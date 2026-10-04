@@ -146,7 +146,8 @@ export interface paths {
         };
         /**
          * List Campaigns
-         * @description Every campaign, newest first, with its enrollment counts by status.
+         * @description Every campaign that is not archived, newest first, with its enrollment counts by
+         *     status. ``archived=true`` lists only the archived ones (#345).
          */
         get: operations["list_campaigns"];
         put?: never;
@@ -175,7 +176,13 @@ export interface paths {
         get: operations["get_campaign"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Campaign
+         * @description Delete a campaign never activated and with no messages (#345), with its steps and
+         *     enrollments. ``409``, with the reason, for any other: archive one that sent. The
+         *     answer lists the Gmail drafts left behind: netkeeper never deletes one (ADR 0003).
+         */
+        delete: operations["delete_campaign"];
         options?: never;
         head?: never;
         patch?: never;
@@ -197,6 +204,70 @@ export interface paths {
          *     this one writer transaction. Nothing of the campaign is sent before its start.
          */
         post: operations["activate_campaign_api_v1_campaigns__campaign_id__activate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archive
+         * @description Hide a concluded campaign from the list and the dashboard (#345), keeping its
+         *     messages and results. ``409`` while an active or paused campaign still has an
+         *     enrollment in progress (end it first), and for one never activated (delete it).
+         */
+        post: operations["archive_campaign"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/delete-plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Delete Plan
+         * @description What ``DELETE /campaigns/{id}`` would remove, the Gmail drafts it would leave,
+         *     or why it is refused (#345). Changes nothing.
+         */
+        get: operations["get_campaign_delete_plan"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/end": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * End
+         * @description ``active`` or ``paused`` to ``completed``, for good (#345): nothing fires again.
+         *     Enrollments keep their state, so replies to a step already sent still count.
+         */
+        post: operations["end_campaign"];
         delete?: never;
         options?: never;
         head?: never;
@@ -529,6 +600,26 @@ export interface paths {
          */
         put: operations["set_step_schedule"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/unarchive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Unarchive
+         * @description ``archived`` back to ``completed`` (#345). It never sends again.
+         */
+        post: operations["unarchive_campaign"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3391,6 +3482,11 @@ export interface components {
         CampaignOut: {
             /** Approved At */
             approved_at: string | null;
+            /**
+             * Concluded
+             * @default false
+             */
+            concluded: boolean;
             /** Contacted Within Days Guard */
             contacted_within_days_guard: number;
             /**
@@ -3400,6 +3496,11 @@ export interface components {
             created_at: string;
             /** Daily Cap */
             daily_cap: number | null;
+            /**
+             * Deletable
+             * @default false
+             */
+            deletable: boolean;
             /** Enrollments */
             enrollments: {
                 [key: string]: number;
@@ -4116,6 +4217,26 @@ export interface components {
             date: string;
             /** Sent */
             sent: number;
+        };
+        /**
+         * DeletePlanOut
+         * @description What deleting the campaign removes and leaves, or why it is refused (#345).
+         */
+        DeletePlanOut: {
+            /** Campaign Id */
+            campaign_id: number;
+            /** Deletable */
+            deletable: boolean;
+            /** Enrollments */
+            enrollments: number;
+            /** Leftover Drafts */
+            leftover_drafts: components["schemas"]["LeftoverDraftOut"][];
+            /** Name */
+            name: string;
+            /** Refusal */
+            refusal: string | null;
+            /** Steps */
+            steps: number;
         };
         /** DoNotSendIn */
         DoNotSendIn: {
@@ -4994,6 +5115,23 @@ export interface components {
             op: "last_contacted";
             /** Within Days */
             within_days?: number | null;
+        };
+        /**
+         * LeftoverDraftOut
+         * @description A test-send Gmail draft that deleting the campaign leaves for you to delete.
+         */
+        LeftoverDraftOut: {
+            /**
+             * Drafted At
+             * Format: date-time
+             */
+            drafted_at: string;
+            /** Gmail Draft Id */
+            gmail_draft_id: string;
+            /** Step Position */
+            step_position: number;
+            /** To Address */
+            to_address: string;
         };
         /**
          * LinkKind
@@ -7372,7 +7510,10 @@ export interface operations {
     };
     list_campaigns: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Only the archived campaigns, in place of the others. */
+                archived?: boolean;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -7386,6 +7527,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CampaignSummaryOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -7473,6 +7623,51 @@ export interface operations {
             };
         };
     };
+    delete_campaign: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeletePlanOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state, or a name taken */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     activate_campaign_api_v1_campaigns__campaign_id__activate_post: {
         parameters: {
             query?: never;
@@ -7519,6 +7714,134 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    archive_campaign: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state, or a name taken */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_campaign_delete_plan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeletePlanOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    end_campaign: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state, or a name taken */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };
@@ -8251,6 +8574,51 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    unarchive_campaign: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state, or a name taken */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

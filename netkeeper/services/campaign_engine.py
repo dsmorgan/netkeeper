@@ -28,6 +28,9 @@ needs a writer session:
   a paused campaign fires nothing, and each enrollment keeps its own state and
   ``next_action_at``. Pausing enrollments as well would lose, on resume, which
   of them a person (or a merge) had paused on their own.
+- :func:`end_campaign` moves an ``active`` or ``paused`` campaign to
+  ``completed`` for good (#345), the campaign only, as a pause does. A
+  ``completed`` or ``archived`` campaign is never selected, so it never fires.
 - :func:`pause_enrollment`, :func:`resume_enrollment` and :func:`remove_enrollment`
   are the per-enrollment moves.
 - ``replied``, ``bounced`` and ``opted_out`` come from detection (P3-08), and
@@ -704,6 +707,35 @@ def resume_campaign(session: Session, user: User, campaign_id: int) -> Campaign:
     campaign.status = CampaignStatus.ACTIVE
     session.flush()
     log.info("campaign %d resumed", campaign_id)
+    return campaign
+
+
+ENDABLE: Final[frozenset[CampaignStatus]] = frozenset(
+    {CampaignStatus.ACTIVE, CampaignStatus.PAUSED}
+)
+"""A campaign a person can end (#345): activated, and not over yet."""
+
+
+def end_campaign(session: Session, user: User, campaign_id: int) -> Campaign:
+    """``active`` or ``paused`` to ``completed``, for good (#345).
+
+    Like a pause, it moves the campaign only: the tick fires nothing for a campaign
+    that is not ``active``, and nothing moves a ``completed`` one back. Each
+    enrollment keeps its state, so reply and bounce detection still record what
+    comes back to a step already sent. A ``scheduled`` message stays for the
+    reconcile to settle, and a Gmail draft stays the person's to send or delete,
+    as for any other end (:func:`_end`).
+    """
+    _require_writer(session, "end_campaign")
+    campaign = _campaign(session, user, campaign_id)
+    if campaign.status not in ENDABLE:
+        raise CampaignEngineError(
+            f"campaign {campaign_id} is {campaign.status}; only an active or paused"
+            " campaign can be ended"
+        )
+    campaign.status = CampaignStatus.COMPLETED
+    session.flush()
+    log.info("campaign %d ended", campaign_id)
     return campaign
 
 

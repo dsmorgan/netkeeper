@@ -699,3 +699,133 @@ async def test_a_completed_campaigns_steps_no_longer_change(
         ids = (campaign.id, campaign.steps[0].id)
     url = f"/api/v1/campaigns/{ids[0]}/steps/{ids[1]}/schedule"
     assert (await client.put(url, json={"delay_days": 1}, headers=CSRF)).status_code == 409
+
+
+# --- the lifecycle (#345) -------------------------------------------------------------
+
+
+async def test_end_archive_and_unarchive(running_app: FastAPI, client: httpx.AsyncClient) -> None:
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = _local(session)
+        mailbox_id = make_mailbox(session, user).id
+        campaign = factories.make_campaign(session, user, mailbox_id=mailbox_id)  # active
+        contact = factories.make_contact(session, user)
+        factories.make_enrollment(session, campaign, contact, next_action_at=datetime.now(UTC))
+        campaign_id = campaign.id
+    base = f"/api/v1/campaigns/{campaign_id}"
+
+    async def on_the_dashboard() -> list[int]:
+        page = (await client.get("/api/v1/dashboard/next-fires")).json()
+        return [fire["campaign_id"] for fire in page["items"]]
+
+    assert await on_the_dashboard() == [campaign_id]
+    running = (await client.get(base)).json()
+    assert (running["concluded"], running["deletable"]) == (False, False)
+    refused = await client.post(f"{base}/archive", headers=CSRF)
+    assert refused.status_code == 409
+    assert "end it before archiving it" in refused.json()["detail"]
+
+    ended = await client.post(f"{base}/end", headers=CSRF)
+    assert ended.status_code == 200, ended.text
+    assert (ended.json()["status"], ended.json()["concluded"]) == ("completed", True)
+    assert await on_the_dashboard() == []
+    assert ended.json()["enrollments"] == {"active": 1}
+    assert (await client.post(f"{base}/end", headers=CSRF)).status_code == 409
+    assert (await client.post(f"{base}/resume", headers=CSRF)).status_code == 409
+
+    archived = await client.post(f"{base}/archive", headers=CSRF)
+    assert archived.status_code == 200, archived.text
+    assert archived.json()["status"] == "archived"
+    assert [c["id"] for c in (await client.get("/api/v1/campaigns")).json()] == []
+    assert await on_the_dashboard() == []
+    listed = await client.get("/api/v1/campaigns", params={"archived": "true"})
+    assert [c["id"] for c in listed.json()] == [campaign_id]
+    # Still there by its id, with its results.
+    assert (await client.get(base)).status_code == 200
+    assert (await client.get(f"{base}/results")).status_code == 200
+
+    unarchived = await client.post(f"{base}/unarchive", headers=CSRF)
+    assert unarchived.status_code == 200, unarchived.text
+    assert unarchived.json()["status"] == "completed"
+    assert [c["id"] for c in (await client.get("/api/v1/campaigns")).json()] == [campaign_id]
+    assert (await client.post(f"{base}/unarchive", headers=CSRF)).status_code == 409
+
+
+async def test_delete_a_draft_and_refuse_one_that_sent(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    seed = _seed(running_app)
+    created = await _create(client, seed)
+    base = f"/api/v1/campaigns/{created['id']}"
+    await client.post(f"{base}/enroll", json={}, headers=CSRF)
+    assert (await client.get(base)).json()["deletable"] is True
+
+    plan = await client.get(f"{base}/delete-plan")
+    assert plan.status_code == 200, plan.text
+    assert plan.json() == {
+        "campaign_id": created["id"],
+        "name": "Reconnect",
+        "deletable": True,
+        "refusal": None,
+        "steps": 3,
+        "enrollments": 2,
+        "leftover_drafts": [],
+    }
+    assert (await client.post(f"{base}/archive", headers=CSRF)).status_code == 409
+
+    deleted = await client.delete(base, headers=CSRF)
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["deletable"] is True
+    assert (await client.get(base)).status_code == 404
+    assert (await client.delete(base, headers=CSRF)).status_code == 404
+
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = _local(session)
+        sent = factories.make_campaign(session, user, mailbox_id=seed["mailbox_id"])
+        enrollment = factories.make_enrollment(session, sent, factories.make_contact(session, user))
+        factories.make_message(session, enrollment)
+        sent_id = sent.id
+    refused = await client.delete(f"/api/v1/campaigns/{sent_id}", headers=CSRF)
+    assert refused.status_code == 409
+    assert "never activated" in refused.json()["detail"]
+    plan = (await client.get(f"/api/v1/campaigns/{sent_id}/delete-plan")).json()
+    assert (plan["deletable"], plan["refusal"]) == (False, refused.json()["detail"])
+
+
+async def test_the_lifecycle_never_reaches_another_users_campaign(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        other = factories.make_user(session, UserKind.HOSTED)
+        draft = factories.make_campaign(session, other, status=CampaignStatus.DRAFT).id
+        ended = factories.make_campaign(session, other, status=CampaignStatus.COMPLETED).id
+        archived = factories.make_campaign(session, other, status=CampaignStatus.ARCHIVED).id
+        active = factories.make_campaign(session, other).id
+    for method, path in (
+        ("POST", f"{active}/end"),
+        ("POST", f"{ended}/archive"),
+        ("POST", f"{archived}/unarchive"),
+        ("GET", f"{draft}/delete-plan"),
+        ("DELETE", f"{draft}"),
+    ):
+        response = await client.request(method, f"/api/v1/campaigns/{path}", headers=CSRF)
+        assert response.status_code == 404, (path, response.text)
+    assert (await client.get("/api/v1/campaigns", params={"archived": "true"})).json() == []
+    with session_scope(factory) as session:
+        statuses = {
+            c.id: c.status
+            for c in session.scalars(
+                scoped(session.get_one(User, other.id), Campaign).where(
+                    Campaign.id.in_((draft, ended, archived, active))
+                )
+            )
+        }
+    assert statuses == {
+        draft: CampaignStatus.DRAFT,
+        ended: CampaignStatus.COMPLETED,
+        archived: CampaignStatus.ARCHIVED,
+        active: CampaignStatus.ACTIVE,
+    }

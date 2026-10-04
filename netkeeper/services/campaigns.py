@@ -16,6 +16,13 @@ each command mirrors an endpoint. The state machine stays where it is:
 - enrollment is the engine's :func:`campaign_engine.enroll`, so the guards
   (spec 11.9) decide who joins, and only a ``draft`` or ``reviewing`` campaign
   takes anyone.
+- the lifecycle (#345): :func:`end` is the engine's
+  (:func:`campaign_engine.end_campaign`), ``active`` or ``paused`` to
+  ``completed`` for good. :func:`archive` hides a :func:`concluded` campaign
+  from the list and the dashboard and keeps everything it sent; :func:`unarchive`
+  undoes it. :func:`delete_campaign` removes a campaign that was never activated
+  and has no messages, and lists the Gmail drafts it leaves (ADR 0003: netkeeper
+  never deletes one).
 
 :func:`create_campaign` makes a ``draft`` from a mailbox and an ordered list of
 templates. A step's channel is its template's. Its defaults follow spec 11.2's
@@ -60,6 +67,7 @@ from netkeeper.models import (
     StepCondition,
     StepMode,
     TemplateChannel,
+    TestSend,
     User,
 )
 from netkeeper.scoping import get_scoped, scoped
@@ -409,9 +417,17 @@ class CampaignSummary:
     """The soonest due time of an active enrollment, while the campaign is active."""
 
 
-def list_campaigns(session: Session, user: User) -> list[CampaignSummary]:
-    """Every campaign of ``user``, newest first, with its enrollment counts by status."""
-    rows = list(session.scalars(scoped(user, Campaign).order_by(Campaign.id.desc())))
+def list_campaigns(
+    session: Session, user: User, *, archived: bool = False
+) -> list[CampaignSummary]:
+    """Every campaign of ``user`` that is not archived, newest first, with its enrollment
+    counts by status; with ``archived``, only the archived ones (#345)."""
+    which = (
+        Campaign.status == CampaignStatus.ARCHIVED
+        if archived
+        else Campaign.status != CampaignStatus.ARCHIVED
+    )
+    rows = list(session.scalars(scoped(user, Campaign).where(which).order_by(Campaign.id.desc())))
     ids = [c.id for c in rows]
     counts = _enrollment_counts(session, user, ids)
     steps: dict[int, int] = dict.fromkeys(ids, 0)
@@ -459,9 +475,13 @@ class CampaignDetail:
     next_action_at: datetime | None
     """The soonest due time of an active enrollment, while the campaign is active."""
     missing: tuple[campaign_review.Missing, ...] = field(default=())
+    """What the review gate still needs, for a ``draft`` or ``reviewing`` campaign."""
     start_editable: bool = False
     """Whether the scheduled start can still move: active or paused, nothing fired yet."""
-    """What the review gate still needs, for a ``draft`` or ``reviewing`` campaign."""
+    concluded: bool = False
+    """Whether it is over and can be archived (#345): ended, or every enrollment finished."""
+    deletable: bool = False
+    """Whether it can be deleted (#345): never activated, and no message of any status."""
 
 
 REVIEWABLE: Final = frozenset({CampaignStatus.DRAFT, CampaignStatus.REVIEWING})
@@ -535,6 +555,9 @@ def campaign_status(
         next_action_at=next_at,
         missing=gaps,
         start_editable=start_editable,
+        concluded=concluded(session, user, campaign),
+        deletable=campaign.status in REVIEWABLE
+        and _delete_refusal(session, user, campaign) is None,
     )
 
 
@@ -822,3 +845,225 @@ def set_step_schedule(
             moved,
         )
     return step
+
+
+# --- the lifecycle: end, archive, unarchive and delete (#345) -----------------------
+
+
+def end(session: Session, user: User, campaign_id: int) -> Campaign:
+    """``active`` or ``paused`` to ``completed`` for good (:func:`campaign_engine.end_campaign`)."""
+    get_campaign(session, user, campaign_id)
+    try:
+        return campaign_engine.end_campaign(session, user, campaign_id)
+    except campaign_engine.CampaignEngineError as exc:
+        raise CampaignConflict(str(exc)) from exc
+
+
+OVER: Final = frozenset({CampaignStatus.COMPLETED, CampaignStatus.ARCHIVED})
+"""A campaign that sends nothing more: ended by a person, then maybe archived."""
+
+
+def concluded(session: Session, user: User, campaign: Campaign) -> bool:
+    """Whether ``campaign`` is over (#345): the person ended it, or every enrollment of an
+    activated campaign is in a terminal state (none ``pending``, ``active`` or ``paused``).
+    A ``draft`` or ``reviewing`` campaign never sent anything, so it is never concluded."""
+    if campaign.status in OVER:
+        return True
+    if campaign.status not in campaign_engine.ENDABLE:
+        return False
+    live = session.scalar(
+        scoped(user, Enrollment)
+        .with_only_columns(Enrollment.id)
+        .where(
+            Enrollment.campaign_id == campaign.id,
+            Enrollment.status.in_(campaign_engine.LIVE_STATUSES),
+        )
+        .limit(1)
+    )
+    return live is None
+
+
+def archive(session: Session, user: User, campaign_id: int) -> Campaign:
+    """A concluded campaign to ``archived`` (#345): hidden from the campaign list and the
+    dashboard, with its messages, results and contact timelines kept. :func:`unarchive`
+    undoes it.
+
+    Refused for an ``active`` or ``paused`` campaign that still has a live enrollment
+    (end it first), and for one never activated (delete it instead). An ``active`` or
+    ``paused`` campaign whose every enrollment has finished is concluded already: it is
+    ended (:func:`campaign_engine.end_campaign`), then archived, in one transaction.
+    """
+    _require_writer(session, "archive")
+    campaign = get_campaign(session, user, campaign_id)
+    if campaign.status is CampaignStatus.ARCHIVED:
+        raise CampaignConflict(f"campaign {campaign_id} is already archived")
+    if campaign.status in REVIEWABLE:
+        raise CampaignConflict(
+            f"campaign {campaign_id} is {campaign.status} and never sent anything;"
+            " delete it instead of archiving it"
+        )
+    if not concluded(session, user, campaign):
+        raise CampaignConflict(
+            f"campaign {campaign_id} is {campaign.status} and still has enrollments in"
+            " progress; end it before archiving it"
+        )
+    if campaign.status in campaign_engine.ENDABLE:
+        end(session, user, campaign_id)
+    campaign.status = CampaignStatus.ARCHIVED
+    session.flush()
+    log.info("campaign %d archived", campaign_id)
+    return campaign
+
+
+def unarchive(session: Session, user: User, campaign_id: int) -> Campaign:
+    """``archived`` back to ``completed`` (#345). Only an ended campaign is ever archived,
+    so this is the state it had; it never sends again."""
+    _require_writer(session, "unarchive")
+    campaign = get_campaign(session, user, campaign_id)
+    if campaign.status is not CampaignStatus.ARCHIVED:
+        raise CampaignConflict(f"campaign {campaign_id} is {campaign.status}, not archived")
+    campaign.status = CampaignStatus.COMPLETED
+    session.flush()
+    log.info("campaign %d unarchived", campaign_id)
+    return campaign
+
+
+@dataclass(frozen=True, slots=True)
+class LeftoverDraft:
+    """A Gmail draft a test send made (#304) that deleting the campaign leaves behind.
+
+    netkeeper never deletes a Gmail draft (ADR 0003): the person deletes it by hand."""
+
+    step_position: int
+    to_address: str
+    drafted_at: datetime
+    gmail_draft_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class DeletePlan:
+    """What deleting a campaign removes and leaves, or why it is refused (#345)."""
+
+    campaign_id: int
+    name: str
+    refusal: str | None
+    """Why the campaign cannot be deleted; None when it can."""
+    steps: int
+    enrollments: int
+    leftover_drafts: tuple[LeftoverDraft, ...]
+
+    @property
+    def deletable(self) -> bool:
+        return self.refusal is None
+
+
+def _message_count(session: Session, user: User, campaign_id: int) -> int:
+    """Every message row of the campaign, in any status and either direction, found by
+    its enrollment or by its step, so a message that names only one still counts."""
+    enrollments = (
+        scoped(user, Enrollment)
+        .with_only_columns(Enrollment.id)
+        .where(Enrollment.campaign_id == campaign_id)
+    )
+    steps = (
+        scoped(user, CampaignStep)
+        .with_only_columns(CampaignStep.id)
+        .where(CampaignStep.campaign_id == campaign_id)
+    )
+    return (
+        session.scalar(
+            scoped(user, Message)
+            .with_only_columns(func.count(Message.id))
+            .where(or_(Message.enrollment_id.in_(enrollments), Message.step_id.in_(steps)))
+        )
+        or 0
+    )
+
+
+def _delete_refusal(session: Session, user: User, campaign: Campaign) -> str | None:
+    if campaign.status not in REVIEWABLE:
+        return (
+            f"campaign {campaign.id} is {campaign.status}; only a campaign that was never"
+            " activated can be deleted. End it, then archive it instead"
+        )
+    if campaign.approved_at is not None or campaign.starts_at is not None:
+        return f"campaign {campaign.id} was activated once, so it is kept; archive it instead"
+    messages = _message_count(session, user, campaign.id)
+    if messages:
+        return (
+            f"campaign {campaign.id} has {messages}"
+            f" {'message' if messages == 1 else 'messages'}, so it is kept"
+        )
+    return None
+
+
+def delete_plan(session: Session, user: User, campaign_id: int) -> DeletePlan:
+    """What :func:`delete_campaign` would remove and leave behind, read only."""
+    campaign = get_campaign(session, user, campaign_id)
+    steps = (
+        session.scalar(
+            scoped(user, CampaignStep)
+            .with_only_columns(func.count(CampaignStep.id))
+            .where(CampaignStep.campaign_id == campaign_id)
+        )
+        or 0
+    )
+    enrollments = (
+        session.scalar(
+            scoped(user, Enrollment)
+            .with_only_columns(func.count(Enrollment.id))
+            .where(Enrollment.campaign_id == campaign_id)
+        )
+        or 0
+    )
+    drafts = tuple(
+        LeftoverDraft(position, test.to_address, test.sent_at, test.gmail_draft_id or "")
+        for test, position in session.execute(
+            scoped(user, TestSend)
+            .add_columns(CampaignStep.position)
+            .join(CampaignStep, CampaignStep.id == TestSend.step_id)
+            .where(
+                TestSend.campaign_id == campaign_id,
+                TestSend.gmail_draft_id.is_not(None),
+                CampaignStep.user_id == user.id,
+            )
+            .order_by(TestSend.sent_at, TestSend.id)
+        ).tuples()
+    )
+    return DeletePlan(
+        campaign_id=campaign.id,
+        name=campaign.name,
+        refusal=_delete_refusal(session, user, campaign),
+        steps=steps,
+        enrollments=enrollments,
+        leftover_drafts=drafts,
+    )
+
+
+def delete_campaign(session: Session, user: User, campaign_id: int) -> DeletePlan:
+    """Delete a campaign that was never activated and has no messages (#345).
+
+    It takes the campaign's steps, enrollments, review records and test-send records
+    with it (``ON DELETE CASCADE``); its templates stay. Refused, with the reason, for
+    any other campaign: one that ever sent is archived instead. Every message row of
+    the campaign, in any status, refuses it, and the database refuses it too: a
+    message's enrollment and step have no ``ON DELETE`` action.
+
+    netkeeper never deletes a Gmail draft (ADR 0003). The returned plan lists each
+    test-send draft left in Gmail, for the person to delete by hand.
+    """
+    _require_writer(session, "delete_campaign")
+    plan = delete_plan(session, user, campaign_id)
+    if plan.refusal is not None:
+        raise CampaignConflict(plan.refusal)
+    campaign = get_campaign(session, user, campaign_id)
+    session.delete(campaign)
+    session.flush()
+    log.info(
+        "campaign %d deleted with %d steps and %d enrollments; %d Gmail drafts left",
+        campaign_id,
+        plan.steps,
+        plan.enrollments,
+        len(plan.leftover_drafts),
+    )
+    return plan

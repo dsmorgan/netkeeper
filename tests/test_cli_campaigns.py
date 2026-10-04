@@ -45,6 +45,7 @@ from netkeeper.models import (
     StepMode,
     Template,
     TemplateChannel,
+    TestSend,
     User,
     UserKind,
 )
@@ -499,6 +500,101 @@ def test_pause_refuses_a_campaign_in_review(world: World) -> None:
     assert "is reviewing, not active" in result.output
 
 
+# --- the lifecycle (#345) ------------------------------------------------------------
+
+
+def _active(world: World) -> int:
+    with session_scope(world.factory, write=True) as session:
+        user = _local(session)
+        mailbox_id = session.scalars(scoped(user, Mailbox).with_only_columns(Mailbox.id)).one()
+        campaign = factories.make_campaign(session, user, mailbox_id=mailbox_id)
+        contact = get_scoped(session, user, Contact, world.contacts[0])
+        assert contact is not None
+        factories.make_message(session, factories.make_enrollment(session, campaign, contact))
+        return campaign.id
+
+
+def test_end_asks_then_ends_and_archive_and_unarchive_follow(world: World) -> None:
+    campaign_id = _active(world)
+    ident = str(campaign_id)
+
+    declined = _run("campaigns", "end", ident, input="n\n")
+    assert declined.exit_code == 1
+    assert "is not ended" in declined.output
+    assert _campaign(world, campaign_id).status is CampaignStatus.ACTIVE
+    refused = _run("campaigns", "archive", ident)
+    assert refused.exit_code == 1
+    assert "end it before archiving it" in refused.output
+
+    ended = _run("campaigns", "end", ident, input="y\n")
+    assert ended.exit_code == 0, ended.output
+    assert "cannot be resumed" in ended.output
+    assert f"campaign {campaign_id} ended" in ended.output
+    assert _campaign(world, campaign_id).status is CampaignStatus.COMPLETED
+    assert _enrollment_statuses(world, campaign_id) == [EnrollmentStatus.ACTIVE]
+    assert _run("campaigns", "end", ident, "--yes").exit_code == 1
+
+    assert f"campaign {campaign_id} archived" in _ok("campaigns", "archive", ident)
+    assert ident not in [line.split()[0] for line in _ok("campaigns", "list").splitlines()[1:]]
+    listed = _ok("campaigns", "list", "--archived")
+    assert [line.split()[0] for line in listed.splitlines()[1:]] == [ident]
+    assert "archived" in listed
+
+    assert "it is completed" in _ok("campaigns", "unarchive", ident)
+    assert _campaign(world, campaign_id).status is CampaignStatus.COMPLETED
+    assert "no archived campaigns" in _ok("campaigns", "list", "--archived")
+
+
+def test_delete_lists_the_drafts_left_asks_then_deletes(world: World) -> None:
+    campaign_id = _create(world)
+    _ok("campaigns", "enroll", str(campaign_id))
+    now = datetime.now(UTC)
+    with session_scope(world.factory, write=True) as session:
+        user = _local(session)
+        step = session.scalars(
+            scoped(user, CampaignStep).where(
+                CampaignStep.campaign_id == campaign_id, CampaignStep.position == 2
+            )
+        ).one()
+        session.add(
+            TestSend(
+                user_id=user.id,
+                campaign_id=campaign_id,
+                step_id=step.id,
+                fingerprint="f" * 64,
+                to_address=world.mailbox_email,
+                gmail_draft_id="draft-left",
+                sent_at=now,
+            )
+        )
+    ident = str(campaign_id)
+
+    declined = _run("campaigns", "delete", ident, input="n\n")
+    assert declined.exit_code == 1
+    assert "is not deleted" in declined.output
+    assert "deletes campaign" in declined.output and "2 steps, 3 enrollments" in declined.output
+    assert "delete them by hand" in declined.output
+    assert f"step 2 test to {world.mailbox_email}" in declined.output
+    assert "draft-left" in declined.output
+    assert _campaign(world, campaign_id).status is CampaignStatus.DRAFT
+
+    deleted = _run("campaigns", "delete", ident, input="y\n")
+    assert deleted.exit_code == 0, deleted.output
+    assert f"campaign {campaign_id} deleted" in deleted.output
+    with session_scope(world.factory) as session:
+        assert get_scoped(session, _local(session), Campaign, campaign_id) is None
+    assert _run("campaigns", "delete", ident, "--yes").exit_code == 1
+
+
+def test_delete_refuses_a_campaign_that_sent_without_asking(world: World) -> None:
+    campaign_id = _active(world)
+    result = _run("campaigns", "delete", str(campaign_id))
+    assert result.exit_code == 1
+    assert "only a campaign that was never activated can be deleted" in result.output
+    assert "delete campaign" not in result.output  # never asked
+    assert _campaign(world, campaign_id).status is CampaignStatus.ACTIVE
+
+
 # --- the gate: no CLI path reaches `active` without it ------------------------------
 
 
@@ -543,6 +639,9 @@ def test_no_command_activates_without_a_complete_review(
         ("campaigns", "enroll", ident),
         ("campaigns", "pause", ident),
         ("campaigns", "resume", ident),
+        ("campaigns", "end", ident, "--yes"),
+        ("campaigns", "archive", ident),
+        ("campaigns", "unarchive", ident),
         ("campaigns", "activate", ident, "--yes"),
         ("simulate", "--campaign", ident, "--days", "2", "--start", "2026-09-29T08:00"),
     ):
