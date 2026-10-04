@@ -39,9 +39,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.gmail import Gmail, GmailError
 from netkeeper.campaigns.render import me_fields
-from netkeeper.campaigns.schedule import local_today
 from netkeeper.config import Settings
 from netkeeper.db import session_scope
+from netkeeper.localtime import local_today
 from netkeeper.models import CampaignStatus, MailboxArm, User
 from netkeeper.models.base import utcnow
 from netkeeper.services import campaign_review as service
