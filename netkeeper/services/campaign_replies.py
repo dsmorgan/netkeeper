@@ -180,15 +180,23 @@ def is_daemon(message: Message) -> bool:
 
 
 def is_hard_bounce(message: Message) -> bool:
-    """A mail system's notice that delivery **failed**, not that it is delayed: it names a
-    failed recipient (``X-Failed-Recipients``), or its subject says it failed and does not
-    say it is delayed. Only the metadata is read, never the body's DSN part."""
+    """A mail system's notice that delivery **failed**, not that it is delayed.
+
+    A subject that says the notice is a delay wins over everything else: a delay notice
+    can carry ``X-Failed-Recipients`` while the mail system keeps retrying, and ending a
+    sequence on it would be wrong. Otherwise the notice is a bounce when it names a failed
+    recipient (``X-Failed-Recipients``) or its subject says it failed. A subject with both
+    delay and failure words is a delay: a missed bounce costs one more send that Gmail
+    rejects again, while a false bounce ends a sequence wrongly. Only the metadata is
+    read, never the body's DSN part."""
     if not is_daemon(message):
+        return False
+    subject = message.header("Subject") or ""
+    if _DELAY.search(subject):
         return False
     if (message.header("X-Failed-Recipients") or "").strip():
         return True
-    subject = message.header("Subject") or ""
-    return not _DELAY.search(subject) and bool(_FAILURE.search(subject))
+    return bool(_FAILURE.search(subject))
 
 
 # --- what is watched --------------------------------------------------------------------

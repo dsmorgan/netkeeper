@@ -497,6 +497,50 @@ def test_a_delivery_delayed_notice_is_not_a_bounce(
     assert outcome.outcome is SendOutcome.SENT
 
 
+def _notice(sender: str, subject: str, *, failed: str | None) -> Message:
+    headers = [("From", sender), ("Subject", subject)]
+    if failed is not None:
+        headers.append(("X-Failed-Recipients", failed))
+    return Message(
+        id="m1",
+        thread_id="t1",
+        label_ids=frozenset({"INBOX"}),
+        history_id=1,
+        internal_date=NOW,
+        snippet="",
+        headers=tuple(headers),
+    )
+
+
+@pytest.mark.parametrize(
+    ("subject", "failed", "is_bounce"),
+    [
+        # A delay notice is never a bounce, even with the failed-recipient header.
+        ("Delivery Status Notification (Delay)", "ada@example.com", False),
+        ("Warning: message delayed; still trying", "ada@example.com", False),
+        # A failure notice with the header is a bounce.
+        ("Delivery Status Notification (Failure)", "ada@example.com", True),
+        # Without the header, a failure subject alone still is.
+        ("Undeliverable: hello", None, True),
+        # Delay and failure words together: delay wins, with or without the header.
+        ("Delivery delayed: failure is not final", None, False),
+        ("Delivery delayed: failure is not final", "ada@example.com", False),
+        # A blank header names no recipient.
+        ("Hello", "  ", False),
+    ],
+)
+def test_is_hard_bounce_checks_the_delay_subject_first(
+    subject: str, failed: str | None, is_bounce: bool
+) -> None:
+    notice = _notice("MAILER-DAEMON@mx.example.net", subject, failed=failed)
+    assert replies.is_hard_bounce(notice) is is_bounce
+
+
+def test_a_person_is_never_a_hard_bounce() -> None:
+    notice = _notice("ada@example.com", "Undeliverable", failed="ada@example.com")
+    assert replies.is_hard_bounce(notice) is False
+
+
 # --- auto-replies (#296 review: ignored) ---------------------------------------------------
 
 
