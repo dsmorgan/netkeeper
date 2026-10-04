@@ -847,9 +847,7 @@ def test_a_bad_link_after_tags_and_fields_that_span_lines_names_the_right_line()
 
 def test_the_same_finding_twice_is_reported_once_at_its_first_line() -> None:
     body = "{{ first_name }}\n{{ frist_name }}\n{{ frist_name }}"
-    assert _lines(lint(LINKEDIN, None, body)) == [
-        (LintRule.UNDEFINED_VARIABLE, "frist_name", 2)
-    ]
+    assert _lines(lint(LINKEDIN, None, body)) == [(LintRule.UNDEFINED_VARIABLE, "frist_name", 2)]
 
 
 def test_a_missing_value_warning_names_the_line_the_field_is_first_used_on() -> None:

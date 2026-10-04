@@ -63,9 +63,7 @@ def get_self_contact(session: SessionDep, user: CurrentUser) -> SelfContactOut:
     operation_id="set_self_contact",
     responses={422: {"description": "A value that is too long"}},
 )
-def set_self_contact(
-    body: SelfContactIn, session: SessionDep, user: CurrentUser
-) -> SelfContactOut:
+def set_self_contact(body: SelfContactIn, session: SessionDep, user: CurrentUser) -> SelfContactOut:
     """Replace your own details. The next test send renders with them."""
     try:
         contact = service.update_self_contact(session, user, body.model_dump())

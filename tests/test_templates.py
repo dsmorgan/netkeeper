@@ -154,9 +154,7 @@ def test_list_is_by_name_and_only_the_users_own(writer: Session, user: User, oth
 
 def test_an_edit_of_a_template_not_in_use_changes_it_in_place(writer: Session, user: User) -> None:
     row = _create(writer, user)
-    edited = update_template(
-        writer, user, row.id, name="renamed", body="Yo {{ nickname }}"
-    )
+    edited = update_template(writer, user, row.id, name="renamed", body="Yo {{ nickname }}")
     assert edited is row
     assert (row.name, row.body, row.subject, row.version) == ("renamed", "Yo {{ nickname }}",
                                                               "Hello", 1)  # fmt: skip
