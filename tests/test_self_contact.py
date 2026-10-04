@@ -59,8 +59,8 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.scoping import get_scoped, scoped, scoped_contacts, scoped_contacts_count
+from netkeeper.services import campaign_review, dashboard, enrich_plan
 from netkeeper.services import campaigns as campaign_service
-from netkeeper.services import dashboard, enrich_plan
 from netkeeper.services.campaign_engine import enroll as engine_enroll
 from netkeeper.services.campaign_guards import Reason
 from netkeeper.services.linkedin_accounts import ensure_account
@@ -351,6 +351,18 @@ def test_campaign_audiences_and_the_enrollment_guards_leave_it_out(
     [verdict] = [v for v in result.verdicts if v.contact_id == you.id]
     assert verdict.reasons == (Reason.SELF,)
     assert you.id not in result.enrolled
+
+
+def test_the_skip_summary_and_its_details_leave_it_out(
+    writer: Session, user: User, you: Contact
+) -> None:
+    """#346's skip summary and its details never count or list the self contact."""
+    campaign = factories.make_campaign(writer, user, status=CampaignStatus.DRAFT)
+    factories.make_contact(writer, user, emails=["other@example.test"])
+    outcome = campaign_service.enroll(writer, user, campaign.id, now=NOW, filter=FilterTree())
+    assert outcome.summary == "1 will start, none skipped"
+    report = campaign_review.guard_report(writer, user, campaign, now=NOW)
+    assert (report.summary, report.skipped_total, report.skipped) == (outcome.summary, 0, ())
 
 
 def test_dashboard_and_tag_counts_leave_it_out(writer: Session, user: User, you: Contact) -> None:

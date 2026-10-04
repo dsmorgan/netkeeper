@@ -190,7 +190,7 @@ def test_archive_and_unarchive_an_ended_campaign(writer: Session) -> None:
     assert get_scoped(writer, user, Message, message.id) is not None
     results = campaign_results.campaign_results(writer, user, campaign.id, now=NOW)
     assert (results.totals.sent, results.totals.contacted) == (1, 1)
-    detail = service.campaign_status(writer, user, campaign.id, me={}, now=NOW)
+    detail = service.campaign_status(writer, user, campaign.id, now=NOW)
     assert (detail.concluded, detail.deletable) == (True, False)
 
     with pytest.raises(CampaignConflict, match="already archived"):
@@ -301,7 +301,7 @@ def test_delete_removes_a_campaign_never_activated_and_lists_the_drafts_left(
         _review_records(session, user, campaign)
         template_ids = [s.template_id for s in campaign.steps]
         campaign_id, user_id = campaign.id, user.id
-        assert service.campaign_status(session, user, campaign_id, me={}, now=NOW).deletable
+        assert service.campaign_status(session, user, campaign_id, now=NOW).deletable
 
     with session_scope(session_factory, write=True) as session:
         user = session.get_one(User, user_id)
@@ -348,7 +348,7 @@ def test_delete_refuses_a_campaign_with_any_message(
 
     plan = service.delete_plan(writer, user, campaign.id)
     assert plan.refusal == f"campaign {campaign.id} has 1 message, so it is kept"
-    assert not service.campaign_status(writer, user, campaign.id, me={}, now=NOW).deletable
+    assert not service.campaign_status(writer, user, campaign.id, now=NOW).deletable
     with pytest.raises(CampaignConflict, match="has 1 message"):
         service.delete_campaign(writer, user, campaign.id)
     assert get_scoped(writer, user, Campaign, campaign.id) is not None
