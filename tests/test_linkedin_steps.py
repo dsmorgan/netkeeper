@@ -384,6 +384,9 @@ def _set(lane: Lane, model: type[Any], row_id: int, **values: Any) -> None:
         # Not yet through the review gate: no step approved, nothing claimed (#339).
         (CampaignStatus.REVIEWING, (Skip.GUARD_EXCLUDED, "campaign_not_active")),
         (CampaignStatus.DRAFT, (Skip.GUARD_EXCLUDED, "campaign_not_active")),
+        # Ended, and ended then archived (#345): nothing of it is claimed again.
+        (CampaignStatus.COMPLETED, (Skip.GUARD_EXCLUDED, "campaign_not_active")),
+        (CampaignStatus.ARCHIVED, (Skip.GUARD_EXCLUDED, "campaign_not_active")),
     ],
 )
 def test_a_campaign_that_is_not_active_is_refused(
@@ -393,6 +396,37 @@ def test_a_campaign_that_is_not_active_is_refused(
     _set(lane, Campaign, lane.campaign_id, status=campaign_status)
     assert lane.claim(enrollment_id).reasons == reasons
     assert lane.messages(enrollment_id) == []
+    assert lane.read(
+        lambda s, u: ready_to_prefill(s, u, now=NOW, settings=lane.settings, limit=10)
+    ) == ([], 0)
+
+
+def test_the_self_contact_is_never_claimed_listed_or_waiting(lane: Lane) -> None:
+    """#342: the self contact holds your own details. Not reachable through enrollment,
+    but should it be enrolled, it is never ready, claimed, or listed as waiting."""
+    enrollment_id = lane.enroll(contact={"is_self": True})
+    assert lane.read(
+        lambda s, u: ready_to_prefill(s, u, now=NOW, settings=lane.settings, limit=10)
+    ) == ([], 0)
+    claim = lane.claim(enrollment_id)
+    assert not claim.claimed
+    assert Reason.SELF.value in claim.reasons
+    assert (lane.messages(enrollment_id), lane.runs()) == ([], [])
+
+    def waiting(session: Session, user: User) -> None:
+        enrollment = get_scoped(session, user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        factories.make_message(
+            session,
+            enrollment,
+            channel=LINKEDIN,
+            status=MessageStatus.PREFILLED,
+            sent_at=None,
+            prefilled_at=NOW,
+        )
+
+    lane.write(waiting)
+    assert lane.read(lambda s, u: waiting_for_you(s, u, limit=10)) == ([], 0)
 
 
 def test_a_paused_enrollment_is_refused(lane: Lane) -> None:
