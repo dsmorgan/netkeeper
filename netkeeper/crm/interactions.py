@@ -47,6 +47,7 @@ from netkeeper.models import (
 from netkeeper.scoping import (
     get_scoped,
     get_scoped_contact,
+    not_self,
     scoped,
     scoped_contacts_update,
 )
@@ -214,8 +215,13 @@ def add_interaction(
 
 
 def get_interaction(session: Session, user: User, interaction_id: int) -> Interaction:
-    """The interaction with ``interaction_id`` if it is ``user``'s, else :class:`NotFound`."""
-    row = get_scoped(session, user, Interaction, interaction_id)
+    """The interaction with ``interaction_id`` if it is ``user``'s and on a contact in the
+    network, else :class:`NotFound`. One on the self contact (#342) is not found either."""
+    row = session.scalars(
+        scoped(user, Interaction)
+        .join(Contact, Contact.id == Interaction.contact_id)
+        .where(Interaction.id == interaction_id, Contact.user_id == user.id, not_self())
+    ).one_or_none()
     if row is None:
         raise NotFound(f"interaction {interaction_id} is not one of user {user.id}'s")
     return row

@@ -18,12 +18,18 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-const FIELDS: ReadonlyArray<{ key: keyof SelfContactIn; label: string; merge: string }> = [
-  { key: 'first_name', label: 'First name', merge: 'first_name' },
-  { key: 'last_name', label: 'Last name', merge: 'last_name' },
-  { key: 'current_company', label: 'Company', merge: 'company' },
-  { key: 'current_title', label: 'Title', merge: 'title' },
-  { key: 'location', label: 'Location', merge: 'location' },
+/** `max` is the server's limit for the field (`SelfContactIn`), so a save never 422s. */
+const FIELDS: ReadonlyArray<{
+  key: keyof SelfContactIn
+  label: string
+  merge: string
+  max: number
+}> = [
+  { key: 'first_name', label: 'First name', merge: 'first_name', max: 200 },
+  { key: 'last_name', label: 'Last name', merge: 'last_name', max: 200 },
+  { key: 'current_company', label: 'Company', merge: 'company', max: 300 },
+  { key: 'current_title', label: 'Title', merge: 'title', max: 300 },
+  { key: 'location', label: 'Location', merge: 'location', max: 300 },
 ]
 
 export function AboutYouSection() {
@@ -76,12 +82,13 @@ function AboutYouForm({ current }: { current: SelfContact }) {
       }}
     >
       <div className="grid gap-3 sm:grid-cols-2">
-        {FIELDS.map(({ key, label, merge }) => (
+        {FIELDS.map(({ key, label, merge, max }) => (
           <div key={key} className="flex flex-col gap-1">
             <Label htmlFor={`${baseId}-${key}`}>{label}</Label>
             <Input
               id={`${baseId}-${key}`}
               value={draft[key] ?? ''}
+              maxLength={max}
               aria-describedby={`${baseId}-${key}-merge`}
               onChange={(event) => {
                 const value = event.target.value

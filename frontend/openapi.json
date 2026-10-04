@@ -3764,6 +3764,10 @@
             "title": "Excluded",
             "type": "integer"
           },
+          "excluded_summary": {
+            "title": "Excluded Summary",
+            "type": "string"
+          },
           "pending": {
             "title": "Pending",
             "type": "integer"
@@ -3784,7 +3788,8 @@
           "excluded",
           "removed",
           "pending",
-          "summary"
+          "summary",
+          "excluded_summary"
         ],
         "title": "EnrollOut",
         "type": "object"
@@ -3867,6 +3872,17 @@
               }
             ],
             "title": "Next Action At"
+          },
+          "not_sent_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Not Sent Error"
           },
           "replied_at": {
             "anyOf": [

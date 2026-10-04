@@ -2784,3 +2784,55 @@ def _migration_0032() -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+# --- the self contact (0034, #342) ------------------------------------------------------
+
+
+def test_0034_downgrade_deletes_the_self_contact_and_leaves_nothing_naming_it(
+    migration_engine: Engine,
+) -> None:
+    """Migrations run with SQLite's foreign keys off, so ON DELETE never fires: the
+    downgrade must delete the children and clear the SET NULL columns itself, or an id
+    SQLite hands out again would inherit the self contact's links and emails."""
+    migrations.upgrade(migration_engine, "0034")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        connection.execute(text("UPDATE contacts SET is_self = true WHERE id = 1"))
+        _insert_children(connection, user_id=1, contact_id=1)
+        _insert_contact(connection, id=2, user_id=1, merged_into_id=1)  # SET NULL on itself
+        _insert_contact(connection, id=3, user_id=1)
+        _insert_children(connection, user_id=1, contact_id=3)
+        _insert_import_run(connection, id=1, user_id=1, status="committed")
+        _insert_import_row(connection, id=1, user_id=1, run_id=1, contact_id=1)  # provenance
+    migrations.downgrade(migration_engine, "0033")
+
+    reflected = MetaData()
+    reflected.reflect(migration_engine)
+    with migration_engine.begin() as connection:
+        ids = {row[0] for row in connection.execute(text("SELECT id FROM contacts"))}
+        assert ids == {2, 3}
+        for table in reflected.sorted_tables:
+            for fk in table.foreign_keys:
+                if fk.column.table.name == "contacts":
+                    column = fk.parent.name
+                    named = connection.execute(
+                        text(f"SELECT count(*) FROM {table.name} WHERE {column} = 1")
+                    ).scalar_one()
+                    assert named == 0, f"{table.name}.{column}"
+        assert (
+            connection.execute(
+                text("SELECT merged_into_id FROM contacts WHERE id = 2")
+            ).scalar_one()
+            is None
+        )
+        assert _raw_cells(connection, 1) == {"Given": "Hortensia"}  # the audit row stays
+        for child in CHILD_ROWS:  # the other contact keeps its own
+            count = connection.execute(
+                text(f"SELECT count(*) FROM {child} WHERE contact_id = 3")
+            ).scalar_one()
+            assert count == 1, child
+        if migration_engine.dialect.name == "sqlite":
+            assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+    assert "is_self" not in {c["name"] for c in inspect(migration_engine).get_columns("contacts")}

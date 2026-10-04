@@ -7,6 +7,7 @@ LinkedIn identity, a job change, a tag) and checks that it does not.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
@@ -18,32 +19,42 @@ from sqlalchemy import Engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.campaigns.templates import REMOVED_FIELD_BLOCK, removed_field_campaigns
 from netkeeper.config import LegacyMe, Settings
 from netkeeper.crm import contacts as crm_contacts
 from netkeeper.crm import identity, triage
-from netkeeper.crm.apply import known_urns
+from netkeeper.crm.apply import _mark_seen, age_unseen, known_urns
 from netkeeper.crm.duplicates import possible_duplicates
 from netkeeper.crm.filters import FilterTree
+from netkeeper.crm.interactions import NotFound as InteractionNotFound
+from netkeeper.crm.interactions import add_interaction, delete_interaction, update_interaction
+from netkeeper.crm.lists import create_list, list_members
 from netkeeper.crm.self_contact import (
     InvalidSelfValue,
     ensure_self_contact,
     get_self_contact,
     update_self_contact,
 )
-from netkeeper.crm.tags import contact_counts, create_tag
+from netkeeper.crm.tags import contact_counts, create_rule, create_tag, run_rules
 from netkeeper.db import session_scope
 from netkeeper.models import (
+    Campaign,
     CampaignStatus,
     Contact,
     ContactEmail,
     ContactSnapshot,
     ContactSource,
     ContactTag,
+    Interaction,
+    InteractionKind,
     LinkKind,
+    ListKind,
+    ListMember,
+    RuleField,
     TagSource,
     User,
 )
-from netkeeper.scoping import scoped, scoped_contacts, scoped_contacts_count
+from netkeeper.scoping import get_scoped, scoped, scoped_contacts, scoped_contacts_count
 from netkeeper.services import campaigns as campaign_service
 from netkeeper.services import dashboard, enrich_plan
 from netkeeper.services.campaign_engine import enroll as engine_enroll
@@ -185,6 +196,10 @@ def _setup(app: FastAPI) -> tuple[int, int]:
             last_name="Owner",
             current_company="Example Co",
             emails=[SELF_EMAIL],
+            # No LinkedIn identity: two different URNs never match as duplicates, so the
+            # hint test would pass for that reason alone and not because of the scope.
+            li_urn=None,
+            li_public_id=None,
         )
         return you.id, other.id
 
@@ -353,3 +368,157 @@ def test_dashboard_and_tag_counts_leave_it_out(writer: Session, user: User, you:
     jobs, total = dashboard.changed_jobs(writer, user, now=NOW, limit=10)
     assert (jobs, total) == ([], 0)
     assert contact_counts(writer, user, [tag.id]) == {}
+
+
+# --- more surfaces (#396 review) -----------------------------------------------------------
+
+
+def test_a_bulk_action_by_ids_never_writes_it(writer: Session, user: User, you: Contact) -> None:
+    other = factories.make_contact(writer, user)
+    selection = crm_contacts.Selection(ids=(you.id, other.id))
+    assert crm_contacts.count_selection(writer, user, selection) == 1
+    written = crm_contacts.bulk_update(
+        writer, user, selection, "archive", expected_count=1, now=NOW
+    )
+    assert written == 1
+    writer.refresh(you)
+    writer.refresh(other)
+    assert you.archived_at is None and other.archived_at is not None
+
+
+def test_an_auto_tag_rule_run_never_tags_it(writer: Session, user: User, you: Contact) -> None:
+    other = factories.make_contact(writer, user, current_company="Example Co")
+    tag = create_tag(writer, user, name="Example")
+    create_rule(writer, user, tag.id, RuleField.COMPANY, "Example")
+    run_rules(writer, user)
+    tagged = set(writer.scalars(scoped(user, ContactTag).with_only_columns(ContactTag.contact_id)))
+    assert tagged == {other.id}
+
+
+def test_aging_after_a_full_sync_never_counts_or_ages_it(
+    writer: Session, user: User, you: Contact
+) -> None:
+    """Its URN is never in a sync: aged with the network, it would count as a miss."""
+    seen = {factories.make_contact(writer, user).li_urn for _ in range(10)}
+    counts = age_unseen(
+        writer,
+        user,
+        frozenset(urn for urn in seen if urn is not None),
+        observed_at=NOW,
+        disconnect_after_misses=1,
+        created_by_sync=frozenset(),
+    )
+    assert (counts.missed, counts.disconnected, counts.refused) == (0, 0, None)
+    writer.refresh(you)
+    assert (you.li_missing_count, you.li_disconnected_at) == (0, None)
+
+
+def test_a_sync_sighting_never_touches_it(writer: Session, user: User, you: Contact) -> None:
+    you.li_missing_count = 1
+    you.li_disconnected_at = NOW
+    writer.flush()
+    assert _mark_seen(writer, user, urns={SELF_URN}, public_ids={SELF_SLUG}) == 0
+    writer.refresh(you)
+    assert (you.li_missing_count, you.li_disconnected_at) == (1, NOW)
+
+
+def test_a_static_lists_members_leave_it_out(writer: Session, user: User, you: Contact) -> None:
+    """Even a membership row written before it was the self contact, or by hand."""
+    other = factories.make_contact(writer, user)
+    listed = create_list(writer, user, name="First 100", kind=ListKind.STATIC)
+    for contact in (you, other):
+        writer.add(ListMember(user_id=user.id, list_id=listed.id, contact_id=contact.id))
+    writer.flush()
+    members, total = list_members(writer, user, listed.id, limit=50)
+    assert [m.id for m in members] == [other.id] and total == 1
+
+
+def test_its_interactions_cannot_be_edited_or_deleted(
+    writer: Session, user: User, you: Contact
+) -> None:
+    """Scoped through the contact: an interaction on the self contact is not found."""
+    row = Interaction(
+        user_id=user.id, contact_id=you.id, kind=InteractionKind.NOTE, at=NOW, summary="x"
+    )
+    writer.add(row)
+    writer.flush()
+    with pytest.raises(InteractionNotFound):
+        update_interaction(writer, user, row.id, summary="y")
+    with pytest.raises(InteractionNotFound):
+        delete_interaction(writer, user, row.id)
+    other = factories.make_contact(writer, user)
+    mine = add_interaction(writer, user, other.id, kind=InteractionKind.NOTE, at=NOW)
+    assert update_interaction(writer, user, mine.id, summary="y").summary == "y"
+
+
+def test_the_enroll_outcome_names_yourself_among_the_excluded(
+    writer: Session, user: User, you: Contact
+) -> None:
+    campaign = factories.make_campaign(writer, user, status=CampaignStatus.DRAFT)
+    other = factories.make_contact(writer, user, emails=["other@example.test"])
+    outcome = campaign_service.enroll(
+        writer, user, campaign.id, now=NOW, contact_ids=[you.id, other.id]
+    )
+    assert (outcome.enrolled, outcome.excluded) == (1, 1)
+    assert outcome.excluded_summary == "1 will start, 1 skipped (1 yourself)"
+
+
+# --- an active campaign using a removed field (S2) ----------------------------------------
+
+
+def _use_me(session: Session, user: User, name: str) -> int:
+    campaign = factories.make_campaign(session, user, name=name)
+    template = campaign.steps[0].template
+    assert template is not None
+    template.body = "Hi {{ first_name }}, {{ me.signature }}"
+    session.flush()
+    return campaign.id
+
+
+def test_removed_field_campaigns_lists_active_and_paused_ones_only(
+    writer: Session, user: User
+) -> None:
+    active = _use_me(writer, user, "Active")
+    paused = _use_me(writer, user, "Paused")
+    draft = _use_me(writer, user, "Draft")
+    clean = factories.make_campaign(writer, user, name="Clean")
+    for campaign_id, status in ((paused, CampaignStatus.PAUSED), (draft, CampaignStatus.DRAFT)):
+        row = get_scoped(writer, user, Campaign, campaign_id)
+        assert row is not None
+        row.status = status
+    writer.flush()
+    found = removed_field_campaigns(writer, user)
+    assert [(c.campaign_id, c.step_positions) for c in found] == [(active, (1,)), (paused, (1,))]
+    assert clean.id not in [c.campaign_id for c in found]
+
+
+async def test_the_app_start_warns_about_them(
+    app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    async with app.router.lifespan_context(app):
+        with session_scope(_factory(app), write=True) as session:
+            _use_me(session, session.scalars(select(User)).one(), "First 100")
+    with caplog.at_level(logging.WARNING, logger="netkeeper.web.app"):
+        async with app.router.lifespan_context(app):
+            pass
+    [warning] = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "netkeeper.web.app" and "removed me.* fields" in r.getMessage()
+    ]
+    assert "'First 100'" in warning and "removed me.* fields" in warning
+    assert "Publish a new template version" in warning
+
+
+async def test_the_campaign_page_shows_why_an_enrollment_is_blocked(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    with session_scope(_factory(running_app), write=True) as session:
+        user = session.scalars(select(User)).one()
+        campaign = factories.make_campaign(session, user)
+        contact = factories.make_contact(session, user)
+        enrollment = factories.make_enrollment(session, campaign, contact)
+        enrollment.not_sent_error = REMOVED_FIELD_BLOCK
+        campaign_id = campaign.id
+    page = (await client.get(f"/api/v1/campaigns/{campaign_id}/enrollments")).json()
+    assert [row["not_sent_error"] for row in page["items"]] == [REMOVED_FIELD_BLOCK]

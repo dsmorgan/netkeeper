@@ -129,6 +129,9 @@ class EnrollOut(BaseModel):
     """Pending enrollments dropped because a new source no longer holds their contacts."""
     pending: int
     summary: str
+    excluded_summary: str
+    """The guards' line over the contacts this call considered (#342): an excluded contact
+    that never becomes an enrollment, such as yourself, is named here."""
 
 
 class CampaignSummaryOut(BaseModel):
@@ -324,6 +327,9 @@ class EnrollmentOut(BaseModel):
     next_action_at: datetime | None
     exit_reason: str | None
     replied_at: datetime | None
+    not_sent_error: str | None = None
+    """Why the latest try sent nothing, or why the enrollment is blocked: a step template
+    that names a removed ``me.*`` field says so (#342). None once something sends."""
 
 
 class EnrollmentPageOut(BaseModel):
@@ -520,6 +526,7 @@ def list_enrollments(
                 next_action_at=row.enrollment.next_action_at,
                 exit_reason=row.enrollment.exit_reason,
                 replied_at=row.enrollment.replied_at,
+                not_sent_error=row.enrollment.not_sent_error,
             )
             for row in page.items
         ],
@@ -552,6 +559,7 @@ def enroll(campaign_id: int, body: EnrollIn, session: SessionDep, user: CurrentU
         removed=outcome.removed,
         pending=outcome.pending,
         summary=outcome.summary,
+        excluded_summary=outcome.excluded_summary,
     )
 
 

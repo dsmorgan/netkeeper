@@ -149,7 +149,7 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from netkeeper.campaigns import schedule
 from netkeeper.campaigns.compose import ComposeError, campaign_label, message_id_for
 from netkeeper.campaigns.render import MergeValues, TemplateRenderError, render
-from netkeeper.campaigns.templates import activation_errors, contact_fields
+from netkeeper.campaigns.templates import activation_errors, block_reason, contact_fields
 from netkeeper.config import Settings
 from netkeeper.crm.contacts import sendable_email
 from netkeeper.db import is_writer, session_scope
@@ -1544,7 +1544,10 @@ class _Chooser:
     ) -> _Claim | None:
         session, user = self.session, self.user
         template = get_scoped(session, user, Template, step.template_id)
-        if template is None or activation_errors(template):
+        blocked = block_reason(template)
+        if template is None or blocked is not None:
+            # Said on the enrollment, so the campaign page shows why nothing sends (#342).
+            enrollment.not_sent_error = blocked
             self.park(enrollment, Skip.TEMPLATE_ERRORS)
             return None
         contact = session.scalars(

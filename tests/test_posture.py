@@ -240,6 +240,7 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "reply poll",
         "sending hours",
         "next campaign send",
+        "campaign templates",
         "route-changed breaker",
         "answer-lost limit",
         "network aging",
@@ -2107,6 +2108,21 @@ def test_the_sending_hours_row_says_them_or_any_time(writer: Session, user: User
     assert row.value.startswith("Mon to Fri, 09:00 to 17:00 (")
     sending_hours.write(writer, user, enabled=False, days=["Mon"], start="09:00", end="17:00")
     assert _row(_report(writer, user), "sending hours").value.startswith("any time")
+
+
+def test_an_active_campaign_using_a_removed_me_field_warns(writer: Session, user: User) -> None:
+    """#342: its step sends nothing until a new template version replaces the template."""
+    assert _row(_report(writer, user), "campaign templates").warnings == ()
+    campaign = factories.make_campaign(writer, user, name="First 100")
+    template = campaign.steps[0].template
+    assert template is not None
+    template.body = "Hi {{ first_name }}, {{ me.name }} here"
+    writer.flush()
+    report = _report(writer, user)
+    [warning] = _row(report, "campaign templates").warnings
+    assert "'First 100'" in warning and "step 1" in warning
+    assert "Publish a new template version" in warning
+    assert "campaign templates" in _warned(report)
 
 
 def test_sending_hours_that_cannot_be_read_warn(writer: Session, user: User) -> None:

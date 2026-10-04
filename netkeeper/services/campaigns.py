@@ -73,6 +73,7 @@ from netkeeper.models import (
 from netkeeper.scoping import get_scoped, scoped, scoped_delete
 from netkeeper.services import campaign_engine, campaign_review
 from netkeeper.services import mailboxes as mailbox_service
+from netkeeper.services.campaign_guards import skip_summary
 
 log = logging.getLogger(__name__)
 
@@ -301,6 +302,9 @@ class EnrollOutcome:
     summary: str
     """Spec 11.8's line over the audience, as the review shows it (its source's contacts
     and the pending ones)."""
+    excluded_summary: str = ""
+    """The same line over the contacts this call considered, so an exclusion that never
+    becomes an enrollment is named too, such as the self contact ("1 yourself", #342)."""
 
 
 def _drop_outside(session: Session, user: User, campaign_id: int, keep: set[int]) -> int:
@@ -385,6 +389,9 @@ def enroll(
         removed=removed,
         pending=pending or 0,
         summary=campaign_review.guard_summary(session, user, campaign, now=now),
+        excluded_summary=skip_summary(
+            result.verdicts, contacted_within_days=campaign.contacted_within_days_guard
+        ),
     )
 
 

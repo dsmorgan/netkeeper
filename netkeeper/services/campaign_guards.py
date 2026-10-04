@@ -459,7 +459,7 @@ _LABELS: Final[Mapping[Reason, str]] = {
     Reason.CAMPAIGN_NOT_ACTIVE: "campaign not active",
     Reason.ENROLLMENT_NOT_ACTIVE: "enrollment not active",
     Reason.UNKNOWN_CONTACT: "not found",
-    Reason.SELF: "you (your own details)",
+    Reason.SELF: "yourself",
     Reason.MERGED: "merged into another contact",
     Reason.ARCHIVED: "archived",
     Reason.NEEDS_REVIEW: "waiting for review",

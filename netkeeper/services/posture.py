@@ -72,6 +72,10 @@ from netkeeper.campaigns.schedule import (
     hold,
     suggested,
 )
+from netkeeper.campaigns.templates import (
+    describe_removed_field_campaigns,
+    removed_field_campaigns,
+)
 from netkeeper.config import HeatSettings, LinkedInSettings, PacingSettings, Settings
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin import heat as heat_math
@@ -527,6 +531,7 @@ def posture(
         _reply_poll(session, user, now=now, settings=settings),
         _sending_hours(session, user),
         _next_campaign_send(session, user, zone=zone, now=now, settings=settings),
+        _campaign_templates(session, user),
         _route_changed_breaker(session, user, account_id),
         _answer_lost_limit(session, user, account_id),
         _network_aging(session, user),
@@ -1457,6 +1462,24 @@ def _sending_hours(session: Session, user: User) -> Protection:
         name="sending hours",
         status=Status.ON,
         value=f"{hours.describe()} ({user.timezone}); only a campaign's start ignores them",
+    )
+
+
+def _campaign_templates(session: Session, user: User) -> Protection:
+    """Active and paused campaigns whose step templates name a removed ``me.*`` field
+    (#342). The engine sends nothing for those steps, so the report says so."""
+    blocked = removed_field_campaigns(session, user)
+    if not blocked:
+        return Protection(
+            name="campaign templates",
+            status=Status.ON,
+            value="no active or paused campaign uses a removed merge field",
+        )
+    return Protection(
+        name="campaign templates",
+        status=Status.ON,
+        value=f"{len(blocked)} active or paused campaign(s) blocked by a removed merge field",
+        warnings=(describe_removed_field_campaigns(blocked),),
     )
 
 
