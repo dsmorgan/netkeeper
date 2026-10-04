@@ -258,7 +258,7 @@ async def prefill(
             "description": "It does not wait for you, a run is running, the session is"
             " flagged, heat is too high, or it is outside active hours"
         },
-        422: {"description": "The inbox poll has no runner"},
+        422: {"description": "A run kind the worker can't start"},
         503: {"description": "This process has no browser worker"},
     },
 )

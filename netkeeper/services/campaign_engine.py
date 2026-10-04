@@ -531,7 +531,7 @@ def _ask_for_linkedin_ids(
     if not asked:
         return
     contacts = session.scalars(
-        scoped(user, Contact).where(
+        scoped_contacts(user).where(  # never the self contact (#342)
             Contact.id.in_(asked),
             Contact.li_urn.is_(None),
             Contact.enrich_priority < LINKEDIN_ENRICH_PRIORITY,

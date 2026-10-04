@@ -26,7 +26,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.render import LintIssue, LintRule, Part, Rendered, Severity
+from netkeeper.campaigns.templates import REMOVED_FIELD_BLOCK
 from netkeeper.config import BudgetSettings, LinkedInSettings, Settings
+from netkeeper.crm.self_contact import ensure_self_contact
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.messaging import MessageOutcome, MessageOutcomeKind
@@ -50,7 +52,7 @@ from netkeeper.scoping import get_scoped, scoped, unscoped
 from netkeeper.services import budgets, heat, linkedin_steps, runs, sending_hours
 from netkeeper.services import campaign_engine as engine
 from netkeeper.services.campaign_engine import Skip, enroll, run_tick
-from netkeeper.services.campaign_guards import Reason, check_step
+from netkeeper.services.campaign_guards import Reason, Verdict, check_step
 from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.linkedin_session import flag_session, record_session_evidence
 from netkeeper.services.linkedin_steps import (
@@ -427,6 +429,25 @@ def test_the_self_contact_is_never_claimed_listed_or_waiting(lane: Lane) -> None
 
     lane.write(waiting)
     assert lane.read(lambda s, u: waiting_for_you(s, u, limit=10)) == ([], 0)
+
+
+def test_a_template_using_a_removed_me_field_parks_and_says_why(lane: Lane) -> None:
+    """#342: a LinkedIn step whose template names a removed ``me.*`` field (activated
+    before the fields were removed) is never claimed, and the enrollment says why, as an
+    email step's does."""
+    enrollment_id = lane.enroll()
+
+    def use_me(session: Session, user: User) -> None:
+        campaign = get_scoped(session, user, Campaign, lane.campaign_id)
+        assert campaign is not None
+        campaign.steps[0].template.body = "Hi {{ first_name }}, {{ me.first_name }}"
+
+    lane.write(use_me)
+    claim = lane.claim(enrollment_id)
+    assert claim.reasons == (Skip.TEMPLATE_ERRORS,)
+    enrollment = lane.enrollment(enrollment_id)
+    assert (enrollment.next_action_at, enrollment.not_sent_error) == (None, REMOVED_FIELD_BLOCK)
+    assert (lane.messages(enrollment_id), lane.runs()) == ([], [])
 
 
 def test_a_paused_enrollment_is_refused(lane: Lane) -> None:
@@ -963,6 +984,24 @@ def test_a_linkedin_first_campaign_asks_for_the_contacts_it_kept_out(
         return len(result.enrolled), slug_only.enrich_priority
 
     assert lane.write(run) == (0, 1)  # waits for enrichment, not enrolled
+
+
+def test_enrollment_never_asks_enrichment_for_the_self_contact(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#342: the self contact is never enrolled, and its ``enrich_priority`` is never
+    raised, even by a verdict that would ask for it (the guards normally stop it first)."""
+    lane = make_lane(session_factory, channels=(LINKEDIN,), status=CampaignStatus.DRAFT)
+
+    def run(session: Session, user: User) -> tuple[int, int]:
+        you = ensure_self_contact(session, user)
+        you.li_urn = None
+        result = enroll(session, user, lane.campaign_id, [you.id], now=NOW)
+        engine._ask_for_linkedin_ids(session, user, lane.campaign_id, [Verdict(you.id, ())])
+        session.flush()
+        return len(result.enrolled), you.enrich_priority
+
+    assert lane.write(run) == (0, 0)
 
 
 def test_an_email_only_campaign_asks_for_nothing(session_factory: sessionmaker[Session]) -> None:

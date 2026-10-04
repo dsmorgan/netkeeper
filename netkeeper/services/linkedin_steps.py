@@ -100,7 +100,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from netkeeper.campaigns import schedule
 from netkeeper.campaigns.render import MergeValues, Severity, TemplateRenderError, render
-from netkeeper.campaigns.templates import activation_errors, contact_fields
+from netkeeper.campaigns.templates import block_reason, contact_fields
 from netkeeper.config import Settings
 from netkeeper.linkedin.messaging import MessageOutcome, MessageOutcomeKind
 from netkeeper.models import (
@@ -510,7 +510,10 @@ class _Claimer:
     ) -> PrefillClaim:
         session, user, now = self.session, self.user, self.now
         template = get_scoped(session, user, Template, step.template_id)
-        if template is None or activation_errors(template):
+        blocked = block_reason(template)
+        if template is None or blocked is not None:
+            # Said on the enrollment, as the email engine does (#342).
+            enrollment.not_sent_error = blocked
             return self.park(enrollment, Skip.TEMPLATE_ERRORS)
         contact = session.scalars(
             scoped_contacts(user)
