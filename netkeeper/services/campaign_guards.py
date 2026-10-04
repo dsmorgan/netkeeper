@@ -13,9 +13,9 @@ or ``None``. :func:`check_contact` runs them all and returns a :class:`Verdict`.
 :func:`load_facts` is the only function here that touches the database. It
 reads the contacts and their history in a few scoped queries, and never
 writes. :func:`check_enrollment` and :func:`check_step` put the two together
-for the two moments spec 11.9 names. :func:`excluded_summary` turns a set of
-verdicts into the review screen's "212 in audience, 37 excluded: ..." line
-(spec 11.8).
+for the two moments spec 11.9 names. :func:`skip_summary` turns a set of
+verdicts into the review screen's "8 will send, 2 skipped (...)" line
+(spec 11.8; #346).
 
 The channel's own health (a mailbox under its cap, a browser under its budget)
 does not depend on the contact. :func:`check_channel` is its guard, over a
@@ -34,8 +34,8 @@ reason, and never includes. Concretely:
 
 A verdict lists every reason that applies, not only the first, so the review
 screen can show them all. :attr:`Verdict.reason` is the first in
-:data:`REASON_ORDER`, and it is the one :func:`excluded_summary` counts, so
-that the summary's parts add up to the number excluded.
+:data:`REASON_ORDER`, and it is the one :func:`skip_summary` counts, so
+that the summary's parts add up to the number skipped.
 """
 
 from __future__ import annotations
@@ -467,29 +467,41 @@ _LABELS: Final[Mapping[Reason, str]] = {
 }
 
 
-def excluded_summary(verdicts: Iterable[Verdict], *, contacted_within_days: int) -> str:
-    """The review screen's line: ``"212 in audience, 37 excluded: 30 no email, 4 ..."``.
+def skip_summary(
+    verdicts: Iterable[Verdict],
+    *,
+    contacted_within_days: int,
+    enrolled: Collection[int] | None = None,
+) -> str:
+    """The review screen's line: ``"8 will send, 2 skipped (1 no email, 1 do-not-contact)"``.
 
-    Generated from the verdicts, never written by hand (spec 11.8). Each excluded
-    contact is counted once, under :attr:`Verdict.reason`, so the parts add up to
-    the number excluded. Parts go largest first, and in :data:`REASON_ORDER` on a
-    tie.
+    Generated from the verdicts, never written by hand (spec 11.8; #346). A contact
+    no guard excludes will send; with ``enrolled`` given, only if it is one of those
+    contacts, and the others are counted as ``not enrolled``. Each skipped contact is
+    counted once, under :attr:`Verdict.reason`, so the parts add up to the number
+    skipped. Parts go largest first, and in :data:`REASON_ORDER` on a tie. The line
+    is informational: it gates nothing, and the guards apply again at every send.
     """
     counts: Counter[Reason] = Counter()
-    audience = 0
+    will_send = not_enrolled = 0
     for verdict in verdicts:
-        audience += 1
         if verdict.reason is not None:
             counts[verdict.reason] += 1
-    excluded = sum(counts.values())
-    if not excluded:
-        return f"{audience} in audience, none excluded"
-    ordered = sorted(counts, key=lambda r: (-counts[r], REASON_ORDER.index(r)))
-    parts = ", ".join(
-        f"{counts[r]} {reason_label(r, contacted_within_days=contacted_within_days)}"
-        for r in ordered
-    )
-    return f"{audience} in audience, {excluded} excluded: {parts}"
+        elif enrolled is None or verdict.contact_id in enrolled:
+            will_send += 1
+        else:
+            not_enrolled += 1
+    skipped = sum(counts.values())
+    if not skipped:
+        line = f"{will_send} will send, none skipped"
+    else:
+        ordered = sorted(counts, key=lambda r: (-counts[r], REASON_ORDER.index(r)))
+        parts = ", ".join(
+            f"{counts[r]} {reason_label(r, contacted_within_days=contacted_within_days)}"
+            for r in ordered
+        )
+        line = f"{will_send} will send, {skipped} skipped ({parts})"
+    return f"{line}, {not_enrolled} not enrolled" if not_enrolled else line
 
 
 # --- reading the facts --------------------------------------------------------------

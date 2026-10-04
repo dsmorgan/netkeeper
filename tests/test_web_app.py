@@ -130,7 +130,7 @@ API_PATHS = {
     "/api/v1/campaigns/{campaign_id}/start-options",
     "/api/v1/campaigns/{campaign_id}/steps/{step_id}/schedule",
     "/api/v1/campaigns/{campaign_id}/review",
-    "/api/v1/campaigns/{campaign_id}/review/guards/acknowledge",
+    "/api/v1/campaigns/{campaign_id}/review/guards",
     "/api/v1/campaigns/{campaign_id}/review/lint",
     "/api/v1/campaigns/{campaign_id}/review/start",
     "/api/v1/campaigns/{campaign_id}/review/steps/{step_id}",

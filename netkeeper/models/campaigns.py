@@ -252,8 +252,9 @@ class Campaign(UserOwned, TimestampMixin, Base):
     # template changes the fingerprint, and the record no longer counts.
     lint_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     lint_fingerprint: Mapped[str | None] = mapped_column(String(64))
-    # The guard summary a person acknowledged (spec 11.8's "212 in audience, 37
-    # excluded: ..."), when, and the audience fingerprint it was for.
+    # Retired (#346): the guard acknowledgement these recorded (0024) no longer exists,
+    # and nothing reads or writes them. They stay mapped so the schema matches the
+    # migrations; a later migration drops them.
     guards_acknowledged_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     guards_fingerprint: Mapped[str | None] = mapped_column(String(64))
     guards_summary: Mapped[str | None] = mapped_column(Text)

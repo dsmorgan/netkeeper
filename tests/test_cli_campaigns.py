@@ -200,15 +200,6 @@ def _complete_review(world: World, campaign_id: int) -> None:
                 session, user, plan, gmail_message_id=f"fake-{step.id}", now=now
             )
         assert campaign_review.record_lint(session, user, campaign_id, me=ME, now=now).clean
-        campaign = campaign_review.get_campaign(session, user, campaign_id)
-        campaign_review.acknowledge_guards(
-            session,
-            user,
-            campaign_id,
-            summary_seen=campaign_review.guard_summary(session, user, campaign, now=now),
-            audience_fingerprint_seen=campaign_review.audience_fingerprint(session, user, campaign),
-            now=now,
-        )
 
 
 # --- create -------------------------------------------------------------------------
@@ -260,7 +251,7 @@ def test_enroll_takes_the_list_through_the_guards(world: World) -> None:
     output = _ok("campaigns", "enroll", str(campaign_id))
 
     assert f"campaign {campaign_id}: 3 enrolled, 0 already in, 1 excluded" in output
-    assert "4 in audience, 1 excluded: 1 do-not-contact" in output
+    assert "3 will send, 1 skipped (1 do-not-contact)" in output
     assert _enrollment_statuses(world, campaign_id) == [EnrollmentStatus.PENDING] * 3
     again = _ok("campaigns", "enroll", str(campaign_id))
     assert "0 enrolled, 3 already in" in again
@@ -298,7 +289,7 @@ def test_status_shows_steps_enrollments_and_what_review_needs(world: World) -> N
     assert "enrollments: 3 pending" in output
     assert "step 1 v1" in output and "step 2 v1" in output
     assert "review: activation still needs" in output
-    for requirement in ("step_approvals", "test_sends", "lint", "guards"):
+    for requirement in ("step_approvals", "test_sends", "lint"):
         assert f"- {requirement}:" in output
 
     missing = _run("campaigns", "status", "999")
@@ -316,7 +307,7 @@ def test_activate_refused_prints_what_is_missing_and_exits_non_zero(world: World
 
     assert result.exit_code == 1
     assert f"error: campaign {campaign_id} cannot be activated" in result.output
-    for requirement in ("step_approvals", "test_sends", "lint", "guards"):
+    for requirement in ("step_approvals", "test_sends", "lint"):
         assert f"- {requirement}:" in result.output
     assert "(steps 1, 2)" in result.output  # the test sends missing, by step
     assert _campaign(world, campaign_id).status is CampaignStatus.REVIEWING
@@ -436,6 +427,8 @@ def test_activate_after_a_complete_review_asks_then_activates(world: World) -> N
     declined = _run("campaigns", "activate", str(campaign_id), input="n\n")
     assert declined.exit_code == 1
     assert "stays in review" in declined.output
+    # #346: the guard summary is shown, and gates nothing; no acknowledgement was made.
+    assert "guards: 3 will send, 1 skipped (1 do-not-contact)" in declined.output
     assert _campaign(world, campaign_id).status is CampaignStatus.REVIEWING
 
     result = _run("campaigns", "activate", str(campaign_id), input="y\n")
@@ -446,6 +439,22 @@ def test_activate_after_a_complete_review_asks_then_activates(world: World) -> N
     assert campaign.status is CampaignStatus.ACTIVE
     assert campaign.approved_at is not None
     assert _enrollment_statuses(world, campaign_id) == [EnrollmentStatus.ACTIVE] * 3
+
+
+def test_guards_lists_each_skipped_contact_with_every_reason(world: World) -> None:
+    campaign_id = _reviewing(world)
+
+    output = _ok("campaigns", "guards", str(campaign_id))
+
+    assert output.splitlines()[0] == "guards: 3 will send, 1 skipped (1 do-not-contact)"
+    assert output.splitlines()[1].split() == ["CONTACT", "NAME", "SKIPPED", "BECAUSE"]
+    [row] = output.splitlines()[2:]
+    assert row.startswith(str(world.contacts[3])) and row.endswith("do-not-contact")
+    assert "note:" not in output  # nobody the old tool emailed
+
+    missing = _run("campaigns", "guards", "999")
+    assert missing.exit_code == 1
+    assert "error: no campaign 999" in missing.output
 
 
 # --- pause and resume ---------------------------------------------------------------
@@ -802,7 +811,7 @@ def test_enroll_with_a_new_list_reports_what_it_removed(world: World) -> None:
     output = _ok("campaigns", "enroll", str(campaign_id), "--list", "Just one")
 
     assert "0 enrolled, 1 already in, 0 excluded, 2 removed; 1 pending" in output
-    assert "1 in audience" in output
+    assert "1 will send, none skipped" in output
     assert _enrollment_statuses(world, campaign_id) == [EnrollmentStatus.PENDING]
 
 

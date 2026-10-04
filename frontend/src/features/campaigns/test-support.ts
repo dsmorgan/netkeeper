@@ -17,6 +17,7 @@ import type {
   CampaignResults,
   CampaignSummary,
   EnrollmentPage,
+  GuardDetails,
   MessagePreview,
   Missing,
   Review,
@@ -161,12 +162,6 @@ export const ALL_MISSING: Missing[] = [
     enrollment_ids: [],
     step_positions: [],
   },
-  {
-    requirement: 'guards',
-    detail: 'the guard summary for the current audience is not acknowledged',
-    enrollment_ids: [],
-    step_positions: [],
-  },
 ]
 
 export function review(overrides: Partial<Review> = {}): Review {
@@ -175,9 +170,23 @@ export function review(overrides: Partial<Review> = {}): Review {
     status: 'reviewing',
     content_fingerprint: 'c0ffee',
     audience_fingerprint: 'aud1ence',
-    guard_summary: '3 in audience, 1 excluded: 1 do-not-contact',
-    guards_acknowledged: null,
+    guard_summary: '2 will send, 1 skipped (1 do-not-contact)',
+    prior_contact_note: null,
     missing: ALL_MISSING,
+    ...overrides,
+  }
+}
+
+/** The guard summary's details: one contact skipped for two reasons (#346). */
+export function guardDetails(overrides: Partial<GuardDetails> = {}): GuardDetails {
+  return {
+    summary: '2 will send, 1 skipped (1 do-not-contact)',
+    will_send: 2,
+    not_enrolled: 0,
+    skipped: [
+      { contact_id: 403, name: 'Tobias Wrenfield', reasons: ['do-not-contact', 'no email'] },
+    ],
+    prior_contact_note: null,
     ...overrides,
   }
 }
@@ -329,6 +338,7 @@ export function campaignBackend(
       'GET /api/v1/campaigns': () => jsonResponse([summary()]),
       [`GET /api/v1/campaigns/${id}`]: () => jsonResponse(state.campaign),
       [`GET /api/v1/campaigns/${id}/review`]: () => jsonResponse(state.review),
+      [`GET /api/v1/campaigns/${id}/review/guards`]: () => jsonResponse(guardDetails()),
       [`GET /api/v1/campaigns/${id}/review/steps/101`]: () => jsonResponse(stepReview()),
       [`GET /api/v1/campaigns/${id}/review/steps/102`]: () =>
         jsonResponse(
