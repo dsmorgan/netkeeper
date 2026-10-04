@@ -705,6 +705,30 @@ def test_a_notice_for_jim_bob_is_not_bob_s_bounce(
     assert report.unconfirmed_notices == 1
 
 
+def test_a_delay_notice_naming_the_recipient_is_not_a_bounce(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """#367: a delay notice can carry X-Failed-Recipients while the mail system keeps
+    trying; it must not put the address on the do-not-send list."""
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    fake.deliver(
+        _mail(
+            f"Mail Delivery Subsystem <{MAILER_DAEMON}>",
+            "Delivery Status Notification (Delay)",
+            "Still trying to reach bob@example.test",
+            X_Failed_Recipients="bob@example.test",
+        ),
+        at=_at(2),
+    )
+
+    _scan(writer, user, fake)
+
+    assert do_not_send.find(writer, user, "bob@example.test") is None
+    row = _row(writer, user, "bob@example.test")
+    assert row.reply_kind is not HistoryReplyKind.BOUNCE
+    assert row.bounced_at is None
+
+
 def test_a_notice_without_the_header_that_names_the_address_exactly_is_a_bounce() -> None:
     fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
     ref = fake.deliver(
