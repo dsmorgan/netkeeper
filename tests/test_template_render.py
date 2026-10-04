@@ -853,9 +853,7 @@ def test_a_bad_link_after_tags_and_fields_that_span_lines_names_the_right_line()
 
 def test_the_same_finding_twice_is_reported_once_at_its_first_line() -> None:
     body = "{{ first_name }}\n{{ frist_name }}\n{{ frist_name }}"
-    assert _lines(lint(EMAIL, SUBJECT, body)) == [
-        (LintRule.UNDEFINED_VARIABLE, "frist_name", 2)
-    ]
+    assert _lines(lint(EMAIL, SUBJECT, body)) == [(LintRule.UNDEFINED_VARIABLE, "frist_name", 2)]
 
 
 def test_a_missing_value_warning_names_the_line_the_field_is_first_used_on() -> None:
@@ -983,13 +981,15 @@ def test_a_linkedin_body_over_the_hard_limit_is_an_error() -> None:
 @pytest.mark.parametrize(
     ("body", "line"),
     [
-        ("Hi {{ first_name }},\nthanks", 2),
-        ("Hi {{ first_name }},\r\nthanks", 2),
-        ("Hi {{ first_name }},\rthanks", 2),
-        ("Hi {{ first_name }}\n\n\nthanks", 2),
-        ("Hi {{ first_name }}\n", 2),
-        ("Hi {{ first_name }},\u2028thanks", 1),  # a break Jinja doesn't number lines by
-        ("{{ first_name }} one\ntwo\nthree", 2),
+        ("Hi {{ first_name }},\nthanks", 1),
+        ("Hi {{ first_name }},\r\nthanks", 1),
+        ("Hi {{ first_name }},\rthanks", 1),
+        ("Hi {{ first_name }}\n\n\nthanks", 1),
+        ("Hi {{ first_name }}\n", 1),
+        ("{{ first_name }} one two\nthree", 1),
+        ("{{ first_name }}\x20one\x20\x20{{ company }}\x20\n", 1),
+        ('Hi {{ first_name }}{{ "\\n" }}', 1),  # a literal that renders a line break
+        ('Hi {{ first_name }}{{ company | default("a\\r\\nb") }}', 1),
     ],
 )
 def test_a_multi_line_linkedin_body_is_an_error(body: str, line: int) -> None:
@@ -1001,12 +1001,68 @@ def test_a_multi_line_linkedin_body_is_an_error(body: str, line: int) -> None:
     )
 
 
+def test_a_line_break_is_reported_on_the_line_it_ends() -> None:
+    body = "Hi {{ first_name }}, one\ntwo\nthree"
+    assert _lines(lint(LINKEDIN, None, body)) == [(LintRule.LINKEDIN_NEWLINE, None, 1)]
+    literal = 'Hi {{ first_name }},\x20\x20\x20\x20\n\n{{ "two\\nlines" }}'
+    assert _lines(lint(LINKEDIN, None, literal)) == [(LintRule.LINKEDIN_NEWLINE, None, 1)]
+
+
+@pytest.mark.parametrize(
+    ("char", "name"),
+    [
+        ("\t", "a tab"),
+        ("\x00", "a NUL character"),
+        ("\x0b", "U+000B"),  # VT
+        ("\x0c", "U+000C"),  # FF
+        ("\x1c", "U+001C"),  # FS
+        ("\x1d", "U+001D"),  # GS
+        ("\x1e", "U+001E"),  # RS
+        ("\x85", "U+0085"),  # NEL
+        ("\x7f", "U+007F"),
+        ("\u2028", "a line separator (U+2028)"),
+        ("\u2029", "a paragraph separator (U+2029)"),
+    ],
+)
+def test_other_control_characters_are_always_an_error(
+    char: str, name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = "Hi {{ first_name }}," + char + "thanks"
+    for allowed in (False, True):  # whatever the newline flag says
+        monkeypatch.setattr(render_module, "LINKEDIN_ALLOW_NEWLINES", allowed)
+        issues = lint(LINKEDIN, None, body)
+        assert _lines(issues) == [(LintRule.LINKEDIN_UNTYPABLE, None, 1)], allowed
+        assert issues[0].severity is Severity.ERROR
+        assert name in issues[0].message
+
+
+def test_a_control_character_in_a_literal_is_an_error() -> None:
+    issues = lint(LINKEDIN, None, '{{ first_name }}\x20{{ "a\\tb" }}')
+    assert _lines(issues) == [(LintRule.LINKEDIN_UNTYPABLE, None, 1)]
+
+
+def test_the_newline_flag_decides_only_about_cr_and_lf(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(render_module, "LINKEDIN_ALLOW_NEWLINES", True)
+    assert lint(LINKEDIN, None, "Hi {{ first_name }},\r\nthanks\n") == []
+
+
 def test_the_line_of_a_long_body_is_where_it_passes_the_limit() -> None:
     first = "Hi {{ first_name }} " + "x" * 600
     issues = lint(LINKEDIN, None, first + "\n" + "y" * 600)
     assert _lines(issues) == [
         (LintRule.LINKEDIN_LONG, None, 2),
-        (LintRule.LINKEDIN_NEWLINE, None, 2),
+        (LintRule.LINKEDIN_NEWLINE, None, 1),
+    ]
+
+
+def test_the_line_of_a_too_long_body_is_where_it_passes_the_limit() -> None:
+    lines = ["Hi {{ first_name }}", "x" * 3000, "y" * 3000, "z" * 3000]
+    issues = lint(LINKEDIN, None, "\n".join(lines))
+    # Lines 1 and 2 and their breaks are 3,021 characters, line 3 ends at 6,022: the
+    # 8,001st character is on line 4.
+    assert _lines(issues) == [
+        (LintRule.LINKEDIN_TOO_LONG, None, 4),
+        (LintRule.LINKEDIN_NEWLINE, None, 1),
     ]
 
 
@@ -1045,6 +1101,22 @@ def test_a_merge_value_that_adds_length_fails_the_rendered_linkedin_message() ->
     )  # fmt: skip
     assert _lines(list(too_long.issues)) == [(LintRule.LINKEDIN_TOO_LONG, None, None)]
     assert has_errors(too_long.issues)
+
+
+def test_a_merge_value_with_a_control_character_fails_the_rendered_linkedin_message() -> None:
+    rendered = render(
+        LINKEDIN, None, "Hi {{ first_name }}, {{ company }}",
+        _values(first_name="Bo", company="Acme\tInc"), today=TODAY,
+    )  # fmt: skip
+    assert _lines(list(rendered.issues)) == [(LintRule.LINKEDIN_UNTYPABLE, None, None)]
+    assert "the rendered message contains a tab" in rendered.issues[0].message
+
+
+def test_a_too_long_template_that_renders_long_gets_no_extra_long_warning() -> None:
+    body = "Hi {{ first_name }} " + "x" * 1500 + "{# " + "y" * 7000 + " #}"
+    rendered = render(LINKEDIN, None, body, _values(first_name="Bo"), today=TODAY)
+    assert LINKEDIN_MESSAGE_LONG_CHARS < len(rendered.body) <= LINKEDIN_MESSAGE_MAX_CHARS
+    assert [issue.rule for issue in rendered.issues] == [LintRule.LINKEDIN_TOO_LONG]
 
 
 def test_a_linkedin_finding_in_the_template_is_not_repeated_for_the_render() -> None:

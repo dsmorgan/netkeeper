@@ -403,6 +403,7 @@ function MessageView({
           {message.to_address !== null && ` <${message.to_address}>`}
         </p>
         {perMessage &&
+          message.blocked === null &&
           (message.approved ? (
             <span className="text-xs font-medium text-emerald-700 dark:text-emerald-300">
               Approved

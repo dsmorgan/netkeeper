@@ -89,8 +89,11 @@ A LinkedIn template (P4-11) is also held to what LinkedIn and the prefill accept
 
 - :attr:`LintRule.LINKEDIN_SUBJECT`: a subject. LinkedIn messages have none.
 - :attr:`LintRule.LINKEDIN_TOO_LONG`: a body over :data:`LINKEDIN_MESSAGE_MAX_CHARS`.
-- :attr:`LintRule.LINKEDIN_NEWLINE`: a line break in the body, while
-  :data:`LINKEDIN_ALLOW_NEWLINES` is false. The prefill never presses Enter.
+- :attr:`LintRule.LINKEDIN_NEWLINE`: a CR or LF in the body or one of its text
+  literals, while :data:`LINKEDIN_ALLOW_NEWLINES` is false. The prefill never
+  presses Enter.
+- :attr:`LintRule.LINKEDIN_UNTYPABLE`: any other control character (a tab, NUL, VT,
+  FF, NEL...) or U+2028 or U+2029, whatever the flag says.
 - :attr:`LintRule.LINKEDIN_LONG`, the one save-time *warning*: a body over
   :data:`LINKEDIN_MESSAGE_LONG_CHARS`, which takes minutes to type.
 
@@ -310,7 +313,8 @@ LINKEDIN_ALLOW_NEWLINES: Final = False
 """Whether a LinkedIn message may have more than one line (P4-11). False until the
 messaging capture (P4-06) shows Shift+Enter never sends, whatever LinkedIn's "Press
 Enter to Send" setting is: the prefill never presses Enter, so a line break can't be
-typed safely. While it is False, a line break in a LinkedIn body is an error."""
+typed safely. While it is False, a CR or LF in a LinkedIn body is an error. It decides
+only about CR and LF; every other line break is always an error."""
 
 MAX_NESTING: Final = 50
 """The deepest a template's tree may go. ``a * b * c`` nests one level per term, and Python's
@@ -382,6 +386,12 @@ _NODE_NAMES: Final[Mapping[type[nodes.Node], str]] = {
 _LINE_BREAKS = re.compile(r"[\r\n\x0b\x0c\x1c-\x1e\x85\u2028\u2029]+")
 # The line breaks Jinja counts lines by, so a line number here is the one lint reports.
 _JINJA_LINE_BREAKS = re.compile(r"\r\n|\r|\n")
+# The line breaks LINKEDIN_ALLOW_NEWLINES decides about (P4-11).
+_CR_LF = re.compile(r"[\r\n]")
+# What a LinkedIn message may never contain, whatever LINKEDIN_ALLOW_NEWLINES says: every
+# other control character (tab, NUL, VT, FF, FS/GS/RS, NEL...) and the Unicode line and
+# paragraph separators. Interim, until the pacing module's predicate (#386) replaces it.
+_UNTYPABLE = re.compile(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029]")
 
 # A candidate http(s) link: the scheme and whatever follows up to whitespace. Matched
 # case-insensitively and loosely on purpose, so ``http:/example.com`` is caught as broken
@@ -416,6 +426,7 @@ class LintRule(enum.StrEnum):
     LINKEDIN_TOO_LONG = "linkedin_too_long"
     LINKEDIN_LONG = "linkedin_long"
     LINKEDIN_NEWLINE = "linkedin_newline"
+    LINKEDIN_UNTYPABLE = "linkedin_untypable"
 
 
 class Part(enum.StrEnum):
@@ -734,6 +745,9 @@ class _Analysis:
     issues: list[LintIssue] = field(default_factory=list)
     # Each merge field the part names, in order, with the line it is first named on.
     references: dict[str, int | None] = field(default_factory=dict)
+    # Each text literal in the part, with its line: what it renders can differ from its
+    # source, as ``"\\n"`` does, so the LinkedIn character rules check it too (P4-11).
+    literals: list[tuple[str, int]] = field(default_factory=list)
     compiled: bool = True
 
     def error(
@@ -868,6 +882,7 @@ class _Walker:
     def const(self, node: nodes.Const) -> None:
         value = node.value
         if isinstance(value, str):
+            self.analysis.literals.append((value, node.lineno))
             if len(value) > MAX_LITERAL_CHARS:
                 self.refuse(node, f"text longer than {MAX_LITERAL_CHARS} characters", "text")
         elif isinstance(value, int):
@@ -1099,7 +1114,7 @@ def _lint(
             )
         )
     if channel is TemplateChannel.LINKEDIN:
-        issues.extend(_linkedin_issues(body, in_template=True))
+        issues.extend(_linkedin_issues(body, literals=body_analysis.literals))
     return issues, analyses
 
 
@@ -1108,10 +1123,15 @@ def _line_of(source: str, offset: int) -> int:
     return len(_JINJA_LINE_BREAKS.findall(source, 0, offset)) + 1
 
 
-def _linkedin_issues(body: str, *, in_template: bool) -> list[LintIssue]:
-    """What LinkedIn and the prefill refuse in a body (P4-11): the template text when
-    ``in_template``, with lines, or a rendered message, without (its lines are not the
-    template's)."""
+def _linkedin_issues(body: str, *, literals: Collection[tuple[str, int]] | None) -> list[LintIssue]:
+    """What LinkedIn and the prefill refuse in a body (P4-11).
+
+    For the template text, ``literals`` are its text literals with their lines, checked
+    too, since ``{{ "\\n" }}`` renders a line break its source does not contain; each
+    finding has a line. For a rendered message, ``literals`` is None and no finding has
+    a line: the rendered text's lines are not the template's.
+    """
+    in_template = literals is not None
     issues: list[LintIssue] = []
     what = "the body" if in_template else "the rendered message"
     size = len(body)
@@ -1137,20 +1157,68 @@ def _linkedin_issues(body: str, *, in_template: bool) -> list[LintIssue]:
                 line=_line_of(body, LINKEDIN_MESSAGE_LONG_CHARS) if in_template else None,
             )
         )
-    if not LINKEDIN_ALLOW_NEWLINES:
-        found = _LINE_BREAKS.search(body)
-        if found is not None:
-            issues.append(
-                LintIssue(
-                    LintRule.LINKEDIN_NEWLINE,
-                    Severity.ERROR,
-                    Part.BODY,
-                    "LinkedIn messages must be one paragraph: the prefill never presses Enter",
-                    # The line the break starts, the first one that can't be typed.
-                    line=_line_of(body, found.start() + 1) if in_template else None,
-                )
+    # Where each character rule is first broken, (line, the character): in the text
+    # itself or in a literal, whichever comes first.
+    texts: list[tuple[str, Callable[[int], int | None]]] = [
+        (body, partial(_line_of, body) if in_template else _no_line)
+    ]
+    texts.extend((value, partial(_same_line, line)) for value, line in literals or ())
+    newline = _first(texts, _CR_LF) if not LINKEDIN_ALLOW_NEWLINES else None
+    untypable = _first(texts, _UNTYPABLE)
+    if newline is not None:
+        issues.append(
+            LintIssue(
+                LintRule.LINKEDIN_NEWLINE,
+                Severity.ERROR,
+                Part.BODY,
+                "LinkedIn messages must be one paragraph: the prefill never presses Enter",
+                line=newline[0],
             )
+        )
+    if untypable is not None:
+        issues.append(
+            LintIssue(
+                LintRule.LINKEDIN_UNTYPABLE,
+                Severity.ERROR,
+                Part.BODY,
+                f"{what} contains {_char_name(untypable[1])}, which the prefill can't type",
+                line=untypable[0],
+            )
+        )
     return issues
+
+
+def _first(
+    texts: Collection[tuple[str, Callable[[int], int | None]]], pattern: re.Pattern[str]
+) -> tuple[int | None, str] | None:
+    """The earliest line any of ``texts`` matches ``pattern`` on, with the character."""
+    hits = []
+    for text, line in texts:
+        found = pattern.search(text)
+        if found is not None:
+            hits.append((line(found.start()), found.group()))
+    if not hits:
+        return None
+    return min(hits, key=lambda hit: hit[0] or 0)
+
+
+def _no_line(_offset: int) -> None:
+    return None
+
+
+def _same_line(line: int, _offset: int) -> int:
+    return line
+
+
+def _char_name(char: str) -> str:
+    """How a finding names a character the prefill can't type: its name, or its code point."""
+    names = {
+        "\t": "a tab",
+        "\x00": "a NUL character",
+        "\u2028": "a line separator (U+2028)",
+        "\u2029": "a paragraph separator (U+2029)",
+    }
+    return names.get(char, f"the control character U+{ord(char):04X}")
 
 
 def lint(channel: TemplateChannel, subject: str | None, body: str) -> list[LintIssue]:
@@ -1307,7 +1375,7 @@ def render(
             found.add(LintRule.LINKEDIN_LONG)
         added.extend(
             issue
-            for issue in _linkedin_issues(rendered_body, in_template=False)
+            for issue in _linkedin_issues(rendered_body, literals=None)
             if issue.rule not in found
         )
     return Rendered(rendered_subject, rendered_body, (*issues, *added))

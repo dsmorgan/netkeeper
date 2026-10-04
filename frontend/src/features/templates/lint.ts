@@ -46,12 +46,15 @@ export const WHY_IT_MATTERS: Readonly<Record<LintRule, string>> = {
     'This contact has no value for the field, so the message has a blank where it goes.',
   removed_field:
     'The me.* fields were removed, so this renders as a blank. Write your own details into the template; a test send shows the contact fields with yours, from Settings.',
-  linkedin_subject: 'LinkedIn messages have no subject, so it would never be sent.',
+  linkedin_subject:
+    'LinkedIn messages have no subject line, so this text would never reach the person.',
   linkedin_too_long: 'LinkedIn refuses a message this long, so the prefill could never send it.',
   linkedin_long:
     'The prefill types each character like a person would, so a long message takes minutes and may not finish.',
   linkedin_newline:
     "The prefill never presses Enter, so a message with a line break can't be typed safely.",
+  linkedin_untypable:
+    "The prefill types what a person could type, and this character isn't something they could.",
 }
 
 /**

@@ -218,6 +218,33 @@ describe('step review', () => {
     ])
   })
 
+  it('offers no approval for a blocked message of a personal_line step', async () => {
+    mockFetch(
+      campaignBackend(reviewing(), {
+        'GET /api/v1/campaigns/5/review/steps/101': () =>
+          jsonResponse(
+            stepReview({
+              per_message: true,
+              unapproved: 1,
+              total: 1,
+              messages: [
+                message({
+                  blocked:
+                    'lint error: LinkedIn messages must be one paragraph: the prefill never presses Enter',
+                }),
+              ],
+              blocked: [],
+            }),
+          ),
+      }),
+    )
+    await renderApp('/campaigns/5')
+
+    const step = await stepOne()
+    expect(await within(shownMessage(step)).findByText(/Blocked: lint error/)).toBeVisible()
+    expect(step.queryByRole('button', { name: 'Approve this message' })).toBeNull()
+  })
+
   it('refreshes a step whose fingerprint went stale, then approves the new one', async () => {
     const calls: Call[] = []
     let fingerprint = 'step-fp-old'
