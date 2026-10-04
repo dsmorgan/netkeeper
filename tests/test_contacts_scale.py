@@ -41,7 +41,7 @@ from netkeeper.models import (
     User,
     UserKind,
 )
-from netkeeper.scoping import scoped, scoped_contacts
+from netkeeper.scoping import scoped_contacts
 
 CSRF = {"X-Netkeeper-Client": "1"}
 CONTACTS = 10_000

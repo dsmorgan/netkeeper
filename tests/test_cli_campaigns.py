@@ -27,7 +27,6 @@ from netkeeper import cli as cli_module
 from netkeeper import migrations
 from netkeeper.campaigns import templates as template_service
 from netkeeper.cli import app as cli
-from netkeeper.config import Settings
 from netkeeper.crm import lists as list_service
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.models import (

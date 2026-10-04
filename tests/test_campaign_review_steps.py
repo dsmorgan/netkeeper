@@ -45,7 +45,6 @@ from netkeeper.services.campaign_engine import Decision, Skip, run_tick
 from netkeeper.services.campaign_guards import Reason, check_step
 
 
-
 @dataclass
 class Reviewed:
     factory: sessionmaker[Session]
@@ -97,9 +96,7 @@ def _reviewing(
 
 def _review(r: Reviewed) -> campaign_review.StepReview:
     with session_scope(r.factory) as session:
-        return campaign_review.review_step(
-            session, r.user, r.campaign_id, r.step_id, now=NOW
-        )
+        return campaign_review.review_step(session, r.user, r.campaign_id, r.step_id, now=NOW)
 
 
 def _complete_and_activate(r: Reviewed, review: campaign_review.StepReview) -> None:

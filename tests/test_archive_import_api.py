@@ -29,7 +29,7 @@ from netkeeper.crm.archive_check import check_zip_directory
 from netkeeper.db import session_scope
 from netkeeper.linkedin import archive as linkedin_archive
 from netkeeper.linkedin.archive import ArchiveRefusalCode
-from netkeeper.models import Contact, Interaction, User
+from netkeeper.models import Interaction, User
 from netkeeper.scoping import scoped_contacts_count, scoped_count
 from netkeeper.web.api import imports as imports_api
 from netkeeper.web.errors import ApiError
