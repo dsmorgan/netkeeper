@@ -1866,8 +1866,13 @@ def test_reset_cleans_up_its_temp_dir_when_interrupted(data: Path, tmp_path: Pat
     shim_dir = tmp_path / "shim"
     shim_dir.mkdir()
     shim = shim_dir / "sqlite3"
-    # Slow enough that the signal below always arrives mid-archive.
-    shim.write_text(f'#!/bin/sh\ncase "$2" in VACUUM*) sleep 10 ;; esac\nexec "{real}" "$@"\n')
+    # The shim touches a ready file and then blocks, so the signal below
+    # arrives only once the script is mid-archive with its traps installed --
+    # not after a fixed delay that a loaded machine can overrun (#371).
+    ready = tmp_path / "ready"
+    shim.write_text(
+        f'#!/bin/sh\ncase "$2" in VACUUM*) : > "{ready}"; sleep 60 ;; esac\nexec "{real}" "$@"\n'
+    )
     shim.chmod(0o755)
     path = f"{shim_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
     assert SH is not None
@@ -1878,12 +1883,13 @@ def test_reset_cleans_up_its_temp_dir_when_interrupted(data: Path, tmp_path: Pat
         start_new_session=True,
     )
     try:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not any(archives.glob(".partial.*")):
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and not ready.exists() and proc.poll() is None:
             time.sleep(0.05)
+        assert ready.exists(), "archive_db() never reached the VACUUM step"
         assert any(archives.glob(".partial.*")), "archive_db() never created its temp directory"
         os.killpg(proc.pid, signal.SIGTERM)
-        proc.wait(timeout=5)
+        proc.wait(timeout=60)
     finally:
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGKILL)
