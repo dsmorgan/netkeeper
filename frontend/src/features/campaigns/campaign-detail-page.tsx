@@ -693,7 +693,7 @@ function AudienceCard({ campaign }: { campaign: Campaign }) {
         {outcome !== null && (
           <div role="status" className="flex flex-col gap-1">
             <p>
-              {outcome.enrolled} enrolled, {outcome.already} already in, {outcome.excluded} excluded
+              {outcome.enrolled} enrolled, {outcome.already} already in, {outcome.excluded} skipped
               {outcome.removed > 0 && `, ${outcome.removed} removed by the new source`}.{' '}
               {outcome.pending} pending in all.
             </p>
