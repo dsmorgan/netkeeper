@@ -423,14 +423,14 @@ def test_the_ceiling_is_honored_at_a_custom_value() -> None:
     assert typing_plan(text, random.Random(0), max_seconds=duration) == plan
 
 
-def test_the_warning_starts_at_1000_characters() -> None:
+def test_the_warning_starts_above_1000_characters() -> None:
     assert typing_length_warning("") is False
     assert typing_length_warning("x" * 999) is False
-    assert typing_length_warning("x" * 1000) is True
+    assert typing_length_warning("x" * 1000) is False  # exactly 1,000 is clean
     assert typing_length_warning("x" * 1001) is True
     # Every length on either side of the line, by property rather than example.
     for length in range(0, 2000, 37):
-        assert typing_length_warning(_body(length, length)) is (length >= 1000)
+        assert typing_length_warning(_body(length, length)) is (length > 1000)
 
 
 def test_a_dense_body_under_the_warning_can_still_exceed_the_ceiling() -> None:
