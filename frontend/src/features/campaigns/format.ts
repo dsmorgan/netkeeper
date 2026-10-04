@@ -1,4 +1,11 @@
-import type { CampaignStatus, EnrollmentStatus, Missing, StepCondition, StepMode } from './api'
+import type {
+  CampaignStatus,
+  DaySends,
+  EnrollmentStatus,
+  Missing,
+  StepCondition,
+  StepMode,
+} from './api'
 
 export const CAMPAIGN_STATUS_LABELS: Record<CampaignStatus, string> = {
   draft: 'Draft',
@@ -157,4 +164,34 @@ export function formatDay(day: string): string {
   const when = new Date(year, month - 1, date)
   if (Number.isNaN(when.getTime())) return day
   return when.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
+/**
+ * At most this many bars. Each bar is at least 2px with a 1px gap, so 60 bars need
+ * 179px: they fit a 390px phone screen inside the page and card padding.
+ */
+export const MAX_BARS = 60
+
+export interface SendsBucket {
+  /** The first local day of the bucket, `YYYY-MM-DD`. */
+  start: string
+  sent: number
+}
+
+/**
+ * The days as they fit: one bar a day up to `MAX_BARS` days, else one a week, or one
+ * per few weeks when even the weeks are too many. `days` is the bucket's length.
+ */
+export function bucketSends(
+  days: readonly DaySends[],
+  maxBars = MAX_BARS,
+): { days: number; buckets: SendsBucket[] } {
+  const size = days.length <= maxBars ? 1 : 7 * Math.ceil(days.length / (7 * maxBars))
+  const buckets: SendsBucket[] = []
+  days.forEach((d, i) => {
+    if (i % size === 0) buckets.push({ start: d.date, sent: 0 })
+    const bucket = buckets[buckets.length - 1]
+    if (bucket !== undefined) bucket.sent += d.sent
+  })
+  return { days: size, buckets }
 }

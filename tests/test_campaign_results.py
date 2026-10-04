@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.db import session_scope
 from netkeeper.models import (
     Campaign,
+    CampaignStatus,
     Enrollment,
     Message,
     MessageDirection,
@@ -133,7 +134,7 @@ def test_a_reply_at_the_same_moment_as_a_send_counts_against_that_send(session: 
     assert _per_step(_results(session, user, campaign), "replied") == [0, 1, 0]
 
 
-def test_bounces_and_opt_outs_count_against_the_step_by_the_time_of_the_event(
+def test_bounces_count_against_their_own_step_and_opt_outs_by_time(
     session: Session,
 ) -> None:
     user = factories.make_user(session)
@@ -171,6 +172,60 @@ def test_bounces_and_opt_outs_count_against_the_step_by_the_time_of_the_event(
     # A bounced message went out, so it counts as sent.
     assert _per_step(results, "sent") == [3, 1, 0]
     assert (results.totals.bounced, results.totals.opted_out) == (2, 1)
+
+
+def test_step_1s_bounce_detected_after_step_2_sent_counts_against_step_1(
+    session: Session,
+) -> None:
+    user = factories.make_user(session)
+    campaign = _campaign(session, user)
+    enrollment = _enroll(session, campaign)
+    _send(
+        session,
+        enrollment,
+        1,
+        T0,
+        status=MessageStatus.BOUNCED,
+        bounced_at=T0 + timedelta(days=8),  # found a day after step 2 went out
+    )
+    _send(session, enrollment, 2, T0 + timedelta(days=7))
+
+    assert _per_step(_results(session, user, campaign), "bounced") == [1, 0, 0]
+
+
+def test_the_earliest_opt_out_decides_the_step(session: Session) -> None:
+    user = factories.make_user(session)
+    campaign = _campaign(session, user)
+    enrollment = _enroll(session, campaign)
+    _send(session, enrollment, 1, T0)
+    _reply(session, enrollment, T0 + timedelta(days=1), unsubscribe=True)
+    _send(session, enrollment, 2, T0 + timedelta(days=7))
+    _reply(session, enrollment, T0 + timedelta(days=8), unsubscribe=True)
+
+    results = _results(session, user, campaign)
+
+    assert _per_step(results, "opted_out") == [1, 0, 0]
+    assert results.totals.opted_out == 1
+
+
+@pytest.mark.parametrize("status", [CampaignStatus.COMPLETED, CampaignStatus.ARCHIVED])
+def test_a_finished_campaigns_days_end_at_its_last_send(
+    session: Session, status: CampaignStatus
+) -> None:
+    user = factories.make_user(session)
+    campaign = _campaign(session, user)
+    _send(session, _enroll(session, campaign), 1, T0)
+    _send(session, _enroll(session, campaign), 1, T0 + timedelta(days=2))
+    campaign.status = status
+    session.flush()
+
+    days = _results(session, user, campaign).sends_per_day  # NOW is 17 days after T0
+
+    assert [(d.day, d.sent) for d in days] == [
+        (date(2030, 6, 3), 1),
+        (date(2030, 6, 4), 0),
+        (date(2030, 6, 5), 1),
+    ]
 
 
 def test_only_messages_that_went_out_count_as_sent(session: Session) -> None:

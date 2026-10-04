@@ -69,10 +69,18 @@ export function NoSuchCampaign() {
   )
 }
 
-export function CampaignDetailPage({ campaignId }: { campaignId: number }) {
+export function CampaignDetailPage({
+  campaignId,
+  status = '',
+  onStatus = () => {},
+}: {
+  campaignId: number
+  /** The enrollment table's status filter, '' for every status: the URL's `status`. */
+  status?: EnrollmentStatus | ''
+  onStatus?: (status: EnrollmentStatus | '') => void
+}) {
   const campaign = useQuery(campaignQuery(campaignId))
   const results = useQuery(campaignResultsQuery(campaignId))
-  const [status, setStatus] = useState<EnrollmentStatus | ''>('')
 
   if (campaign.isPending) return <LoadingNote label="Loading the campaign…" />
   if (campaign.isError) {
@@ -87,11 +95,11 @@ export function CampaignDetailPage({ campaignId }: { campaignId: number }) {
   return (
     <div className="flex max-w-5xl flex-col gap-4">
       <Overview campaign={data} />
-      {!reviewable && <ResultsCard results={results} onShowEnrollments={setStatus} />}
+      {!reviewable && <ResultsCard campaignId={data.id} results={results} />}
       <StepsCard campaign={data} results={results.data} />
       {reviewable && <AudienceCard campaign={data} />}
       {reviewable && <ReviewPanel campaign={data} />}
-      <EnrollmentsCard campaignId={data.id} status={status} onStatus={setStatus} />
+      <EnrollmentsCard campaignId={data.id} status={status} onStatus={onStatus} />
     </div>
   )
 }
@@ -228,63 +236,66 @@ function StepsCard({
       <CardHeader>
         <CardTitle level={2}>Steps</CardTitle>
         <CardDescription>
-          Fired counts every message a step made; sent, those that went out. A reply, bounce or
-          opt-out counts against the last step sent before it. A step with no time of its own aims
-          for the next suggested slot (Tue–Thu, 09:00 to 16:30) after its delay.
+          Fired counts every message a step made; sent, those that went out. A reply or opt-out
+          counts against the last step sent before it; a bounce, against the step that bounced. A
+          step with no time of its own aims for the next suggested slot (Tue–Thu, 09:00 to 16:30)
+          after its delay.
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <table className="w-full text-left text-sm">
-          <thead className="text-muted-foreground">
-            <tr>
-              <th scope="col" className="py-1 pr-3 font-medium">
-                Step
-              </th>
-              <th scope="col" className="py-1 pr-3 font-medium">
-                Template
-              </th>
-              <th scope="col" className="py-1 pr-3 font-medium">
-                Timing
-              </th>
-              <th scope="col" className="py-1 pr-3 font-medium">
-                Mode
-              </th>
-              <th scope="col" className="py-1 pr-3 font-medium">
-                Fired
-              </th>
-              <th scope="col" className="py-1 pr-3 font-medium">
-                Sent
-              </th>
-              <th scope="col" className="py-1 pr-3 font-medium">
-                Replied
-              </th>
-              <th scope="col" className="py-1 pr-3 font-medium">
-                Bounced
-              </th>
-              <th scope="col" className="py-1 pr-3 font-medium">
-                Opted out
-              </th>
-              {editable && (
-                <th scope="col" className="py-1 font-medium">
-                  <span className="sr-only">Edit</span>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="text-muted-foreground">
+              <tr>
+                <th scope="col" className="py-1 pr-3 font-medium">
+                  Step
                 </th>
-              )}
-            </tr>
-          </thead>
-          <tbody>
-            {campaign.steps.map((step) => (
-              <StepRow
-                key={step.id}
-                campaign={campaign}
-                step={step}
-                results={byStep.get(step.id)}
-                editable={editable}
-                editing={editing === step.id}
-                onEdit={(on) => setEditing(on ? step.id : null)}
-              />
-            ))}
-          </tbody>
-        </table>
+                <th scope="col" className="py-1 pr-3 font-medium">
+                  Template
+                </th>
+                <th scope="col" className="py-1 pr-3 font-medium">
+                  Timing
+                </th>
+                <th scope="col" className="py-1 pr-3 font-medium">
+                  Mode
+                </th>
+                <th scope="col" className="py-1 pr-3 font-medium">
+                  Fired
+                </th>
+                <th scope="col" className="py-1 pr-3 font-medium">
+                  Sent
+                </th>
+                <th scope="col" className="py-1 pr-3 font-medium">
+                  Replied
+                </th>
+                <th scope="col" className="py-1 pr-3 font-medium">
+                  Bounced
+                </th>
+                <th scope="col" className="py-1 pr-3 font-medium">
+                  Opted out
+                </th>
+                {editable && (
+                  <th scope="col" className="py-1 font-medium">
+                    <span className="sr-only">Edit</span>
+                  </th>
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {campaign.steps.map((step) => (
+                <StepRow
+                  key={step.id}
+                  campaign={campaign}
+                  step={step}
+                  results={byStep.get(step.id)}
+                  editable={editable}
+                  editing={editing === step.id}
+                  onEdit={(on) => setEditing(on ? step.id : null)}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
       </CardContent>
     </Card>
   )
@@ -551,7 +562,7 @@ function EnrollmentsCard({
   const rows = useQuery(enrollmentsQuery(campaignId, search, status, offset))
 
   return (
-    <Card id={ENROLLMENTS_ANCHOR} className="scroll-mt-4">
+    <Card id={ENROLLMENTS_ANCHOR} tabIndex={-1} className="scroll-mt-4 outline-none">
       <CardHeader>
         <CardTitle level={2}>Enrollments</CardTitle>
       </CardHeader>

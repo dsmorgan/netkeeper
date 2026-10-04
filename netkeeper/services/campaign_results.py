@@ -8,16 +8,18 @@ What counts:
   (a bounce is found after the message was sent), with a ``sent_at``. A
   scheduled, drafted, prefilled, stale, discarded or failed message is not one.
 - **Sends per day** count sends by the local date of ``sent_at``, in the user's
-  time zone, from the first send's date to today, with a zero for each day in
-  between that sent nothing. A campaign that has sent nothing has no days.
+  time zone, from the first send's date to today (to the last send's, for a
+  campaign that is over: ``completed`` or ``archived``), with a zero for each day
+  in between that sent nothing. A campaign that has sent nothing has no days.
 - **A reply** is the enrollment's ``replied_at``, its first reply. It counts
   against the last step sent to that enrollment at or before that time, so a
   reply that arrives while step 3 waits to send counts against step 2.
-- **A bounce** is the enrollment's earliest bounced message, at its
-  ``bounced_at``. **An opt-out** is the enrollment's earliest reply that asked to
-  unsubscribe, at its own time. Each counts against the last step sent at or
-  before that time, as a reply does; a bounce found before its own send time
-  counts against its own step.
+- **A bounce** is the enrollment's earliest bounced message (by ``bounced_at``),
+  and counts against that message's own step: a bounce is a fact about the
+  message, so step 1's bounce found after step 2 sent is still step 1's. This
+  departs from #350's "by the time of the event", which suits replies only.
+- **An opt-out** is the enrollment's earliest reply that asked to unsubscribe,
+  and counts against the last step sent at or before it, as a reply does.
 - Each enrollment counts at most once for each of the three. An event before the
   enrollment's first send answers nothing the campaign sent, so it counts nowhere.
 
@@ -38,6 +40,7 @@ from sqlalchemy.orm import Session
 
 from netkeeper.campaigns import schedule
 from netkeeper.models import (
+    CampaignStatus,
     CampaignStep,
     Enrollment,
     Message,
@@ -52,6 +55,9 @@ log = logging.getLogger(__name__)
 
 WENT_OUT: Final = (MessageStatus.SENT, MessageStatus.BOUNCED)
 """The outbound statuses of a message that was sent."""
+
+OVER: Final = frozenset({CampaignStatus.COMPLETED, CampaignStatus.ARCHIVED})
+"""A campaign that sends nothing more: its days end at its last send, not today."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,8 +182,8 @@ def campaign_results(
             replied[step_id] += 1
 
     bounced: Counter[int] = Counter()
-    for enrollment_id, (bounce_at, own_step) in first_bounce.items():
-        bounced[_attribute(sends[enrollment_id], bounce_at) or own_step] += 1
+    for _at, own_step in first_bounce.values():
+        bounced[own_step] += 1
 
     first_opt_out: dict[int, datetime] = {}
     for enrollment_id, received_at in session.execute(
@@ -207,7 +213,10 @@ def campaign_results(
             by_day[send.at.astimezone(zone).date()] += 1
     days: list[DaySends] = []
     if by_day:
-        day, last = min(by_day), max(max(by_day), now.astimezone(zone).date())
+        last = max(by_day)
+        if campaign.status not in OVER:
+            last = max(last, now.astimezone(zone).date())
+        day = min(by_day)
         while day <= last:
             days.append(DaySends(day, by_day[day]))
             day += timedelta(days=1)
