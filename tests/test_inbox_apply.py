@@ -20,10 +20,11 @@ from inbox_fakes import a_thread_with, conversation, delta, message, profile_urn
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.crm import archive as archive_module
 from netkeeper.crm import inbox_apply
 from netkeeper.crm.archive import import_archive
 from netkeeper.crm.identity import merge
-from netkeeper.crm.interactions import add_interaction
+from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction
 from netkeeper.db import session_scope
 from netkeeper.linkedin import inbox
 from netkeeper.linkedin.archive import open_archive
@@ -452,3 +453,57 @@ def test_a_conversation_goes_with_its_contact(writer: Session, user: User) -> No
     writer.flush()
     writer.expire_all()
     assert _conversations(writer, user) == []
+
+
+def test_an_archived_inbound_message_is_adopted_and_still_reaches_the_reply_hook(
+    writer: Session, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#388 review, S2: a reply the archive already recorded is the poll's reply too."""
+    calls: list[tuple[inbox_apply.NewInbound, ...]] = []
+    monkeypatch.setattr(inbox_apply, "REPLY_HANDLERS", [lambda s, u, new: calls.append(new)])
+    ada = _contact(writer, user, ADA)
+    archived = add_interaction(
+        writer,
+        user,
+        ada.id,
+        InteractionKind.LI_IN,
+        THEN.replace(microsecond=0),
+        "Invented reply.",
+        source=ContactSource.ARCHIVE,
+    )
+    reply = conversation("one", ADA, [message(2, sender=ADA, at=THEN, tag="one")])
+    first = inbox_apply.apply_delta(writer, user, delta(reply), polled_at=NOW)
+    again = inbox_apply.apply_delta(writer, user, delta(reply), polled_at=NOW)
+
+    assert first.messages_new == 0 and again.messages_new == 0
+    assert [[n.interaction_id for n in new] for new in calls] == [[archived.id], []]
+    assert archived.external_id == "urn:li:msg_message:INVENTEDONE2"
+    assert [r.id for r in _interactions(writer, user)] == [archived.id]
+
+
+def test_an_archived_invitation_is_never_taken_for_a_polled_message(
+    writer: Session, user: User
+) -> None:
+    """N1: an invitation row at the same second is not a message, in either direction."""
+    ada = _contact(writer, user, ADA)
+    at = THEN.replace(microsecond=0)
+    add_interaction(
+        writer,
+        user,
+        ada.id,
+        InteractionKind.LI_OUT,
+        at,
+        INVITATION_SUMMARY,
+        source=ContactSource.ARCHIVE,
+    )
+    sent = conversation("one", ADA, [message(1, sender=ADA, at=THEN, outbound=True)])
+    counts = inbox_apply.apply_delta(writer, user, delta(sent), polled_at=NOW)
+    assert counts.messages_new == 1
+
+    # The other way: an archive invitation after a polled message at the same second.
+    ben = _contact(writer, user, BEN)
+    to_ben = conversation("two", BEN, [message(1, sender=BEN, at=THEN, outbound=True, tag="b")])
+    inbox_apply.apply_delta(writer, user, delta(to_ben), polled_at=NOW)
+    ledger = archive_module._Interactions(writer, user)
+    assert ledger.add(ben.id, InteractionKind.LI_OUT, at, f"{INVITATION_SUMMARY}: invented note")
+    assert not ledger.add(ben.id, InteractionKind.LI_OUT, at, "Invented opener.")  # a message is

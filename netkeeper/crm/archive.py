@@ -774,7 +774,7 @@ class _Interactions:
     seconds, so the ledger keys on the second.
     """
 
-    __slots__ = ("_contacts", "_seen", "_session", "_user", "created")
+    __slots__ = ("_contacts", "_polled", "_seen", "_session", "_user", "created")
 
     def __init__(self, session: Session, user: User) -> None:
         self._session = session
@@ -783,6 +783,9 @@ class _Interactions:
         self.created: list[int] = []
         """The ids of the interactions this import wrote, for its run (#132)."""
         self._seen: dict[tuple[int, InteractionKind, datetime], int] = {}
+        # The inbox poll's rows (P4-08), counted apart: only a message, never an
+        # invitation, is matched against them.
+        self._polled: dict[tuple[int, InteractionKind, datetime], int] = {}
         statement = scoped(user, Interaction).where(
             or_(
                 Interaction.source == ContactSource.ARCHIVE,
@@ -794,7 +797,8 @@ class _Interactions:
         )
         for row in session.scalars(statement):
             key = (row.contact_id, row.kind, _second(row.at))
-            self._seen[key] = self._seen.get(key, 0) + 1
+            ledger = self._seen if row.source is ContactSource.ARCHIVE else self._polled
+            ledger[key] = ledger.get(key, 0) + 1
 
     def contact_for(self, public_id: str) -> int | None:
         """The contact a profile slug belongs to, or ``None`` when it belongs to none.
@@ -835,6 +839,10 @@ class _Interactions:
         if planned > 0:
             self._seen[key] = planned - 1
             return False
+        polled = 0 if _is_invitation(summary) else self._polled.get(key, 0)
+        if polled > 0:
+            self._polled[key] = polled - 1
+            return False
         interaction = add_interaction(
             self._session,
             self._user,
@@ -850,6 +858,11 @@ class _Interactions:
 
 #: The kinds the LinkedIn inbox poll records (P4-08), which the ledger also counts.
 _POLLED_KINDS: Final = (InteractionKind.LI_IN, InteractionKind.LI_OUT)
+
+
+def _is_invitation(summary: str | None) -> bool:
+    """An invitation row, marked by its summary: never matched against a polled message."""
+    return summary is not None and summary.startswith(INVITATION_SUMMARY)
 
 
 def _second(at: datetime) -> datetime:
