@@ -11,6 +11,7 @@ bounds were checked by hand against 300 seeds while writing this file.
 
 from __future__ import annotations
 
+import math
 import random
 import statistics
 
@@ -23,12 +24,23 @@ from netkeeper.linkedin.pacing import (
     TypingPlanError,
     TypingTooLong,
     UnsupportedCharacter,
+    is_untypable,
     plan_duration,
+    typing_expected_seconds,
     typing_length_warning,
     typing_plan,
 )
 
 _SEEDS = range(200)
+# A sentence-dense body: a sentence-end pause every few characters.
+_DENSE_999 = ("I am so ok. We go. Hi! " * 50)[:999]
+# Emoji and combining sequences, written as escapes so no invisible character hides
+# in the source.
+_FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467"  # man, ZWJ, woman, ZWJ, girl
+_THUMB_TONE = "\U0001f44d\U0001f3fd"  # thumbs up, medium skin tone
+_FLAG_US = "\U0001f1fa\U0001f1f8"  # regional indicators U, S
+_FLAG_SCOTLAND = "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"
+_E_ACUTE = "e\u0301"  # e, combining acute accent
 _WORDS = (
     "hi",
     "there",
@@ -86,7 +98,11 @@ def _body(length: int, seed: int) -> str:
 
 def _random_text(rng: random.Random, length: int) -> str:
     """Arbitrary typable text with line breaks in every form, emoji, and odd spaces."""
-    alphabet = [*"abcdefgh .,!?'-é ", "\n", "\r\n", "\r", "\u00a0", "😀", "👍🏽", "日"]
+    alphabet = [
+        *"abcdefgh .,!?'-",
+        *("\n", "\r\n", "\r", "\u00a0", "\u00e9", "\U0001f600", "\u65e5"),
+        *(_FAMILY, _THUMB_TONE, _FLAG_US, _FLAG_SCOTLAND, _E_ACUTE),
+    ]
     return "".join(rng.choice(alphabet) for _ in range(length))
 
 
@@ -117,6 +133,9 @@ def test_typing_constants_are_pinned_to_the_decision() -> None:
     assert profile.floor_s == 0.04
     assert pacing.MAX_TYPING_SECONDS == 300
     assert pacing.TYPING_WARN_CHARS == 1000
+    assert pacing.TYPING_LINT_SECONDS == 240
+    # The same line breaks netkeeper.campaigns.render splits a header on.
+    assert frozenset("\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029") == pacing.LINE_BREAK_CHARS
     # Multi-line stays refused until P4-06 (#374) shows Shift+Enter never sends.
     assert pacing.SHIFT_ENTER_NEWLINES_ALLOWED is False
 
@@ -157,13 +176,14 @@ def test_no_step_ever_carries_an_enter() -> None:
         text = _random_text(rng, rng.randint(0, 300))
         plan = typing_plan(text, random.Random(seed), allow_newlines=True)
         for step in plan:
-            assert "\n" not in step.chunk
-            assert "\r" not in step.chunk
-            assert all(ord(c) >= 0x20 and c not in "\x7f\u2028\u2029" for c in step.chunk)
+            assert not any(c in pacing.LINE_BREAK_CHARS for c in step.chunk)
+            assert not any(is_untypable(c) for c in step.chunk)
+            assert all(ord(c) >= 0x20 and not 0x7F <= ord(c) <= 0x9F for c in step.chunk)
             if step.newline:
                 assert step.chunk == ""
+                assert not step.needs_insert_text
             else:
-                assert len(step.chunk) == 1
+                assert step.chunk
 
 
 def test_line_breaks_become_their_own_newline_steps() -> None:
@@ -187,31 +207,95 @@ def test_a_line_break_is_refused_by_default(text: str) -> None:
     assert "zebra" not in str(raised.value)  # the body is never quoted
 
 
-@pytest.mark.parametrize("char", ["\t", "\x00", "\x1b", "\x7f", "\x85", "\u2028", "\u2029"])
-def test_other_control_characters_are_refused(char: str) -> None:
+_CONTROLS = [chr(cp) for cp in [*range(0x00, 0x20), 0x7F, *range(0x80, 0xA0)]]
+
+
+@pytest.mark.parametrize("char", _CONTROLS, ids=[f"U+{ord(c):04X}" for c in _CONTROLS])
+def test_every_control_character_is_refused_or_a_newline_step(char: str) -> None:
+    """Every C0 and C1 control and DEL: a line break by default raises
+    MultilineRefused; with newlines allowed it becomes a newline step; anything else
+    raises UnsupportedCharacter either way."""
+    text = f"secret{char}body"
+    with pytest.raises(TypingPlanError) as raised:
+        typing_plan(text, random.Random(0))
+    assert "secret" not in str(raised.value)
+    assert is_untypable(char)
+    if char in pacing.LINE_BREAK_CHARS:
+        assert isinstance(raised.value, MultilineRefused)
+        plan = typing_plan(text, random.Random(0), allow_newlines=True)
+        assert [step.newline for step in plan].count(True) == 1
+    else:
+        assert isinstance(raised.value, UnsupportedCharacter)
+        with pytest.raises(UnsupportedCharacter):
+            typing_plan(text, random.Random(0), allow_newlines=True)
+
+
+@pytest.mark.parametrize(
+    "char",
+    [
+        "\u2028",  # line separator: a line break
+        "\u2029",  # paragraph separator: a line break
+    ],
+)
+def test_unicode_separators_are_line_breaks(char: str) -> None:
+    with pytest.raises(MultilineRefused):
+        typing_plan(f"a{char}b", random.Random(0))
+
+
+@pytest.mark.parametrize(
+    "char",
+    [
+        "\u202e",  # right-to-left override (Cf)
+        "\u200b",  # zero-width space (Cf)
+        "\ufeff",  # byte-order mark (Cf)
+        "\u2066",  # left-to-right isolate (Cf)
+        "\ue000",  # private use (Co)
+        "\ud800",  # lone surrogate (Cs)
+        "\U000e0001",  # language tag (Cf), outside the allowed tag range
+        "\u0378",  # unassigned (Cn)
+    ],
+)
+def test_format_private_surrogate_and_unassigned_are_refused(char: str) -> None:
+    assert is_untypable(char)
     with pytest.raises(UnsupportedCharacter) as raised:
         typing_plan(f"secret{char}body", random.Random(0), allow_newlines=True)
     assert "secret" not in str(raised.value)
 
 
+def test_the_joiners_and_tag_characters_are_typable() -> None:
+    for char in ["\u200d", "\u200c", *(chr(cp) for cp in range(0xE0020, 0xE0080))]:
+        assert not is_untypable(char)
+
+
 def test_a_step_cannot_be_built_around_a_line_break() -> None:
     """The plan's shape is enforced by TypeStep itself, not only by typing_plan."""
-    for chunk in ["\n", "\r", "a\n", "ab", "", "\t"]:
+    for chunk in ["\n", "\r", "\r\n", "a\n", "ab", "", "\t", "a\u200b", "\u202e"]:
         with pytest.raises(ValueError):
             TypeStep(chunk=chunk, delay_before_s=0.1, newline=False)
     with pytest.raises(ValueError):
         TypeStep(chunk="\n", delay_before_s=0.1, newline=True)
-    with pytest.raises(ValueError):
-        TypeStep(chunk="a", delay_before_s=-0.1, newline=False)
+    for delay in [-0.1, math.nan, math.inf, -math.inf]:
+        with pytest.raises(ValueError):
+            TypeStep(chunk="a", delay_before_s=delay, newline=False)
 
 
-def test_an_emoji_is_its_own_chunk() -> None:
-    plan = typing_plan("ok 😀 👍🏽 日", random.Random(3))
-    chunks = [step.chunk for step in plan]
-    assert chunks == ["o", "k", " ", "😀", " ", "👍", "🏽", " ", "日"]
-    assert [step.needs_insert_text for step in plan] == [
-        False, False, False, True, False, True, True, False, False,
-    ]  # fmt: skip
+def test_each_grapheme_cluster_is_one_step() -> None:
+    """An emoji sequence or a letter with a combining mark is one step, inserted as text."""
+    clusters = [
+        "\U0001f600",
+        _FAMILY,
+        _THUMB_TONE,
+        _FLAG_US,
+        _FLAG_SCOTLAND,
+        _E_ACUTE,
+        "\u65e5",
+    ]
+    plan = typing_plan("ok " + " ".join(clusters), random.Random(3))
+    chunks = [step.chunk for step in plan if step.chunk != " "]
+    assert chunks == ["o", "k", *clusters]
+    for step in plan:
+        printable_ascii = len(step.chunk) == 1 and 0x20 <= ord(step.chunk) <= 0x7E
+        assert step.needs_insert_text is not printable_ascii
 
 
 def test_no_typos_or_backspaces() -> None:
@@ -349,13 +433,71 @@ def test_the_warning_starts_at_1000_characters() -> None:
         assert typing_length_warning(_body(length, length)) is (length >= 1000)
 
 
-def test_a_body_just_under_the_warning_fits_the_ceiling() -> None:
-    # The warning fires well before the ceiling: a 999-character body took about
-    # 0.23 s a character, about 230 s, so it always fits under 300 s.
-    for seed in range(50):
-        text = _body(999, seed)
-        assert typing_length_warning(text) is False
-        assert plan_duration(typing_plan(text, random.Random(seed))) <= 300
+def test_a_dense_body_under_the_warning_can_still_exceed_the_ceiling() -> None:
+    # The character-count warning alone does not keep a body under the ceiling: a
+    # sentence-dense 999-character body expects about 297 s, so roughly a third of
+    # seeds go over 300 s. typing_expected_seconds is what flags it.
+    assert typing_length_warning(_DENSE_999) is False
+    assert typing_expected_seconds(_DENSE_999) > pacing.TYPING_LINT_SECONDS
+    outcomes = []
+    for seed in range(100):
+        try:
+            typing_plan(_DENSE_999, random.Random(seed))
+            outcomes.append(True)
+        except TypingTooLong:
+            outcomes.append(False)
+    assert True in outcomes and False in outcomes
+
+
+def test_the_estimate_matches_the_sampled_mean() -> None:
+    # Over ten batches of 60 seeds, the sampled mean landed within 1.5% of the
+    # estimate for every body here. Within 3% never flakes; dropping the lognormal's
+    # mean correction (about 10%) or the thinking pause (about 15%) fails it.
+    for text in [_DENSE_999, _body(500, 4), "x" * 1500, _body(800, 9).replace(" ", "\n")]:
+        expected = typing_expected_seconds(text)
+        sampled = statistics.mean(
+            plan_duration(
+                typing_plan(text, random.Random(seed), allow_newlines=True, max_seconds=1e9)
+            )
+            for seed in range(60)
+        )
+        assert abs(sampled - expected) <= 0.03 * expected
+
+
+def test_the_estimate_is_deterministic_and_never_raises() -> None:
+    awkward = "a\tb\u202ec\n" + _FAMILY + "\x00"
+    assert typing_expected_seconds(awkward) == typing_expected_seconds(awkward)
+    assert typing_expected_seconds("") == 0
+
+
+def test_a_body_under_the_lint_threshold_fits_the_ceiling() -> None:
+    """The property P4-11's lint relies on: an expected time at or under 240 s leaves
+    enough margin that no seed goes over 300 s."""
+    # Each body is trimmed to the longest prefix whose estimate is under the lint
+    # threshold. The sampled spread is about 7 s, so 300 s is about eight standard
+    # deviations above 240 s.
+    bodies = [("I am so ok. We go. Hi! " * 60), _body(2000, 1), "x" * 2000]
+    for body in bodies:
+        length = len(body)
+        while typing_expected_seconds(body[:length]) > pacing.TYPING_LINT_SECONDS:
+            length -= 10
+        text = body[:length]
+        for seed in range(100):
+            assert plan_duration(typing_plan(text, random.Random(seed))) <= 300
+
+
+def test_a_total_that_is_not_finite_never_passes_the_ceiling() -> None:
+    # Two finite delays of about 1e308 overflow to an infinite total. Even with an
+    # infinite ceiling, which ``inf <= inf`` would pass, the plan is refused.
+    huge = pacing.TypingProfile(char_median_s=1e308, char_sigma=0.0, thinking_p=0.0)
+    with pytest.raises(TypingTooLong):
+        typing_plan("ab", random.Random(0), huge, max_seconds=math.inf)
+
+
+def test_a_nan_delay_never_reaches_a_plan() -> None:
+    nan_profile = pacing.TypingProfile(char_median_s=math.nan)
+    with pytest.raises(ValueError):
+        typing_plan("ab", random.Random(0), nan_profile, max_seconds=math.inf)
 
 
 def test_an_empty_body_is_an_empty_plan() -> None:

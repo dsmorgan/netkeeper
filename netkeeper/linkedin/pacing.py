@@ -32,6 +32,8 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Final
 from zoneinfo import ZoneInfo
 
+import regex
+
 # --- human delay --------------------------------------------------------
 
 # Appendix C: "Delay between profiles ... Median matches a person reading a
@@ -662,39 +664,75 @@ def plan_enrichment(
 #
 # PerimeterX collects keystroke timing on LinkedIn's pages, so a uniform
 # ``keyboard.type(delay=...)`` is detectable. :func:`typing_plan` decides, purely,
-# how a message body is typed: one step per character, with a varied delay before
-# each one. P4-03's prefill only replays the plan; nothing here touches a page.
+# how a message body is typed: one step per user-perceived character (an extended
+# grapheme cluster), with a varied delay before each one. P4-03's prefill only
+# replays the plan; nothing here touches a page.
 #
 # Three things the plan guarantees, because a wrong keystroke in a message box can
 # send a message nobody meant to send:
 #
-# * No step ever carries a newline or a carriage return in its ``chunk``. A plain
-#   Enter sends the message, so a line break is its own step with ``newline=True``
-#   and an empty chunk, for the replay to press as Shift+Enter. Even that step is
-#   refused unless ``allow_newlines`` is set, and its default,
-#   :data:`SHIFT_ENTER_NEWLINES_ALLOWED`, stays ``False`` until P4-06 (#374) shows
-#   that Shift+Enter never sends.
-# * No other control character (a tab moves focus) and no line or paragraph
-#   separator reaches a step: the plan refuses the body instead.
+# * No step ever carries a line break in its ``chunk``. A plain Enter sends the
+#   message, so a line break is its own step with ``newline=True`` and an empty
+#   chunk, for the replay to press as Shift+Enter. Even that step is refused unless
+#   ``allow_newlines`` is set, and its default, :data:`SHIFT_ENTER_NEWLINES_ALLOWED`,
+#   stays ``False`` until P4-06 (#374) shows that Shift+Enter never sends.
+# * No step carries a code point :func:`is_untypable` refuses: a control character
+#   (a tab moves focus), a line or paragraph separator, a lone surrogate, a
+#   private-use or unassigned code point, or a format character other than the
+#   joiners and tag characters emoji sequences need. The plan refuses the body.
 # * No typos and no backspaces: a correction that misfires could leave wrong text,
 #   or press a key netkeeper doesn't intend.
 #
 # The text is never logged, and no exception raised here quotes it.
 
-#: Spec decision 2026-10-03: no plan longer than this many seconds is ever typed.
+#: Spec decision 2026-10-03: no plan whose delays add up to more than this many
+#: seconds is ever typed.
 MAX_TYPING_SECONDS: Final = 300.0
 #: Spec decision 2026-10-03: a body this many characters long or longer earns a
 #: warning. P4-11's (#377) lint raises it; :func:`typing_length_warning` is the rule.
 TYPING_WARN_CHARS: Final = 1000
+#: The expected typing time (:func:`typing_expected_seconds`) above which P4-11's
+#: lint flags a body. Set with a margin under :data:`MAX_TYPING_SECONDS`, so a body
+#: the lint passes practically never draws a plan over the ceiling.
+TYPING_LINT_SECONDS: Final = 240.0
 #: Whether a newline may be typed (as Shift+Enter). ``False`` until P4-06 (#374)
 #: shows that Shift+Enter never sends a LinkedIn message; until then a multi-line
 #: body is refused.
 SHIFT_ENTER_NEWLINES_ALLOWED: Final = False
 
+#: Every code point treated as a line break, the same set
+#: ``netkeeper.campaigns.render`` splits a header on. ``\r\n`` is one line break.
+LINE_BREAK_CHARS: Final = frozenset("\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
+
+# The format characters (category Cf) an emoji sequence needs: zero-width joiner and
+# non-joiner, and the tag characters of a subdivision flag.
+_ALLOWED_FORMAT: Final = frozenset(
+    {"\u200c", "\u200d"} | {chr(cp) for cp in range(0xE0020, 0xE0080)}
+)
+_UNTYPABLE_CATEGORIES: Final = frozenset({"Cc", "Zl", "Zp", "Cs", "Co", "Cn"})
 # The characters after which, followed by whitespace, the next character gets the
 # sentence-end pause instead of the word-boundary pause.
 _SENTENCE_ENDS: Final = frozenset(".!?")
-_LINE_BREAKS: Final = frozenset("\r\n")
+_LINE_BREAK_RE: Final = regex.compile(
+    "(\r\n|[" + regex.escape("".join(sorted(LINE_BREAK_CHARS))) + "])"
+)
+_GRAPHEME_RE: Final = regex.compile(r"\X")
+
+
+def is_untypable(char: str) -> bool:
+    """Whether no typing step may carry this one code point.
+
+    True for a control character (Cc, line breaks included), a line or paragraph
+    separator (Zl, Zp), a lone surrogate (Cs), a private-use (Co) or unassigned (Cn)
+    code point, and a format character (Cf) other than ZWJ, ZWNJ, and the tag
+    characters U+E0020 to U+E007F. That refuses bidi controls, a zero-width space,
+    and a byte-order mark. Unassigned means unassigned in the Unicode version of
+    Python's :mod:`unicodedata`. P4-11's lint uses the same rule.
+    """
+    category = unicodedata.category(char)
+    if category in _UNTYPABLE_CATEGORIES:
+        return True
+    return category == "Cf" and char not in _ALLOWED_FORMAT
 
 
 class TypingPlanError(ValueError):
@@ -717,7 +755,7 @@ class MultilineRefused(TypingPlanError):
 
 
 class UnsupportedCharacter(TypingPlanError):
-    """The body has a control character, other than a line break, that no step may type."""
+    """The body has a code point :func:`is_untypable` refuses, other than a line break."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -746,12 +784,11 @@ DEFAULT_TYPING: Final = TypingProfile()
 class TypeStep:
     """One keystroke of a plan: wait ``delay_before_s``, then type ``chunk``.
 
-    ``chunk`` is exactly one code point. A code point outside the Basic Multilingual
-    Plane (an emoji) is typed with ``insert_text``, which ``keyboard.type`` can't do
-    reliably; :attr:`needs_insert_text` says which. A step with ``newline=True`` has
-    an empty chunk, and the replay presses Shift+Enter for it, never a bare Enter.
-    The constructor refuses any other shape, so a plan can't carry a line break, or
-    a control character, inside a chunk.
+    ``chunk`` is exactly one extended grapheme cluster: a letter with its combining
+    marks, or a whole emoji sequence (a ZWJ family, a skin tone, a flag). A step with
+    ``newline=True`` has an empty chunk, and the replay presses Shift+Enter for it,
+    never a bare Enter. The constructor refuses any other shape, a code point
+    :func:`is_untypable` refuses, and a delay that is negative or not finite.
     """
 
     chunk: str
@@ -759,29 +796,31 @@ class TypeStep:
     newline: bool
 
     def __post_init__(self) -> None:
-        if self.delay_before_s < 0:
-            raise ValueError("delay_before_s must not be negative")
+        if not math.isfinite(self.delay_before_s) or self.delay_before_s < 0:
+            raise ValueError("delay_before_s must be finite and not negative")
         if self.newline:
             if self.chunk:
                 raise ValueError("a newline step has an empty chunk")
             return
-        if len(self.chunk) != 1:
-            raise ValueError("a typing step types exactly one character")
-        if _is_untypable(self.chunk):
+        if len(_GRAPHEME_RE.findall(self.chunk)) != 1:
+            raise ValueError("a typing step types exactly one grapheme cluster")
+        if any(is_untypable(char) for char in self.chunk):
             raise ValueError("a typing step never types a control character or line break")
 
     @property
     def needs_insert_text(self) -> bool:
-        """Whether the chunk is outside the Basic Multilingual Plane."""
-        return bool(self.chunk) and ord(self.chunk) > 0xFFFF
+        """Whether the replay inserts the chunk as text rather than pressing a key.
+
+        Only a single printable ASCII character is safe to press with
+        ``keyboard.type``; anything else (an accented letter, an emoji sequence) is
+        inserted with ``insert_text``. A newline step is neither: it is Shift+Enter.
+        """
+        if self.newline:
+            return False
+        return not (len(self.chunk) == 1 and 0x20 <= ord(self.chunk) <= 0x7E)
 
 
 TypingPlan = tuple[TypeStep, ...]
-
-
-def _is_untypable(char: str) -> bool:
-    """A control character (category Cc), or a Unicode line or paragraph separator."""
-    return unicodedata.category(char) in {"Cc", "Zl", "Zp"}
 
 
 def plan_duration(plan: TypingPlan) -> float:
@@ -792,25 +831,69 @@ def plan_duration(plan: TypingPlan) -> float:
 def typing_length_warning(text: str) -> bool:
     """Whether ``text`` is long enough, :data:`TYPING_WARN_CHARS` or more, to warn about.
 
-    Counts code points, line breaks included, the same units :func:`typing_plan`
-    types one step at a time.
+    Counts code points, line breaks included.
     """
     return len(text) >= TYPING_WARN_CHARS
 
 
-def _split_units(text: str) -> list[str]:
-    """``text`` as typing units: one code point each, with ``\\r\\n`` folded into ``\\n``."""
+def _units(text: str) -> list[str]:
+    """``text`` as typing units: one grapheme cluster each, and ``"\\n"`` for each line
+    break (``\\r\\n`` is one). No validation: :func:`typing_plan` checks the units."""
     units: list[str] = []
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if char == "\r":
-            if index + 1 < len(text) and text[index + 1] == "\n":
-                index += 1
-            char = "\n"
-        units.append(char)
-        index += 1
+    for index, piece in enumerate(_LINE_BREAK_RE.split(text)):
+        if index % 2:
+            units.append("\n")
+        elif piece:
+            units.extend(_GRAPHEME_RE.findall(piece))
     return units
+
+
+def _extras(units: list[str]) -> list[str | None]:
+    """For each unit, the extra pause before it: ``"sentence"``, ``"word"``, or ``None``.
+
+    The first visible unit after a run of whitespace or line breaks gets the
+    sentence-end extra when the last visible unit before that run ends a sentence,
+    and the word-boundary extra otherwise.
+    """
+    extras: list[str | None] = []
+    pending_boundary = False
+    last_visible = ""
+    for unit in units:
+        is_space = unit == "\n" or unit.isspace()
+        if pending_boundary and not is_space:
+            extras.append("sentence" if last_visible in _SENTENCE_ENDS else "word")
+        else:
+            extras.append(None)
+        if is_space:
+            pending_boundary = bool(last_visible)
+        else:
+            pending_boundary = False
+            last_visible = unit
+    return extras
+
+
+def typing_expected_seconds(text: str, profile: TypingProfile = DEFAULT_TYPING) -> float:
+    """The expected seconds :func:`typing_plan` would plan for ``text``. Deterministic.
+
+    The sum, over every unit, of the per-character delay's mean, the thinking pause's
+    mean (``thinking_p`` times the middle of its range), and the mean of the word or
+    sentence extra where one applies. A lognormal's mean is its median times
+    ``exp(sigma ** 2 / 2)``. The floor is ignored; at the default profile it moves the
+    mean by well under a millisecond a character. P4-11's lint compares this with
+    :data:`TYPING_LINT_SECONDS`. It never raises, whatever the text holds.
+    """
+    char_mean = profile.char_median_s * math.exp(profile.char_sigma**2 / 2)
+    spread = math.exp(profile.extra_sigma**2 / 2)
+    extra_mean = {
+        "word": profile.word_extra_median_s * spread,
+        "sentence": profile.sentence_extra_median_s * spread,
+    }
+    low, high = profile.thinking_range_s
+    thinking_mean = profile.thinking_p * (low + high) / 2
+    units = _units(text)
+    total = len(units) * (char_mean + thinking_mean)
+    total += sum(extra_mean[extra] for extra in _extras(units) if extra is not None)
+    return total
 
 
 def typing_plan(
@@ -823,7 +906,7 @@ def typing_plan(
 ) -> TypingPlan:
     """The plan for typing ``text`` the way a person does. P4-10 (#376).
 
-    One step per code point, each after a lognormal delay around
+    One step per extended grapheme cluster, each after a lognormal delay around
     ``profile.char_median_s``. The first character after a run of whitespace gets an
     extra pause: the sentence-end extra when the last character before the
     whitespace ends a sentence (``.``, ``!``, or ``?``), the word-boundary extra
@@ -832,54 +915,53 @@ def typing_plan(
     ``profile.floor_s``. Draws come from ``rng`` in one fixed order, so the same
     seed and the same text always give the same plan.
 
-    A line break (``\\n``, ``\\r``, or ``\\r\\n``) is its own step with
-    ``newline=True`` and an empty chunk, and only when ``allow_newlines`` is set;
-    otherwise the body raises :class:`MultilineRefused`. Any other control
-    character raises :class:`UnsupportedCharacter`. A plan longer than
-    ``max_seconds`` raises :class:`TypingTooLong`, so nothing is typed. No error
-    message quotes the text.
+    A line break (any of :data:`LINE_BREAK_CHARS`, with ``\\r\\n`` as one) is its
+    own step with ``newline=True`` and an empty chunk, and only when
+    ``allow_newlines`` is set; otherwise the body raises :class:`MultilineRefused`.
+    Any other code point :func:`is_untypable` refuses raises
+    :class:`UnsupportedCharacter`.
+
+    A plan whose delays add up to more than ``max_seconds``, or to a total that
+    isn't finite, raises :class:`TypingTooLong`. The ceiling counts only the planned
+    delays, not the round trip of each key press, so real typing takes somewhat
+    longer. Because the plan is random, a body near the ceiling can pass with one
+    seed and fail with another: P4-03 must build the plan before it spends any
+    budget or navigates, so a refusal costs nothing. No error message quotes the
+    text.
     """
-    units = _split_units(text)
+    units = _units(text)
     for position, unit in enumerate(units):
         if unit == "\n":
             if not allow_newlines:
                 raise MultilineRefused(
                     "this body has a line break, and typing one (Shift+Enter) is not allowed"
                 )
-        elif _is_untypable(unit):
-            raise UnsupportedCharacter(
-                f"character {position} is a control character (U+{ord(unit):04X}) no step types"
-            )
+            continue
+        for char in unit:
+            if is_untypable(char):
+                raise UnsupportedCharacter(
+                    f"character {position} holds U+{ord(char):04X}, which no step types"
+                )
 
     steps: list[TypeStep] = []
-    pending_boundary = False  # whitespace or a line break since the last visible character
-    last_visible = ""
-    for unit in units:
-        is_newline = unit == "\n"
-        is_space = is_newline or unit.isspace()
+    extra_medians = {
+        "word": profile.word_extra_median_s,
+        "sentence": profile.sentence_extra_median_s,
+    }
+    for unit, extra in zip(units, _extras(units), strict=True):
         delay = rng.lognormvariate(math.log(profile.char_median_s), profile.char_sigma)
-        if pending_boundary and not is_space:
-            extra_median = (
-                profile.sentence_extra_median_s
-                if last_visible in _SENTENCE_ENDS
-                else profile.word_extra_median_s
-            )
-            delay += rng.lognormvariate(math.log(extra_median), profile.extra_sigma)
+        if extra is not None:
+            delay += rng.lognormvariate(math.log(extra_medians[extra]), profile.extra_sigma)
         if rng.random() < profile.thinking_p:
             delay += rng.uniform(*profile.thinking_range_s)
         delay = max(delay, profile.floor_s)
-        if is_newline:
+        if unit == "\n":
             steps.append(TypeStep(chunk="", delay_before_s=delay, newline=True))
         else:
             steps.append(TypeStep(chunk=unit, delay_before_s=delay, newline=False))
-        if is_space:
-            pending_boundary = bool(last_visible)
-        else:
-            pending_boundary = False
-            last_visible = unit
 
     plan: TypingPlan = tuple(steps)
     duration = plan_duration(plan)
-    if duration > max_seconds:
+    if not (math.isfinite(duration) and duration <= max_seconds):
         raise TypingTooLong(duration, max_seconds)
     return plan
