@@ -289,6 +289,8 @@ export function AiDraftHelper({
             <div className="flex items-center gap-2">
               <Checkbox
                 id={ids.include}
+                // Base UI submits the hidden input's form on Enter: point it at the helper's.
+                form={formId}
                 checked={includeCurrent}
                 aria-describedby={ids.includeHint}
                 onCheckedChange={(checked) => {

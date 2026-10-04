@@ -1323,6 +1323,22 @@ describe('draft with your AI assistant', () => {
     expect(requestsTo(seen, 'POST', '/api/v1/templates')).toEqual([])
   })
 
+  it('never saves the template on Enter on the include checkbox', async () => {
+    withClipboard(undefined)
+    const { seen, helper } = await openHelper()
+    // An edit enables Save, the form's default submitter, which a stray Enter would click.
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'reconnect 2' } })
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+    const include = within(helper).getByRole('checkbox', { name: 'Include the current text' })
+    // Base UI's checkbox handles Enter itself: it clicks the default submitter of its hidden
+    // input's form, in a microtask. jsdom has no implicit submission, so this is the whole path.
+    fireEvent.keyDown(include, { key: 'Enter', code: 'Enter' })
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    expect(requestsTo(seen, 'PATCH', '/api/v1/templates/1')).toEqual([])
+    expect(requestsTo(seen, 'POST', '/api/v1/templates')).toEqual([])
+    expect(include).not.toBeChecked()
+  })
+
   it('sits below the channel and above the subject', async () => {
     withClipboard(undefined)
     const { helper } = await openHelper()
