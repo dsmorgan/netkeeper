@@ -114,7 +114,9 @@ def _complete_and_activate(r: Reviewed, review: campaign_review.StepReview) -> N
             audience_fingerprint_seen=campaign_review.audience_fingerprint(session, user, campaign),
             now=NOW,
         )
-        campaign_review.activate(session, user, r.campaign_id, settings=SETTINGS, me=ME, now=NOW)
+        campaign_review.activate(
+            session, user, r.campaign_id, settings=SETTINGS, me=ME, now=NOW, starts_at=NOW
+        )
 
 
 def _tick_until_quiet(r: Reviewed, sender: FakeSender) -> None:
@@ -197,5 +199,5 @@ def test_a_lint_error_blocks_every_message_and_activation(
         assert "lint" in {g.requirement for g in gaps}
         with pytest.raises(campaign_review.ReviewIncomplete):
             campaign_review.activate(
-                session, r.user, r.campaign_id, settings=SETTINGS, me=ME, now=NOW
+                session, r.user, r.campaign_id, settings=SETTINGS, me=ME, now=NOW, starts_at=NOW
             )

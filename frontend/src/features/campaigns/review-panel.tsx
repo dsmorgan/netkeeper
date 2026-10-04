@@ -677,7 +677,7 @@ function ActivateSection({
         title={`Activate ${campaign.name}?`}
         confirmLabel="Activate campaign"
         confirmVariant="default"
-        onConfirm={() => activate.mutate()}
+        onConfirm={() => activate.mutateAsync()}
         pending={activate.isPending}
         error={activate.isError ? errorText(activate.error) : null}
       >
