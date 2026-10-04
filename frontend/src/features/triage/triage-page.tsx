@@ -38,8 +38,8 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
-import { displayName } from '@/features/contacts/format'
 import { MergePanel, type MergeTarget, type Survivor } from '@/features/contacts/merge-panel'
+import { labelled } from '@/features/contacts/merge-text'
 import { NeedsReviewNotice } from '@/features/contacts/needs-review'
 import { PossibleDuplicates } from '@/features/contacts/possible-duplicates'
 
@@ -431,7 +431,10 @@ export function TriagePage() {
                             onMerge={(match) =>
                               setMerging({
                                 contactId: card.contact.id,
-                                target: { id: match.contact_id, name: displayName(match) },
+                                target: {
+                                  id: match.contact_id,
+                                  name: labelled({ ...match, id: match.contact_id }),
+                                },
                                 survivor: match.needs_review ? 'this' : 'other',
                               })
                             }
@@ -439,13 +442,15 @@ export function TriagePage() {
                         }
                       />
                     )}
-                  {mergingHere !== null && (
+                  <EvidencePanel card={card} />
+                </div>
+                {/* The merge spans the row under both columns: its preview is a
+                    four-column table, which the side column would clip. */}
+                {mergingHere !== null && (
+                  <div className="lg:col-span-2">
                     <MergePanel
                       key={`${mergingHere.contactId}-${mergingHere.target.id}`}
-                      contact={{
-                        id: card.contact.id,
-                        name: `${card.contact.preferred_name} ${card.contact.last_name}`.trim(),
-                      }}
+                      contact={{ id: card.contact.id, name: labelled(card.contact) }}
                       initialTarget={mergingHere.target}
                       initialSurvivor={mergingHere.survivor}
                       onClose={() => setMerging(null)}
@@ -454,9 +459,8 @@ export function TriagePage() {
                         queue.merged(survivor, loserId)
                       }}
                     />
-                  )}
-                  <EvidencePanel card={card} />
-                </div>
+                  </div>
+                )}
               </div>
             )}
 

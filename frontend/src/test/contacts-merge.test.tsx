@@ -165,8 +165,12 @@ describe('merge from the contact page', () => {
     expect(where).toContain('"email_contains"')
 
     const table = await within(panel).findByRole('table')
-    expect(within(table).getByRole('columnheader', { name: 'Stays: Ada Ventura' })).toBeVisible()
-    expect(within(table).getByRole('columnheader', { name: 'Merged away: Bo Marsh' })).toBeVisible()
+    expect(
+      within(table).getByRole('columnheader', { name: 'Stays: Ada Ventura (Tessellate Labs)' }),
+    ).toBeVisible()
+    expect(
+      within(table).getByRole('columnheader', { name: 'Merged away: Bo Marsh (bo@example.test)' }),
+    ).toBeVisible()
     const headline = within(table).getByRole('row', { name: /Headline/ })
     expect(
       within(headline)
@@ -178,11 +182,13 @@ describe('merge from the contact page', () => {
     )
     expect(sent(seen, '/api/v1/contacts/1/merge/preview')[0]?.body).toEqual({ loser_id: 2 })
 
-    fireEvent.click(within(panel).getByRole('button', { name: 'Keep Bo Marsh instead' }))
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Keep Bo Marsh (bo@example.test) instead' }),
+    )
     await waitFor(() => expect(sent(seen, '/api/v1/contacts/2/merge/preview')).toHaveLength(1))
     expect(sent(seen, '/api/v1/contacts/2/merge/preview')[0]?.body).toEqual({ loser_id: 1 })
     expect(
-      await within(panel).findByRole('columnheader', { name: 'Stays: Bo Marsh' }),
+      await within(panel).findByRole('columnheader', { name: 'Stays: Bo Marsh (bo@example.test)' }),
     ).toBeVisible()
     expect(sent(seen, '/api/v1/contacts/1/merge')).toHaveLength(0)
   })
@@ -191,12 +197,16 @@ describe('merge from the contact page', () => {
     const seen = serve()
     const { router } = await renderApp('/contacts/1')
     const panel = await openPanelAndPickBo()
-    fireEvent.click(within(panel).getByRole('button', { name: 'Keep Bo Marsh instead' }))
-    await within(panel).findByRole('columnheader', { name: 'Stays: Bo Marsh' })
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Keep Bo Marsh (bo@example.test) instead' }),
+    )
+    await within(panel).findByRole('columnheader', { name: 'Stays: Bo Marsh (bo@example.test)' })
 
     fireEvent.click(within(panel).getByRole('button', { name: 'Merge…' }))
     const dialog = await screen.findByRole('alertdialog')
-    expect(dialog).toHaveTextContent('Merge Ada Ventura into Bo Marsh?')
+    expect(dialog).toHaveTextContent(
+      'Merge Ada Ventura (Tessellate Labs) into Bo Marsh (bo@example.test)?',
+    )
     expect(dialog).toHaveTextContent('1 email address moves')
     expect(dialog).toHaveTextContent('1 campaign enrollment moves')
     expect(dialog).toHaveTextContent('3 campaign messages move')
@@ -211,6 +221,9 @@ describe('merge from the contact page', () => {
     })
     await waitFor(() => expect(router.state.location.pathname).toBe('/contacts/2'))
     expect(sent(seen, '/api/v1/contacts/2/merge')).toHaveLength(1)
+    // The previews were dropped, not refetched into a 409 against a merged-away contact.
+    await screen.findByRole('heading', { name: 'Bo Marsh' })
+    expect(seen.filter((entry) => entry.path.endsWith('/merge/preview'))).toHaveLength(2)
     expect(sent(seen, '/api/v1/contacts/2/merge')[0]?.body).toEqual({ loser_id: 1 })
   })
 
@@ -235,7 +248,7 @@ describe('merge from the contact page', () => {
     const merge = await within(panel).findByRole('button', { name: 'Merge…' })
     for (const control of [
       merge,
-      within(panel).getByRole('button', { name: 'Keep Bo Marsh instead' }),
+      within(panel).getByRole('button', { name: 'Keep Bo Marsh (bo@example.test) instead' }),
       within(panel).getByRole('button', { name: 'Choose another contact' }),
       within(panel).getByRole('button', { name: 'Close' }),
     ]) {
@@ -277,6 +290,94 @@ describe('merge from the contact page', () => {
   })
 })
 
+describe('two records with one name', () => {
+  it('tells the two Ada Quills apart everywhere the merge names them', async () => {
+    const email = (id: number, address: string) => ({
+      id,
+      email: address,
+      kind: 'other' as const,
+      is_primary: true,
+      status: 'ok' as const,
+      source: 'manual' as const,
+      observed_at: '2026-01-02T09:00:00Z',
+    })
+    const first = contactDetail({
+      id: 1,
+      first_name: 'Ada',
+      last_name: 'Quill',
+      preferred_name: 'Ada',
+      emails: [email(10, 'ada@quill.test')],
+    })
+    const second = contactDetail({
+      id: 3,
+      first_name: 'Ada',
+      last_name: 'Quill',
+      preferred_name: 'Ada',
+      li_urn: null,
+      emails: [email(30, 'ada.q@quill.test')],
+    })
+    const contacts: Record<number, Detail> = { 1: first, 3: second }
+    mockApi((request, body) => {
+      const { pathname } = new URL(request.url)
+      const one = /^\/api\/v1\/contacts\/(\d+)$/.exec(pathname)
+      if (one && request.method === 'GET') return jsonResponse(contacts[Number(one[1])])
+      if (/\/tags$/.test(pathname)) return jsonResponse([])
+      if (pathname === '/api/v1/contacts/query') {
+        return jsonResponse(
+          contactPage([
+            contactRow(3, {
+              first_name: 'Ada',
+              last_name: 'Quill',
+              preferred_name: 'Ada',
+              primary_email: 'ada.q@quill.test',
+            }),
+          ]),
+        )
+      }
+      const preview = /^\/api\/v1\/contacts\/(\d+)\/merge\/preview$/.exec(pathname)
+      if (preview) {
+        const loserId = (body as { loser_id: number }).loser_id
+        return jsonResponse(
+          previewOf(contacts[Number(preview[1])] as Detail, contacts[loserId] as Detail),
+        )
+      }
+      return undefined
+    })
+    await renderApp('/contacts/1')
+    fireEvent.click(await screen.findByRole('button', { name: /Merge with…/ }))
+    const panel = await screen.findByRole('region', { name: 'Merge contacts' })
+    expect(panel).toHaveTextContent('Merge Ada Quill (ada@quill.test) with another contact')
+    fireEvent.change(within(panel).getByLabelText('Find the other contact'), {
+      target: { value: 'ada' },
+    })
+    fireEvent.click(await within(panel).findByRole('button', { name: /Ada Quill/ }))
+
+    expect(
+      await within(panel).findByRole('columnheader', { name: 'Stays: Ada Quill (ada@quill.test)' }),
+    ).toBeVisible()
+    expect(
+      within(panel).getByRole('columnheader', {
+        name: 'Merged away: Ada Quill (ada.q@quill.test)',
+      }),
+    ).toBeVisible()
+    expect(panel).toHaveTextContent(
+      'Ada Quill (ada@quill.test) stays. Ada Quill (ada.q@quill.test) is merged into them',
+    )
+    expect(
+      within(panel).getByRole('button', { name: 'Keep Ada Quill (ada.q@quill.test) instead' }),
+    ).toBeVisible()
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Merge…' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent(
+      'Merge Ada Quill (ada.q@quill.test) into Ada Quill (ada@quill.test)?',
+    )
+    expect(dialog).toHaveTextContent(
+      'Ada Quill (ada@quill.test) keeps its record. Everything below moves to it from Ada Quill (ada.q@quill.test)',
+    )
+  })
+})
+
 describe('the possible-duplicate hint', () => {
   const waiting = { ...BO, needs_review_at: '2026-09-24T12:00:00Z' }
   const ada: Schemas['PossibleDuplicateOut'] = {
@@ -288,7 +389,8 @@ describe('the possible-duplicate hint', () => {
     current_company: 'Tessellate Labs',
     li_public_id: 'ada-ventura-fake',
     needs_review: false,
-    matched_by: ['slug', 'name'],
+    matched_by: ['name'],
+    linkedin_ids_differ: true,
   }
 
   it('sits in the review band and opens the merge with the confirmed contact kept', async () => {
@@ -298,7 +400,7 @@ describe('the possible-duplicate hint', () => {
     const band = await screen.findByRole('region', { name: 'Needs review' })
     const hint = await within(band).findByRole('list', { name: 'Possible duplicates' })
     expect(hint).toHaveTextContent('Possible duplicate of Ada Ventura')
-    expect(hint).toHaveTextContent('the same name under a different LinkedIn id')
+    expect(hint).toHaveTextContent('the same name; LinkedIn ids differ')
     expect(within(hint).getByRole('link', { name: 'Ada Ventura' })).toHaveAttribute(
       'href',
       '/contacts/1',
@@ -309,7 +411,9 @@ describe('the possible-duplicate hint', () => {
     fireEvent.click(within(hint).getByRole('button', { name: 'Merge with Ada Ventura' }))
     const panel = await screen.findByRole('region', { name: 'Merge contacts' })
     expect(
-      await within(panel).findByRole('columnheader', { name: 'Stays: Ada Ventura' }),
+      await within(panel).findByRole('columnheader', {
+        name: 'Stays: Ada Ventura (Tessellate Labs)',
+      }),
     ).toBeVisible()
     expect(sent(seen, '/api/v1/contacts/1/merge/preview')[0]?.body).toEqual({ loser_id: 2 })
     expect(sent(seen, '/api/v1/contacts/1/merge')).toHaveLength(0)

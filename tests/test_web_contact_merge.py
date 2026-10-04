@@ -14,6 +14,7 @@ Every name, address and number here is invented.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -27,13 +28,16 @@ from isolation.harness import acting_as
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.crm.identity import merge
 from netkeeper.crm.lists import add_members, create_list
 from netkeeper.crm.tags import create_tag, tag_contact
 from netkeeper.db import session_scope
 from netkeeper.models import (
     Contact,
     ContactMet,
+    EmailStatus,
     Enrollment,
+    EnrollmentStatus,
     HistoryCampaign,
     HistoryRecipient,
     HistoryReplyKind,
@@ -41,9 +45,11 @@ from netkeeper.models import (
     Message,
     MessageStatus,
     MetSource,
+    TemplateChannel,
     User,
     UserKind,
 )
+from netkeeper.models.base import Base
 from netkeeper.scoping import scoped
 
 CSRF = {"X-Netkeeper-Client": "1"}
@@ -207,7 +213,54 @@ def campaign_rows(session: Session, user: User) -> Pair:
     return Pair(survivor.id, loser.id)
 
 
+def two_campaigns(session: Session, user: User) -> Pair:
+    """#242 twice over: an opt-out on the loser beats the survivor's live enrollment in one
+    campaign, and the survivor's further step wins in the other."""
+    first = factories.make_campaign(session, user)
+    second = factories.make_campaign(
+        session, user, channels=(TemplateChannel.EMAIL, TemplateChannel.EMAIL)
+    )
+    survivor = factories.make_contact(session, user)
+    loser = factories.make_contact(session, user, li_urn=None, li_public_id=None)
+    live = factories.make_enrollment(session, first, survivor, current_step=1)
+    factories.make_message(session, live, status=MessageStatus.DRAFTED, sent_at=None)
+    opted_out = factories.make_enrollment(
+        session, first, loser, status=EnrollmentStatus.OPTED_OUT, current_step=1
+    )
+    factories.make_message(session, opted_out)
+    ahead = factories.make_enrollment(session, second, survivor, current_step=2)
+    factories.make_message(session, ahead, position=2, status=MessageStatus.DRAFTED, sent_at=None)
+    behind = factories.make_enrollment(session, second, loser, current_step=1)
+    factories.make_message(session, behind)
+    return Pair(survivor.id, loser.id)
+
+
+def merge_chain(session: Session, user: User) -> Pair:
+    """A loser that already absorbed another contact: the chain points at the survivor after."""
+    survivor = factories.make_contact(session, user, emails=["hal@example.test"])
+    loser = factories.make_contact(session, user, li_urn=None, li_public_id=None)
+    earlier = factories.make_contact(
+        session, user, li_urn=None, li_public_id="hal-old", emails=["hal.old@example.test"]
+    )
+    merge(session, user, loser.id, earlier.id)
+    return Pair(survivor.id, loser.id)
+
+
+def bounced(session: Session, user: User) -> Pair:
+    """A bounced address on the loser, which the merge puts on the do-not-send list (#238)."""
+    survivor = factories.make_contact(session, user)
+    loser = factories.make_contact(
+        session, user, li_urn=None, li_public_id=None, emails=["iris.bounced@example.test"]
+    )
+    loser.emails[0].status = EmailStatus.BOUNCED
+    session.flush()
+    return Pair(survivor.id, loser.id)
+
+
 SCENARIOS: dict[str, Scenario] = {
+    "two_campaigns": two_campaigns,
+    "merge_chain": merge_chain,
+    "bounced": bounced,
     "plain": plain,
     "met_rule": met_rule,
     "card_headline": card_headline,
@@ -265,6 +318,16 @@ def _rows(factory: sessionmaker[Session], owner: User) -> dict[str, list[tuple[A
         }
 
 
+def _dump(factory: sessionmaker[Session]) -> dict[str, list[tuple[Any, ...]]]:
+    """Every row of every table, read on a plain connection: the whole database, as is."""
+    engine = factory.kw["bind"]
+    with engine.connect() as connection:
+        return {
+            table.name: sorted((tuple(row) for row in connection.execute(table.select())), key=repr)
+            for table in Base.metadata.sorted_tables
+        }
+
+
 # --- the preview -------------------------------------------------------------
 
 
@@ -274,6 +337,7 @@ async def test_the_preview_is_the_merge_and_keeps_nothing(
 ) -> None:
     pair = _arrange(factory, owner, SCENARIOS[name])
     before = _rows(factory, owner)
+    everything = _dump(factory)
     survivor_before = (await client.get(f"/api/v1/contacts/{pair.survivor}")).json()
 
     response = await _preview(client, pair.survivor, pair.loser)
@@ -281,6 +345,7 @@ async def test_the_preview_is_the_merge_and_keeps_nothing(
     assert response.status_code == 200, response.text
     preview = response.json()
     assert _rows(factory, owner) == before, "the preview wrote something"
+    assert _dump(factory) == everything, "the preview left a row behind somewhere"
     assert preview["survivor"] == survivor_before
     assert preview["loser"]["id"] == pair.loser
     assert preview["loser"]["merged_into_id"] is None
@@ -289,6 +354,46 @@ async def test_the_preview_is_the_merge_and_keeps_nothing(
     merged = await _merge(client, pair.survivor, pair.loser)
     assert merged.status_code == 200, merged.text
     assert _comparable(preview["result"]) == _comparable(merged.json())
+
+
+async def test_the_preview_counts_two_campaigns_and_a_chain(
+    client: httpx.AsyncClient, factory: sessionmaker[Session], owner: User
+) -> None:
+    pair = _arrange(factory, owner, two_campaigns)
+    moves = (await _preview(client, pair.survivor, pair.loser)).json()["moves"]
+    assert (moves["enrollments_moved"], moves["enrollments_combined"]) == (0, 2)
+    assert moves["messages_moved"] == 2
+    # The opt-out wins the first campaign, so the survivor's draft there is discarded; the
+    # survivor's further step wins the second, and its draft there stays.
+    assert moves["messages_discarded"] == 1
+
+    pair = _arrange(factory, owner, merge_chain)
+    moves = (await _preview(client, pair.survivor, pair.loser)).json()["moves"]
+    assert moves["emails"] == {"moved": 1, "dropped": 0}
+
+
+async def test_the_preview_writes_no_merge_log_lines(
+    client: httpx.AsyncClient,
+    factory: sessionmaker[Session],
+    owner: User,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pair = _arrange(factory, owner, bounced)
+    caplog.set_level(logging.DEBUG, logger="netkeeper")
+
+    assert (await _preview(client, pair.survivor, pair.loser)).status_code == 200
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert not [line for line in messages if "merging contact" in line]
+    assert not [line for line in messages if "do-not-send: entry added" in line]
+    assert f"merge preview of contact {pair.loser} into {pair.survivor} (rolled back)" in messages
+
+    # The real merge still logs both, so the check above can tell the difference.
+    caplog.clear()
+    assert (await _merge(client, pair.survivor, pair.loser)).status_code == 200
+    messages = [record.getMessage() for record in caplog.records]
+    assert [line for line in messages if "merging contact" in line]
+    assert [line for line in messages if "do-not-send: entry added" in line]
 
 
 async def test_the_preview_shows_the_met_rule(
@@ -383,7 +488,11 @@ def _matches(found: list[dict[str, Any]]) -> dict[int, list[str]]:
     return {row["contact_id"]: row["matched_by"] for row in found}
 
 
-async def test_the_hint_finds_name_email_and_phone_matches(
+def _differ(found: list[dict[str, Any]]) -> dict[int, bool]:
+    return {row["contact_id"]: row["linkedin_ids_differ"] for row in found}
+
+
+async def test_the_hint_needs_the_names_to_agree_and_ranks_them(
     client: httpx.AsyncClient, factory: sessionmaker[Session], owner: User
 ) -> None:
     with session_scope(factory, write=True) as session:
@@ -399,37 +508,134 @@ async def test_the_hint_finds_name_email_and_phone_matches(
             phones=["+15550100009"],
             needs_review_at=AT,
         )
-        by_name = factories.make_contact(
+        renamed = factories.make_contact(
             session, user, first_name=" gita ", last_name="SAMPLE", li_public_id="gita-sample"
         )
-        by_preferred = factories.make_contact(
+        by_name = factories.make_contact(
+            session, user, first_name="Gita", last_name="Sample", li_public_id=None
+        )
+        by_phone = factories.make_contact(
             session,
             user,
             first_name="Margarita",
             preferred_name="Gita",
             last_name="Sample",
             li_public_id=None,
+            phones=["+15550100009"],
         )
-        by_email = factories.make_contact(session, user, emails=["gita@example.test"])
-        by_phone = factories.make_contact(session, user, phones=["+15550100009"])
-        stranger = factories.make_contact(session, user, first_name="Gita", last_name="Other")
+        by_email = factories.make_contact(
+            session,
+            user,
+            first_name="Gita",
+            last_name="Sample",
+            li_public_id=None,
+            emails=["gita@example.test"],
+        )
+        # The same address or number under another name is no match at all.
+        email_only = factories.make_contact(session, user, emails=["gita@example.test"])
+        phone_only = factories.make_contact(session, user, phones=["+15550100009"])
+        other_last = factories.make_contact(session, user, first_name="Gita", last_name="Other")
         archived = factories.make_contact(
             session, user, first_name="Gita", last_name="Sample", archived_at=AT
         )
-        ids = card.id, by_name.id, by_preferred.id, by_email.id, by_phone.id
-        excluded = stranger.id, archived.id
+        ids = card.id, by_email.id, by_phone.id, by_name.id, renamed.id
+        excluded = email_only.id, phone_only.id, other_last.id, archived.id
+
+    found = await _duplicates(client, ids[0])
+
+    assert _matches(found) == {
+        ids[1]: ["email", "name"],
+        ids[2]: ["phone", "name"],
+        ids[3]: ["name"],
+        ids[4]: ["name"],
+    }
+    assert not set(excluded) & set(_matches(found))
+    assert _differ(found) == {ids[1]: False, ids[2]: False, ids[3]: False, ids[4]: True}
+    # An address, then a number, then a name; differing LinkedIn ids rank last.
+    assert [row["contact_id"] for row in found] == [ids[1], ids[2], ids[3], ids[4]]
+
+
+async def test_a_role_address_is_never_a_match(
+    client: httpx.AsyncClient, factory: sessionmaker[Session], owner: User
+) -> None:
+    with session_scope(factory, write=True) as session:
+        user = _user(session, owner)
+        kai = factories.make_contact(
+            session,
+            user,
+            first_name="Kai",
+            last_name="Placeholder",
+            li_public_id=None,
+            emails=["info@globex.test", "Sales+EU@globex.test"],
+        )
+        colleague = factories.make_contact(
+            session, user, first_name="Lena", last_name="Example", emails=["info@globex.test"]
+        )
+        namesake = factories.make_contact(
+            session,
+            user,
+            first_name="Kai",
+            last_name="Placeholder",
+            li_urn=None,
+            li_public_id=None,
+            emails=["info@globex.test", "sales+eu@globex.test"],
+        )
+        ids = kai.id, colleague.id, namesake.id
 
     found = _matches(await _duplicates(client, ids[0]))
+    # The colleague behind the same info@ is not named; the namesake is, by name only.
+    assert found == {ids[2]: ["name"]}
 
-    assert found == {
-        ids[1]: ["slug", "name"],
-        ids[2]: ["name"],
-        ids[3]: ["email"],
-        ids[4]: ["phone"],
-    }
-    assert not set(excluded) & set(found)
-    # Strongest first: an address, then a number, then a renamed slug, then a name.
-    assert list(found) == [ids[3], ids[4], ids[1], ids[2]]
+
+async def test_a_different_john_smith_at_globex_ranks_last_or_not_at_all(
+    client: httpx.AsyncClient, factory: sessionmaker[Session], owner: User
+) -> None:
+    with session_scope(factory, write=True) as session:
+        user = _user(session, owner)
+        john = factories.make_contact(
+            session,
+            user,
+            first_name="John",
+            last_name="Smith",
+            current_company="Globex",
+            li_urn=None,
+            li_public_id="john-smith-globex",
+            needs_review_at=AT,
+        )
+        other_slug = factories.make_contact(
+            session,
+            user,
+            first_name="John",
+            last_name="Smith",
+            current_company="Globex",
+            li_urn=None,
+            li_public_id="john-smith-7f3a",
+        )
+        no_slug = factories.make_contact(
+            session,
+            user,
+            first_name="John",
+            last_name="Smith",
+            current_company="Initech",
+            li_urn=None,
+            li_public_id=None,
+        )
+        synced = factories.make_contact(
+            session, user, first_name="John", last_name="Smith", current_company="Globex"
+        )
+        other_urn = factories.make_contact(
+            session, user, first_name="John", last_name="Smith", current_company="Globex"
+        )
+        ids = john.id, no_slug.id, other_slug.id, synced.id, other_urn.id
+
+    found = await _duplicates(client, ids[0])
+    # Differing slugs count against: still named, labeled, and after the one without.
+    assert [row["contact_id"] for row in found][:2] == [ids[1], ids[2]]
+    assert _differ(found)[ids[2]] is True
+    assert _differ(found)[ids[1]] is False
+    # Two contacts with different URNs are two people.
+    synced_found = await _duplicates(client, ids[3])
+    assert ids[4] not in _matches(synced_found)
 
 
 async def test_the_hint_stays_conservative(
@@ -505,7 +711,27 @@ async def test_the_hint_writes_nothing(
     assert _rows(factory, owner) == before
 
 
-def test_the_hint_limit_is_pinned() -> None:
-    from netkeeper.crm.duplicates import DUPLICATE_LIMIT
+def test_the_hint_limit_and_role_addresses_are_pinned() -> None:
+    from netkeeper.crm.duplicates import DUPLICATE_LIMIT, ROLE_LOCAL_PARTS
 
     assert DUPLICATE_LIMIT == 5
+    assert (
+        frozenset(
+            {
+                "info",
+                "hello",
+                "sales",
+                "office",
+                "contact",
+                "admin",
+                "support",
+                "team",
+                "hr",
+                "jobs",
+                "careers",
+                "noreply",
+                "no-reply",
+            }
+        )
+        == ROLE_LOCAL_PARTS
+    )

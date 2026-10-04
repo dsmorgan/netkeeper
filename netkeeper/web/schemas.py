@@ -847,9 +847,11 @@ class MergePreviewOut(BaseModel):
 class PossibleDuplicateOut(BaseModel):
     """Another contact that may be the same person (#363). A hint; nothing merges on its own.
 
-    ``matched_by``, strongest first: ``email`` (an address on both), ``phone`` (a
-    number on both), ``slug`` (the same name under a LinkedIn slug changed before
-    any sync), ``name`` (the same first or preferred name and last name).
+    The names always agree (``name``: the same last name and first or preferred
+    name). ``matched_by`` adds, strongest first, ``email`` (a personal address on
+    both; role addresses such as ``info@`` never count) and ``phone`` (a number
+    on both). ``linkedin_ids_differ``: both carry a LinkedIn slug and they
+    differ, which counts against a match, so such a match ranks last.
     """
 
     contact_id: int
@@ -860,7 +862,8 @@ class PossibleDuplicateOut(BaseModel):
     current_company: str | None
     li_public_id: str | None
     needs_review: bool
-    matched_by: list[Literal["name", "email", "phone", "slug"]]
+    matched_by: list[Literal["name", "email", "phone"]]
+    linkedin_ids_differ: bool
 
 
 BulkAction = Literal["set_met", "archive", "unarchive", "set_do_not_contact"]

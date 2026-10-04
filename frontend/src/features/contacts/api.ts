@@ -590,6 +590,7 @@ export interface MergeCandidate {
   current_title: string | null
   current_company: string | null
   primary_email: string | null
+  li_public_id: string | null
   archived: boolean
 }
 
@@ -620,6 +621,7 @@ export async function searchMergeCandidates(
         'preferred_name',
         'current_title',
         'current_company',
+        'li_public_id',
         'archived_at',
       ],
     },
@@ -636,6 +638,7 @@ export async function searchMergeCandidates(
       current_title: row.current_title ?? null,
       current_company: row.current_company ?? null,
       primary_email: row.primary_email ?? null,
+      li_public_id: row.li_public_id ?? null,
       archived: (row.archived_at ?? null) !== null,
     })),
   }

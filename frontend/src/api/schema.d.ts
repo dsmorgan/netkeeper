@@ -745,9 +745,10 @@ export interface paths {
          * List Possible Duplicates
          * @description Other live contacts that may be this person, strongest match first (#363).
          *
-         *     A hint for a person to act on, never a merge: by email, phone, the same
-         *     name, or the same name under a LinkedIn slug changed before any sync. Two
-         *     contacts with different LinkedIn URNs never match. Only this user's
+         *     A hint for a person to act on, never a merge. The names must agree; a
+         *     shared personal email or phone strengthens the match, and differing
+         *     LinkedIn slugs weaken it (ranked last). Two contacts with different
+         *     LinkedIn URNs never match. Only this user's
          *     contacts, at most five. A merged-away id stands for its survivor.
          */
         get: operations["list_possible_duplicates"];
@@ -5605,9 +5606,11 @@ export interface components {
          * PossibleDuplicateOut
          * @description Another contact that may be the same person (#363). A hint; nothing merges on its own.
          *
-         *     ``matched_by``, strongest first: ``email`` (an address on both), ``phone`` (a
-         *     number on both), ``slug`` (the same name under a LinkedIn slug changed before
-         *     any sync), ``name`` (the same first or preferred name and last name).
+         *     The names always agree (``name``: the same last name and first or preferred
+         *     name). ``matched_by`` adds, strongest first, ``email`` (a personal address on
+         *     both; role addresses such as ``info@`` never count) and ``phone`` (a number
+         *     on both). ``linkedin_ids_differ``: both carry a LinkedIn slug and they
+         *     differ, which counts against a match, so such a match ranks last.
          */
         PossibleDuplicateOut: {
             /** Contact Id */
@@ -5622,8 +5625,10 @@ export interface components {
             last_name: string;
             /** Li Public Id */
             li_public_id: string | null;
+            /** Linkedin Ids Differ */
+            linkedin_ids_differ: boolean;
             /** Matched By */
-            matched_by: ("name" | "email" | "phone" | "slug")[];
+            matched_by: ("name" | "email" | "phone")[];
             /** Needs Review */
             needs_review: boolean;
             /** Preferred Name */

@@ -2,7 +2,39 @@
  * A merge's moves in sentences (#363), for the preview and its confirmation.
  */
 
-import type { MergeMoves } from './types'
+import { displayName } from './format'
+import type { ContactDetail, MergeMoves } from './types'
+
+/** What `labelled` needs: a name, and whatever of the distinguishing details is known. */
+export interface Nameable {
+  id: number
+  first_name?: string | null
+  last_name?: string | null
+  preferred_name?: string | null
+  primary_email?: string | null
+  current_company?: string | null
+  li_public_id?: string | null
+}
+
+/**
+ * A name with one detail that tells it apart, so two records of one name never
+ * read the same in a merge: the primary email, else the company, else the
+ * LinkedIn slug, else the contact id. "Ada Quill (ada@quill.test)".
+ */
+export function labelled(contact: Nameable): string {
+  const detail =
+    contact.primary_email ||
+    contact.current_company ||
+    contact.li_public_id ||
+    `contact ${contact.id}`
+  return `${displayName(contact)} (${detail})`
+}
+
+/** {@link labelled} for a contact in full, whose primary email is among its emails. */
+export function labelledDetail(contact: ContactDetail): string {
+  const email = contact.emails.find((row) => row.is_primary) ?? contact.emails[0]
+  return labelled({ ...contact, primary_email: email?.email ?? null })
+}
 
 function count(n: number, one: string, many: string = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`
