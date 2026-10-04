@@ -165,7 +165,7 @@ def list_merge_fields(
         contact = get_scoped(session, user, Contact, contact_id)
         if contact is None:
             raise HTTPException(status_code=404, detail=f"no contact {contact_id}")
-    examples = service.field_examples(_me(request), contact)
+    examples = service.field_examples(_me(request), contact, timezone=user.timezone)
     return MergeFieldsOut(
         contact_id=contact_id,
         fields=[
@@ -252,7 +252,7 @@ def preview_template(
         contact = get_scoped(session, user, Contact, contact_id)
         if contact is None:
             raise HTTPException(status_code=404, detail=f"no contact {contact_id}")
-        rendered = service.render_preview(row, contact, me=_me(request))
+        rendered = service.render_preview(row, contact, me=_me(request), timezone=user.timezone)
     return TemplatePreviewOut(
         subject=rendered.subject,
         body=rendered.body,

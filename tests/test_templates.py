@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import factories
@@ -631,3 +631,30 @@ def test_preview_refuses_another_users_contact(writer: Session, user: User, othe
     contact = factories.make_contact(writer, other)
     with pytest.raises(ValueError, match="its own user's contact"):
         render_preview(row, contact, me={})
+
+
+def test_preview_uses_the_users_local_date(
+    writer: Session, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#357: at 03:00 UTC on 21 September it is still the 20th in Los Angeles, so a job
+    starting on the 21st has not started for this user, as the engine sees it."""
+    monkeypatch.setattr(service, "utcnow", lambda: datetime(2026, 9, 21, 3, 0, tzinfo=UTC))
+    row = _create(writer, user, body="Changed {{ last_position_change }}")
+    contact = factories.make_contact(
+        writer,
+        user,
+        positions=[
+            {"title": "Lead", "started_on": date(2026, 9, 21)},
+            {"title": "Engineer", "started_on": date(2021, 6, 1), "ended_on": date(2026, 9, 1)},
+        ],
+    )
+    local = render_preview(row, contact, me={}, timezone="America/Los_Angeles")
+    assert local.body == "Changed 2026-09-01"
+    assert render_preview(row, contact, me={}, timezone="UTC").body == "Changed 2026-09-21"
+    # An unreadable zone falls back to UTC rather than failing the preview.
+    assert render_preview(row, contact, me={}, timezone="Nowhere/Land").body == "Changed 2026-09-21"
+    examples = {
+        e.field.name: e.example
+        for e in service.field_examples({}, contact, timezone="America/Los_Angeles")
+    }
+    assert examples["last_position_change"] == "2026-09-01"

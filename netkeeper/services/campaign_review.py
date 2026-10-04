@@ -81,6 +81,7 @@ from netkeeper.campaigns.render import (
     render,
     uses_personal_line,
 )
+from netkeeper.campaigns.schedule import local_today
 from netkeeper.campaigns.templates import activation_errors, contact_fields
 from netkeeper.config import Settings
 from netkeeper.crm import lists as crm_lists
@@ -567,7 +568,7 @@ def _render_messages(
     """The step's message for each pending enrollment, in enrollment order, each with
     the reason it is blocked, if it is. The guards are the ones that decide at a step
     fire, for this step's channel; the render is the engine's."""
-    today = now.date()
+    today = local_today(user.timezone, now)
     contacts = _contacts(session, user, [e.contact_id for e in pending])
     facts = load_facts(session, user, list(contacts), campaign_id=campaign.id)
     policy = GuardPolicy(contacted_within_days=campaign.contacted_within_days_guard)
@@ -768,7 +769,7 @@ def approve_messages(
             campaign,
             step,
             me,
-            now.date(),
+            local_today(user.timezone, now),
             enrollment_id=i,
         )
         for i in ids
@@ -1093,7 +1094,7 @@ def missing(
                 campaign,
                 step,
                 me,
-                now.date(),
+                local_today(user.timezone, now),
                 enrollment_id=e.id,
             )
         }

@@ -6,7 +6,7 @@ Every Gmail call goes to a :class:`FakeGmail` set as ``app.state.gmail_opener``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -1489,3 +1489,47 @@ async def test_a_mailboxs_test_drafts_are_searched_only_in_that_mailbox(
 
 def _mailbox_ids(session: Session) -> list[int]:
     return list(session.scalars(unscoped(select(Mailbox.id).order_by(Mailbox.id))))
+
+
+def test_the_review_render_uses_the_users_local_date(session: Session) -> None:
+    """#357: at 03:00 UTC on 21 September it is still the 20th in Los Angeles, so a job
+    starting on the 21st has not started for this user, as the engine sees it. The review
+    must show what the send will."""
+    now = datetime(2026, 9, 21, 3, 0, tzinfo=UTC)
+    user = factories.make_user(session)
+    campaign = factories.make_campaign(session, user)
+    step = campaign.steps[0]
+    assert step.template is not None
+    step.template.body = "Changed {{ last_position_change }}"
+    contact = factories.make_contact(
+        session,
+        user,
+        emails=["reach@example.test"],
+        positions=[
+            {"title": "Lead", "started_on": date(2026, 9, 21)},
+            {"title": "Engineer", "started_on": date(2021, 6, 1), "ended_on": date(2026, 9, 1)},
+        ],
+    )
+    enrollment = factories.make_enrollment(
+        session, campaign, contact, status=EnrollmentStatus.PENDING
+    )
+
+    def body() -> str | None:
+        (preview,) = campaign_review._render_messages(
+            session,
+            user,
+            campaign,
+            step,
+            step.template,
+            [enrollment],
+            {},
+            now,
+            step_approved=False,
+            approved_messages={},
+        )
+        return preview.body
+
+    user.timezone = "America/Los_Angeles"
+    assert body() == "Changed 2026-09-01"
+    user.timezone = "UTC"
+    assert body() == "Changed 2026-09-21"
