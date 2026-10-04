@@ -95,6 +95,7 @@ Details and exit criteria are in [the spec](docs/architecture.md#19-delivery-pha
 - [Architecture spec](docs/architecture.md): design, data model, safety rules, phases.
 - [Implementation guide](docs/implementation-guide.md): the backlog, what runs in parallel, and the human checkpoints.
 - [Reconnect workflow](docs/networking-workflow.md): the method the tool automates.
+- [Draft templates with your AI assistant](docs/ai-drafting.md): use an AI chat subscription you already have to draft templates, without sending it your contacts' data.
 - [Architecture decision records](docs/adr/): why the contested parts are the way they are.
 
 ## Contributing

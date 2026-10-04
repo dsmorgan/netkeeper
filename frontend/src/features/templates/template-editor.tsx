@@ -14,6 +14,10 @@
  * The merge-field helper inserts `{{ field }}` at the cursor of the subject or
  * the body, whichever was focused last (the body until you focus one), and
  * leaves the cursor after the insert.
+ *
+ * The "Draft with your AI assistant" helper (#368) builds a prompt to copy into
+ * an AI chat assistant and fills the subject and body from the reply you paste
+ * back. A paste lints at once, skipping the typing debounce.
  */
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query'
 import { useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -30,6 +34,7 @@ import { cn } from '@/lib/utils'
 
 import { createTemplate, deleteTemplate, lintDraft, templateKeys, updateTemplate } from './api'
 import type { ContactRow, TemplateChannel, TemplateDraft, TemplateOut } from './api'
+import { AiDraftHelper, type AppliedStep } from './ai-draft-helper'
 import { LINT_DEBOUNCE_MS, draftOf, sameDraft } from './draft'
 import { InlineLint, LineMarks } from './inline-lint'
 import { hasErrors, issuesFor, lineRange, severityByLine } from './lint'
@@ -90,7 +95,10 @@ export function TemplateEditor({
     () => ({ channel: draft.channel, subject: draft.subject, body: draft.body }),
     [draft.channel, draft.subject, draft.body],
   )
-  const linted = useDebounced(text, LINT_DEBOUNCE_MS)
+  const debounced = useDebounced(text, LINT_DEBOUNCE_MS)
+  // Text a paste put in, linted at once rather than after the debounce.
+  const [pasted, setPasted] = useState<typeof text | null>(null)
+  const linted = pasted !== null && sameText(pasted, text) ? text : debounced
   const lint = useQuery({
     queryKey: [...templateKeys.all, 'lint', linted] as const,
     queryFn: ({ signal }) => lintDraft(linted, signal),
@@ -163,6 +171,12 @@ export function TemplateEditor({
     set({ [target]: value.slice(0, start) + token + value.slice(end) })
   }
 
+  const applyPaste = ({ subject, body }: AppliedStep) => {
+    const next = { ...draft, body, ...(subject === null ? {} : { subject }) }
+    setPasted({ channel: next.channel, subject: next.subject, body: next.body })
+    onDraftChange(next)
+  }
+
   const goToLine = (line: number) => {
     const field = bodyRef.current
     if (field === null) return
@@ -192,6 +206,7 @@ export function TemplateEditor({
             </p>
           </Callout>
         )}
+        <AiDraftHelper channel={draft.channel} disabled={locked} onApply={applyPaste} />
         <form
           className="space-y-3"
           onSubmit={(event) => {
@@ -368,6 +383,13 @@ export function TemplateEditor({
       )}
     </Card>
   )
+}
+
+function sameText(
+  a: Pick<TemplateDraft, 'channel' | 'subject' | 'body'>,
+  b: Pick<TemplateDraft, 'channel' | 'subject' | 'body'>,
+): boolean {
+  return a.channel === b.channel && a.subject === b.subject && a.body === b.body
 }
 
 /** Lint findings, dimmed and marked while the text has moved on from what they describe. */
