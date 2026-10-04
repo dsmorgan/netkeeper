@@ -193,6 +193,31 @@ def test_step_1s_bounce_detected_after_step_2_sent_counts_against_step_1(
     assert _per_step(_results(session, user, campaign), "bounced") == [1, 0, 0]
 
 
+def test_the_earliest_detected_bounce_decides_the_step(session: Session) -> None:
+    user = factories.make_user(session)
+    campaign = _campaign(session, user)
+    enrollment = _enroll(session, campaign)
+    # Step 1 went out first but its bounce was found last.
+    _send(
+        session,
+        enrollment,
+        1,
+        T0,
+        status=MessageStatus.BOUNCED,
+        bounced_at=T0 + timedelta(days=10),
+    )
+    _send(
+        session,
+        enrollment,
+        2,
+        T0 + timedelta(days=7),
+        status=MessageStatus.BOUNCED,
+        bounced_at=T0 + timedelta(days=8),
+    )
+
+    assert _per_step(_results(session, user, campaign), "bounced") == [0, 1, 0]
+
+
 def test_the_earliest_opt_out_decides_the_step(session: Session) -> None:
     user = factories.make_user(session)
     campaign = _campaign(session, user)
