@@ -27,7 +27,7 @@ The workflow is a five-stage reconnect method: validate your network, enrich it,
 - macOS 14 or later. Linux works through the container image, but the LinkedIn steps need Chrome on the same host as the backend, so a Mac runs netkeeper natively.
 - Google Chrome, or any Chromium-based browser. Firefox and Safari have no DevTools protocol and cannot be used for the LinkedIn steps.
 - A Gmail account and your own Google Cloud OAuth client for the email steps. [docs/gmail-setup.md](docs/gmail-setup.md) walks through the setup.
-- Optional: an Anthropic API key for the LLM features. They are off unless you configure one.
+- Optional, after 1.0: an Anthropic API key for the LLM features, which are deferred until after the 1.0 release. They will stay off unless you configure one.
 
 ## Running
 
@@ -82,8 +82,11 @@ Enrichment opens each contact's LinkedIn profile from your account, so they may 
 | 2 | LinkedIn extractor: sync, enrichment, pacing, budgets, backoff |
 | 3 | Email campaigns over Gmail: templates, sequences, review gate, reply detection |
 | 4 | LinkedIn messaging: prefill by default, auto-send opt-in |
-| 5 | Optional LLM module |
-| 6 | Google Contacts push, container image, polish |
+| 5 | Optional LLM module (after 1.0) |
+| 6 | Google Contacts push, container image, polish, a template-drafting guide for your own AI subscription. Ends with the 1.0 release |
+| 7 | Backlog after 1.0 |
+
+The work runs in this order: phases 3, 4, then 6, which ends with the 1.0 release. Phase 5 and phase 7 come after 1.0.
 
 Details and exit criteria are in [the spec](docs/architecture.md#19-delivery-phases).
 
