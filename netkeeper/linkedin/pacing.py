@@ -719,6 +719,15 @@ _ALLOWED_FORMAT: Final = frozenset(
     {"\u200c", "\u200d"} | {chr(cp) for cp in range(0xE0020, 0xE0080)}
 )
 _UNTYPABLE_CATEGORIES: Final = frozenset({"Cc", "Zl", "Zp", "Cs", "Co", "Cn"})
+# Invisible characters outside Cf: the combining grapheme joiner and the Hangul fillers.
+_INVISIBLE: Final = frozenset({"\u034f", "\u115f", "\u1160", "\u3164"})
+# A subdivision flag: the black flag, one or more tag digits or lowercase tag letters,
+# and the cancel tag (for example England, U+1F3F4 + "gbeng" in tags + U+E007F).
+_TAG_FLAG_RE: Final = regex.compile(
+    "\U0001f3f4[\U000e0030-\U000e0039\U000e0061-\U000e007a]+\U000e007f"
+)
+_TAG_FIRST: Final = 0xE0020
+_TAG_LAST: Final = 0xE007F
 # The characters after which, followed by whitespace, the next character gets the
 # sentence-end pause instead of the word-boundary pause.
 _SENTENCE_ENDS: Final = frozenset(".!?")
@@ -733,13 +742,40 @@ def is_untypable(char: str) -> bool:
     separator (Zl, Zp), a lone surrogate (Cs), a private-use (Co) or unassigned (Cn)
     code point, and a format character (Cf) other than ZWJ, ZWNJ, and the tag
     characters U+E0020 to U+E007F. That refuses bidi controls, a zero-width space,
-    and a byte-order mark. Unassigned means unassigned in the Unicode version of
-    Python's :mod:`unicodedata`. P4-11's lint uses the same rule.
+    and a byte-order mark. Also true for the invisible combining grapheme joiner
+    (U+034F) and Hangul fillers (U+115F, U+1160, U+3164). Unassigned means unassigned
+    in the Unicode version of Python's :mod:`unicodedata`.
+
+    A tag character passes here, but only :func:`is_untypable_cluster` decides
+    whether its cluster is a real subdivision flag. P4-11's lint should check whole
+    clusters with that function.
     """
     category = unicodedata.category(char)
-    if category in _UNTYPABLE_CATEGORIES:
+    if category in _UNTYPABLE_CATEGORIES or char in _INVISIBLE:
         return True
     return category == "Cf" and char not in _ALLOWED_FORMAT
+
+
+def _is_variation_selector(char: str) -> bool:
+    code = ord(char)
+    return 0xFE00 <= code <= 0xFE0F or 0xE0100 <= code <= 0xE01EF
+
+
+def is_untypable_cluster(cluster: str) -> bool:
+    """Whether no typing step may carry this grapheme cluster.
+
+    True when any code point in it is :func:`is_untypable`, when it holds more than
+    one variation selector, or when it holds a tag character (U+E0020 to U+E007F) and
+    isn't exactly a subdivision flag: U+1F3F4, then tag digits or lowercase tag
+    letters, then the cancel tag U+E007F. Tags anywhere else can carry invisible
+    text. This is the rule :func:`typing_plan` and :class:`TypeStep` apply.
+    """
+    if any(is_untypable(char) for char in cluster):
+        return True
+    if sum(_is_variation_selector(char) for char in cluster) > 1:
+        return True
+    has_tag = any(_TAG_FIRST <= ord(char) <= _TAG_LAST for char in cluster)
+    return has_tag and _TAG_FLAG_RE.fullmatch(cluster) is None
 
 
 class TypingPlanError(ValueError):
@@ -761,11 +797,20 @@ class MultilineRefused(TypingPlanError):
     """The body has a newline (CR or LF) and newlines are not allowed (P4-06, #374)."""
 
 
+class InvalidTypingProfile(TypingPlanError):
+    """A :class:`TypingProfile` with a value no plan should use."""
+
+
 class UnsupportedCharacter(TypingPlanError):
     """The body has a code point :func:`is_untypable` refuses, other than CR or LF.
 
     Includes every line break outside :data:`NEWLINE_CHARS`, with or without the
     newline flag."""
+
+
+# The largest sigma a TypingProfile accepts. At 2, a lognormal's 99th percentile is
+# about 100 times its median; anything wider is a typo, not a typist.
+_MAX_SIGMA: Final = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -786,6 +831,25 @@ class TypingProfile:
     thinking_range_s: tuple[float, float] = (0.8, 2.5)
     floor_s: float = 0.04
 
+    def __post_init__(self) -> None:
+        positive = {
+            "char_median_s": self.char_median_s,
+            "word_extra_median_s": self.word_extra_median_s,
+            "sentence_extra_median_s": self.sentence_extra_median_s,
+            "floor_s": self.floor_s,
+        }
+        for name, value in positive.items():
+            if not (math.isfinite(value) and value > 0):
+                raise InvalidTypingProfile(f"{name} must be finite and positive")
+        for name, value in {"char_sigma": self.char_sigma, "extra_sigma": self.extra_sigma}.items():
+            if not (math.isfinite(value) and 0 <= value <= _MAX_SIGMA):
+                raise InvalidTypingProfile(f"{name} must be between 0 and {_MAX_SIGMA}")
+        if not (math.isfinite(self.thinking_p) and 0 <= self.thinking_p <= 1):
+            raise InvalidTypingProfile("thinking_p must be between 0 and 1")
+        low, high = self.thinking_range_s
+        if not (math.isfinite(low) and math.isfinite(high) and 0 <= low <= high):
+            raise InvalidTypingProfile("thinking_range_s must be finite, with 0 <= low <= high")
+
 
 DEFAULT_TYPING: Final = TypingProfile()
 
@@ -797,8 +861,8 @@ class TypeStep:
     ``chunk`` is exactly one extended grapheme cluster: a letter with its combining
     marks, or a whole emoji sequence (a ZWJ family, a skin tone, a flag). A step with
     ``newline=True`` has an empty chunk, and the replay presses Shift+Enter for it,
-    never a bare Enter. The constructor refuses any other shape, a code point
-    :func:`is_untypable` refuses, and a delay that is negative or not finite.
+    never a bare Enter. The constructor refuses any other shape, a cluster
+    :func:`is_untypable_cluster` refuses, and a delay that is negative or not finite.
     """
 
     chunk: str
@@ -814,8 +878,8 @@ class TypeStep:
             return
         if len(_GRAPHEME_RE.findall(self.chunk)) != 1:
             raise ValueError("a typing step types exactly one grapheme cluster")
-        if any(is_untypable(char) for char in self.chunk):
-            raise ValueError("a typing step never types a control character or line break")
+        if is_untypable_cluster(self.chunk):
+            raise ValueError("a typing step never types a cluster is_untypable_cluster refuses")
 
     @property
     def needs_insert_text(self) -> bool:
@@ -928,18 +992,42 @@ def typing_plan(
 
     A newline (:data:`NEWLINE_CHARS`: CR, LF, or CRLF as one) is its own step with
     ``newline=True`` and an empty chunk, and only when ``allow_newlines`` is set;
-    otherwise the body raises :class:`MultilineRefused`. Every other line break in
-    :data:`LINE_BREAK_CHARS` (VT, FF, FS, GS, RS, NEL, U+2028, U+2029), and any other
-    code point :func:`is_untypable` refuses, raises :class:`UnsupportedCharacter`,
-    whatever ``allow_newlines`` says.
+    otherwise the body raises :class:`MultilineRefused`. Only ``\\r\\n``, in that
+    order, is one newline: ``\\n\\r`` and ``\\r\\r`` are two newline steps each.
+    Every other line break in :data:`LINE_BREAK_CHARS` (VT, FF, FS, GS, RS, NEL,
+    U+2028, U+2029), and any other cluster :func:`is_untypable_cluster` refuses,
+    raises :class:`UnsupportedCharacter`, whatever ``allow_newlines`` says.
 
     A plan whose delays add up to more than ``max_seconds``, or to a total that
-    isn't finite, raises :class:`TypingTooLong`. The ceiling counts only the planned
+    isn't finite, raises :class:`TypingTooLong`. ``max_seconds`` can lower the
+    ceiling but never raise it past :data:`MAX_TYPING_SECONDS`. The ceiling counts only the planned
     delays, not the round trip of each key press, so real typing takes somewhat
     longer. Because the plan is random, a body near the ceiling can pass with one
     seed and fail with another: P4-03 must build the plan before it spends any
     budget or navigates, so a refusal costs nothing. No error message quotes the
     text.
+    """
+    return _typing_plan_unclamped(
+        text,
+        rng,
+        profile,
+        allow_newlines=allow_newlines,
+        max_seconds=min(max_seconds, MAX_TYPING_SECONDS),
+    )
+
+
+def _typing_plan_unclamped(
+    text: str,
+    rng: random.Random,
+    profile: TypingProfile,
+    *,
+    allow_newlines: bool,
+    max_seconds: float,
+) -> TypingPlan:
+    """:func:`typing_plan` with a ceiling that may exceed :data:`MAX_TYPING_SECONDS`.
+
+    Private, for statistical tests that need plans longer than any real message.
+    Nothing outside the tests may call it.
     """
     units = _units(text)
     for position, unit in enumerate(units):
@@ -954,6 +1042,10 @@ def typing_plan(
                 raise UnsupportedCharacter(
                     f"character {position} holds U+{ord(char):04X}, which no step types"
                 )
+        if is_untypable_cluster(unit):
+            raise UnsupportedCharacter(
+                f"character {position} is a tag or variation-selector sequence no step types"
+            )
 
     steps: list[TypeStep] = []
     extra_medians = {
