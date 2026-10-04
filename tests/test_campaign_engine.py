@@ -1380,8 +1380,10 @@ def test_a_linkedin_step_is_left_unfired_and_blocks_nobody(
     world.write(sent_step_one)
     result = world.tick()
     assert [f.enrollment_id for f, _ in result.fired] == [email_step]
-    assert reasons_of(result, linkedin) == (Skip.LINKEDIN_STEP,)
+    # Listed as ready to prefill (P4-09): never fired, its due time kept, no message.
+    assert reasons_of(result, linkedin) == (Skip.READY_TO_PREFILL,)
     assert world.enrollment(linkedin).next_action_at == NOW - timedelta(hours=1)
+    assert world.messages(linkedin) == []
 
 
 # --- enrollment and activation ------------------------------------------------------------
@@ -1752,7 +1754,7 @@ def test_linkedin_rows_never_starve_an_email_step(
     world.write(sent_step_one)
     result = world.tick()
     assert [f.enrollment_id for f, _ in result.fired] == [email_step]
-    assert reasons_of(result, linkedin[0]) == (Skip.LINKEDIN_STEP,)  # reported a page at most
+    assert reasons_of(result, linkedin[0]) == (Skip.READY_TO_PREFILL,)  # reported a page at most
 
 
 @pytest.mark.parametrize(("median", "floor"), [(240, 0), (0, 90), (240, -5)])

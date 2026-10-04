@@ -9,6 +9,8 @@ and it reports back through :func:`record_progress` and :func:`finish_run`.
 **Who may start a run.** :func:`create_run` is the one door, and it refuses:
 
 * a kind with no runner (``message_send``);
+* a **scheduled** ``message_send``, ever: a LinkedIn prefill runs only when a person
+  asks for it (P4-09). This holds before and after the kind has a runner;
 * a second run while one of the same account's runs is still ``running`` --
   the browser takes one client per account anyway (spec 9.9), and a second row
   that could only fail ``busy`` tells a person nothing;
@@ -317,6 +319,10 @@ def create_run(
     """
     _require_writer(session)
     _require_aware(now)
+    if kind is SyncRunKind.MESSAGE_SEND and trigger is not SyncRunTrigger.MANUAL:
+        # Person-triggered only (P4-09): checked before anything else, so it holds once
+        # the kind has a runner as well (P4-03).
+        raise RunError("a message_send run is only ever started by a person, never scheduled")
     if kind not in RUNNABLE_KINDS:
         raise RunError(f"no runner exists for {kind.value} runs yet")
     if max_visits is not None:

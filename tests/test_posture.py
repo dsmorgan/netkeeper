@@ -233,6 +233,7 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "budget profile_visits",
         "budget inbox_polls",
         "budget li_messages_auto",
+        "budget li_prefills",
         "heat",
         "heat skip gate",
         "scheduled jobs",
@@ -1210,8 +1211,10 @@ def test_a_clean_report_claims_configuration_and_not_enforcement(
     assert "in force" not in text.split("nothing is misconfigured")[1]
     assert "never callers" in text
     for name in _report(writer, user).protections:
-        if name.name == "budget li_messages_auto":
-            assert name.name in text.split("not covered by this report:")[1]
+        if name.name in ("budget li_messages_auto", "budget li_prefills"):
+            # Collapsed: the report wraps its lines, and a name may straddle a break.
+            covered = text.split("not covered by this report:")[1]
+            assert name.name in " ".join(covered.split())
 
 
 def test_the_gap_lists_the_protections_nothing_enforces_yet(writer: Session, user: User) -> None:
@@ -1224,9 +1227,9 @@ def test_the_gap_lists_the_protections_nothing_enforces_yet(writer: Session, use
     assert unwired.strip()
 
     # Since P2-10 the runners and the scheduler are live (netkeeper.worker), and since
-    # P4-08 the inbox poll's runner, so what is left is the budget whose job does not
+    # P4-08 the inbox poll's runner, so what is left is the budgets whose jobs do not
     # exist yet -- and nothing the runners enforce may still be listed as unwired.
-    assert unwired.strip() == "budget li_messages_auto"
+    assert unwired.strip() == "budget li_messages_auto, budget li_prefills"
     for name in (
         "budget inbox_polls",
         "budget connection_pages",
@@ -1396,6 +1399,7 @@ def test_the_defaults_this_report_calls_clean_are_appendix_c_s() -> None:
     assert DEFAULTS.linkedin.budget.connection_pages_per_day == 150
     assert DEFAULTS.linkedin.budget.inbox_polls_per_day == 8
     assert DEFAULTS.linkedin.budget.li_messages_auto_per_day == 15
+    assert DEFAULTS.linkedin.budget.li_prefills_per_day == 10
     assert DEFAULTS.linkedin.heat.per_block == 1.0
     assert DEFAULTS.linkedin.heat.half_life_hours == 6
     assert DEFAULTS.linkedin.heat.skip_threshold == 2.5

@@ -2937,3 +2937,81 @@ def _migration_0035() -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+# --- a LinkedIn step's prefill (0036, #379) ------------------------------------------------
+
+
+def _migration_0036() -> Any:
+    path = VERSIONS_DIR / "0036_linkedin_prefill.py"
+    spec = importlib.util.spec_from_file_location("migration_0036", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_0036_adds_the_prefill_columns_and_a_run_delete_clears_its_link(
+    migration_engine: Engine,
+) -> None:
+    previous = _migration_0036().down_revision
+    migrations.upgrade(migration_engine, previous)
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+    migrations.upgrade(migration_engine, "0036")
+    inspector = inspect(migration_engine)
+    columns = {c["name"] for c in inspector.get_columns("messages")}
+    assert {"prefilled_at", "sync_run_id"} <= columns
+    indexes = {i["name"]: i["column_names"] for i in inspector.get_indexes("messages")}
+    assert indexes["ix_messages_sync_run_id"] == ["sync_run_id"]
+    assert indexes["ix_messages_user_id_li_conversation_urn"] == ["user_id", "li_conversation_urn"]
+    with migration_engine.begin() as connection:
+        # The existing message has neither.
+        row = connection.execute(
+            text("SELECT prefilled_at, sync_run_id FROM messages WHERE id = 1")
+        ).one()
+        assert tuple(row) == (None, None)
+        connection.execute(
+            text(
+                "INSERT INTO linkedin_accounts (user_id, label, created_at, updated_at)"
+                " VALUES (1, 'default', :t, :t)"
+            ),
+            {"t": STAMP},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO sync_runs (id, user_id, linkedin_account_id, kind, status, trigger,"
+                " started_at, browser_mode, created_at, updated_at)"
+                " VALUES (1, 1, 1, 'message_send', 'completed', 'manual', :t, 'attach', :t, :t)"
+            ),
+            {"t": STAMP},
+        )
+        connection.execute(
+            text("UPDATE messages SET sync_run_id = 1, prefilled_at = :t WHERE id = 1"),
+            {"t": STAMP},
+        )
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        connection.execute(text("UPDATE messages SET sync_run_id = 99 WHERE id = 1"))
+    with migration_engine.begin() as connection:
+        connection.execute(text("DELETE FROM sync_runs WHERE id = 1"))
+        kept = connection.execute(text("SELECT sync_run_id FROM messages WHERE id = 1"))
+        assert kept.scalar_one() is None  # SET NULL: the message outlives its run
+        assert _count(connection, "messages") == 1
+
+
+def test_0036_downgrades_to_messages_without_a_prefill(migration_engine: Engine) -> None:
+    previous = _migration_0036().down_revision
+    migrations.upgrade(migration_engine, "0036")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+        connection.execute(text("UPDATE messages SET prefilled_at = :t WHERE id = 1"), {"t": STAMP})
+    migrations.downgrade(migration_engine, previous)
+    inspector = inspect(migration_engine)
+    columns = {c["name"] for c in inspector.get_columns("messages")}
+    assert columns.isdisjoint({"prefilled_at", "sync_run_id"})
+    assert "ix_messages_user_id_li_conversation_urn" not in {
+        i["name"] for i in inspector.get_indexes("messages")
+    }
+    with migration_engine.begin() as connection:
+        assert _count(connection, "messages") == 1
+    migrations.upgrade(migration_engine, "0036")

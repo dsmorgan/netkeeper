@@ -197,13 +197,14 @@ describe('NextSendsCard', () => {
         items: [
           fire({ enrollment_id: 1, due: PAST, contact_id: 41, contact_name: 'Ada Example' }),
           fire({ enrollment_id: 2, due: FUTURE, step_position: 3 }),
+          fire({ enrollment_id: 3, channel: 'linkedin', ready_to_prefill: true }),
         ],
         total: 5,
       }),
     })
     const body = await card('Next campaign sends')
     const items = await body.findAllByRole('listitem')
-    expect(items).toHaveLength(2)
+    expect(items).toHaveLength(3)
     expect(items[0]).toHaveTextContent('due now')
     expect(items[0]).toHaveTextContent('Autumn hello · step 2')
     expect(within(items[0]!).getByRole('link', { name: 'Ada Example' })).toHaveAttribute(
@@ -213,7 +214,9 @@ describe('NextSendsCard', () => {
     expect(items[1]).not.toHaveTextContent('due now')
     expect(items[1]).toHaveTextContent('2099')
     expect(items[1]).toHaveTextContent('step 3')
-    expect(body.getByText('and 3 more')).toBeInTheDocument()
+    expect(items[1]).not.toHaveTextContent('ready to prefill')
+    expect(items[2]).toHaveTextContent('Autumn hello · step 2 · LinkedIn, ready to prefill')
+    expect(body.getByText('and 2 more')).toBeInTheDocument()
   })
 })
 

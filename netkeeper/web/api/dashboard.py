@@ -45,8 +45,11 @@ def list_next_fires(
     session: SessionDep,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = 5,
 ) -> NextFirePage:
-    """The next campaign steps due, soonest first (``next_action_at``, spec 11.4)."""
-    fires, total = campaign_engine.upcoming(session, user, limit=limit)
+    """The next campaign steps due, soonest first (``next_action_at``, spec 11.4).
+
+    A LinkedIn step is listed too, with ``ready_to_prefill``: a person prefills it
+    (P4-09), and the tick never fires it."""
+    fires, total = campaign_engine.upcoming(session, user, limit=limit, include_linkedin=True)
     return NextFirePage(
         items=[
             NextFireOut(
@@ -58,6 +61,7 @@ def list_next_fires(
                 channel=None if fire.step is None else fire.step.channel.value,
                 contact_id=fire.contact.id,
                 contact_name=_name(fire.contact),
+                ready_to_prefill=fire.ready_to_prefill,
             )
             for fire in fires
         ],

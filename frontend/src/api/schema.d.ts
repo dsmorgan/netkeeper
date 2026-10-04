@@ -162,6 +162,109 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/campaigns/linkedin/messages/{message_id}/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check Sent
+         * @description "I sent it, check now": start a manual inbox poll, which finds the message sent.
+         */
+        post: operations["check_linkedin_prefill_sent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/linkedin/messages/{message_id}/discard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Discard
+         * @description You will not send it: ``discarded``. The step counts as fired, and the enrollment
+         *     moves to its next step or completes. Nothing changes in LinkedIn.
+         */
+        post: operations["discard_linkedin_prefill"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/linkedin/prefill": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Prefill
+         * @description Claim one LinkedIn step and submit its prefill; answers at once, before any browser
+         *     work. A refusal answers ``409`` with its reasons; what the refusal changed (a reply
+         *     that ended the enrollment, a step parked) is kept.
+         */
+        post: operations["prefill_linkedin_step"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/linkedin/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Ready
+         * @description Due LinkedIn steps, ready to prefill, oldest due first.
+         */
+        get: operations["list_linkedin_ready"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/linkedin/waiting": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Waiting
+         * @description Prefilled and stale LinkedIn messages, waiting for you to send or discard them.
+         */
+        get: operations["list_linkedin_waiting"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/campaigns/{campaign_id}": {
         parameters: {
             query?: never;
@@ -1237,6 +1340,9 @@ export interface paths {
         /**
          * List Next Fires
          * @description The next campaign steps due, soonest first (``next_action_at``, spec 11.4).
+         *
+         *     A LinkedIn step is listed too, with ``ready_to_prefill``: a person prefills it
+         *     (P4-09), and the tick never fires it.
          */
         get: operations["list_next_fires"];
         put?: never;
@@ -4264,6 +4370,15 @@ export interface components {
             /** Unverifies */
             unverifies?: string | null;
         };
+        /** DiscardedOut */
+        DiscardedOut: {
+            /** Enrollment Id */
+            enrollment_id: number;
+            enrollment_status: components["schemas"]["EnrollmentStatus"];
+            /** Message Id */
+            message_id: number;
+            status: components["schemas"]["MessageStatus"];
+        };
         /** DoNotSendIn */
         DoNotSendIn: {
             /** Email */
@@ -5546,6 +5661,18 @@ export interface components {
             to_address: string | null;
         };
         /**
+         * MessageStatus
+         * @description Where one message is (spec 11.5, 11.6, 11.7).
+         *
+         *     Outbound: ``scheduled`` (rendered, waiting for its send), ``drafted`` (a
+         *     Gmail draft, waiting for you), ``prefilled`` (typed into LinkedIn's compose
+         *     box, waiting for you), ``sent``, ``stale`` (a prefill not seen sent within
+         *     three days), ``discarded`` (a draft you deleted instead of sending),
+         *     ``bounced``, ``failed`` (with ``error``). Inbound: ``received``.
+         * @enum {string}
+         */
+        MessageStatus: "scheduled" | "drafted" | "prefilled" | "sent" | "stale" | "discarded" | "bounced" | "failed" | "received";
+        /**
          * MessagesApproveIn
          * @description Each message with the ``fingerprint`` it came with.
          */
@@ -5609,6 +5736,8 @@ export interface components {
          *     The contact is named and nothing more: no address, no message text. ``due``
          *     in the past means the next tick's. ``step_position`` is null only for an
          *     enrollment with no next step, which the tick completes rather than sends.
+         *     ``ready_to_prefill`` marks a LinkedIn step: once due, it waits for a person to
+         *     prefill it (P4-09); the tick never fires it.
          */
         NextFireOut: {
             /** Campaign Id */
@@ -5628,6 +5757,11 @@ export interface components {
             due: string;
             /** Enrollment Id */
             enrollment_id: number;
+            /**
+             * Ready To Prefill
+             * @default false
+             */
+            ready_to_prefill: boolean;
             /** Step Position */
             step_position: number | null;
         };
@@ -5879,6 +6013,45 @@ export interface components {
             preferred_name: string;
         };
         /**
+         * PrefillAccepted
+         * @description The ``202`` of a prefill: the claimed message, its run, and the task running it.
+         */
+        PrefillAccepted: {
+            /** Enrollment Id */
+            enrollment_id: number;
+            /** Message Id */
+            message_id: number;
+            /** Run Id */
+            run_id: number;
+            /** Task Id */
+            task_id: string;
+        };
+        /**
+         * PrefillIn
+         * @description One of the two: an enrollment, or ``next`` for the oldest ready one.
+         */
+        PrefillIn: {
+            /** Enrollment Id */
+            enrollment_id?: number | null;
+            /**
+             * Next
+             * @default false
+             */
+            next: boolean;
+        };
+        /**
+         * PrefillRefused
+         * @description Why nothing was claimed: the reasons as words, and one line for a person.
+         */
+        PrefillRefused: {
+            /** Detail */
+            detail: string | null;
+            /** Enrollment Id */
+            enrollment_id: number | null;
+            /** Reasons */
+            reasons: string[];
+        };
+        /**
          * ProtectionOut
          * @description One row of the posture report (spec section 9): what it is, whether it is in
          *     force, and anything wrong with it. ``status`` is `netkeeper.services.posture.Status`'s
@@ -5901,6 +6074,38 @@ export interface components {
             value: string;
             /** Warnings */
             warnings: string[];
+        };
+        /**
+         * ReadyOut
+         * @description One due LinkedIn step. The contact is named and nothing more: no message text.
+         */
+        ReadyOut: {
+            /** Campaign Id */
+            campaign_id: number;
+            /** Campaign Name */
+            campaign_name: string;
+            /** Contact Id */
+            contact_id: number;
+            /** Contact Name */
+            contact_name: string;
+            /**
+             * Due
+             * Format: date-time
+             */
+            due: string;
+            /** Enrollment Id */
+            enrollment_id: number;
+            /** Held Until */
+            held_until: string | null;
+            /** Step Position */
+            step_position: number;
+        };
+        /** ReadyPage */
+        ReadyPage: {
+            /** Items */
+            items: components["schemas"]["ReadyOut"][];
+            /** Total */
+            total: number;
         };
         /**
          * RefusedOut
@@ -7317,6 +7522,34 @@ export interface components {
             /** Error Type */
             type: string;
         };
+        /**
+         * WaitingOut
+         * @description One LinkedIn message waiting for you. No message text.
+         */
+        WaitingOut: {
+            /** Campaign Id */
+            campaign_id: number;
+            /** Campaign Name */
+            campaign_name: string;
+            /** Contact Id */
+            contact_id: number;
+            /** Contact Name */
+            contact_name: string;
+            /** Enrollment Id */
+            enrollment_id: number;
+            /** Message Id */
+            message_id: number;
+            /** Prefilled At */
+            prefilled_at: string | null;
+            status: components["schemas"]["MessageStatus"];
+        };
+        /** WaitingPage */
+        WaitingPage: {
+            /** Items */
+            items: components["schemas"]["WaitingOut"][];
+            /** Total */
+            total: number;
+        };
     };
     responses: never;
     parameters: never;
@@ -7668,6 +7901,225 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    check_linkedin_prefill_sent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                message_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunAccepted"];
+                };
+            };
+            /** @description No such message */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description It does not wait for you, a run is running, the session is flagged, heat is too high, or it is outside active hours */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The inbox poll has no runner */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description This process has no browser worker */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    discard_linkedin_prefill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                message_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscardedOut"];
+                };
+            };
+            /** @description No such message */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description It does not wait for you */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    prefill_linkedin_step: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PrefillIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrefillAccepted"];
+                };
+            };
+            /** @description No such enrollment, or nothing is ready */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused: the reasons are in the body */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrefillRefused"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description This process has no browser worker */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_linkedin_ready: {
+        parameters: {
+            query?: {
+                /** @description Items per page. */
+                limit?: number;
+                /** @description Items to skip. */
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadyPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_linkedin_waiting: {
+        parameters: {
+            query?: {
+                /** @description Items per page. */
+                limit?: number;
+                /** @description Items to skip. */
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WaitingPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

@@ -601,6 +601,7 @@ ENFORCED_BY: Final[dict[str, tuple[str, ...]]] = {
     f"{_CONSUME}[{_ACTION_CLASS}.PROFILE_VISITS]": ("budget profile_visits",),
     f"{_CONSUME}[{_ACTION_CLASS}.INBOX_POLLS]": ("budget inbox_polls",),
     f"{_CONSUME}[{_ACTION_CLASS}.LI_MESSAGES_AUTO]": ("budget li_messages_auto",),
+    f"{_CONSUME}[{_ACTION_CLASS}.LI_PREFILLS]": ("budget li_prefills",),
     "netkeeper.linkedin.pacing.warmup_budget": ("warm-up ramp",),
     "netkeeper.linkedin.pacing.apply_weekend_multiplier": ("weekend damping",),
     "netkeeper.linkedin.pacing.plan_enrichment": ("human-like pacing",),
@@ -618,12 +619,16 @@ ENFORCED_BY: Final[dict[str, tuple[str, ...]]] = {
 #: ``netkeeper linkedin sync``/``enrich``, the runs API, and ``serve``'s
 #: scheduler all reach them through ``netkeeper.worker`` -- and since P4-08 the
 #: inbox poll's runner is too (``netkeeper linkedin inbox`` and the runs API),
-#: spending ``inbox_polls`` before every read. What is left is the budget whose job
-#: does not exist yet: LinkedIn auto-send. Kept in sync by
+#: spending ``inbox_polls`` before every read. What is left is the budgets whose jobs
+#: do not exist yet: LinkedIn auto-send and the LinkedIn prefill. Kept in sync by
 #: ``test_the_unenforced_list_is_what_the_package_actually_shows``, which is the
 #: whole point: a hand-maintained list of "not wired up yet" is wrong the week
 #: after it is written.
-UNENFORCED_TODAY: Final[tuple[str, ...]] = (f"{_CONSUME}[{_ACTION_CLASS}.LI_MESSAGES_AUTO]",)
+UNENFORCED_TODAY: Final[tuple[str, ...]] = (
+    f"{_CONSUME}[{_ACTION_CLASS}.LI_MESSAGES_AUTO]",
+    # P4-09 reads the li_prefills budget before a claim; P4-03's runner consumes it.
+    f"{_CONSUME}[{_ACTION_CLASS}.LI_PREFILLS]",
+)
 
 
 def _unenforced_protections() -> tuple[str, ...]:
@@ -644,13 +649,13 @@ GAPS: Final[tuple[str, ...]] = (
     " tell you a limit is set and how much of it is spent; it cannot tell you"
     " that the code which will do the work remembers to ask. The protections"
     f" listed next have no enforcing caller that netkeeper runs yet: {_UNENFORCED_TEXT}."
-    " Its job (LinkedIn auto-send) does not exist yet, so that limit is a setting"
-    " rather than a brake until it does. The connections sync and enrichment"
-    " runners are wired: `netkeeper linkedin sync` and `enrich`, the runs API, and"
-    " `netkeeper serve`'s scheduler reach them. The inbox poll's runner spends"
-    " `inbox_polls` before every read and is reached by `netkeeper linkedin inbox`"
-    " and the runs API, but it has no page source yet, so a poll fails before it"
-    " reads anything and `netkeeper serve` does not schedule it.",
+    " Their jobs (LinkedIn auto-send, the LinkedIn prefill) do not exist yet, so each"
+    " of those limits is a setting rather than a brake until they do. The connections"
+    " sync and enrichment runners are wired: `netkeeper linkedin sync` and `enrich`,"
+    " the runs API, and `netkeeper serve`'s scheduler reach them. The inbox poll's"
+    " runner spends `inbox_polls` before every read and is reached by `netkeeper"
+    " linkedin inbox` and the runs API, but it has no page source yet, so a poll fails"
+    " before it reads anything and `netkeeper serve` does not schedule it.",
     "the activity lock binds netkeeper processes that share this data directory on"
     " this machine: it is a file lock under the data directory. A netkeeper started"
     " with a different NETKEEPER_DATA, a netkeeper on another machine, or any other"

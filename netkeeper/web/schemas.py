@@ -2339,6 +2339,8 @@ class NextFireOut(BaseModel):
     The contact is named and nothing more: no address, no message text. ``due``
     in the past means the next tick's. ``step_position`` is null only for an
     enrollment with no next step, which the tick completes rather than sends.
+    ``ready_to_prefill`` marks a LinkedIn step: once due, it waits for a person to
+    prefill it (P4-09); the tick never fires it.
     """
 
     enrollment_id: int
@@ -2349,6 +2351,7 @@ class NextFireOut(BaseModel):
     channel: str | None
     contact_id: int
     contact_name: str
+    ready_to_prefill: bool = False
 
 
 class NextFirePage(BaseModel):

@@ -312,6 +312,7 @@ def test_hard_max_per_day_matches_spec_9_6() -> None:
         ActionClass.PROFILE_VISITS: 250,
         ActionClass.INBOX_POLLS: 24,
         ActionClass.LI_MESSAGES_AUTO: 30,
+        ActionClass.LI_PREFILLS: 20,
     }
 
 

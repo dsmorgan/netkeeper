@@ -72,6 +72,7 @@ class ActionClass(enum.StrEnum):
     PROFILE_VISITS = "profile_visits"
     INBOX_POLLS = "inbox_polls"
     LI_MESSAGES_AUTO = "li_messages_auto"
+    LI_PREFILLS = "li_prefills"
 
 
 Period = Literal["day", "week"]
@@ -87,6 +88,9 @@ HARD_MAX_PER_DAY: Final[dict[ActionClass, int]] = {
     ActionClass.PROFILE_VISITS: 250,
     ActionClass.INBOX_POLLS: 24,
     ActionClass.LI_MESSAGES_AUTO: 30,
+    # A campaign's LinkedIn step typed into the composer for a person to send (P4-09).
+    # Each one also spends a profile visit (P4-03 consumes both).
+    ActionClass.LI_PREFILLS: 20,
 }
 
 #: The weekly profile-visit limit, when config does not set one, is this many
@@ -108,6 +112,7 @@ _DAY_DEFAULT: Final[dict[ActionClass, Callable[[BudgetSettings], int]]] = {
     ActionClass.PROFILE_VISITS: lambda s: s.profile_visits_per_day,
     ActionClass.INBOX_POLLS: lambda s: s.inbox_polls_per_day,
     ActionClass.LI_MESSAGES_AUTO: lambda s: s.li_messages_auto_per_day,
+    ActionClass.LI_PREFILLS: lambda s: s.li_prefills_per_day,
 }
 
 # One entry per key in HARD_MAX_PER_WEEK, not one entry per ActionClass: only

@@ -17,6 +17,7 @@ profile_visits_per_day = 60
 # profile_visits_per_week = 300
 inbox_polls_per_day = 8
 li_messages_auto_per_day = 15
+li_prefills_per_day = 10
 warmup_start = 20
 warmup_step = 10
 

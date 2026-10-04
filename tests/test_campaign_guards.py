@@ -384,7 +384,8 @@ def test_the_summary_counts_each_contact_once_under_its_first_reason() -> None:
 def test_the_summary_breaks_a_tie_in_reason_order() -> None:
     verdicts = _verdicts((2, Reason.NO_LINKEDIN), (2, Reason.ARCHIVED), (1, Reason.MERGED))
     assert skip_summary(verdicts, contacted_within_days=30) == (
-        "0 will start, 5 skipped (2 archived, 2 no LinkedIn profile, 1 merged into another contact)"
+        "0 will start, 5 skipped (2 archived,"
+        " 2 no LinkedIn member id (needs enrichment first), 1 merged into another contact)"
     )
 
 
@@ -425,7 +426,7 @@ def test_every_reason_has_its_label() -> None:
         "email_invalid": "invalid email",
         "do_not_send": "address on the do-not-send list",
         "address_bounced_elsewhere": "address bounced on another contact",
-        "no_linkedin": "no LinkedIn profile",
+        "no_linkedin": "no LinkedIn member id (needs enrichment first)",
         "duplicate_address": "address already in this campaign",
         "in_another_campaign": "in another campaign",
         "contacted_recently": "contacted in the last 1 day",
@@ -503,7 +504,7 @@ def test_the_self_contact_is_excluded_by_its_own_reason(
     reach the guards, they exclude it, and say why, on every channel."""
     you = ensure_self_contact(writer, user)
     you.emails.append(ContactEmail(user_id=user.id, email="me@example.test", is_primary=True))
-    you.li_public_id = "self-fixture"
+    you.li_urn = "urn:li:fsd_profile:SELFFIXTURE"  # LinkedIn needs the URN (P4-09)
     writer.flush()
     got = load_facts(writer, user, [you.id], campaign_id=campaign.id)[you.id]
     assert got.is_self

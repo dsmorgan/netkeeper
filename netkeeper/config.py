@@ -86,6 +86,7 @@ class BudgetSettings:
     profile_visits_per_week: int | None = None
     inbox_polls_per_day: int = 8
     li_messages_auto_per_day: int = 15
+    li_prefills_per_day: int = 10
     warmup_start: int = 20
     warmup_step: int = 10
 

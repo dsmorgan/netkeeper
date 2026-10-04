@@ -381,6 +381,8 @@ class Message(UserOwned, TimestampMixin, Base):
     __tablename__ = "messages"
     __table_args__ = (
         Index("ix_messages_user_id_status", "user_id", "status"),
+        # The inbox poll finds a prefilled message sent by its conversation (P4-02; 0036).
+        Index("ix_messages_user_id_li_conversation_urn", "user_id", "li_conversation_urn"),
         # An inbound message is received and nothing else; an outbound one never is.
         CheckConstraint(
             "(direction = 'in') = (status = 'received')", name="message_direction_status"
@@ -426,6 +428,12 @@ class Message(UserOwned, TimestampMixin, Base):
     gmail_draft_id: Mapped[str | None] = mapped_column(String(200))
     li_conversation_urn: Mapped[str | None] = mapped_column(String(300))
     li_message_urn: Mapped[str | None] = mapped_column(String(300))
+    # A LinkedIn step's prefill (P4-09; 0036): when the run typed it into the composer
+    # (``stale`` three days later), and the ``message_send`` run that did.
+    prefilled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    sync_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sync_runs.id", ondelete="SET NULL"), index=True
+    )
     # One line on why a send failed. Never a message body, a token, or a header.
     error: Mapped[str | None] = mapped_column(String(500))
     # For the sender's reconcile (P3-07; 0021). The Gmail message ids the thread already
