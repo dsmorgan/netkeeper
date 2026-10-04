@@ -21,6 +21,8 @@ import { mockApi, renderWithClient, requestsTo, type RouteHandler } from '@/feat
 import { jsonResponse } from '@/test/fetch'
 
 import type { LintIssue, MergeField, TemplateOut } from './api'
+import { LINT_DEBOUNCE_MS } from './draft'
+import { WHY_IT_MATTERS } from './lint'
 import { TemplatesPage } from './templates-page'
 
 const WAIT = { timeout: 3000 }
@@ -1028,5 +1030,216 @@ describe('inline lint', () => {
     expect(within(bodyLint).getByText('Warning')).toBeInTheDocument()
     expect(screen.queryByText(/a campaign can't use this template/)).not.toBeInTheDocument()
     expect(screen.getByLabelText('Body')).not.toHaveAttribute('aria-invalid')
+  })
+})
+
+describe('draft with your AI assistant', () => {
+  const ROBIN = { id: 7, first_name: 'Robin', last_name: 'Example', current_company: null }
+
+  function withClipboard(writeText?: (text: string) => Promise<void>) {
+    Object.defineProperty(navigator, 'clipboard', {
+      value: writeText === undefined ? undefined : { writeText },
+      configurable: true,
+    })
+  }
+
+  async function openHelper(
+    row: TemplateOut = template(),
+    extra: Record<string, RouteHandler> = {},
+  ) {
+    const seen = mockApi(
+      routes([row], {
+        'GET /api/v1/contacts': () => jsonResponse({ items: [ROBIN], total: 1, describe: '' }),
+        'GET /api/v1/templates/1/preview': () =>
+          jsonResponse({ subject: 'Hi Robin', body: 'Hi Robin at .', issues: [] }),
+        ...extra,
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: row.name }))
+    const helper = await screen.findByRole('region', { name: 'Draft with your AI assistant' }, WAIT)
+    const toggle = within(helper).getByRole('button', { name: 'Show' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(toggle)
+    expect(within(helper).getByRole('button', { name: 'Hide' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    )
+    return { seen, helper }
+  }
+
+  it('copies a prompt with the allowed fields and the rules, and no contact data', async () => {
+    const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined)
+    withClipboard(writeText)
+    const { seen, helper } = await openHelper()
+
+    // Pick a contact in the preview: the merge-field examples become Robin's values.
+    fireEvent.change(await screen.findByLabelText('Contact'), { target: { value: 'rob' } })
+    fireEvent.click(await screen.findByRole('button', { name: /Robin Example/ }, WAIT))
+    await screen.findByText(/Examples are Robin Example's values\./, undefined, WAIT)
+
+    fireEvent.change(within(helper).getByLabelText('What the campaign is for'), {
+      target: { value: 'Ask for advice on a move into design' },
+    })
+    fireEvent.change(within(helper).getByLabelText("Who it's for"), {
+      target: { value: 'Old teammates' },
+    })
+    fireEvent.change(within(helper).getByLabelText('Tone'), { target: { value: 'professional' } })
+    fireEvent.change(within(helper).getByLabelText('Steps'), { target: { value: '2' } })
+    fireEvent.change(within(helper).getByLabelText('Anything to mention'), {
+      target: { value: 'The hackathon' },
+    })
+    const copy = await within(helper).findByRole('button', { name: 'Copy prompt' })
+    await waitFor(() => expect(copy).toBeEnabled(), WAIT)
+    fireEvent.click(copy)
+
+    await within(helper).findByText('Copied. Paste it into your AI chat assistant.')
+    expect(writeText).toHaveBeenCalledTimes(1)
+    const prompt = writeText.mock.calls[0]?.[0] ?? ''
+    expect(prompt).toContain('{{ first_name }}')
+    expect(prompt).toContain('{{ company }}')
+    expect(prompt).toContain('{{ previous_send_date | ago }}')
+    expect(prompt).toContain(WHY_IT_MATTERS.no_contact_field)
+    expect(prompt).toContain('Ask for advice on a move into design')
+    expect(prompt).toContain('Tone: professional')
+    expect(prompt).toContain('End of step 2')
+    expect(prompt).not.toMatch(/Robin|Example Co|Alex/)
+    // The helper's own field list was asked for without a contact.
+    expect(
+      requestsTo(seen, 'GET', '/api/v1/templates/merge-fields').some((r) => r.search === ''),
+    ).toBe(true)
+  })
+
+  it('shows the prompt selected to copy by hand when there is no clipboard', async () => {
+    withClipboard(undefined)
+    const { helper } = await openHelper()
+    const copy = await within(helper).findByRole('button', { name: 'Copy prompt' })
+    await waitFor(() => expect(copy).toBeEnabled(), WAIT)
+    fireEvent.click(copy)
+
+    const manual = (await within(helper).findByLabelText('Prompt')) as HTMLTextAreaElement
+    expect(manual).toHaveAttribute('readonly')
+    expect(manual.value).toContain('{{ first_name }}')
+    await waitFor(() => expect(document.activeElement).toBe(manual))
+    expect(manual.selectionStart).toBe(0)
+    expect(manual.selectionEnd).toBe(manual.value.length)
+    expect(within(helper).getByText(/didn't allow copying/)).toBeInTheDocument()
+  })
+
+  it('shows the prompt to copy by hand when the clipboard refuses', async () => {
+    withClipboard(vi.fn<(text: string) => Promise<void>>().mockRejectedValue(new Error('denied')))
+    const { helper } = await openHelper()
+    const copy = await within(helper).findByRole('button', { name: 'Copy prompt' })
+    await waitFor(() => expect(copy).toBeEnabled(), WAIT)
+    fireEvent.click(copy)
+    expect(await within(helper).findByLabelText('Prompt')).toBeInTheDocument()
+  })
+
+  it('fills the subject and body from a pasted reply and lints it', async () => {
+    withClipboard(undefined)
+    const { seen, helper } = await openHelper()
+    const body = 'Hi {{ first_name }},\n{% for x in y %}{% endfor %}'
+    fireEvent.change(within(helper).getByLabelText("Assistant's reply"), {
+      target: {
+        value: `Here you go!\n\nStep 1\nSubject: Long time, {{ first_name }}\nBody:\n${body}\nEnd of step 1\n\nHope it helps.`,
+      },
+    })
+    fireEvent.click(within(helper).getByRole('button', { name: 'Paste result' }))
+
+    expect(screen.getByLabelText('Subject')).toHaveValue('Long time, {{ first_name }}')
+    expect(screen.getByLabelText('Body')).toHaveValue(body)
+    expect(within(helper).getByText('Filled the subject and body.')).toBeInTheDocument()
+    const issues = await screen.findByRole('list', { name: 'Body lint' }, WAIT)
+    expect(within(issues).getByText("Loops aren't supported in templates")).toBeInTheDocument()
+    expect(requestsTo(seen, 'POST', '/api/v1/templates/lint').at(-1)?.body).toEqual({
+      channel: 'email',
+      subject: 'Long time, {{ first_name }}',
+      body,
+    })
+  })
+
+  it('lints a paste at once, without waiting for the typing debounce', async () => {
+    withClipboard(undefined)
+    const { seen, helper } = await openHelper()
+    await screen.findByText('No lint issues.', undefined, WAIT)
+    fireEvent.change(within(helper).getByLabelText("Assistant's reply"), {
+      target: { value: 'Subject: S\nBody:\nPasted {{ first_name }}' },
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      fireEvent.click(within(helper).getByRole('button', { name: 'Paste result' }))
+      // Short of the debounce: a typed edit would still be waiting it out.
+      await act(() => vi.advanceTimersByTimeAsync(LINT_DEBOUNCE_MS - 1))
+      expect(
+        requestsTo(seen, 'POST', '/api/v1/templates/lint').some(
+          (r) => (r.body as { body: string }).body === 'Pasted {{ first_name }}',
+        ),
+      ).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('pastes a reply without the labels into the body as it is', async () => {
+    withClipboard(undefined)
+    const { helper } = await openHelper()
+    fireEvent.change(within(helper).getByLabelText("Assistant's reply"), {
+      target: { value: '  Hi {{ first_name }}, it has been ages!  ' },
+    })
+    fireEvent.click(within(helper).getByRole('button', { name: 'Paste result' }))
+
+    expect(screen.getByLabelText('Body')).toHaveValue('Hi {{ first_name }}, it has been ages!')
+    expect(screen.getByLabelText('Subject')).toHaveValue('Hi {{ first_name }}')
+    expect(within(helper).getByText('Pasted the reply into the body as it is.')).toBeInTheDocument()
+    expect(within(helper).getByText(/didn't have Subject: and Body: labels/)).toBeInTheDocument()
+  })
+
+  it('fills step 1 of several and offers the others', async () => {
+    const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined)
+    withClipboard(writeText)
+    const { helper } = await openHelper()
+    fireEvent.change(within(helper).getByLabelText("Assistant's reply"), {
+      target: {
+        value:
+          'Step 1\nSubject: One\nBody:\nFirst {{ first_name }}\n\nStep 2\nSubject: Two\nBody:\nSecond {{ first_name }}',
+      },
+    })
+    fireEvent.click(within(helper).getByRole('button', { name: 'Paste result' }))
+    expect(screen.getByLabelText('Body')).toHaveValue('First {{ first_name }}')
+    expect(
+      within(helper).getByText('Filled the subject and body from step 1 of 2.'),
+    ).toBeInTheDocument()
+
+    const others = within(helper).getByRole('region', { name: 'Other steps' })
+    fireEvent.click(within(others).getByRole('button', { name: 'Copy step 2' }))
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        'Step 2\nSubject: Two\nBody:\nSecond {{ first_name }}\nEnd of step 2',
+      ),
+    )
+    fireEvent.click(within(others).getByRole('button', { name: 'Use step 2 here' }))
+    expect(screen.getByLabelText('Subject')).toHaveValue('Two')
+    expect(screen.getByLabelText('Body')).toHaveValue('Second {{ first_name }}')
+  })
+
+  it('leaves the subject alone for a LinkedIn template, and says why', async () => {
+    withClipboard(undefined)
+    const { helper } = await openHelper(template({ channel: 'linkedin', subject: null }))
+    fireEvent.change(within(helper).getByLabelText("Assistant's reply"), {
+      target: { value: 'Subject: Nope\nBody:\nHi {{ first_name }}' },
+    })
+    fireEvent.click(within(helper).getByRole('button', { name: 'Paste result' }))
+    expect(screen.getByLabelText('Subject')).toHaveValue('')
+    expect(screen.getByLabelText('Body')).toHaveValue('Hi {{ first_name }}')
+    expect(within(helper).getByText(/the reply's subject was left out/)).toBeInTheDocument()
+  })
+
+  it('links the guide', async () => {
+    withClipboard(undefined)
+    const { helper } = await openHelper()
+    expect(within(helper).getByRole('link', { name: 'Read the guide' })).toHaveAttribute(
+      'href',
+      'https://github.com/dsmorgan/netkeeper/blob/main/docs/ai-drafting.md',
+    )
   })
 })
