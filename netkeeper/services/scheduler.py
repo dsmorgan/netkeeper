@@ -92,7 +92,7 @@ waited for on the database thread instead of freezing the loop it needs to commi
 **Wired into ``netkeeper serve`` (P2-10), disarmed.** ``serve``'s lifespan
 builds and starts this scheduler (:mod:`netkeeper.services.scheduled_runs`)
 for :data:`SERVED_SCHEDULES` -- the connections syncs and enrichment; the
-inbox poll has no runner yet -- with handlers that record a ``sync_runs`` row
+inbox poll has no page source yet (P4-01) -- with handlers that record a ``sync_runs`` row
 and hand it to the browser worker. Before any of that, :func:`poll_and_fire`
 asks the **arm gate**: while a person has not armed the account's scheduled
 runs (every account starts disarmed) a due fire is skipped as ``"disarmed"``
@@ -211,10 +211,14 @@ class JobOutcome(enum.Enum):
     DISARMED_AFTER_GATE = "disarmed_after_gate"
     """The same, for an account found disarmed after the gate let the fire through."""
 
+    NOTHING_TO_WATCH = "nothing_to_watch"
+    """The inbox poll's handler found no live enrollment with a LinkedIn contact
+    (P4-08): it recorded no run and attached to nothing. The fire counts as skipped."""
+
 
 #: The outcomes that say the handler started nothing: the fire was skipped, not run.
 SKIPPED_AFTER_GATE: Final = frozenset(
-    {JobOutcome.PAUSED_AFTER_GATE, JobOutcome.DISARMED_AFTER_GATE}
+    {JobOutcome.PAUSED_AFTER_GATE, JobOutcome.DISARMED_AFTER_GATE, JobOutcome.NOTHING_TO_WATCH}
 )
 
 #: A handler returns ``None`` when the fire ran (whatever the run made of it),
@@ -329,10 +333,11 @@ LATE_FIRE_SLACK: Final = timedelta(minutes=5)
 #: re-offer per interval: a re-offer that is not done either waits for the normal one.
 NOT_DONE_JITTER: Final = timedelta(hours=3)
 
-#: The kinds ``netkeeper serve`` schedules: the ones with a runner (P2-06,
-#: P2-07). ``inbox`` is left out, not registered-but-inert: it has no runner
-#: until the inbox poll exists, and a due time for a job that does nothing would
-#: read in ``netkeeper posture`` as a job that runs.
+#: The kinds ``netkeeper serve`` schedules: the ones whose runner can do its job
+#: (P2-06, P2-07). ``inbox`` is left out, not registered-but-inert: its runner and
+#: handler exist (P4-08), but it has no page source until P4-01 (#380) wires one,
+#: and a due time for a job that can only fail would read in ``netkeeper posture``
+#: as a job that runs. P4-01 removes this exclusion in the PR that wires the source.
 SERVED_SCHEDULES: Final[dict[JobKind, JobSchedule]] = {
     kind: schedule for kind, schedule in DEFAULT_SCHEDULES.items() if kind is not JobKind.INBOX
 }

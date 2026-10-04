@@ -2836,3 +2836,104 @@ def test_0034_downgrade_deletes_the_self_contact_and_leaves_nothing_naming_it(
         if migration_engine.dialect.name == "sqlite":
             assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
     assert "is_self" not in {c["name"] for c in inspect(migration_engine).get_columns("contacts")}
+
+
+# --- the LinkedIn inbox poll (0035, #378) ------------------------------------------------
+
+
+def _insert_li_conversation(
+    connection: Connection, *, id: int, user_id: int, contact_id: int, urn: str
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO li_conversations (id, user_id, contact_id, conversation_urn,"
+            " last_activity_at, polled_at, created_at, updated_at)"
+            " VALUES (:id, :user_id, :contact_id, :urn, :t, :t, :t, :t)"
+        ),
+        {"id": id, "user_id": user_id, "contact_id": contact_id, "urn": urn, "t": STAMP},
+    )
+
+
+def _insert_polled_interaction(
+    connection: Connection, *, user_id: int, contact_id: int, external_id: str | None
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO interactions (user_id, contact_id, kind, at, source, external_id,"
+            " observed_at, created_at, updated_at)"
+            " VALUES (:user_id, :contact_id, 'li_in', :t, 'sync', :external_id, :t, :t, :t)"
+        ),
+        {"user_id": user_id, "contact_id": contact_id, "external_id": external_id, "t": STAMP},
+    )
+
+
+def test_0035_keeps_every_interaction_and_starts_with_no_conversations(
+    migration_engine: Engine,
+) -> None:
+    previous = _migration_0035().down_revision
+    assert previous == "0034"
+    migrations.upgrade(migration_engine, previous)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_contact(connection, id=2, user_id=2)
+        _insert_children(connection, user_id=1, contact_id=1)
+        connection.execute(  # a second note at the same instant
+            text(
+                "INSERT INTO interactions (user_id, contact_id, kind, at, source, observed_at,"
+                " created_at, updated_at) VALUES (1, 1, 'note', :t, 'manual', :t, :t, :t)"
+            ),
+            {"t": STAMP},
+        )
+    migrations.upgrade(migration_engine, "0035")
+    with migration_engine.begin() as connection:
+        assert _count(connection, "interactions") == 2
+        assert (
+            connection.execute(
+                text("SELECT count(*) FROM interactions WHERE external_id IS NULL")
+            ).scalar_one()
+            == 2
+        )
+        assert _count(connection, "li_conversations") == 0
+        _insert_polled_interaction(connection, user_id=1, contact_id=1, external_id="urn:m:1")
+        _insert_polled_interaction(connection, user_id=2, contact_id=2, external_id="urn:m:1")
+        _insert_li_conversation(connection, id=1, user_id=1, contact_id=1, urn="urn:c:1")
+        _insert_li_conversation(connection, id=2, user_id=2, contact_id=2, urn="urn:c:1")
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_polled_interaction(connection, user_id=1, contact_id=1, external_id="urn:m:1")
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_li_conversation(connection, id=3, user_id=1, contact_id=1, urn="urn:c:1")
+    with migration_engine.begin() as connection:
+        connection.execute(text("DELETE FROM contacts WHERE id = 1"))  # the rows go with it
+        assert _count(connection, "li_conversations") == 1
+    index_columns = {
+        index["name"]: index["column_names"]
+        for index in inspect(migration_engine).get_indexes("li_conversations")
+    }
+    assert index_columns["ix_li_conversations_user_id_contact_id"] == ["user_id", "contact_id"]
+
+
+def test_0035_downgrades_to_interactions_without_an_external_id(migration_engine: Engine) -> None:
+    previous = _migration_0035().down_revision
+    migrations.upgrade(migration_engine, "0035")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_polled_interaction(connection, user_id=1, contact_id=1, external_id="urn:m:1")
+        _insert_li_conversation(connection, id=1, user_id=1, contact_id=1, urn="urn:c:1")
+    migrations.downgrade(migration_engine, previous)
+    inspector = inspect(migration_engine)
+    assert "li_conversations" not in inspector.get_table_names()
+    assert "external_id" not in {column["name"] for column in inspector.get_columns("interactions")}
+    with migration_engine.begin() as connection:
+        assert _count(connection, "interactions") == 1
+    migrations.upgrade(migration_engine, "0035")
+
+
+def _migration_0035() -> Any:
+    path = VERSIONS_DIR / "0035_linkedin_inbox.py"
+    spec = importlib.util.spec_from_file_location("migration_0035", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module

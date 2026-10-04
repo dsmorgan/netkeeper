@@ -630,7 +630,7 @@ Done when: you accept the ADR and it's merged.
 Issue: #375.
 
 **P4-08 Inbox poll, core side** · lane core · L · `safety`
-Goal: the `InboxDelta` contract, apply as interactions and conversation records, the runner, the worker kind, the scheduler handler, the `inbox_polls` budget, and the archive dedupe widened to polled rows. Migration 0034.
+Goal: the `InboxDelta` contract, apply as interactions and conversation records, the runner, the worker kind, the scheduler handler, the `inbox_polls` budget, and the archive dedupe widened to polled rows. Migration 0035.
 Depends on: P3-08. Merges after CP7.
 Done when: a fake source's delta produces the expected interactions idempotently; the runner can be started by hand.
 Issue: #378.

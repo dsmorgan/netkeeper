@@ -20,7 +20,13 @@ and enrichment). A handler:
 3. answers :attr:`~netkeeper.services.scheduler.JobOutcome.RETRY_LATER` when
    the worker could not reach the browser, and the scheduler parks a retry 20
    to 50 minutes out (spec 9.9);
-4. answers :attr:`~netkeeper.services.scheduler.JobOutcome.NOT_DONE` when a full
+4. for the inbox poll only (P4-08), answers
+   :attr:`~netkeeper.services.scheduler.JobOutcome.NOTHING_TO_WATCH` before anything
+   else when no live enrollment has a contact with a LinkedIn URN: it records no
+   run and attaches to nothing, and the fire counts as skipped. The inbox kind has
+   a handler here but is not in ``SERVED_SCHEDULES`` until P4-01 (#380) wires its
+   page source, so ``netkeeper serve`` never fires it today;
+5. answers :attr:`~netkeeper.services.scheduler.JobOutcome.NOT_DONE` when a full
    sync ran but lost some of the page's answers (#200,
    :func:`netkeeper.services.runs.lost_answers`): it is incomplete and aged
    nobody, so the week's full sync is not done, and the scheduler offers it again
@@ -44,6 +50,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import LinkedInSettings
+from netkeeper.crm.inbox_apply import has_anything_to_watch
 from netkeeper.db import off_loop, session_scope
 from netkeeper.models import SyncRunKind, SyncRunTrigger, User, UserKind
 from netkeeper.models.base import utcnow
@@ -72,6 +79,10 @@ RUN_KIND: Final[dict[JobKind, SyncRunKind]] = {
     JobKind.ENRICH: SyncRunKind.ENRICH,
 }
 
+#: The inbox poll's run kind. Its handler is registered with the others, but the kind
+#: stays out of ``SERVED_SCHEDULES`` until P4-01 (#380) wires a page source.
+INBOX_RUN_KIND: Final = {JobKind.INBOX: SyncRunKind.INBOX}
+
 #: The task name a run is submitted under.
 RUN_TASK_NAME: Final = "linkedin.run"
 
@@ -83,11 +94,15 @@ def serve_registry(
     *,
     clock: Callable[[], datetime],
 ) -> JobRegistry:
-    """One handler per kind in :data:`RUN_KIND`, each recording and running a scheduled run."""
-    return {
+    """One handler per kind in :data:`RUN_KIND` and :data:`INBOX_RUN_KIND`, each recording
+    and running a scheduled run. The inbox handler first checks there is anyone to watch."""
+    registry: dict[JobKind, JobHandler] = {
         kind: _handler(factory, executor, tasks, run_kind, clock=clock)
         for kind, run_kind in RUN_KIND.items()
     }
+    for kind, run_kind in INBOX_RUN_KIND.items():
+        registry[kind] = _handler(factory, executor, tasks, run_kind, clock=clock, watch_check=True)
+    return registry
 
 
 def submit_run(
@@ -115,7 +130,13 @@ def _handler(
     run_kind: SyncRunKind,
     *,
     clock: Callable[[], datetime],
+    watch_check: bool = False,
 ) -> JobHandler:
+    def nothing_to_watch(ctx: JobContext) -> bool:
+        with session_scope(factory) as session:
+            user = session.get(User, ctx.user_id)
+            return user is None or not has_anything_to_watch(session, user)
+
     def record(ctx: JobContext) -> int | None:
         with session_scope(factory, write=True) as session:
             user = session.get(User, ctx.user_id)
@@ -130,6 +151,12 @@ def _handler(
             ).id
 
     async def handle(ctx: JobContext) -> JobOutcome | None:
+        if watch_check and await off_loop(nothing_to_watch, ctx):
+            log.info(
+                "scheduled %s not started: no live enrollment has a LinkedIn contact",
+                run_kind.value,
+            )
+            return JobOutcome.NOTHING_TO_WATCH
         try:
             # Off the event loop, in one writer session as before (#259).
             run_id = await off_loop(record, ctx)
@@ -225,7 +252,7 @@ def start_serve_scheduler(
     a heartbeat, and a fire on a disarmed account is skipped by the arm gate
     (``build_scheduler``'s default, never turned off here). The scheduler runs
     :data:`~netkeeper.services.scheduler.SERVED_SCHEDULES` only (no inbox poll:
-    it has no runner yet) with the configured heat gate and active hours.
+    it has no page source yet) with the configured heat gate and active hours.
     """
     executor = extractor.executor(factory, bus)
     _quiet_the_heartbeat()

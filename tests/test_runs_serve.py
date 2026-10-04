@@ -235,7 +235,13 @@ async def test_a_disarmed_serve_never_touches_the_browser_across_a_week(
                     user_id=user_id, account_id=account, kind=kind, due=clock.at, catch_up=False
                 )
             )
-            assert outcome is scheduler.JobOutcome.DISARMED_AFTER_GATE
+            # The inbox poll (P4-08) has nobody to watch here, so it stops even earlier.
+            expected = (
+                scheduler.JobOutcome.NOTHING_TO_WATCH
+                if kind is scheduler.JobKind.INBOX
+                else scheduler.JobOutcome.DISARMED_AFTER_GATE
+            )
+            assert outcome is expected
         await app.state.tasks.join()
         assert _rows(bare_engine) == []
         with session_scope(factory, write=True) as session:

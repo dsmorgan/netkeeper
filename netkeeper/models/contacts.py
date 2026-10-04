@@ -578,6 +578,10 @@ class Interaction(ContactChild, Base):
     """One thing that happened between you and a contact: the timeline (spec 8.1)."""
 
     __tablename__ = "interactions"
+    # A LinkedIn message the inbox poll recorded is unique per user by its URN (P4-08,
+    # 0035), so a repeat poll writes nothing twice. NULLs are distinct on SQLite and
+    # PostgreSQL alike, so every other interaction is unaffected.
+    __table_args__ = (UniqueConstraint("user_id", "external_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, sort_order=-100)
     kind: Mapped[InteractionKind] = mapped_column(
@@ -591,6 +595,9 @@ class Interaction(ContactChild, Base):
     message_id: Mapped[int | None] = mapped_column(
         ForeignKey("messages.id", ondelete="SET NULL"), index=True
     )
+    # Where the interaction came from outside netkeeper, when it has an id there: the
+    # LinkedIn message URN for one the inbox poll recorded (P4-08). NULL otherwise.
+    external_id: Mapped[str | None] = mapped_column(String(300))
 
     contact: Mapped[Contact] = relationship(back_populates="interactions")
 

@@ -6573,7 +6573,7 @@ export interface components {
         };
         /**
          * SyncRunKind
-         * @description Spec 8.4's run kinds. ``inbox`` and ``message_send`` have no runner yet.
+         * @description Spec 8.4's run kinds. ``message_send`` has no runner yet.
          * @enum {string}
          */
         SyncRunKind: "connections_full" | "connections_incremental" | "enrich" | "inbox" | "message_send";

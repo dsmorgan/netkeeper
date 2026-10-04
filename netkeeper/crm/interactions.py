@@ -179,13 +179,16 @@ def add_interaction(
     message_id: int | None = None,
     *,
     source: ContactSource = ContactSource.MANUAL,
+    external_id: str | None = None,
 ) -> Interaction:
     """Record ``kind`` at ``at`` on one of ``user``'s contacts and return the flushed row.
 
     An outbound kind raises the contact's ``last_contacted_at`` to ``at`` when
     that is later than the current value; an earlier outbound row, backfilled
     from an archive, leaves a newer value alone. ``source`` is ``manual`` for a
-    person's own entry; an importer passes its own. :class:`NotFound` when the
+    person's own entry; an importer passes its own. ``external_id`` is the row's id
+    outside netkeeper (a LinkedIn message URN, P4-08), unique per user; the caller
+    checks it is new. :class:`NotFound` when the
     contact is not ``user``'s; :class:`NoSuchMessage` for a ``message_id`` that is not
     a message to that contact; ``ValueError`` for a naive ``at``; ``RuntimeError``
     when ``session`` is not a writer.
@@ -203,6 +206,7 @@ def add_interaction(
         summary=summary,
         message_id=message_id,
         source=ContactSource(source),
+        external_id=external_id,
     )
     session.add(row)
     session.flush()

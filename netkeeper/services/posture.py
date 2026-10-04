@@ -211,8 +211,8 @@ SESSION_EVIDENCE_FRESH_FOR: Final = timedelta(hours=24)
 #: named here reads as having no runner.
 NOT_SERVED_BECAUSE: Final[dict[JobKind, str]] = {
     JobKind.INBOX: (
-        "the LinkedIn inbox poll has no runner yet, so `netkeeper serve` does not schedule"
-        " it; Gmail replies are polled by the campaign engine; see the reply poll row"
+        "the LinkedIn inbox poll has no page source yet, so `netkeeper serve` does not"
+        " schedule it; Gmail replies are polled by the campaign engine; see the reply poll row"
     ),
 }
 
@@ -612,16 +612,14 @@ ENFORCED_BY: Final[dict[str, tuple[str, ...]]] = {
 #: this report or a rehearsal. Code that exists but nothing starts enforces
 #: nothing. Since P2-10 the connections sync and enrichment runners are live --
 #: ``netkeeper linkedin sync``/``enrich``, the runs API, and ``serve``'s
-#: scheduler all reach them through ``netkeeper.worker`` -- so what is left is
-#: the two budgets whose jobs do not exist yet: the inbox poll and LinkedIn
-#: auto-send (phase 3 and later). Kept in sync by
+#: scheduler all reach them through ``netkeeper.worker`` -- and since P4-08 the
+#: inbox poll's runner is too (``netkeeper linkedin inbox`` and the runs API),
+#: spending ``inbox_polls`` before every read. What is left is the budget whose job
+#: does not exist yet: LinkedIn auto-send. Kept in sync by
 #: ``test_the_unenforced_list_is_what_the_package_actually_shows``, which is the
 #: whole point: a hand-maintained list of "not wired up yet" is wrong the week
 #: after it is written.
-UNENFORCED_TODAY: Final[tuple[str, ...]] = (
-    f"{_CONSUME}[{_ACTION_CLASS}.INBOX_POLLS]",
-    f"{_CONSUME}[{_ACTION_CLASS}.LI_MESSAGES_AUTO]",
-)
+UNENFORCED_TODAY: Final[tuple[str, ...]] = (f"{_CONSUME}[{_ACTION_CLASS}.LI_MESSAGES_AUTO]",)
 
 
 def _unenforced_protections() -> tuple[str, ...]:
@@ -642,10 +640,13 @@ GAPS: Final[tuple[str, ...]] = (
     " tell you a limit is set and how much of it is spent; it cannot tell you"
     " that the code which will do the work remembers to ask. The protections"
     f" listed next have no enforcing caller that netkeeper runs yet: {_UNENFORCED_TEXT}."
-    " Their jobs (the inbox poll, LinkedIn auto-send) do not exist yet, so each of"
-    " those limits is a setting rather than a brake until they do. The connections"
-    " sync and enrichment runners are wired: `netkeeper linkedin sync` and"
-    " `enrich`, the runs API, and `netkeeper serve`'s scheduler reach them.",
+    " Its job (LinkedIn auto-send) does not exist yet, so that limit is a setting"
+    " rather than a brake until it does. The connections sync and enrichment"
+    " runners are wired: `netkeeper linkedin sync` and `enrich`, the runs API, and"
+    " `netkeeper serve`'s scheduler reach them. The inbox poll's runner spends"
+    " `inbox_polls` before every read and is reached by `netkeeper linkedin inbox`"
+    " and the runs API, but it has no page source yet, so a poll fails before it"
+    " reads anything and `netkeeper serve` does not schedule it.",
     "the activity lock binds netkeeper processes that share this data directory on"
     " this machine: it is a file lock under the data directory. A netkeeper started"
     " with a different NETKEEPER_DATA, a netkeeper on another machine, or any other"
@@ -657,7 +658,7 @@ GAPS: Final[tuple[str, ...]] = (
     " and attaches as a second CDP client. Nothing in netkeeper deletes it; only a"
     " manual `rm` can cause this, so leave `locks/` alone while `netkeeper serve` runs.",
     "`netkeeper serve` runs the scheduler for the connections syncs and"
-    " enrichment; the inbox poll has no runner yet and is not scheduled. A"
+    " enrichment; the inbox poll has no page source yet and is not scheduled. A"
     " scheduled run fires only while the scheduled-runs row above says armed;"
     " this report reads that flag from the database and cannot see a scheduler"
     " some process was started with differently.",
@@ -1352,7 +1353,7 @@ def _scheduled_jobs(scheduler: SchedulerPosture) -> Protection:
     job kind has a due time would be claiming protection from a mechanism that
     is not running, so a schedule that is missing or half-established warns. A
     kind ``netkeeper serve`` does not schedule (the LinkedIn inbox poll, which has
-    no runner) is named as not applicable, never as missing.
+    no page source yet) is named as not applicable, never as missing.
     """
     states = [
         f"{kind} {'scheduled' if due is not None else 'missing'}"

@@ -73,7 +73,7 @@ from netkeeper.models.imports import (
     RowChanges,
     RowDecision,
 )
-from netkeeper.models.linkedin import DEFAULT_ACCOUNT_LABEL, LinkedInAccount
+from netkeeper.models.linkedin import DEFAULT_ACCOUNT_LABEL, LiConversation, LinkedInAccount
 from netkeeper.models.lists import (
     LIST_NAME_MAX_LENGTH,
     LIST_TABLES,
@@ -168,6 +168,7 @@ __all__ = [
     "Interaction",
     "InteractionKind",
     "JsonValue",
+    "LiConversation",
     "LinkKind",
     "LinkedInAccount",
     "ListKind",

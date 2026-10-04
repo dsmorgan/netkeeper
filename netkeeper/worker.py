@@ -4,8 +4,9 @@ This is the one place a LinkedIn run meets the browser. For a ``sync_runs``
 row (:mod:`netkeeper.services.runs`) it takes the account's activity lock,
 attaches to the Chrome the user started (ADR 0002: attach only, never
 launch), builds the source that reads through that tab, and calls the runner:
-:func:`netkeeper.services.connections_sync.sync_connections` or
-:func:`netkeeper.services.enrichment.enrich_contacts`. The runners own budgets,
+:func:`netkeeper.services.connections_sync.sync_connections`,
+:func:`netkeeper.services.enrichment.enrich_contacts`, or
+:func:`netkeeper.services.inbox_poll.poll_inbox`. The runners own budgets,
 heat, the session flag, pacing, cancel, and how the run ended; this module
 owns only what needs the browser.
 
@@ -69,6 +70,7 @@ from netkeeper.linkedin.browser import (
 )
 from netkeeper.linkedin.connections import ConnectionsSource, SyncMode
 from netkeeper.linkedin.enrich import ProfileSource
+from netkeeper.linkedin.inbox import InboxSource
 from netkeeper.linkedin.page_connections import PageConnections
 from netkeeper.linkedin.page_profiles import PageProfiles
 from netkeeper.logging_setup import setup_logging
@@ -78,6 +80,7 @@ from netkeeper.services.budgets import profile_visit_risk_warning
 from netkeeper.services.connections_sync import sync_connections
 from netkeeper.services.enrichment import enrich_contacts
 from netkeeper.services.events import Event, EventBus
+from netkeeper.services.inbox_poll import poll_inbox
 from netkeeper.services.linkedin_accounts import local_account_id, scheduled_runs_armed
 from netkeeper.services.scheduled_runs import ServeExtractor
 from netkeeper.web.app import create_app
@@ -126,6 +129,29 @@ def profile_source(run: BrowserRun, *, sleep: Sleep = asyncio.sleep) -> PageProf
     return PageProfiles(run, sleep=sleep)
 
 
+#: Why a live inbox poll cannot read yet: the one line its run's ``error`` carries.
+NO_INBOX_SOURCE: Final = (
+    "the LinkedIn inbox page source is not built yet (P4-01, #380); nothing was read"
+)
+
+
+def inbox_source(run: BrowserRun, *, sleep: Sleep = asyncio.sleep) -> InboxSource:
+    """The source a live inbox poll reads through: P4-01's page source (#380).
+
+    Not built yet, so this raises :class:`NotImplementedError` with
+    :data:`NO_INBOX_SOURCE`. The worker has attached by then, but the poll has spent
+    no budget and loaded no page. The run ends ``failed``, and ``netkeeper serve``
+    does not schedule the poll until P4-01 replaces this.
+    """
+    raise NotImplementedError(NO_INBOX_SOURCE)
+
+
+class InboxSourceFactory(Protocol):
+    """Builds an inbox poll's :class:`InboxSource`: :func:`inbox_source`'s shape."""
+
+    def __call__(self, run: BrowserRun, *, sleep: Sleep) -> InboxSource: ...
+
+
 class ProfileSourceFactory(Protocol):
     """Builds an enrichment run's :class:`ProfileSource`: :func:`profile_source`'s shape."""
 
@@ -167,6 +193,7 @@ class BrowserWorker:
         sleep: Sleep = asyncio.sleep,
         rng: random.Random | None = None,
         profiles: ProfileSourceFactory = profile_source,
+        inbox_sources: InboxSourceFactory = inbox_source,
     ) -> None:
         self.provider = provider
         self._factory = factory
@@ -179,6 +206,9 @@ class BrowserWorker:
         # landing wait, since its fake Chrome serves no profile screen and would
         # otherwise sit out the live 20 s wait on every visit. Always the default live.
         self._profiles = profiles
+        # The inbox poll's source (P4-08): a test passes a fake; live, P4-01's page
+        # source once it exists, and until then a factory that refuses.
+        self._inbox_sources = inbox_sources
 
     async def execute(self, run_id: int, user_id: int) -> runs.RunOutcome:
         """Run ``run_id`` to its end and record how it ended. See the module docstring.
@@ -245,6 +275,16 @@ class BrowserWorker:
         async def progress(event: Any) -> None:
             self._publish("run.progress", run_id, user_id, _plain(event))
 
+        if facts.kind is SyncRunKind.INBOX:
+            await poll_inbox(
+                self._factory,
+                user_id,
+                self._inbox_sources(browser, sleep=self._sleep),
+                settings=self._settings,
+                run_id=run_id,
+                clock=self._clock,
+            )
+            return
         if facts.kind is SyncRunKind.ENRICH:
             await enrich_contacts(
                 self._factory,

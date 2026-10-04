@@ -1017,11 +1017,16 @@ def test_a_caller_nothing_starts_is_not_live() -> None:
     assert _callers_of("netkeeper.services.heat.raise_heat", live_only=False) == {
         package / "services" / "connections_sync.py",
         package / "services" / "enrichment.py",
+        package / "services" / "inbox_poll.py",  # P4-08
     }
     assert _callers_of("netkeeper.services.heat.raise_heat") == {
         package / "services" / "connections_sync.py",
         package / "services" / "enrichment.py",
+        package / "services" / "inbox_poll.py",
     }
+    # The inbox poll's runner is live through the worker (P4-08), and only through it.
+    assert package / "services" / "inbox_poll.py" in live
+    assert package / "services" / "inbox_poll.py" not in without_worker
 
 
 # The scanner, shown snippets as if they were a file in the package (#162).
@@ -1205,7 +1210,7 @@ def test_a_clean_report_claims_configuration_and_not_enforcement(
     assert "in force" not in text.split("nothing is misconfigured")[1]
     assert "never callers" in text
     for name in _report(writer, user).protections:
-        if name.name in ("budget inbox_polls", "budget li_messages_auto"):
+        if name.name == "budget li_messages_auto":
             assert name.name in text.split("not covered by this report:")[1]
 
 
@@ -1218,11 +1223,12 @@ def test_the_gap_lists_the_protections_nothing_enforces_yet(writer: Session, use
     unwired = gaps.split("no enforcing caller that netkeeper runs yet:")[1].split(".")[0]
     assert unwired.strip()
 
-    # Since P2-10 the runners and the scheduler are live (netkeeper.worker), so
-    # what is left is the two budgets whose jobs do not exist yet -- and nothing
-    # the runners enforce may still be listed as unwired.
-    assert unwired.strip() == "budget inbox_polls, budget li_messages_auto"
+    # Since P2-10 the runners and the scheduler are live (netkeeper.worker), and since
+    # P4-08 the inbox poll's runner, so what is left is the budget whose job does not
+    # exist yet -- and nothing the runners enforce may still be listed as unwired.
+    assert unwired.strip() == "budget li_messages_auto"
     for name in (
+        "budget inbox_polls",
         "budget connection_pages",
         "budget profile_visits",
         "warm-up ramp",
@@ -1232,6 +1238,8 @@ def test_the_gap_lists_the_protections_nothing_enforces_yet(writer: Session, use
     ):
         assert name not in unwired, name
     assert "sync and enrichment runners are wired" in gaps
+    assert "inbox poll's runner spends `inbox_polls`" in gaps
+    assert "no page source yet" in gaps
 
 
 _CONNECTION_PAGES = f"{_CONSUME}[netkeeper.services.budgets.ActionClass.CONNECTION_PAGES]"
@@ -1801,7 +1809,7 @@ def test_a_served_schedule_is_on_and_names_each_kind(writer: Session) -> None:
     assert row.status is Status.ON and row.warnings == ()
     assert row.value.startswith(
         "connections_incremental scheduled; connections_full scheduled; enrich scheduled;"
-        " inbox not applicable (the LinkedIn inbox poll has no runner yet"
+        " inbox not applicable (the LinkedIn inbox poll has no page source yet"
     )
     assert "Gmail replies are polled by the campaign engine; see the reply poll row" in row.value
     assert report.scheduler.unscheduled == ()
