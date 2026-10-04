@@ -41,7 +41,7 @@ from netkeeper.models import (
 )
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import campaign_engine, campaign_review
-from netkeeper.services.campaign_engine import run_tick
+from netkeeper.services.campaign_engine import Decision, Skip, run_tick
 from netkeeper.services.campaign_guards import Reason, check_step
 
 ME = me_fields(SETTINGS.me)
@@ -125,17 +125,21 @@ def _complete_and_activate(r: Reviewed, review: campaign_review.StepReview) -> N
         )
 
 
-def _tick_until_quiet(r: Reviewed, sender: FakeSender) -> None:
+def _tick_until_quiet(r: Reviewed, sender: FakeSender) -> list[Decision]:
+    """Tick until nothing more fires; every decision the ticks made."""
+    decisions: list[Decision] = []
     for n in range(12):
         at = NOW + timedelta(minutes=1 + 10 * n)
         sender.now = at
-        run_tick(
+        for result in run_tick(
             r.factory,
             settings=SETTINGS,
             sender=sender,
             clock=partial(_at, at),
             rng=random.Random(n),
-        )
+        ):
+            decisions.extend(result.decisions)
+    return decisions
 
 
 def _at(when: datetime) -> datetime:
@@ -184,6 +188,8 @@ def _exclude_bob(
         contact.do_not_contact = True
     elif how is Reason.NO_EMAIL:
         contact.emails.clear()
+    elif how is Reason.EMAIL_INVALID:
+        contact.emails[0].status = EmailStatus.INVALID
     elif how is Reason.NEEDS_REVIEW:
         contact.needs_review_at = NOW
     elif how is Reason.ARCHIVED:
@@ -209,6 +215,7 @@ def _exclude_bob(
     [
         Reason.DO_NOT_CONTACT,
         Reason.NO_EMAIL,
+        Reason.EMAIL_INVALID,
         Reason.NEEDS_REVIEW,
         Reason.DO_NOT_SEND,
         Reason.IN_ANOTHER_CAMPAIGN,
@@ -223,7 +230,8 @@ def test_a_contact_a_guard_excludes_after_activation_is_never_sent(
 ) -> None:
     """#346: activation needs no guard acknowledgement, and the guards still apply when
     the step fires: a contact a guard excludes only after the review, the approval and
-    activation is sent nothing, whatever the guard."""
+    activation is sent nothing, whatever the guard. The campaign is one email step, so
+    each address guard is the one deciding, and the tick's decision names it."""
     r = _reviewing(
         session_factory,
         subject="{{ first_name }}",
@@ -244,10 +252,18 @@ def test_a_contact_a_guard_excludes_after_activation_is_never_sent(
         _exclude_bob(session, r.user, r.campaign_id, contact, how)
         step = get_scoped(session, r.user, CampaignStep, r.step_id)
         assert step is not None
-        assert how in check_step(session, r.user, enrollment, step, now=NOW).reasons
+        assert step.channel is TemplateChannel.EMAIL
+        assert check_step(session, r.user, enrollment, step, now=NOW).reasons == (how,)
 
     sender = FakeSender()
-    _tick_until_quiet(r, sender)
+    decisions = _tick_until_quiet(r, sender)
+
+    skipped = [d for d in decisions if d.enrollment_id == r.ok[1]]
+    assert skipped and all(not d.fired for d in skipped)
+    # Other decisions only wait for the mailbox's spacing; the guard's names its reason,
+    # and that reason alone.
+    [guarded] = [d.reasons for d in skipped if d.reasons != (Skip.SPACING,)]
+    assert guarded in {(Skip.GUARD_EXCLUDED, how.value), (Skip.ENDED, how.value)}
 
     assert sorted(f.to_address or "" for f in sender.firings) == ["ada@contacts.example"]
     with session_scope(r.factory) as session:
@@ -258,6 +274,55 @@ def test_a_contact_a_guard_excludes_after_activation_is_never_sent(
                 )
             )
         )
+
+
+def test_a_contact_pending_in_two_campaigns_starts_only_in_the_older_enrollment(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#346 review: another campaign counts only for an older enrollment, in the summary
+    as in check_step. The older campaign counts the contact as starting; the newer one
+    skips it as in another campaign."""
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        mailbox = make_mailbox(session, user, **ARMED_FOR_SEND)
+        x = factories.make_contact(session, user, emails=["x@contacts.example"])
+        older, newer = (
+            factories.make_campaign(
+                session,
+                user,
+                channels=(TemplateChannel.EMAIL,),
+                status=CampaignStatus.REVIEWING,
+                mailbox_id=mailbox.id,
+            )
+            for _ in range(2)
+        )
+        in_older = factories.make_enrollment(session, older, x, status=EnrollmentStatus.PENDING)
+        in_newer = factories.make_enrollment(session, newer, x, status=EnrollmentStatus.PENDING)
+        assert in_older.id < in_newer.id
+
+        def report(campaign: Campaign) -> campaign_review.GuardReport:
+            return campaign_review.guard_report(session, user, campaign, now=NOW)
+
+        def at_fire(enrollment: Enrollment, campaign: Campaign) -> set[Reason]:
+            verdict = check_step(session, user, enrollment, campaign.steps[0], now=NOW)
+            # Pending and reviewing: what check_step adds for not being live yet.
+            return set(verdict.reasons) - {
+                Reason.ENROLLMENT_NOT_ACTIVE,
+                Reason.CAMPAIGN_NOT_ACTIVE,
+            }
+
+        first, second = report(older), report(newer)
+        assert (first.summary, first.will_start, first.skipped) == (
+            "1 will start, none skipped",
+            1,
+            (),
+        )
+        assert at_fire(in_older, older) == set()
+        assert second.summary == "0 will start, 1 skipped (1 in another campaign)"
+        assert [(c.contact_id, c.reasons) for c in second.skipped] == [
+            (x.id, ("in another campaign",))
+        ]
+        assert at_fire(in_newer, newer) == {Reason.IN_ANOTHER_CAMPAIGN}
 
 
 def _summary(r: Reviewed) -> campaign_review.GuardReport:
@@ -381,3 +446,22 @@ def test_a_lint_error_blocks_every_message_and_activation(
             campaign_review.activate(
                 session, r.user, r.campaign_id, settings=SETTINGS, me=ME, now=NOW, starts_at=NOW
             )
+
+
+def test_the_summary_alone_never_reads_the_old_tools_history(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r = _reviewing(session_factory, subject="{{ first_name }}", body="Hi {{ first_name }}")
+
+    def unwanted(*_: object) -> None:
+        pytest.fail("the note was read for a caller that does not show it")
+
+    monkeypatch.setattr(campaign_review, "prior_contact", unwanted)
+    with session_scope(r.factory) as session:
+        campaign = campaign_review.get_campaign(session, r.user, r.campaign_id)
+        assert campaign_review.guard_summary(session, r.user, campaign, now=NOW) == (
+            "3 will start, 1 skipped (1 do-not-contact)"
+        )
+        assert campaign_review.guard_summary_and_note(
+            session, r.user, campaign, now=NOW, include_note=False
+        ) == ("3 will start, 1 skipped (1 do-not-contact)", None)
