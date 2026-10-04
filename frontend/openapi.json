@@ -6777,7 +6777,11 @@
           "missing_subject",
           "bad_link",
           "missing_value",
-          "removed_field"
+          "removed_field",
+          "linkedin_subject",
+          "linkedin_too_long",
+          "linkedin_long",
+          "linkedin_newline"
         ],
         "title": "LintRule",
         "type": "string"

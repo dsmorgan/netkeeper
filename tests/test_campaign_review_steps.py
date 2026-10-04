@@ -19,6 +19,7 @@ import pytest
 from campaign_fakes import ARMED_FOR_SEND, NOW, SETTINGS, FakeSender, make_mailbox
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.campaigns.render import LintRule
 from netkeeper.crm import do_not_send
 from netkeeper.crm import lists as list_service
 from netkeeper.crm.self_contact import update_self_contact
@@ -460,3 +461,58 @@ def test_the_summary_alone_never_reads_the_old_tools_history(
         assert campaign_review.guard_summary_and_note(
             session, r.user, campaign, now=NOW, include_note=False
         ) == ("3 will start, 1 skipped (1 do-not-contact)", None)
+
+
+def _linkedin_reviewing(factory: sessionmaker[Session], *, subject: str | None, body: str) -> Any:
+    """A one-step LinkedIn campaign under review, with one contact enrolled."""
+    with session_scope(factory, write=True) as session:
+        user = factories.make_user(session)
+        campaign = factories.make_campaign(
+            session, user, channels=(TemplateChannel.LINKEDIN,), status=CampaignStatus.REVIEWING
+        )
+        template = get_scoped(session, user, Template, campaign.steps[0].template_id)
+        assert template is not None
+        template.subject, template.body = subject, body
+        contact = factories.make_contact(session, user)
+        factories.make_enrollment(session, campaign, contact, status=EnrollmentStatus.PENDING)
+        return user, campaign.id
+
+
+@pytest.mark.parametrize(
+    ("subject", "body", "rule"),
+    [
+        ("Hello", "Hi {{ first_name }}", LintRule.LINKEDIN_SUBJECT),
+        (None, "Hi {{ first_name }},\nthanks", LintRule.LINKEDIN_NEWLINE),
+        (None, "Hi {{ first_name }} " + "x" * 8000, LintRule.LINKEDIN_TOO_LONG),
+    ],
+    ids=["subject", "newline", "too_long"],
+)
+def test_a_linkedin_step_that_fails_lint_blocks_activation(
+    session_factory: sessionmaker[Session], subject: str | None, body: str, rule: LintRule
+) -> None:
+    """P4-11: what the prefill would refuse fails lint, and activation needs a clean lint."""
+    user, campaign_id = _linkedin_reviewing(session_factory, subject=subject, body=body)
+    with session_scope(session_factory, write=True) as session:
+        result = campaign_review.record_lint(session, user, campaign_id, now=NOW)
+        assert not result.clean
+        [(_position, issues)] = result.steps
+        assert [issue.rule for issue in issues] == [rule]
+        campaign = campaign_review.get_campaign(session, user, campaign_id)
+        gaps = campaign_review.missing(session, user, campaign, now=NOW)
+        assert "lint" in {g.requirement for g in gaps}
+        with pytest.raises(campaign_review.ReviewIncomplete):
+            campaign_review.activate(
+                session, user, campaign_id, settings=SETTINGS, now=NOW, starts_at=NOW
+            )
+
+
+def test_a_long_linkedin_message_is_a_warning_that_does_not_block_lint(
+    session_factory: sessionmaker[Session],
+) -> None:
+    user, campaign_id = _linkedin_reviewing(
+        session_factory, subject=None, body="Hi {{ first_name }} " + "x" * 1500
+    )
+    with session_scope(session_factory, write=True) as session:
+        result = campaign_review.record_lint(session, user, campaign_id, now=NOW)
+        assert result.clean
+        assert result.steps == ((1, ()),)

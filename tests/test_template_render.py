@@ -18,6 +18,9 @@ from netkeeper.campaigns.render import (
     ALLOWED_NODES,
     ALLOWED_TESTS,
     CONTACT_FIELDS,
+    LINKEDIN_ALLOW_NEWLINES,
+    LINKEDIN_MESSAGE_LONG_CHARS,
+    LINKEDIN_MESSAGE_MAX_CHARS,
     MAX_INT_BITS,
     MAX_LITERAL_CHARS,
     MAX_NESTING,
@@ -44,6 +47,9 @@ EMAIL = TemplateChannel.EMAIL
 LINKEDIN = TemplateChannel.LINKEDIN
 TODAY = date(2026, 9, 26)
 GOOD_BODY = "Hi {{ first_name }}, Ada here."
+# A subject that is clean on its own, for tests about the body that need multiple lines
+# or length, which a LinkedIn message may not have (P4-11).
+SUBJECT = "Hello"
 
 
 def _rules(issues: list[LintIssue]) -> list[tuple[LintRule, str | None]]:
@@ -714,7 +720,7 @@ def test_filter_results_count_against_the_budget() -> None:
 def test_numbers_stay_small() -> None:
     big = "9" * MAX_LITERAL_CHARS  # about 3,300 bits; four of them pass 10,000
     body = "{{ first_name }}{{ " + " * ".join([big] * 4) + " }}"
-    assert lint(LINKEDIN, None, body) == []
+    assert lint(EMAIL, SUBJECT, body) == []
     assert "bits" in str(_fails_fast(body))
 
 
@@ -741,7 +747,7 @@ def test_a_huge_number_literal_is_refused_not_a_crash(digits: int, rule: LintRul
 def test_deep_nesting_is_refused_fast_not_a_crash(deep: str) -> None:
     body = "{{ first_name }}" + (deep if deep.startswith("{%") else "{{ " + deep + " }}")
     start = time.perf_counter()
-    issues = lint(LINKEDIN, None, body)
+    issues = lint(EMAIL, SUBJECT, body)
     assert time.perf_counter() - start < 1.0
     assert has_errors(issues)
     assert {issue.rule for issue in issues} <= {LintRule.UNSUPPORTED, LintRule.SYNTAX}
@@ -811,7 +817,7 @@ def test_each_finding_about_one_place_names_its_line() -> None:
         "{% for x in y %}{% endfor %}\n"  # 5
         "see http:/broken\n"  # 6
     )
-    assert _lines(lint(LINKEDIN, None, body)) == [
+    assert _lines(lint(EMAIL, SUBJECT, body)) == [
         (LintRule.UNDEFINED_VARIABLE, "frist_name", 2),
         (LintRule.REMOVED_FIELD, "me.age", 3),
         (LintRule.UNSAFE_ATTRIBUTE, "_x", 3),
@@ -822,7 +828,7 @@ def test_each_finding_about_one_place_names_its_line() -> None:
 
 
 def test_a_syntax_error_names_its_line() -> None:
-    [issue] = lint(LINKEDIN, None, "{{ first_name }}\n\n{{ oops")
+    [issue] = lint(EMAIL, SUBJECT, "{{ first_name }}\n\n{{ oops")
     assert (issue.rule, issue.line) == (LintRule.SYNTAX, 3)
 
 
@@ -840,19 +846,21 @@ def test_a_bad_link_after_tags_and_fields_that_span_lines_names_the_right_line()
         "{% if company\n %}x{% endif %}{# a\ncomment #}\n"  # lines 4-6
         "go to https://{{ company }}.example/ok or https://bad_host!.example\n"  # line 7
     )
-    assert _lines(lint(LINKEDIN, None, body)) == [
+    assert _lines(lint(EMAIL, SUBJECT, body)) == [
         (LintRule.BAD_LINK, "https://bad_host!.example", 7)
     ]
 
 
 def test_the_same_finding_twice_is_reported_once_at_its_first_line() -> None:
     body = "{{ first_name }}\n{{ frist_name }}\n{{ frist_name }}"
-    assert _lines(lint(LINKEDIN, None, body)) == [(LintRule.UNDEFINED_VARIABLE, "frist_name", 2)]
+    assert _lines(lint(EMAIL, SUBJECT, body)) == [
+        (LintRule.UNDEFINED_VARIABLE, "frist_name", 2)
+    ]
 
 
 def test_a_missing_value_warning_names_the_line_the_field_is_first_used_on() -> None:
     rendered = render(
-        LINKEDIN, None, "Hi {{ first_name }}\n\n{{ company }} {{ company }}",
+        EMAIL, SUBJECT, "Hi {{ first_name }}\n\n{{ company }} {{ company }}",
         _values(first_name="Bo"), today=TODAY,
     )  # fmt: skip
     assert _lines(list(rendered.issues)) == [(LintRule.MISSING_VALUE, "company", 3)]
@@ -917,3 +925,133 @@ def test_a_field_lint_allows_but_the_list_cannot_place_is_an_error(
 def test_every_listed_field_has_an_invented_placeholder() -> None:
     assert {f.name for f in merge_fields()} == set(PLACEHOLDER_EXAMPLES)
     assert all(placeholder_example(f.name) for f in merge_fields())
+
+
+# --- LinkedIn messages (P4-11) ---------------------------------------------------------
+
+
+def _sized(chars: int) -> str:
+    """A clean one-line LinkedIn body exactly ``chars`` characters long."""
+    head = "Hi {{ first_name }} "
+    return head + "x" * (chars - len(head))
+
+
+def test_the_linkedin_limits_are_pinned() -> None:
+    assert LINKEDIN_MESSAGE_MAX_CHARS == 8000
+    assert LINKEDIN_MESSAGE_LONG_CHARS == 1000
+    assert LINKEDIN_ALLOW_NEWLINES is False
+
+
+@pytest.mark.parametrize("subject", ["Hello", "", "   "])
+def test_a_linkedin_template_with_a_subject_is_an_error(subject: str) -> None:
+    issues = lint(LINKEDIN, subject, GOOD_BODY)
+    assert _lines(issues) == [(LintRule.LINKEDIN_SUBJECT, None, 1)]
+    assert issues[0].part is Part.SUBJECT
+    assert has_errors(issues)
+
+
+def test_a_linkedin_body_at_the_warning_limit_is_clean() -> None:
+    body = _sized(LINKEDIN_MESSAGE_LONG_CHARS)
+    assert len(body) == 1000
+    assert lint(LINKEDIN, None, body) == []
+
+
+def test_a_linkedin_body_over_the_warning_limit_is_a_warning() -> None:
+    issues = lint(LINKEDIN, None, _sized(LINKEDIN_MESSAGE_LONG_CHARS + 1))
+    assert _lines(issues) == [(LintRule.LINKEDIN_LONG, None, 1)]
+    assert issues[0].severity is Severity.WARNING
+    assert issues[0].part is Part.BODY
+    assert "1,001 characters" in issues[0].message
+    assert not has_errors(issues)
+
+
+def test_a_linkedin_body_at_the_hard_limit_is_only_long() -> None:
+    body = _sized(LINKEDIN_MESSAGE_MAX_CHARS)
+    assert len(body) == 8000
+    issues = lint(LINKEDIN, None, body)
+    assert [issue.rule for issue in issues] == [LintRule.LINKEDIN_LONG]
+    assert not has_errors(issues)
+
+
+def test_a_linkedin_body_over_the_hard_limit_is_an_error() -> None:
+    issues = lint(LINKEDIN, None, _sized(LINKEDIN_MESSAGE_MAX_CHARS + 1))
+    assert _lines(issues) == [(LintRule.LINKEDIN_TOO_LONG, None, 1)]
+    assert issues[0].severity is Severity.ERROR
+    assert "8,001 characters" in issues[0].message
+
+
+@pytest.mark.parametrize(
+    ("body", "line"),
+    [
+        ("Hi {{ first_name }},\nthanks", 2),
+        ("Hi {{ first_name }},\r\nthanks", 2),
+        ("Hi {{ first_name }},\rthanks", 2),
+        ("Hi {{ first_name }}\n\n\nthanks", 2),
+        ("Hi {{ first_name }}\n", 2),
+        ("Hi {{ first_name }},\u2028thanks", 1),  # a break Jinja doesn't number lines by
+        ("{{ first_name }} one\ntwo\nthree", 2),
+    ],
+)
+def test_a_multi_line_linkedin_body_is_an_error(body: str, line: int) -> None:
+    issues = lint(LINKEDIN, None, body)
+    assert _lines(issues) == [(LintRule.LINKEDIN_NEWLINE, None, line)]
+    assert issues[0].severity is Severity.ERROR
+    assert issues[0].message == (
+        "LinkedIn messages must be one paragraph: the prefill never presses Enter"
+    )
+
+
+def test_the_line_of_a_long_body_is_where_it_passes_the_limit() -> None:
+    first = "Hi {{ first_name }} " + "x" * 600
+    issues = lint(LINKEDIN, None, first + "\n" + "y" * 600)
+    assert _lines(issues) == [
+        (LintRule.LINKEDIN_LONG, None, 2),
+        (LintRule.LINKEDIN_NEWLINE, None, 2),
+    ]
+
+
+def test_an_email_template_is_unaffected_by_the_linkedin_rules() -> None:
+    long_body = "Hi {{ first_name }},\n" + "x" * (LINKEDIN_MESSAGE_MAX_CHARS + 10)
+    assert lint(EMAIL, "Hello", long_body) == []
+    rendered = render(EMAIL, "Hello", long_body, _values(first_name="Bo"), today=TODAY)
+    assert rendered.issues == ()
+
+
+def test_a_merge_value_that_adds_a_line_break_fails_the_rendered_linkedin_message() -> None:
+    rendered = render(
+        LINKEDIN,
+        None,
+        "Hi {{ first_name }}, {{ personal_line }}",
+        MergeValues(contact={"first_name": "Bo"}, personal_line="one\ntwo"),
+        today=TODAY,
+    )
+    assert _lines(list(rendered.issues)) == [(LintRule.LINKEDIN_NEWLINE, None, None)]
+    assert has_errors(rendered.issues)
+
+
+def test_a_merge_value_that_adds_length_fails_the_rendered_linkedin_message() -> None:
+    body = "Hi {{ first_name }}, {{ personal_line }}"
+    long = render(
+        LINKEDIN, None, body,
+        MergeValues(contact={"first_name": "Bo"}, personal_line="x" * 1500),
+        today=TODAY,
+    )  # fmt: skip
+    assert _lines(list(long.issues)) == [(LintRule.LINKEDIN_LONG, None, None)]
+    assert "the rendered message is" in long.issues[0].message
+    too_long = render(
+        LINKEDIN, None, body,
+        MergeValues(contact={"first_name": "Bo"}, personal_line="x" * 9000),
+        today=TODAY,
+    )  # fmt: skip
+    assert _lines(list(too_long.issues)) == [(LintRule.LINKEDIN_TOO_LONG, None, None)]
+    assert has_errors(too_long.issues)
+
+
+def test_a_linkedin_finding_in_the_template_is_not_repeated_for_the_render() -> None:
+    body = "Hi {{ first_name }}\n" + "x" * (LINKEDIN_MESSAGE_MAX_CHARS + 1)
+    rendered = render(LINKEDIN, None, body, _values(first_name="Bo"), today=TODAY)
+    assert [issue.rule for issue in rendered.issues] == [
+        LintRule.LINKEDIN_TOO_LONG,
+        LintRule.LINKEDIN_NEWLINE,
+    ]
+    assert all(issue.line is not None for issue in rendered.issues)

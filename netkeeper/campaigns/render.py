@@ -67,7 +67,8 @@ gives no value, a comparison or ``in`` is false, and ``default`` and
 Lint
 ----
 :func:`lint` runs at save time over the template text alone. Every rule it
-applies is an error, and :func:`has_errors` is what blocks activation:
+applies is an error but :attr:`LintRule.LINKEDIN_LONG`, and :func:`has_errors` is
+what blocks activation:
 
 - :attr:`LintRule.SYNTAX`: the template does not parse.
 - :attr:`LintRule.UNSUPPORTED`: anything off the allowlist.
@@ -84,12 +85,23 @@ applies is an error, and :func:`has_errors` is what blocks activation:
 - :attr:`LintRule.MISSING_SUBJECT`: an email template with no subject.
 - :attr:`LintRule.BAD_LINK`: an ``http``/``https`` link that does not parse.
 
+A LinkedIn template (P4-11) is also held to what LinkedIn and the prefill accept:
+
+- :attr:`LintRule.LINKEDIN_SUBJECT`: a subject. LinkedIn messages have none.
+- :attr:`LintRule.LINKEDIN_TOO_LONG`: a body over :data:`LINKEDIN_MESSAGE_MAX_CHARS`.
+- :attr:`LintRule.LINKEDIN_NEWLINE`: a line break in the body, while
+  :data:`LINKEDIN_ALLOW_NEWLINES` is false. The prefill never presses Enter.
+- :attr:`LintRule.LINKEDIN_LONG`, the one save-time *warning*: a body over
+  :data:`LINKEDIN_MESSAGE_LONG_CHARS`, which takes minutes to type.
+
 Each issue about one place carries its one-based ``line`` in the part; an issue
 about the whole part (a missing subject, a body with no per-contact field) has
 none.
 
 :func:`render` adds the render-time warnings: fields with no value for this
-contact, and links that came out broken once merge values were filled in.
+contact, and links that came out broken once merge values were filled in. For a
+LinkedIn message it checks the rendered body's length and line breaks too, since
+a merge value can add either; those findings have no line.
 """
 
 from __future__ import annotations
@@ -285,6 +297,21 @@ MAX_LITERAL_CHARS: Final = 1_000
 MAX_TRUNCATE_LENGTH: Final = 1_000
 """The largest length ``truncate`` may be given."""
 
+LINKEDIN_MESSAGE_MAX_CHARS: Final = 8000
+"""The longest LinkedIn message lint lets through (P4-11). Longer is an error, in the
+template text and in a rendered message."""
+
+LINKEDIN_MESSAGE_LONG_CHARS: Final = 1000
+"""A LinkedIn message longer than this is a warning (P4-11): the prefill types it a
+character at a time, about 140 ms each, so 1,000 characters already take over two
+minutes, and typing stops at 300 seconds (P4-10)."""
+
+LINKEDIN_ALLOW_NEWLINES: Final = False
+"""Whether a LinkedIn message may have more than one line (P4-11). False until the
+messaging capture (P4-06) shows Shift+Enter never sends, whatever LinkedIn's "Press
+Enter to Send" setting is: the prefill never presses Enter, so a line break can't be
+typed safely. While it is False, a line break in a LinkedIn body is an error."""
+
 MAX_NESTING: Final = 50
 """The deepest a template's tree may go. ``a * b * c`` nests one level per term, and Python's
 own compiler refuses a template nested past about 200 (and gets slow well before that)."""
@@ -353,6 +380,8 @@ _NODE_NAMES: Final[Mapping[type[nodes.Node], str]] = {
 }
 # Every line break a header could be split on.
 _LINE_BREAKS = re.compile(r"[\r\n\x0b\x0c\x1c-\x1e\x85\u2028\u2029]+")
+# The line breaks Jinja counts lines by, so a line number here is the one lint reports.
+_JINJA_LINE_BREAKS = re.compile(r"\r\n|\r|\n")
 
 # A candidate http(s) link: the scheme and whatever follows up to whitespace. Matched
 # case-insensitively and loosely on purpose, so ``http:/example.com`` is caught as broken
@@ -383,6 +412,10 @@ class LintRule(enum.StrEnum):
     BAD_LINK = "bad_link"
     MISSING_VALUE = "missing_value"
     REMOVED_FIELD = "removed_field"
+    LINKEDIN_SUBJECT = "linkedin_subject"
+    LINKEDIN_TOO_LONG = "linkedin_too_long"
+    LINKEDIN_LONG = "linkedin_long"
+    LINKEDIN_NEWLINE = "linkedin_newline"
 
 
 class Part(enum.StrEnum):
@@ -453,7 +486,7 @@ class MergeValues:
 
 @dataclass(frozen=True, slots=True)
 class Rendered:
-    """A rendered template and every issue found: lint's, then the render's own warnings."""
+    """A rendered template and every issue found: lint's, then the render's own findings."""
 
     subject: str | None
     body: str
@@ -1037,6 +1070,16 @@ def _lint(
                 LintRule.MISSING_SUBJECT, Severity.ERROR, Part.SUBJECT, "an email needs a subject"
             )
         )
+    if channel is TemplateChannel.LINKEDIN and subject is not None:
+        issues.append(
+            LintIssue(
+                LintRule.LINKEDIN_SUBJECT,
+                Severity.ERROR,
+                Part.SUBJECT,
+                "LinkedIn messages have no subject, so clear it",
+                line=1,
+            )
+        )
     analyses: dict[Part, _Analysis] = {}
     if subject is not None:
         analyses[Part.SUBJECT] = _analyse(subject, Part.SUBJECT)
@@ -1055,14 +1098,66 @@ def _lint(
                 "add one, like {{ first_name }}",
             )
         )
+    if channel is TemplateChannel.LINKEDIN:
+        issues.extend(_linkedin_issues(body, in_template=True))
     return issues, analyses
+
+
+def _line_of(source: str, offset: int) -> int:
+    """The one-based line of ``source`` the character at ``offset`` is on, as Jinja counts."""
+    return len(_JINJA_LINE_BREAKS.findall(source, 0, offset)) + 1
+
+
+def _linkedin_issues(body: str, *, in_template: bool) -> list[LintIssue]:
+    """What LinkedIn and the prefill refuse in a body (P4-11): the template text when
+    ``in_template``, with lines, or a rendered message, without (its lines are not the
+    template's)."""
+    issues: list[LintIssue] = []
+    what = "the body" if in_template else "the rendered message"
+    size = len(body)
+    if size > LINKEDIN_MESSAGE_MAX_CHARS:
+        issues.append(
+            LintIssue(
+                LintRule.LINKEDIN_TOO_LONG,
+                Severity.ERROR,
+                Part.BODY,
+                f"{what} is {size:,} characters, over LinkedIn's limit of "
+                f"{LINKEDIN_MESSAGE_MAX_CHARS:,}",
+                line=_line_of(body, LINKEDIN_MESSAGE_MAX_CHARS) if in_template else None,
+            )
+        )
+    elif size > LINKEDIN_MESSAGE_LONG_CHARS:
+        issues.append(
+            LintIssue(
+                LintRule.LINKEDIN_LONG,
+                Severity.WARNING,
+                Part.BODY,
+                f"{what} is {size:,} characters; over {LINKEDIN_MESSAGE_LONG_CHARS:,}, "
+                "the prefill takes minutes to type it",
+                line=_line_of(body, LINKEDIN_MESSAGE_LONG_CHARS) if in_template else None,
+            )
+        )
+    if not LINKEDIN_ALLOW_NEWLINES:
+        found = _LINE_BREAKS.search(body)
+        if found is not None:
+            issues.append(
+                LintIssue(
+                    LintRule.LINKEDIN_NEWLINE,
+                    Severity.ERROR,
+                    Part.BODY,
+                    "LinkedIn messages must be one paragraph: the prefill never presses Enter",
+                    # The line the break starts, the first one that can't be typed.
+                    line=_line_of(body, found.start() + 1) if in_template else None,
+                )
+            )
+    return issues
 
 
 def lint(channel: TemplateChannel, subject: str | None, body: str) -> list[LintIssue]:
     """Save-time lint of a template's text.
 
-    Every issue it returns is an error; :func:`has_errors` of the result is what
-    blocks activation.
+    Every issue it returns is an error but a :attr:`LintRule.LINKEDIN_LONG` warning;
+    :func:`has_errors` of the result is what blocks activation.
     """
     issues, _ = _lint(channel, subject, body)
     return issues
@@ -1161,7 +1256,8 @@ def render(
     that reaches past the sandbox. Everything else is an issue on the result:
     lint's errors, then a :attr:`LintRule.MISSING_VALUE` warning for each named
     field with no value here, then a :attr:`LintRule.BAD_LINK` warning for each
-    link that came out broken once values were filled in.
+    link that came out broken once values were filled in, then, for LinkedIn, what
+    the rendered message breaks of LinkedIn's rules that the template text did not.
     """
     issues, analyses = _lint(channel, subject, body)
     for issue in issues:
@@ -1175,11 +1271,11 @@ def render(
         rendered_subject = _one_line(_render_one(env, subject, context))
     rendered_body = _render_one(env, body, context)
 
-    warnings: list[LintIssue] = []
+    added: list[LintIssue] = []
     for part, analysis in analyses.items():
         for name, line in analysis.references.items():
             if _missing(_value_of(values, name)):
-                warnings.append(
+                added.append(
                     LintIssue(
                         LintRule.MISSING_VALUE,
                         Severity.WARNING,
@@ -1202,5 +1298,16 @@ def render(
                 link,
             )
             if not any(i.rule is LintRule.BAD_LINK and i.field == link for i in issues):
-                warnings.append(issue)
-    return Rendered(rendered_subject, rendered_body, (*issues, *warnings))
+                added.append(issue)
+    if channel is TemplateChannel.LINKEDIN:
+        # A merge value can add length or a line break the template text did not have.
+        # Each is reported once: the template text's finding, when it has one, stands.
+        found = {issue.rule for issue in issues}
+        if LintRule.LINKEDIN_TOO_LONG in found:
+            found.add(LintRule.LINKEDIN_LONG)
+        added.extend(
+            issue
+            for issue in _linkedin_issues(rendered_body, in_template=False)
+            if issue.rule not in found
+        )
+    return Rendered(rendered_subject, rendered_body, (*issues, *added))
