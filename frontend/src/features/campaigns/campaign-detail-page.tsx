@@ -2,7 +2,8 @@
  * One campaign (P3-11a): its steps and their progress, its audience, the review
  * gate while it is a draft or reviewing, its enrollments, and pause and resume.
  * Its scheduled start, changeable until the first send, and each step's timing,
- * changeable until the campaign is over (#338).
+ * changeable until the campaign is over (#338). Once it is active, its results:
+ * sends per day, and replies, bounces and opt-outs per step (#350).
  */
 import { Link } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -23,6 +24,7 @@ import {
   ENROLLMENT_PAGE,
   campaignKeys,
   campaignQuery,
+  campaignResultsQuery,
   enroll,
   enrollmentsQuery,
   pauseCampaign,
@@ -30,7 +32,9 @@ import {
   setCampaignStart,
   setStepSchedule,
   type Campaign,
+  type CampaignResults,
   type Step,
+  type StepResults,
   type EnrollOut,
   type EnrollmentStatus,
 } from './api'
@@ -48,6 +52,7 @@ import {
   timingText,
   toLocalInput,
 } from './format'
+import { ENROLLMENTS_ANCHOR, ResultsCard } from './results-card'
 import { ReviewPanel } from './review-panel'
 import { UNCHOSEN, startIso, type StartChoice } from './start'
 import { StartPicker } from './start-picker'
@@ -66,6 +71,8 @@ export function NoSuchCampaign() {
 
 export function CampaignDetailPage({ campaignId }: { campaignId: number }) {
   const campaign = useQuery(campaignQuery(campaignId))
+  const results = useQuery(campaignResultsQuery(campaignId))
+  const [status, setStatus] = useState<EnrollmentStatus | ''>('')
 
   if (campaign.isPending) return <LoadingNote label="Loading the campaign…" />
   if (campaign.isError) {
@@ -80,10 +87,11 @@ export function CampaignDetailPage({ campaignId }: { campaignId: number }) {
   return (
     <div className="flex max-w-5xl flex-col gap-4">
       <Overview campaign={data} />
-      <StepsCard campaign={data} />
+      {!reviewable && <ResultsCard results={results} onShowEnrollments={setStatus} />}
+      <StepsCard campaign={data} results={results.data} />
       {reviewable && <AudienceCard campaign={data} />}
       {reviewable && <ReviewPanel campaign={data} />}
-      <EnrollmentsCard campaignId={data.id} />
+      <EnrollmentsCard campaignId={data.id} status={status} onStatus={setStatus} />
     </div>
   )
 }
@@ -205,16 +213,24 @@ function ChangeStart({ campaign }: { campaign: Campaign }) {
 
 const TIMING_EDITABLE = new Set<Campaign['status']>(['draft', 'reviewing', 'active', 'paused'])
 
-function StepsCard({ campaign }: { campaign: Campaign }) {
+function StepsCard({
+  campaign,
+  results,
+}: {
+  campaign: Campaign
+  results: CampaignResults | undefined
+}) {
   const [editing, setEditing] = useState<number | null>(null)
   const editable = TIMING_EDITABLE.has(campaign.status)
+  const byStep = new Map(results?.steps.map((r) => [r.step_id, r]))
   return (
     <Card>
       <CardHeader>
         <CardTitle level={2}>Steps</CardTitle>
         <CardDescription>
-          Fired counts every message a step made; sent, those that went out. A step with no time of
-          its own aims for the next suggested slot (Tue–Thu, 09:00 to 16:30) after its delay.
+          Fired counts every message a step made; sent, those that went out. A reply, bounce or
+          opt-out counts against the last step sent before it. A step with no time of its own aims
+          for the next suggested slot (Tue–Thu, 09:00 to 16:30) after its delay.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -239,6 +255,15 @@ function StepsCard({ campaign }: { campaign: Campaign }) {
               <th scope="col" className="py-1 pr-3 font-medium">
                 Sent
               </th>
+              <th scope="col" className="py-1 pr-3 font-medium">
+                Replied
+              </th>
+              <th scope="col" className="py-1 pr-3 font-medium">
+                Bounced
+              </th>
+              <th scope="col" className="py-1 pr-3 font-medium">
+                Opted out
+              </th>
               {editable && (
                 <th scope="col" className="py-1 font-medium">
                   <span className="sr-only">Edit</span>
@@ -252,6 +277,7 @@ function StepsCard({ campaign }: { campaign: Campaign }) {
                 key={step.id}
                 campaign={campaign}
                 step={step}
+                results={byStep.get(step.id)}
                 editable={editable}
                 editing={editing === step.id}
                 onEdit={(on) => setEditing(on ? step.id : null)}
@@ -267,12 +293,15 @@ function StepsCard({ campaign }: { campaign: Campaign }) {
 function StepRow({
   campaign,
   step,
+  results,
   editable,
   editing,
   onEdit,
 }: {
   campaign: Campaign
   step: Step
+  /** Undefined while the results load, or when they could not. */
+  results: StepResults | undefined
   editable: boolean
   editing: boolean
   onEdit: (on: boolean) => void
@@ -296,6 +325,9 @@ function StepRow({
         <td className="py-2 pr-3 text-muted-foreground">{MODE_LABELS[step.mode]}</td>
         <td className="py-2 pr-3 tabular-nums">{step.fired}</td>
         <td className="py-2 pr-3 tabular-nums">{step.sent}</td>
+        <td className="py-2 pr-3 tabular-nums">{results?.replied ?? '—'}</td>
+        <td className="py-2 pr-3 tabular-nums">{results?.bounced ?? '—'}</td>
+        <td className="py-2 pr-3 tabular-nums">{results?.opted_out ?? '—'}</td>
         {editable && (
           <td className="py-2">
             <Button
@@ -311,7 +343,7 @@ function StepRow({
       </tr>
       {editing && (
         <tr>
-          <td colSpan={7} className="pb-3">
+          <td colSpan={10} className="pb-3">
             <StepTimingForm campaign={campaign} step={step} onDone={() => onEdit(false)} />
           </td>
         </tr>
@@ -497,15 +529,29 @@ function AudienceCard({ campaign }: { campaign: Campaign }) {
   )
 }
 
-function EnrollmentsCard({ campaignId }: { campaignId: number }) {
+function EnrollmentsCard({
+  campaignId,
+  status,
+  onStatus,
+}: {
+  campaignId: number
+  /** The status filter; the results tiles set it too. */
+  status: EnrollmentStatus | ''
+  onStatus: (status: EnrollmentStatus | '') => void
+}) {
   const [q, setQ] = useState('')
   const [search, setSearch] = useState('')
-  const [status, setStatus] = useState<EnrollmentStatus | ''>('')
   const [offset, setOffset] = useState(0)
+  const [shownStatus, setShownStatus] = useState(status)
+  if (shownStatus !== status) {
+    // A tile changed the filter: start from the first page of it.
+    setShownStatus(status)
+    setOffset(0)
+  }
   const rows = useQuery(enrollmentsQuery(campaignId, search, status, offset))
 
   return (
-    <Card>
+    <Card id={ENROLLMENTS_ANCHOR} className="scroll-mt-4">
       <CardHeader>
         <CardTitle level={2}>Enrollments</CardTitle>
       </CardHeader>
@@ -530,7 +576,7 @@ function EnrollmentsCard({ campaignId }: { campaignId: number }) {
             value={status}
             onChange={(event) => {
               setOffset(0)
-              setStatus(event.target.value as EnrollmentStatus | '')
+              onStatus(event.target.value as EnrollmentStatus | '')
             }}
           >
             <option value="">Every status</option>

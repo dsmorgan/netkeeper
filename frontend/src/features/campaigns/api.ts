@@ -35,6 +35,9 @@ export type TestSend = Schemas['TestSendOut']
 export type Enrollment = Schemas['EnrollmentOut']
 export type EnrollmentPage = Schemas['EnrollmentPageOut']
 export type StartOptions = Schemas['StartOptionsOut']
+export type CampaignResults = Schemas['CampaignResultsOut']
+export type StepResults = Schemas['StepResultsOut']
+export type DaySends = Schemas['DaySendsOut']
 
 /** A request the backend refused: its status, its sentence, and `missing` when it sent one. */
 export class CampaignApiError extends Error {
@@ -85,6 +88,7 @@ export const campaignKeys = {
     [...campaignKeys.all, 'enrollments', id, q, status, offset] as const,
   startOptions: (id: number, at: string | null) =>
     [...campaignKeys.all, 'start-options', id, at] as const,
+  results: (id: number) => [...campaignKeys.all, 'results', id] as const,
 }
 
 /**
@@ -127,6 +131,24 @@ export function campaignQuery(id: number) {
         signal,
       })
       if (data === undefined) fail(response.status, error, 'could not load the campaign')
+      return data
+    },
+  })
+}
+
+/**
+ * What the campaign has done (#350): sends per day in your time zone, from the first
+ * send to today, and replies, bounces and opt-outs per step, with the totals.
+ */
+export function campaignResultsQuery(id: number) {
+  return queryOptions({
+    queryKey: campaignKeys.results(id),
+    queryFn: async ({ signal }): Promise<CampaignResults> => {
+      const { data, error, response } = await api.GET('/api/v1/campaigns/{campaign_id}/results', {
+        params: { path: { campaign_id: id } },
+        signal,
+      })
+      if (data === undefined) fail(response.status, error, 'could not load the results')
       return data
     },
   })

@@ -14,6 +14,7 @@ import { jsonResponse } from '@/test/fetch'
 
 import type {
   Campaign,
+  CampaignResults,
   CampaignSummary,
   EnrollmentPage,
   MessagePreview,
@@ -263,6 +264,25 @@ export const ENROLLMENTS: EnrollmentPage = {
   ],
 }
 
+/** A campaign's results: nothing sent yet unless a test says otherwise (#350). */
+export function results(overrides: Partial<CampaignResults> = {}): CampaignResults {
+  return {
+    campaign_id: 5,
+    timezone: 'America/New_York',
+    sends_per_day: [],
+    steps: STEPS.map((s) => ({
+      step_id: s.id,
+      position: s.position,
+      sent: 0,
+      replied: 0,
+      bounced: 0,
+      opted_out: 0,
+    })),
+    totals: { sent: 0, contacted: 0, replied: 0, reply_rate: null, bounced: 0, opted_out: 0 },
+    ...overrides,
+  }
+}
+
 type Handler = (call: Call) => Response | Promise<Response>
 
 /** The default sending hours, as the backend answers them (#338). */
@@ -320,6 +340,7 @@ export function campaignBackend(
           }),
         ),
       [`GET /api/v1/campaigns/${id}/enrollments`]: () => jsonResponse(ENROLLMENTS),
+      [`GET /api/v1/campaigns/${id}/results`]: () => jsonResponse(results({ campaign_id: id })),
       'GET /api/v1/settings/sending-hours': () => jsonResponse(SENDING_HOURS),
       [`GET /api/v1/campaigns/${id}/start-options`]: (call) =>
         jsonResponse(startOptions({ at: call.query.get('at') })),

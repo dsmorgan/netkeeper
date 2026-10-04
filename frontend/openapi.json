@@ -1341,6 +1341,44 @@
         "title": "CampaignOut",
         "type": "object"
       },
+      "CampaignResultsOut": {
+        "properties": {
+          "campaign_id": {
+            "title": "Campaign Id",
+            "type": "integer"
+          },
+          "sends_per_day": {
+            "items": {
+              "$ref": "#/components/schemas/DaySendsOut"
+            },
+            "title": "Sends Per Day",
+            "type": "array"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/StepResultsOut"
+            },
+            "title": "Steps",
+            "type": "array"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/ResultTotalsOut"
+          }
+        },
+        "required": [
+          "campaign_id",
+          "timezone",
+          "sends_per_day",
+          "steps",
+          "totals"
+        ],
+        "title": "CampaignResultsOut",
+        "type": "object"
+      },
       "CampaignStatus": {
         "description": "Where a campaign is in its life (spec 8.5, 11.8).",
         "enum": [
@@ -3388,6 +3426,25 @@
           "actual_count"
         ],
         "title": "CountMismatch",
+        "type": "object"
+      },
+      "DaySendsOut": {
+        "properties": {
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "sent": {
+            "title": "Sent",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "date",
+          "sent"
+        ],
+        "title": "DaySendsOut",
         "type": "object"
       },
       "DoNotSendIn": {
@@ -8055,6 +8112,51 @@
         "title": "RepliedIn",
         "type": "object"
       },
+      "ResultTotalsOut": {
+        "properties": {
+          "bounced": {
+            "title": "Bounced",
+            "type": "integer"
+          },
+          "contacted": {
+            "title": "Contacted",
+            "type": "integer"
+          },
+          "opted_out": {
+            "title": "Opted Out",
+            "type": "integer"
+          },
+          "replied": {
+            "title": "Replied",
+            "type": "integer"
+          },
+          "reply_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply Rate"
+          },
+          "sent": {
+            "title": "Sent",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sent",
+          "contacted",
+          "replied",
+          "reply_rate",
+          "bounced",
+          "opted_out"
+        ],
+        "title": "ResultTotalsOut",
+        "type": "object"
+      },
       "RevertFieldIn": {
         "description": "The field to put back to its last synced value (spec 10.5, CP1 #28).",
         "properties": {
@@ -9450,6 +9552,44 @@
           "sent"
         ],
         "title": "StepOut",
+        "type": "object"
+      },
+      "StepResultsOut": {
+        "properties": {
+          "bounced": {
+            "title": "Bounced",
+            "type": "integer"
+          },
+          "opted_out": {
+            "title": "Opted Out",
+            "type": "integer"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "replied": {
+            "title": "Replied",
+            "type": "integer"
+          },
+          "sent": {
+            "title": "Sent",
+            "type": "integer"
+          },
+          "step_id": {
+            "title": "Step Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step_id",
+          "position",
+          "sent",
+          "replied",
+          "bounced",
+          "opted_out"
+        ],
+        "title": "StepResultsOut",
         "type": "object"
       },
       "StepReviewOut": {
@@ -12207,6 +12347,52 @@
           }
         },
         "summary": "Pause",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/results": {
+      "get": {
+        "description": "Sends per local day, and replies, bounces and opt-outs per step, with the totals.",
+        "operationId": "get_campaign_results",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignResultsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Campaign Results",
         "tags": [
           "campaigns"
         ]
