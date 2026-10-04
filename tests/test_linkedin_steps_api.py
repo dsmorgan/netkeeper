@@ -281,3 +281,42 @@ async def test_the_dashboard_marks_linkedin_rows_ready_to_prefill(
     assert [(i["enrollment_id"], i["ready_to_prefill"]) for i in body["items"]] == [
         (enrollment_id, True)
     ]
+
+
+async def test_a_message_send_run_cannot_be_started_through_the_runs_api(
+    client: httpx.AsyncClient,
+    running_app: FastAPI,
+    executor: FakeExecutor,
+    with_runner: None,
+    inside_active_hours: None,
+) -> None:
+    """S5: even with a runner, only a prefill claim records a message_send run."""
+    _seed(running_app)
+    response = await client.post(
+        "/api/v1/linkedin/runs", json={"kind": "message_send"}, headers=HEADERS
+    )
+    assert response.status_code == 422
+    assert "prefill claim" in response.json()["detail"]
+    assert (_runs(running_app), executor.executed) == ([], [])
+
+
+async def test_waiting_marks_an_interrupted_claim(
+    client: httpx.AsyncClient, running_app: FastAPI, executor: FakeExecutor, with_runner: None
+) -> None:
+    [enrollment_id] = _seed(running_app)
+    claimed = await client.post(
+        f"{BASE}/prefill", json={"enrollment_id": enrollment_id}, headers=HEADERS
+    )
+    message_id = claimed.json()["message_id"]
+    with session_scope(running_app.state.session_factory, write=True) as session:
+        user = _local(session)
+        for run in session.scalars(scoped(user, SyncRun)):
+            runs.finish_run(session, user, run.id, status=SyncRunStatus.FAILED, now=NOW)
+    [item] = (await client.get(f"{BASE}/waiting")).json()["items"]
+    assert (item["message_id"], item["status"], item["interrupted"]) == (
+        message_id,
+        "scheduled",
+        True,
+    )
+    discarded = await client.post(f"{BASE}/messages/{message_id}/discard", headers=HEADERS)
+    assert discarded.status_code == 200 and discarded.json()["status"] == "discarded"

@@ -24,6 +24,7 @@ from campaign_fakes import NOW, SETTINGS, FakeSender, make_mailbox
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.campaigns.render import LintIssue, LintRule, Part, Rendered, Severity
 from netkeeper.config import BudgetSettings, LinkedInSettings, Settings
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
@@ -322,7 +323,7 @@ def test_one_open_prefill_refuses_a_second(lane: Lane) -> None:
     assert lane.messages(second) == []
 
     # Once the person discards it, the next may go.
-    lane.write(lambda s, u: discard(s, u, claim.message_id or 0, settings=lane.settings))
+    lane.write(lambda s, u: discard(s, u, claim.message_id or 0, settings=lane.settings, now=NOW))
     assert lane.claim(second).claimed
 
 
@@ -682,7 +683,19 @@ def test_prefilled_counts_the_step_and_waits_for_the_send(
     assert not lane.record(message_id, MessageOutcomeKind.UNKNOWN)
 
 
-@pytest.mark.parametrize("kind", [MessageOutcomeKind.NOT_TYPED, MessageOutcomeKind.TOO_LONG])
+def test_too_long_gives_the_claim_back_and_parks_at_once(lane: Lane) -> None:
+    """The same body would be too long again: no retry."""
+    enrollment_id = lane.enroll()
+    claim = lane.claim(enrollment_id)
+    assert claim.message_id is not None
+    assert lane.record(claim.message_id, MessageOutcomeKind.TOO_LONG)
+    assert lane.messages(enrollment_id) == []
+    enrollment = lane.enrollment(enrollment_id)
+    assert (enrollment.not_sent_count, enrollment.next_action_at) == (1, None)
+    assert enrollment.not_sent_error == "too_long: fixed words"
+
+
+@pytest.mark.parametrize("kind", [MessageOutcomeKind.NOT_TYPED])
 def test_nothing_typed_gives_the_claim_back_and_two_in_a_row_park_it(
     lane: Lane, kind: MessageOutcomeKind
 ) -> None:
@@ -805,7 +818,7 @@ def test_discard_counts_the_step_and_moves_the_enrollment_on(
     _sent_step_one(lane, enrollment_id, at=sent_at)
     message_id = lane.prefill(enrollment_id)
 
-    discarded = lane.write(lambda s, u: discard(s, u, message_id, settings=lane.settings))
+    discarded = lane.write(lambda s, u: discard(s, u, message_id, settings=lane.settings, now=NOW))
     assert discarded.status is MessageStatus.DISCARDED
     enrollment = lane.enrollment(enrollment_id)
     assert enrollment.current_step == 2
@@ -822,7 +835,7 @@ def test_discarding_the_last_step_completes(lane: Lane) -> None:
     enrollment_id = lane_one.enroll(current_step=1)
     _sent_step_one(lane_one, enrollment_id, at=NOW - timedelta(days=8))
     message_id = lane_one.prefill(enrollment_id)
-    lane_one.write(lambda s, u: discard(s, u, message_id, settings=lane_one.settings))
+    lane_one.write(lambda s, u: discard(s, u, message_id, settings=lane_one.settings, now=NOW))
     enrollment = lane_one.enrollment(enrollment_id)
     assert (enrollment.status, enrollment.current_step) == (EnrollmentStatus.COMPLETED, 2)
 
@@ -833,12 +846,14 @@ def test_discard_refuses_what_does_not_wait_for_the_person(lane: Lane) -> None:
     assert claim.message_id is not None
     # Claimed, its run still running: the composer may be being typed into.
     with pytest.raises(linkedin_steps.PrefillNotWaiting):
-        lane.write(lambda s, u: discard(s, u, claim.message_id or 0, settings=lane.settings))
+        lane.write(
+            lambda s, u: discard(s, u, claim.message_id or 0, settings=lane.settings, now=NOW)
+        )
     with pytest.raises(LookupError):
-        lane.write(lambda s, u: discard(s, u, 999_999, settings=lane.settings))
+        lane.write(lambda s, u: discard(s, u, 999_999, settings=lane.settings, now=NOW))
     # Its run ended without recording anything (a crash): a person may let it go.
     lane.finish_runs()
-    lane.write(lambda s, u: discard(s, u, claim.message_id or 0, settings=lane.settings))
+    lane.write(lambda s, u: discard(s, u, claim.message_id or 0, settings=lane.settings, now=NOW))
     message = lane.message(claim.message_id)
     assert message is not None and message.status is MessageStatus.DISCARDED
 
@@ -968,7 +983,10 @@ def test_the_engine_imports_nothing_of_the_browser_or_the_prefill() -> None:
 def test_the_dashboard_lists_linkedin_rows_and_posture_does_not(lane: Lane) -> None:
     linkedin = lane.enroll(next_action_at=NOW + timedelta(hours=1))
     fires, total = lane.read(lambda s, u: engine.upcoming(s, u, limit=10, include_linkedin=True))
-    assert [(f.enrollment.id, f.ready_to_prefill) for f in fires] == [(linkedin, True)]
+    # Listed, and ready to prefill only once due (N5).
+    assert [(f.enrollment.id, f.on_linkedin) for f in fires] == [(linkedin, True)]
+    assert not fires[0].ready_to_prefill(NOW)
+    assert fires[0].ready_to_prefill(NOW + timedelta(hours=1))
     assert total == 1
     assert lane.read(lambda s, u: engine.upcoming(s, u, limit=10)) == ([], 0)
 
@@ -980,3 +998,223 @@ def test_waiting_lists_only_the_users_linkedin_messages(lane: Lane) -> None:
     assert total == 1 and rows[0].contact.id == lane.enrollment(enrollment_id).contact_id
     count = lane.read(lambda s, u: s.scalar(unscoped(select(func.count()).select_from(Message))))
     assert count == 1
+
+
+# --- review follow-ups: rendered errors, interrupted claims, stale slots, the anchor ------
+
+
+def _rendered(body: str, *issues: LintIssue) -> Callable[..., Rendered]:
+    def fake(*_: Any, **__: Any) -> Rendered:
+        return Rendered(None, body, tuple(issues))
+
+    return fake
+
+
+def test_a_rendered_error_parks_it_with_a_visible_reason(
+    lane: Lane, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1: an error in this contact's rendered message refuses and parks, and says why on
+    the enrollment. The render is stubbed here; a real-path test follows once #387
+    (LinkedIn render errors) lands."""
+    enrollment_id = lane.enroll()
+    error = LintIssue(LintRule.NO_CONTACT_FIELD, Severity.ERROR, Part.BODY, "empty", "company")
+    warning = LintIssue(LintRule.BAD_LINK, Severity.WARNING, Part.BODY, "odd link")
+    monkeypatch.setattr(linkedin_steps, "render", _rendered("Hi there", error, warning))
+    claim = lane.claim(enrollment_id)
+    assert claim.reasons == (Refusal.RENDERED_ERRORS, "no_contact_field")
+    enrollment = lane.enrollment(enrollment_id)
+    assert (enrollment.next_action_at, enrollment.not_sent_error) == (
+        None,
+        "blocked: no_contact_field",
+    )
+    assert (lane.messages(enrollment_id), lane.runs()) == ([], [])
+
+
+def test_a_warning_alone_does_not_block(lane: Lane, monkeypatch: pytest.MonkeyPatch) -> None:
+    enrollment_id = lane.enroll()
+    warning = LintIssue(LintRule.BAD_LINK, Severity.WARNING, Part.BODY, "odd link")
+    monkeypatch.setattr(linkedin_steps, "render", _rendered("Hi there", warning))
+    assert lane.claim(enrollment_id).claimed
+
+
+@pytest.mark.parametrize("body", ["", "  \n "])
+def test_an_empty_rendered_body_parks_it(
+    lane: Lane, monkeypatch: pytest.MonkeyPatch, body: str
+) -> None:
+    """M25."""
+    enrollment_id = lane.enroll()
+    monkeypatch.setattr(linkedin_steps, "render", _rendered(body))
+    assert lane.claim(enrollment_id).reasons == (Skip.RENDER_FAILED,)
+    assert lane.enrollment(enrollment_id).next_action_at is None
+    assert lane.messages(enrollment_id) == []
+
+
+def test_an_interrupted_claim_is_named_listed_and_discardable(lane: Lane) -> None:
+    """S1, M30: a claim whose run died blocks the next prefill, visibly, until discarded;
+    discarding it moves the enrollment on."""
+    first, second = lane.enroll(), lane.enroll()
+    claim = lane.claim(first)
+    assert claim.message_id is not None
+    # Running: not listed (the composer may be being typed into), but still open.
+    assert lane.read(lambda s, u: waiting_for_you(s, u, limit=10)) == ([], 0)
+    refused = lane.claim(second)
+    assert refused.reasons == (Refusal.PREFILL_OPEN,)
+    assert refused.detail == f"message {claim.message_id} is scheduled; send or discard it first"
+
+    lane.finish_runs()  # the run ends with no outcome recorded
+    [row], total = lane.read(lambda s, u: waiting_for_you(s, u, limit=10))
+    assert (row.message.id, row.interrupted, total) == (claim.message_id, True, 1)
+
+    lane.write(lambda s, u: discard(s, u, claim.message_id or 0, settings=lane.settings, now=NOW))
+    enrollment = lane.enrollment(first)
+    assert enrollment.current_step == 1
+    assert enrollment.next_action_at is not None and enrollment.next_action_at > NOW
+    assert lane.claim(second).claimed
+
+
+def test_a_ten_day_old_prefill_no_longer_blocks(lane: Lane) -> None:
+    """S2: the claim marks what the tick has not, and an old prefill holds no slot."""
+    first, second = lane.enroll(), lane.enroll()
+
+    def old(session: Session, user: User) -> int:
+        enrollment = get_scoped(session, user, Enrollment, first)
+        assert enrollment is not None
+        return factories.make_message(
+            session,
+            enrollment,
+            status=MessageStatus.PREFILLED,
+            sent_at=None,
+            prefilled_at=NOW - timedelta(days=10),
+        ).id
+
+    old_id = lane.write(old)
+    assert lane.claim(second).claimed
+    message = lane.message(old_id)
+    assert message is not None and message.status is MessageStatus.STALE
+
+
+def test_the_open_prefill_index_holds_when_the_check_is_bypassed(
+    lane: Lane, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S4: the partial unique index (0036) refuses a second open prefill, and the claim
+    answers prefill_open with nothing left behind, its run included."""
+    first, second = lane.enroll(), lane.enroll()
+    lane.prefill(first)
+    monkeypatch.setattr(linkedin_steps, "_open_prefill", lambda *_: None)
+    claim = lane.claim(second)
+    assert (claim.reasons, claim.detail) == ((Refusal.PREFILL_OPEN,), "another prefill is open")
+    assert lane.messages(second) == []
+    assert [run.status for run in lane.runs()] == [SyncRunStatus.COMPLETED]
+    assert lane.enrollment(second).next_action_at == NOW
+
+
+def test_step_two_never_gets_the_start_day_exemption(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """M08: only step 1 on the start's day goes outside the sending hours."""
+    lane = make_lane(session_factory, channels=(EMAIL, LINKEDIN))
+    _set(lane, Campaign, lane.campaign_id, starts_at=NOW - timedelta(hours=1), start_chosen=True)
+    enrollment_id = lane.enroll(current_step=1)
+    _sent_step_one(lane, enrollment_id, at=NOW - timedelta(days=8))
+    _sent_hours(lane, start="09:00", end="12:00")
+    assert lane.claim(enrollment_id).reasons == (Skip.OUTSIDE_SENDING_HOURS,)
+
+
+def test_an_earlier_waiting_message_parks_it(session_factory: sessionmaker[Session]) -> None:
+    """M11: only the waiting gate refuses here: step 1 was sent long ago, so the cadence
+    alone would let step 3 go."""
+    lane = make_lane(session_factory, channels=(EMAIL, EMAIL, LINKEDIN))
+    enrollment_id = lane.enroll(current_step=2)
+    _sent_step_one(lane, enrollment_id, at=NOW - timedelta(days=30))
+
+    def drafted(session: Session, user: User) -> None:
+        enrollment = get_scoped(session, user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        factories.make_message(
+            session, enrollment, position=2, status=MessageStatus.DRAFTED, sent_at=None
+        )
+
+    lane.write(drafted)
+    assert lane.claim(enrollment_id).reasons == (Skip.WAITING_ON_UNSENT,)
+    assert len(lane.messages(enrollment_id)) == 2
+    assert lane.enrollment(enrollment_id).next_action_at is None
+
+
+def test_prefill_next_tries_no_further_after_a_refusal_about_the_user(
+    lane: Lane, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M34: one attempt, not one per ready row."""
+    open_one = lane.enroll(next_action_at=NOW - timedelta(hours=3))
+    lane.prefill(open_one)
+    lane.enroll(next_action_at=NOW - timedelta(hours=2))
+    lane.enroll(next_action_at=NOW - timedelta(hours=1))
+    calls: list[int] = []
+    real = linkedin_steps.claim_prefill
+
+    def counting(session: Session, user: User, enrollment_id: int, **kwargs: Any) -> PrefillClaim:
+        calls.append(enrollment_id)
+        return real(session, user, enrollment_id, **kwargs)
+
+    monkeypatch.setattr(linkedin_steps, "claim_prefill", counting)
+    claim = lane.write(lambda s, u: claim_next(s, u, now=NOW, settings=lane.settings))
+    assert claim is not None and claim.reasons == (Refusal.PREFILL_OPEN,)
+    assert len(calls) == 1
+
+
+def test_a_discarded_linkedin_first_step_moves_on_to_the_email_step(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """S3: step 2 is due its delay after the discard, and the tick sends it."""
+    lane = make_lane(session_factory, channels=(LINKEDIN, EMAIL))
+    _sent_hours(lane, any_time=True)
+    enrollment_id = lane.enroll()
+    message_id = lane.prefill(enrollment_id)
+    lane.write(lambda s, u: discard(s, u, message_id, settings=lane.settings, now=NOW))
+    enrollment = lane.enrollment(enrollment_id)
+    assert (enrollment.status, enrollment.current_step) == (EnrollmentStatus.ACTIVE, 1)
+    due = enrollment.next_action_at
+    assert due is not None and due >= NOW + timedelta(days=7)
+
+    assert _tick(lane, due - timedelta(minutes=1)).fired == []
+    result = _tick(lane, due)
+    assert [f.enrollment_id for f, _ in result.fired] == [enrollment_id]
+    assert result.fired[0][0].step_position == 2
+
+
+def test_a_discarded_step_moves_an_all_linkedin_campaign_on(lane: Lane) -> None:
+    """S3: the second LinkedIn step is ready its delay after the discard of the first."""
+    _sent_hours(lane, any_time=True)
+    enrollment_id = lane.enroll()
+    message_id = lane.prefill(enrollment_id)
+    lane.write(lambda s, u: discard(s, u, message_id, settings=lane.settings, now=NOW))
+    due = lane.enrollment(enrollment_id).next_action_at
+    assert due is not None and due >= NOW + timedelta(days=7)
+    early = due - timedelta(minutes=1)
+    _set(lane, Enrollment, enrollment_id, next_action_at=early)
+    assert lane.claim(enrollment_id, now=early).reasons == (Skip.NOT_DUE,)
+    assert lane.claim(enrollment_id, now=due).claimed
+
+
+def test_discarding_a_stale_prefill_moves_the_enrollment_on(lane: Lane) -> None:
+    """N2: stale is waiting (the engine parks on it), and a discard still advances."""
+    _sent_hours(lane, any_time=True)
+    enrollment_id = lane.enroll()
+    message_id = lane.prefill(enrollment_id)
+    later = NOW + timedelta(days=3)
+    assert lane.write(lambda s, u: engine.mark_stale(s, u, now=later)) == 1
+    assert lane.read(lambda s, u: engine._waiting(s, u, enrollment_id))
+    lane.write(lambda s, u: discard(s, u, message_id, settings=lane.settings, now=later))
+    enrollment = lane.enrollment(enrollment_id)
+    assert enrollment.current_step == 1
+    assert enrollment.next_action_at is not None and enrollment.next_action_at > later
+
+
+def test_a_prefill_never_counts_against_the_campaigns_email_cap(lane: Lane) -> None:
+    """N1: LinkedIn has its own budget."""
+    lane.prefill(lane.enroll())
+    count = lane.read(
+        lambda s, u: engine.campaign_count(
+            s, u, lane.campaign_id, NOW - timedelta(days=1), NOW + timedelta(days=1)
+        )
+    )
+    assert count == 0

@@ -1346,7 +1346,7 @@ earlier here over the later: an opt-out must survive a merge with a reply.
 """
 
 UNSENT_MESSAGE_STATUSES: Final[frozenset[MessageStatus]] = frozenset(
-    {MessageStatus.DRAFTED, MessageStatus.PREFILLED}
+    {MessageStatus.DRAFTED, MessageStatus.PREFILLED, MessageStatus.STALE}
 )
 """Outbound messages waiting for the person. A merge discards the set-aside enrollment's
 (#242 review). A discarded message's Gmail draft stays in Gmail for the person:

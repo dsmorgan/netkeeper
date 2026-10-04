@@ -200,6 +200,7 @@ def test_the_engine_constants_are_pinned() -> None:
         "scheduled",
         "drafted",
         "prefilled",
+        "stale",
     }
     assert {s.value for s in engine_module.ENROLLING_STATUSES} == {"draft", "reviewing"}
 

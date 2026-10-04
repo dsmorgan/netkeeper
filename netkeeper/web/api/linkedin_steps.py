@@ -3,7 +3,8 @@
 - ``GET /campaigns/linkedin/ready``: due LinkedIn steps, oldest first, each ready to
   prefill once its ``held_until`` (the sending hours) has passed.
 - ``GET /campaigns/linkedin/waiting``: ``prefilled`` and ``stale`` messages, waiting
-  for you to send or discard them.
+  for you to send or discard them, and ``interrupted`` ones (claimed, their run over
+  with no outcome), waiting for you to discard them.
 - ``POST /campaigns/linkedin/prefill`` with ``{"enrollment_id": n}`` or
   ``{"next": true}``: claims the step (every check in
   :mod:`netkeeper.services.linkedin_steps`) and submits its ``message_send`` run to
@@ -87,7 +88,11 @@ class WaitingOut(BaseModel):
 
     message_id: int
     status: MessageStatus
-    """``prefilled``, or ``stale`` three days after its prefill."""
+    """``prefilled``, ``stale`` three days after its prefill, or ``scheduled`` when
+    ``interrupted``."""
+    interrupted: bool
+    """Claimed, and its run ended without recording what it typed (a crash): nobody knows
+    what the composer holds. It blocks every later prefill until you discard it."""
     enrollment_id: int
     campaign_id: int
     campaign_name: str
@@ -179,6 +184,7 @@ def list_waiting(
             WaitingOut(
                 message_id=row.message.id,
                 status=row.message.status,
+                interrupted=row.interrupted,
                 enrollment_id=row.enrollment.id,
                 campaign_id=row.campaign.id,
                 campaign_name=row.campaign.name,
@@ -298,7 +304,9 @@ def discard(
     """You will not send it: ``discarded``. The step counts as fired, and the enrollment
     moves to its next step or completes. Nothing changes in LinkedIn."""
     try:
-        message = service.discard(session, user, message_id, settings=_settings(request))
+        message = service.discard(
+            session, user, message_id, settings=_settings(request), now=utcnow()
+        )
     except service.PrefillNotWaiting as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LookupError as exc:

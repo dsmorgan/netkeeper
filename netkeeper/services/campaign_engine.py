@@ -222,9 +222,10 @@ ENDING_REASONS: Final[Mapping[Reason, EnrollmentStatus]] = {
 other exclusion is re-checked :data:`RECHECK_AFTER` later."""
 
 WAITING_STATUSES: Final[frozenset[MessageStatus]] = frozenset(
-    {MessageStatus.SCHEDULED, MessageStatus.DRAFTED, MessageStatus.PREFILLED}
+    {MessageStatus.SCHEDULED, MessageStatus.DRAFTED, MessageStatus.PREFILLED, MessageStatus.STALE}
 )
-"""An outbound message in one of these has not gone out yet, and nobody knows it failed."""
+"""An outbound message in one of these has not gone out yet, and nobody knows it failed. A
+``stale`` prefill may still be sent by the person (P4-02 then records it)."""
 
 
 class CampaignEngineError(Exception):
@@ -510,7 +511,11 @@ def _ask_for_linkedin_ids(
 ) -> None:
     """Raise the enrichment priority of each contact enrolled, or kept out only for its
     missing LinkedIn member id, when the campaign has a LinkedIn step (P4-09). An
-    email-only campaign changes nothing."""
+    email-only campaign changes nothing.
+
+    The member id itself comes from a connections sync, not enrichment: enrichment
+    visits only contacts that already have one (``enrich_plan._eligible``). The raise
+    is spec 9.6's first tier, so the contact is visited first once a sync adds it."""
     has_linkedin_step = session.scalar(
         scoped(user, CampaignStep)
         .with_only_columns(CampaignStep.id)
@@ -723,7 +728,7 @@ def reschedule_step(session: Session, user: User, step: CampaignStep, *, setting
                 settings, user, step, campaign.starts_at, hours
             )
         else:
-            latest = _latest_sent(session, user, enrollment.id)
+            latest = latest_fired(session, user, enrollment.id)
             if latest is None:
                 continue
             enrollment.next_action_at = follow_up_due(settings, user, step, latest, hours)
@@ -892,6 +897,27 @@ def _latest_sent(session: Session, user: User, enrollment_id: int) -> datetime |
             Message.sent_at.is_not(None),
         )
     )
+
+
+def latest_fired(session: Session, user: User, enrollment_id: int) -> datetime | None:
+    """What the next step's delay counts from: the enrollment's latest sent outbound
+    message, or the latest LinkedIn prefill the person discarded (``discarded_at``,
+    P4-09), whichever is later. Only :func:`netkeeper.services.linkedin_steps.discard`
+    sets ``discarded_at``, so with email alone this is :func:`_latest_sent`."""
+    sent = _latest_sent(session, user, enrollment_id)
+    discarded = session.scalar(
+        scoped(user, Message)
+        .with_only_columns(func.max(Message.discarded_at))
+        .where(
+            Message.enrollment_id == enrollment_id,
+            Message.direction == MessageDirection.OUT,
+            Message.channel == TemplateChannel.LINKEDIN,
+            Message.status == MessageStatus.DISCARDED,
+            Message.discarded_at.is_not(None),
+        )
+    )
+    found = [at for at in (sent, discarded) if at is not None]
+    return max(found) if found else None
 
 
 def step_has_message(session: Session, user: User, enrollment_id: int, step_id: int) -> bool:
@@ -1074,7 +1100,8 @@ def mailbox_count(
 def campaign_count(
     session: Session, user: User, campaign_id: int, since: datetime, until: datetime
 ) -> int:
-    """Outbound messages of the campaign fired in ``[since, until)``, any status."""
+    """Outbound email of the campaign fired in ``[since, until)``, any status. A LinkedIn
+    prefill never counts: it has its own budget (``li_prefills``, P4-09)."""
     fired = func.coalesce(Message.scheduled_at, Message.sent_at)
     return int(
         session.scalar(
@@ -1084,6 +1111,7 @@ def campaign_count(
             .where(
                 Enrollment.user_id == user.id,
                 Enrollment.campaign_id == campaign_id,
+                Message.channel == TemplateChannel.EMAIL,
                 Message.direction == MessageDirection.OUT,
                 fired >= since,
                 fired < until,
@@ -1293,9 +1321,14 @@ class UpcomingFire:
     contact: Contact
 
     @property
-    def ready_to_prefill(self) -> bool:
-        """A LinkedIn step: a person prefills it (P4-09); the tick never fires it."""
+    def on_linkedin(self) -> bool:
+        """A LinkedIn step: once due, a person prefills it (P4-09); the tick never fires it."""
         return self.step is not None and self.step.channel is TemplateChannel.LINKEDIN
+
+    def ready_to_prefill(self, now: datetime) -> bool:
+        """A LinkedIn step due now, of a campaign that has started: ready to prefill."""
+        started = self.campaign.starts_at is not None and self.campaign.starts_at <= now
+        return self.on_linkedin and started and self.due <= now
 
 
 def upcoming(
@@ -1308,7 +1341,7 @@ def upcoming(
     so a row already due is the next tick's and is listed first. As in
     :func:`_due`, a row whose next step is on LinkedIn is left out: the tick
     never fires it. ``include_linkedin`` lists those rows too, for the dashboard,
-    where each is ready to prefill once due (:attr:`UpcomingFire.ready_to_prefill`,
+    where each is ready to prefill once due (:meth:`UpcomingFire.ready_to_prefill`,
     P4-09). A held pause keeps its ``next_action_at`` and is not listed (#242 review).
     """
     statement = (
@@ -1576,15 +1609,18 @@ class _Chooser:
             return None
 
         latest = _latest_sent(session, user, enrollment.id)
-        if latest is None and step.position > 1:
+        # The cadence counts from the latest step fired: a send, or a LinkedIn prefill
+        # the person discarded (P4-09). With email alone it is the latest send.
+        anchor = latest_fired(session, user, enrollment.id)
+        if anchor is None and step.position > 1:
             # A later step with nothing sent before it: the earlier one failed or was
             # never seen going out. Nothing to count its delay from.
             self.park(enrollment, Skip.WAITING_ON_UNSENT)
             return None
-        if latest is not None:
+        if anchor is not None:
             # The step's own timing (#338 review, S2): an explicit time of day may come
             # before the raw delay, and the suggested slot after it.
-            due = follow_up_due(self.settings, user, step, latest, self.blocks.hours)
+            due = follow_up_due(self.settings, user, step, anchor, self.blocks.hours)
             if due > now:
                 self.defer(enrollment, due, Skip.NOT_DUE)
                 return None
@@ -1758,7 +1794,7 @@ def _advance(
     if upcoming is None:
         _end(session, user, enrollment, EnrollmentStatus.COMPLETED, None)
         return
-    latest = _latest_sent(session, user, enrollment.id)
+    latest = latest_fired(session, user, enrollment.id)
     if latest is None or _waiting(session, user, enrollment.id):
         # A step not yet seen going out (a draft waiting for the person): the next
         # step's delay counts from when it does (schedule_next).

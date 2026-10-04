@@ -153,7 +153,7 @@ class ContactFacts:
 
     ``has_linkedin`` is the contact's ``li_urn``, never its slug alone (P4-09): a
     prefill checks the composer's recipient against the member id, so a contact with
-    only a slug waits for enrichment.
+    only a slug waits until a connections sync adds it.
 
     ``do_not_send`` is why the do-not-send list holds the contact's address (#238,
     Part B), or ``None``: an opt-out on any of the contact's addresses, otherwise
@@ -475,7 +475,7 @@ _LABELS: Final[Mapping[Reason, str]] = {
     Reason.EMAIL_INVALID: "invalid email",
     Reason.DO_NOT_SEND: "address on the do-not-send list",
     Reason.ADDRESS_BOUNCED_ELSEWHERE: "address bounced on another contact",
-    Reason.NO_LINKEDIN: "no LinkedIn member id (needs enrichment first)",
+    Reason.NO_LINKEDIN: "no LinkedIn member id yet (a connections sync adds it)",
     Reason.DUPLICATE_ADDRESS: "address already in this campaign",
     Reason.IN_ANOTHER_CAMPAIGN: "in another campaign",
 }
@@ -598,7 +598,7 @@ def load_facts(
             email_statuses=tuple(e.status for e in contact.emails),
             sendable_email=sendable.get(contact.id),
             # The URN, never the slug alone (P4-09): a prefill checks the composer's
-            # recipient against it. A slug-only contact waits for enrichment.
+            # recipient against it. A slug-only contact waits for a connections sync.
             has_linkedin=contact.li_urn is not None,
             other_campaigns=frozenset(others.get(contact.id, ())),
             last_outbound_at=last_out.get(contact.id),

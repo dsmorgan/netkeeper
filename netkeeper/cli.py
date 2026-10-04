@@ -3543,7 +3543,8 @@ def campaigns_linkedin_waiting() -> None:
             session, user, limit=linkedin_steps.READY_PAGE_MAX
         )
         lines = [
-            f"message {row.message.id}: {row.message.status.value},"
+            f"message {row.message.id}:"
+            f" {'interrupted' if row.interrupted else row.message.status.value},"
             f" {_contact_label(row.contact)}, {row.campaign.name!r}"
             for row in rows
         ]
@@ -3650,7 +3651,9 @@ def campaigns_linkedin_discard(
     with _campaign_db() as factory, session_scope(factory, write=True) as session:
         user = _local_user_or_exit(session)
         try:
-            linkedin_steps.discard(session, user, message_id, settings=settings)
+            linkedin_steps.discard(
+                session, user, message_id, settings=settings, now=datetime.now(UTC)
+            )
         except LookupError as exc:
             typer.echo(f"error: {exc}", err=True)
             raise typer.Exit(code=1) from exc

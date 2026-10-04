@@ -375,6 +375,12 @@ class Enrollment(UserOwned, TimestampMixin, Base):
     campaign: Mapped[Campaign] = relationship()
 
 
+OPEN_PREFILL_WHERE = (
+    "channel = 'linkedin' AND direction = 'out' AND status IN ('scheduled', 'prefilled')"
+)
+"""The rows ``uq_messages_one_open_prefill`` holds to one per user: an open prefill."""
+
+
 class Message(UserOwned, TimestampMixin, Base):
     """One message a campaign sent (or tried to), or one reply to it (spec 8.5, 11.5 to 11.7)."""
 
@@ -383,6 +389,14 @@ class Message(UserOwned, TimestampMixin, Base):
         Index("ix_messages_user_id_status", "user_id", "status"),
         # The inbox poll finds a prefilled message sent by its conversation (P4-02; 0036).
         Index("ix_messages_user_id_li_conversation_urn", "user_id", "li_conversation_urn"),
+        # One open LinkedIn prefill per user (spec 11.6; P4-09, 0036), held by the database.
+        Index(
+            "uq_messages_one_open_prefill",
+            "user_id",
+            unique=True,
+            sqlite_where=text(OPEN_PREFILL_WHERE),
+            postgresql_where=text(OPEN_PREFILL_WHERE),
+        ),
         # An inbound message is received and nothing else; an outbound one never is.
         CheckConstraint(
             "(direction = 'in') = (status = 'received')", name="message_direction_status"
@@ -431,6 +445,9 @@ class Message(UserOwned, TimestampMixin, Base):
     # A LinkedIn step's prefill (P4-09; 0036): when the run typed it into the composer
     # (``stale`` three days later), and the ``message_send`` run that did.
     prefilled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # When the person discarded a LinkedIn prefill (P4-09; 0036): the next step's delay
+    # counts from it, as from a send. Nothing else sets it.
+    discarded_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     sync_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("sync_runs.id", ondelete="SET NULL"), index=True
     )

@@ -2596,7 +2596,11 @@ def test_the_stop_precedence_is_pinned() -> None:
         "replied",
         "removed",
     ]
-    assert {s.value for s in identity.UNSENT_MESSAGE_STATUSES} == {"drafted", "prefilled"}
+    assert {s.value for s in identity.UNSENT_MESSAGE_STATUSES} == {
+        "drafted",
+        "prefilled",
+        "stale",
+    }
     assert {s.value for s in identity.LIVE_AFTER_MERGE} == {"pending", "active", "paused"}
 
 
