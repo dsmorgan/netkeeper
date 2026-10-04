@@ -48,7 +48,7 @@ from netkeeper.campaigns.render import (
     MergeField,
     MergeValues,
     Rendered,
-    has_errors,
+    Severity,
     lint,
     merge_fields,
     placeholder_example,
@@ -410,10 +410,11 @@ def activation_errors(row: Template) -> list[LintIssue]:
 
     Lints the text again rather than reading ``lint_json``: the rules may have
     changed since the save, as they did when #342 removed the ``me.*`` fields.
-    Campaign activation (P3-06 and later) calls this.
+    Campaign activation (P3-06 and later) calls this. Warnings, such as a long
+    LinkedIn message (P4-11), never block, so they are left out.
     """
     issues = lint(row.channel, row.subject, row.body)
-    return issues if has_errors(issues) else []
+    return [issue for issue in issues if issue.severity is Severity.ERROR]
 
 
 REMOVED_FIELD_BLOCK: Final = (

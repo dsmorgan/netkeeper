@@ -743,6 +743,8 @@ Template lint at save time: undefined variables, a body with no per-contact merg
 
 *As built (#344):* each lint finding about one place carries its one-based `line` in the subject or body; one about the whole part (a missing subject, a body with no per-contact field) has none. The editor shows each finding under its field, at its line, with one sentence on why it matters. `GET /templates/merge-fields` lists every merge field with a description and an example (invented placeholders, or a contact's values with `contact_id`), built from the same names lint allows, so the editor's merge-field helper follows any change to them.
 
+*As built (P4-11):* a LinkedIn template is linted for what LinkedIn and the prefill accept. A subject is an error, since LinkedIn messages have none. A body over 8,000 characters (`LINKEDIN_MESSAGE_MAX_CHARS`) is an error, and one over 1,000 (`LINKEDIN_MESSAGE_LONG_CHARS`) is a warning, because the prefill types about 140 ms a character and stops at 300 seconds. While `LINKEDIN_ALLOW_NEWLINES` is false, a line break in the body is an error: the prefill never presses Enter. P4-03 (#382) sets it to true only if the messaging capture (P4-06) shows that Shift+Enter never sends. Each finding carries its line, and the editor shows why it matters. A render checks the rendered message's length and line breaks too, since a merge value such as `personal_line` can add either, so step approval blocks a message that the template text alone did not. The long-message warning is the only save-time warning: it never blocks activation, and activation lists only the errors. Email templates are unchanged.
+
 *As built (P3-03):* `netkeeper/campaigns/render.py`. The template language is an **allowlist**, checked by one walker that runs as lint and again before every render. A template may contain only:
 
 - text and `{{ }}` output;
@@ -763,7 +765,7 @@ The sandbox bounds what the allowlist lets through a second time:
 - The output stops at 100,000 characters.
 - There are no globals, and an unsafe attribute fails the render.
 
-All four save-time rules are errors. A field with no value renders as an empty string and adds a warning to the preview; whatever an allowed template does with it (arithmetic, a comparison, `in`), it never raises. The rendered subject is one line: every line break in it becomes a space, so no merge value can add a header.
+All four save-time rules are errors (P4-11 adds LinkedIn's, one of them a warning). A field with no value renders as an empty string and adds a warning to the preview; whatever an allowed template does with it (arithmetic, a comparison, `in`), it never raises. The rendered subject is one line: every line break in it becomes a space, so no merge value can add a header.
 
 `connected_year` and `years_since_connected` (whole years) come from `connected_on`. `last_position_change` is the latest `started_on` or `ended_on` on or before today among the contact's positions, because leaving a job is a change just as starting one is. A date after today does not count yet, whether it is an announced departure (an `ended_on`) or an announced new job (a `started_on`): "congrats on the move" before the move is wrong (#255). Positions with no dates are invisible to it, and the end of a side role counts even when the main job is unchanged (#232). `ago` counts whole UTC days: today, yesterday, N days ago, last week (7 to 13 days), N weeks ago, last month (28 to 59), N months ago, last year (365 to 729), N years ago.
 
