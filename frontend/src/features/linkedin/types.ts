@@ -39,8 +39,9 @@ export type BrowserHealth = JsonOf<
 
 /** The run kinds the worker can actually run (`RUNNABLE_KINDS`, `netkeeper/services/runs.py`).
  *
- * `inbox` and `message_send` have no runner yet (spec 9.4): the API answers a
- * start for either with `422`, so the Start dialog never offers them.
+ * `message_send` has no runner yet (spec 9.4), and the API answers a start for it
+ * with `422`. `inbox` has a runner (P4-08) but no page source until P4-01, so a
+ * poll can only fail. The Start dialog offers neither.
  */
 export const RUNNABLE_KINDS: readonly RunKind[] = [
   'connections_full',

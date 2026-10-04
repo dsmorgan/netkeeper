@@ -219,7 +219,7 @@ async def test_a_disarmed_serve_never_touches_the_browser_across_a_week(
         inbox = scheduler.stored_due(session, user, account, scheduler.JobKind.INBOX)
     assert full is not None and full > clock.at - timedelta(days=1)
     assert enrich is not None and enrich > START + timedelta(days=8)
-    assert inbox is None  # no runner, not scheduled
+    assert inbox is None  # no page source yet (P4-01), not scheduled
 
     # 2 and 3: past the gate, then past create_run too.
     provider, connector = fake_provider()
