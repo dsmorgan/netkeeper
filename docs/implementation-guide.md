@@ -540,7 +540,7 @@ Depends on: P3-07.
 Done when: a reply moves the enrollment to `replied` before the next step fires in `simulate`; the follow-up never fires for a replied enrollment.
 
 **P3-09 Review gate and test send** · lane campaigns · M · `safety`
-Goal: the activation requirements in spec 11.8: sampled previews, searched previews, test send per email step, lint clean, guard summary acknowledged. (Since #339, one approval per step replaces the sampled and searched previews.)
+Goal: the activation requirements in spec 11.8: sampled previews, searched previews, test send per email step, lint clean, guard summary acknowledged. (Since #339, one approval per step replaces the sampled and searched previews.) (Since #346, the guard summary is informational and needs no acknowledgement.)
 Depends on: P3-06, P3-07.
 Done when: activation is impossible through the API without every requirement recorded.
 

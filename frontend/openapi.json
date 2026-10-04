@@ -4954,24 +4954,48 @@
         "title": "Gte",
         "type": "object"
       },
-      "GuardsIn": {
+      "GuardsOut": {
+        "description": "The guard summary's details, on demand (#346).",
         "properties": {
-          "audience_fingerprint": {
-            "maxLength": 64,
-            "title": "Audience Fingerprint",
-            "type": "string"
+          "not_enrolled": {
+            "title": "Not Enrolled",
+            "type": "integer"
+          },
+          "prior_contact_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prior Contact Note"
+          },
+          "skipped": {
+            "items": {
+              "$ref": "#/components/schemas/SkippedContactOut"
+            },
+            "title": "Skipped",
+            "type": "array"
           },
           "summary": {
-            "maxLength": 2000,
             "title": "Summary",
             "type": "string"
+          },
+          "will_send": {
+            "title": "Will Send",
+            "type": "integer"
           }
         },
         "required": [
           "summary",
-          "audience_fingerprint"
+          "will_send",
+          "not_enrolled",
+          "skipped",
+          "prior_contact_note"
         ],
-        "title": "GuardsIn",
+        "title": "GuardsOut",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -8423,7 +8447,14 @@
             "title": "Guard Summary",
             "type": "string"
           },
-          "guards_acknowledged": {
+          "missing": {
+            "items": {
+              "$ref": "#/components/schemas/MissingOut"
+            },
+            "title": "Missing",
+            "type": "array"
+          },
+          "prior_contact_note": {
             "anyOf": [
               {
                 "type": "string"
@@ -8432,14 +8463,7 @@
                 "type": "null"
               }
             ],
-            "title": "Guards Acknowledged"
-          },
-          "missing": {
-            "items": {
-              "$ref": "#/components/schemas/MissingOut"
-            },
-            "title": "Missing",
-            "type": "array"
+            "title": "Prior Contact Note"
           },
           "status": {
             "$ref": "#/components/schemas/CampaignStatus"
@@ -8451,7 +8475,7 @@
           "content_fingerprint",
           "audience_fingerprint",
           "guard_summary",
-          "guards_acknowledged",
+          "prior_contact_note",
           "missing"
         ],
         "title": "ReviewOut",
@@ -9358,6 +9382,32 @@
           "met_count"
         ],
         "title": "SharedCompanyOut",
+        "type": "object"
+      },
+      "SkippedContactOut": {
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          }
+        },
+        "required": [
+          "contact_id",
+          "name",
+          "reasons"
+        ],
+        "title": "SkippedContactOut",
         "type": "object"
       },
       "SnapshotOut": {
@@ -12715,10 +12765,10 @@
         ]
       }
     },
-    "/api/v1/campaigns/{campaign_id}/review/guards/acknowledge": {
-      "post": {
-        "description": "Acknowledge the guard summary; refused unless it is still the current one.",
-        "operationId": "acknowledge_guards_api_v1_campaigns__campaign_id__review_guards_acknowledge_post",
+    "/api/v1/campaigns/{campaign_id}/review/guards": {
+      "get": {
+        "description": "The guard summary's details: each skipped contact, with every reason (#346).",
+        "operationId": "get_guards_api_v1_campaigns__campaign_id__review_guards_get",
         "parameters": [
           {
             "in": "path",
@@ -12730,22 +12780,12 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GuardsIn"
-              }
-            }
-          },
-          "required": true
-        },
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReviewOut"
+                  "$ref": "#/components/schemas/GuardsOut"
                 }
               }
             },
@@ -12753,16 +12793,6 @@
           },
           "404": {
             "description": "No such campaign, step or enrollment for this user"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RefusedOut"
-                }
-              }
-            },
-            "description": "Refused in the campaign's state; the detail says why. ``code`` is ``stale`` when only a fingerprint went stale: show it again and retry"
           },
           "422": {
             "content": {
@@ -12775,7 +12805,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Acknowledge Guards",
+        "summary": "Get Guards",
         "tags": [
           "campaigns"
         ]

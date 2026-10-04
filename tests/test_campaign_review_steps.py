@@ -23,6 +23,7 @@ from netkeeper.campaigns.render import me_fields
 from netkeeper.db import session_scope
 from netkeeper.models import (
     CampaignStatus,
+    Contact,
     Enrollment,
     EnrollmentStatus,
     Message,
@@ -105,15 +106,6 @@ def _complete_and_activate(r: Reviewed, review: campaign_review.StepReview) -> N
         )
         campaign_review.record_test_send(session, user, plan, gmail_message_id="fake", now=NOW)
         assert campaign_review.record_lint(session, user, r.campaign_id, me=ME, now=NOW).clean
-        campaign = campaign_review.get_campaign(session, user, r.campaign_id)
-        campaign_review.acknowledge_guards(
-            session,
-            user,
-            r.campaign_id,
-            summary_seen=campaign_review.guard_summary(session, user, campaign, now=NOW),
-            audience_fingerprint_seen=campaign_review.audience_fingerprint(session, user, campaign),
-            now=NOW,
-        )
         campaign_review.activate(
             session, user, r.campaign_id, settings=SETTINGS, me=ME, now=NOW, starts_at=NOW
         )
@@ -168,6 +160,40 @@ def test_blocked_messages_are_listed_apart_and_never_sent(
             )
             enrollment = get_scoped(session, r.user, Enrollment, enrollment_id)
             assert enrollment is not None and enrollment.current_step is None
+
+
+def test_a_contact_a_guard_excludes_after_activation_is_never_sent(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#346: activation needs no guard acknowledgement, and the guards still apply when
+    the step fires: a contact that became do-not-contact after the review, after the
+    approval and after activation is sent nothing."""
+    r = _reviewing(session_factory, subject="{{ first_name }}", body="Hi {{ first_name }}")
+    with session_scope(r.factory) as session:
+        campaign = campaign_review.get_campaign(session, r.user, r.campaign_id)
+        assert campaign_review.guard_summary(session, r.user, campaign, now=NOW) == (
+            "3 will send, 1 skipped (1 do-not-contact)"
+        )
+    _complete_and_activate(r, _review(r))
+    with session_scope(r.factory, write=True) as session:
+        enrollment = get_scoped(session, r.user, Enrollment, r.ok[1])
+        assert enrollment is not None
+        contact = get_scoped(session, r.user, Contact, enrollment.contact_id)
+        assert contact is not None
+        contact.do_not_contact = True
+
+    sender = FakeSender()
+    _tick_until_quiet(r, sender)
+
+    assert sorted(f.to_address or "" for f in sender.firings) == ["ada@contacts.example"]
+    with session_scope(r.factory) as session:
+        assert not list(
+            session.scalars(
+                scoped(r.user, Message).where(
+                    Message.enrollment_id == r.ok[1], Message.status == MessageStatus.SENT
+                )
+            )
+        )
 
 
 def test_a_lint_error_blocks_every_message_and_activation(

@@ -324,20 +324,20 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/campaigns/{campaign_id}/review/guards/acknowledge": {
+    "/api/v1/campaigns/{campaign_id}/review/guards": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
-        put?: never;
         /**
-         * Acknowledge Guards
-         * @description Acknowledge the guard summary; refused unless it is still the current one.
+         * Get Guards
+         * @description The guard summary's details: each skipped contact, with every reason (#346).
          */
-        post: operations["acknowledge_guards_api_v1_campaigns__campaign_id__review_guards_acknowledge_post"];
+        get: operations["get_guards_api_v1_campaigns__campaign_id__review_guards_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -4402,12 +4402,21 @@ export interface components {
             /** Value */
             value: string | number | boolean;
         };
-        /** GuardsIn */
-        GuardsIn: {
-            /** Audience Fingerprint */
-            audience_fingerprint: string;
+        /**
+         * GuardsOut
+         * @description The guard summary's details, on demand (#346).
+         */
+        GuardsOut: {
+            /** Not Enrolled */
+            not_enrolled: number;
+            /** Prior Contact Note */
+            prior_contact_note: string | null;
+            /** Skipped */
+            skipped: components["schemas"]["SkippedContactOut"][];
             /** Summary */
             summary: string;
+            /** Will Send */
+            will_send: number;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -5779,10 +5788,10 @@ export interface components {
             content_fingerprint: string;
             /** Guard Summary */
             guard_summary: string;
-            /** Guards Acknowledged */
-            guards_acknowledged: string | null;
             /** Missing */
             missing: components["schemas"]["MissingOut"][];
+            /** Prior Contact Note */
+            prior_contact_note: string | null;
             status: components["schemas"]["CampaignStatus"];
         };
         /**
@@ -6117,6 +6126,15 @@ export interface components {
             contact_count: number;
             /** Met Count */
             met_count: number;
+        };
+        /** SkippedContactOut */
+        SkippedContactOut: {
+            /** Contact Id */
+            contact_id: number;
+            /** Name */
+            name: string;
+            /** Reasons */
+            reasons: string[];
         };
         /**
          * SnapshotOut
@@ -7760,7 +7778,7 @@ export interface operations {
             };
         };
     };
-    acknowledge_guards_api_v1_campaigns__campaign_id__review_guards_acknowledge_post: {
+    get_guards_api_v1_campaigns__campaign_id__review_guards_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -7769,11 +7787,7 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["GuardsIn"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -7781,7 +7795,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ReviewOut"];
+                    "application/json": components["schemas"]["GuardsOut"];
                 };
             };
             /** @description No such campaign, step or enrollment for this user */
@@ -7790,15 +7804,6 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
-            };
-            /** @description Refused in the campaign's state; the detail says why. ``code`` is ``stale`` when only a fingerprint went stale: show it again and retry */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RefusedOut"];
-                };
             };
             /** @description Validation Error */
             422: {

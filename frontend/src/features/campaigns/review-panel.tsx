@@ -7,9 +7,10 @@
  * messages (a step whose template uses `{{ personal_line }}` has each message
  * approved on its own instead), lint, a test per email step to your own
  * mailbox (a draft in your Drafts while Gmail is armed for drafts, a message sent
- * to you once it is armed to send), and the guard summary acknowledged as shown.
- * Activation asks first, with the scheduled start (#338), and a `409` shows what is
- * still missing.
+ * to you once it is armed to send). The guard summary is one line of who will send
+ * and who is skipped, with each skipped contact on demand; it gates nothing, since the
+ * guards apply again when each step fires (#346). Activation asks first, with the
+ * scheduled start (#338), and a `409` shows what is still missing.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronLeft, ChevronRight, CircleDashed } from 'lucide-react'
@@ -26,12 +27,12 @@ import { StartPicker } from './start-picker'
 import {
   CampaignApiError,
   STEP_PAGE,
-  acknowledgeGuards,
   activateCampaign,
   approveMessages,
   approveStep,
   campaignKeys,
   errorText,
+  guardDetailsQuery,
   lintCampaign,
   reviewQuery,
   startReview,
@@ -94,11 +95,9 @@ export function ReviewPanel({ campaign }: { campaign: Campaign }) {
             <LintSection campaignId={id} missing={missing} onChange={refresh} />
             <TestSendSection campaign={campaign} missing={missing} onChange={refresh} />
             <GuardsSection
+              campaignId={id}
               summary={review.data.guard_summary}
-              acknowledged={review.data.guards_acknowledged}
-              missing={missing}
-              onAcknowledge={() => acknowledgeGuards(id, review.data)}
-              onChange={refresh}
+              priorContact={review.data.prior_contact_note ?? null}
             />
             <ActivateSection campaign={campaign} missing={missing} onChange={refresh} />
           </>
@@ -566,53 +565,49 @@ function TestSendSection({
 }
 
 function GuardsSection({
+  campaignId,
   summary,
-  acknowledged,
-  missing,
-  onAcknowledge,
-  onChange,
+  priorContact,
 }: {
+  campaignId: number
   summary: string
-  acknowledged: string | null
-  missing: Missing[]
-  onAcknowledge: () => Promise<unknown>
-  onChange: () => Promise<unknown>
+  priorContact: string | null
 }) {
-  const [notice, setNotice] = useState<string | null>(null)
-  const ack = useMutation({
-    mutationFn: onAcknowledge,
-    onMutate: () => setNotice(null),
-    onSuccess: onChange,
-    onError: async (error) => {
-      if (!isStale(error)) return
-      // The audience or the guard results moved: fetch the summary as it is now.
-      setNotice(
-        'The guard results changed since the summary was shown, so it was refreshed. ' +
-          'Read it again before acknowledging.',
-      )
-      await onChange()
-    },
-  })
-  const done = !isMissing(missing, 'guards') && acknowledged !== null
+  const [open, setOpen] = useState(false)
+  const details = useQuery({ ...guardDetailsQuery(campaignId), enabled: open })
   return (
     <Section title="Guard summary">
       <p className="text-sm">{summary}</p>
-      {done ? (
-        <p className="text-sm text-muted-foreground">Acknowledged.</p>
-      ) : (
-        <Button
-          variant="outline"
-          className="w-fit"
-          onClick={() => ack.mutate()}
-          disabled={ack.isPending}
-        >
-          Acknowledge this summary
-        </Button>
-      )}
-      <StaleNotice notice={notice} />
-      {ack.isError && !isStale(ack.error) && (
-        <ErrorNote label="Not acknowledged." error={ack.error} />
-      )}
+      {priorContact !== null && <p className="text-sm text-muted-foreground">{priorContact}.</p>}
+      <p className="text-sm text-muted-foreground">
+        For your information: activation doesn&apos;t wait on it. The guards check each contact
+        again when each step fires, and skip anyone they exclude then.
+      </p>
+      <Button
+        variant="outline"
+        className="w-fit"
+        aria-expanded={open}
+        onClick={() => setOpen((shown) => !shown)}
+      >
+        {open ? 'Hide skipped contacts' : 'Show skipped contacts'}
+      </Button>
+      {open &&
+        (details.isPending ? (
+          <LoadingNote label="Loading the skipped contacts…" />
+        ) : details.isError ? (
+          <ErrorNote label="The skipped contacts are unavailable." error={details.error} />
+        ) : details.data.skipped.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Nobody is skipped.</p>
+        ) : (
+          <ul aria-label="Skipped contacts" className="flex flex-col gap-1 text-sm">
+            {details.data.skipped.map((c) => (
+              <li key={c.contact_id}>
+                <span className="font-medium">{c.name || `Contact ${c.contact_id}`}</span>
+                <span className="text-muted-foreground">: {c.reasons.join(', ')}</span>
+              </li>
+            ))}
+          </ul>
+        ))}
     </Section>
   )
 }

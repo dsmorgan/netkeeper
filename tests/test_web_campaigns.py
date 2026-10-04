@@ -161,7 +161,7 @@ async def test_enroll_list_and_status(running_app: FastAPI, client: httpx.AsyncC
         "excluded": 1,
         "removed": 0,
         "pending": 2,
-        "summary": "3 in audience, 1 excluded: 1 do-not-contact",
+        "summary": "2 will send, 1 skipped (1 do-not-contact)",
     }
     listed = (await client.get("/api/v1/campaigns")).json()
     assert [(c["id"], c["status"], c["steps"], c["enrollments"]) for c in listed] == [
@@ -280,7 +280,7 @@ async def test_a_new_list_on_a_draft_replaces_the_audience(
     assert _pending_contacts(running_app, created["id"]) == [newcomer]
     after = (await client.get(f"{base}/review")).json()
     assert body["summary"] == after["guard_summary"]
-    assert body["summary"].startswith("1 in audience")
+    assert body["summary"] == "1 will send, none skipped"
     assert after["audience_fingerprint"] != before["audience_fingerprint"]
     status = (await client.get(base)).json()
     assert status["source_list_id"] == b_id

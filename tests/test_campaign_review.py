@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.gmail import GmailRateLimited
 from netkeeper.campaigns.gmail_fake import FakeGmail
+from netkeeper.crm import lists as list_service
 from netkeeper.db import session_scope
 from netkeeper.models import (
     Campaign,
@@ -29,7 +30,10 @@ from netkeeper.models import (
     Contact,
     Enrollment,
     EnrollmentStatus,
+    HistoryCampaign,
+    HistoryRecipient,
     Interaction,
+    ListKind,
     Mailbox,
     MailboxStatus,
     Message,
@@ -50,7 +54,7 @@ from netkeeper.services.campaign_sender import GmailSender
 
 CSRF = {"X-Netkeeper-Client": "1"}
 ARMED_FOR_DRAFTS: dict[str, Any] = {"armed_at": utcnow() - timedelta(days=1), "armed_by": "test"}
-REQUIREMENTS = ("step_approvals", "test_sends", "lint", "guards")
+REQUIREMENTS = ("step_approvals", "test_sends", "lint")
 
 
 def test_the_step_review_limits_are_pinned() -> None:
@@ -172,20 +176,6 @@ async def _lint(client: httpx.AsyncClient, s: Setup) -> Any:
     return await _ok(await client.post(f"{s.base}/review/lint", headers=CSRF))
 
 
-async def _ack(client: httpx.AsyncClient, s: Setup) -> None:
-    review = await _review(client, s)
-    await _ok(
-        await client.post(
-            f"{s.base}/review/guards/acknowledge",
-            json={
-                "summary": review["guard_summary"],
-                "audience_fingerprint": review["audience_fingerprint"],
-            },
-            headers=CSRF,
-        )
-    )
-
-
 async def _complete(client: httpx.AsyncClient, s: Setup, *, skip: str | None = None) -> None:
     """Record every requirement but ``skip``."""
     if skip != "step_approvals":
@@ -194,8 +184,6 @@ async def _complete(client: httpx.AsyncClient, s: Setup, *, skip: str | None = N
         await _test_send_all(client, s)
     if skip != "lint":
         assert (await _lint(client, s))["clean"] is True
-    if skip != "guards":
-        await _ack(client, s)
 
 
 def _missing(body: Any) -> set[str]:
@@ -320,7 +308,7 @@ async def test_nothing_recorded_lists_every_requirement(
     response = await client.post(f"{s.base}/activate", headers=CSRF)
     assert response.status_code == 409
     body = response.json()
-    assert _missing(body) == {"step_approvals", "test_sends", "lint", "guards"}
+    assert _missing(body) == {"step_approvals", "test_sends", "lint"}  # no guards (#346)
     for requirement in ("step_approvals", "test_sends"):
         gap = next(m for m in body["missing"] if m["requirement"] == requirement)
         assert gap["step_positions"] == [1, 2]
@@ -422,9 +410,6 @@ def _edit(s: Setup, change: str) -> None:
         ("template_version", {"step_approvals", "test_sends", "lint"}, [1]),
         ("step_mode", {"step_approvals", "test_sends", "lint"}, [2]),
         ("step_added", {"step_approvals", "test_sends", "lint"}, [3]),
-        # A step approval covers the messages of contacts enrolled later (#339).
-        ("enrolled", {"guards"}, None),
-        ("removed", {"guards"}, None),
     ],
 )
 async def test_a_change_after_the_review_undoes_the_affected_approvals(
@@ -447,27 +432,27 @@ async def test_a_change_after_the_review_undoes_the_affected_approvals(
     assert _campaign(s)[0] is CampaignStatus.REVIEWING
 
 
-async def test_an_audience_change_with_the_same_summary_still_undoes_the_acknowledgement(
+@pytest.mark.parametrize("change", ["enrolled", "removed"])
+async def test_an_audience_change_after_the_review_undoes_nothing(
+    client: httpx.AsyncClient, running_app: FastAPI, change: str
+) -> None:
+    """#346: no record counts for the audience; a step approval covers contacts enrolled
+    later (#339), and the guards apply again at every fire."""
+    s = _build(running_app)
+    await _complete(client, s)
+    _edit(s, change)
+    assert _missing(await _review(client, s)) == set()
+    assert (await client.post(f"{s.base}/activate", headers=CSRF)).status_code == 200
+
+
+async def test_a_contact_a_guard_excludes_after_the_review_does_not_block_activation(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
-    """The acknowledgement counts for the audience it was given for, not only its text."""
+    """#346: the guard summary is informational, so a change in it gates nothing. The
+    contact is not sent anything: see the engine test in test_campaign_review_steps."""
     s = _build(running_app)
     await _complete(client, s)
     before = await _review(client, s)
-    _edit(s, "removed")
-    _edit(s, "enrolled")  # the same count, so the same summary, for another audience
-    assert (await _review(client, s))["guard_summary"] == before["guard_summary"]
-    response = await client.post(f"{s.base}/activate", headers=CSRF)
-    assert response.status_code == 409
-    assert _missing(response.json()) == {"guards"}
-    assert _campaign(s)[0] is CampaignStatus.REVIEWING
-
-
-async def test_guard_results_that_change_undo_the_acknowledgement(
-    client: httpx.AsyncClient, running_app: FastAPI
-) -> None:
-    s = _build(running_app)
-    await _complete(client, s)
     with session_scope(s.factory, write=True) as session:
         user = _local(session)
         contact_id = session.scalars(unscoped(select(Enrollment.contact_id))).first()
@@ -475,9 +460,93 @@ async def test_guard_results_that_change_undo_the_acknowledgement(
         contact = get_scoped(session, user, Contact, contact_id)
         assert contact is not None
         contact.do_not_contact = True
-    response = await client.post(f"{s.base}/activate", headers=CSRF)
-    assert response.status_code == 409
-    assert _missing(response.json()) == {"guards"}
+    after = await _review(client, s)
+    assert (before["guard_summary"], after["guard_summary"]) == (
+        "12 will send, none skipped",
+        "11 will send, 1 skipped (1 do-not-contact)",
+    )
+    assert _missing(after) == set()
+    assert (await client.post(f"{s.base}/activate", headers=CSRF)).status_code == 200
+
+
+async def test_the_guard_acknowledgement_is_gone(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app)
+    review = await _review(client, s)
+    assert "guards_acknowledged" not in review
+    response = await client.post(
+        f"{s.base}/review/guards/acknowledge",
+        json={"summary": review["guard_summary"], "audience_fingerprint": "x"},
+        headers=CSRF,
+    )
+    assert response.status_code in (404, 405)
+
+
+async def test_the_guard_details_list_each_skipped_contact_with_every_reason(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app, people=4)
+    _block(s, s.enrollment_ids[0], "do_not_contact")
+    _block(s, s.enrollment_ids[0], "no_email")
+    _block(s, s.enrollment_ids[1], "no_email")
+    with session_scope(s.factory) as session:
+        first, second = (
+            session.scalars(unscoped(select(Enrollment.contact_id).where(Enrollment.id == e))).one()
+            for e in s.enrollment_ids[:2]
+        )
+    details = await _ok(await client.get(f"{s.base}/review/guards"))
+    summary = "2 will send, 2 skipped (1 do-not-contact, 1 no email)"
+    assert details["summary"] == summary == (await _review(client, s))["guard_summary"]
+    assert (details["will_send"], details["not_enrolled"]) == (2, 0)
+    assert [(c["contact_id"], c["reasons"]) for c in details["skipped"]] == [
+        (first, ["do-not-contact", "no email"]),  # every reason, not only the counted one
+        (second, ["no email"]),
+    ]
+    assert all(c["name"] for c in details["skipped"])
+    assert details["prior_contact_note"] is None
+
+
+async def test_the_review_notes_who_the_old_tool_emailed(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """#65: informational, over the contacts that will send, and gating nothing."""
+    s = _build(running_app, people=3)
+    _block(s, s.enrollment_ids[2], "do_not_contact")
+    with session_scope(s.factory, write=True) as session:
+        user = _local(session)
+        old = HistoryCampaign(
+            user_id=user.id, name="Spring", started_on=date(2026, 3, 2), source_sha256="0" * 64
+        )
+        session.add(old)
+        session.flush()
+        for email in (s.contact_emails[0], s.contact_emails[2]):  # [2] is skipped
+            session.add(HistoryRecipient(user_id=user.id, history_campaign_id=old.id, email=email))
+    review = await _review(client, s)
+    note = "1 was emailed by the old tool; last on 2026-03-02"
+    assert review["prior_contact_note"] == note
+    assert (await _ok(await client.get(f"{s.base}/review/guards")))["prior_contact_note"] == note
+    await _complete(client, s)
+    assert _missing(await _review(client, s)) == set()
+
+
+async def test_a_source_contact_no_guard_skips_but_not_enrolled_is_counted_apart(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app, people=2)
+    with session_scope(s.factory, write=True) as session:
+        user = _local(session)
+        campaign = session.scalars(unscoped(select(Campaign))).one()
+        members = [
+            *session.scalars(unscoped(select(Enrollment.contact_id))),
+            factories.make_contact(session, user, emails=["late@contacts.example"]).id,
+        ]
+        source = list_service.create_list(session, user, "Source", ListKind.STATIC)
+        list_service.add_members(session, user, source.id, members)
+        campaign.source_list_id = source.id
+    details = await _ok(await client.get(f"{s.base}/review/guards"))
+    assert details["summary"] == "2 will send, none skipped, 1 not enrolled"
+    assert (details["will_send"], details["not_enrolled"], details["skipped"]) == (2, 1, [])
 
 
 async def test_a_template_edited_after_the_review_was_shown_refuses_the_approval(
@@ -546,37 +615,9 @@ async def test_an_approval_on_a_campaign_no_longer_reviewing_is_a_real_refusal(
         json={"fingerprint": step["fingerprint"]},
         headers=CSRF,
     )
-    review = await _review(client, s)
-    ack = await client.post(
-        f"{s.base}/review/guards/acknowledge",
-        json={
-            "summary": review["guard_summary"],
-            "audience_fingerprint": review["audience_fingerprint"],
-        },
-        headers=CSRF,
-    )
-    for response in (approve, ack):
-        assert response.status_code == 409
-        assert "not reviewing" in response.json()["detail"]
-        assert response.json().get("code") is None
-
-
-async def test_a_summary_that_is_not_the_current_one_is_not_acknowledged(
-    client: httpx.AsyncClient, running_app: FastAPI
-) -> None:
-    s = _build(running_app)
-    review = await _review(client, s)
-    response = await client.post(
-        f"{s.base}/review/guards/acknowledge",
-        json={
-            "summary": "1 in audience, none excluded",
-            "audience_fingerprint": review["audience_fingerprint"],
-        },
-        headers=CSRF,
-    )
-    assert response.status_code == 409
-    assert response.json()["code"] == "stale"
-    assert review["guard_summary"] == "12 in audience, none excluded"
+    assert approve.status_code == 409
+    assert "not reviewing" in approve.json()["detail"]
+    assert approve.json().get("code") is None
 
 
 @pytest.mark.parametrize("status", [MailboxStatus.REAUTH_REQUIRED, MailboxStatus.DISABLED])
@@ -661,7 +702,6 @@ async def test_a_step_approval_covers_contacts_enrolled_after_it(
     s = _build(running_app)
     await _complete(client, s)
     _edit(s, "enrolled")
-    await _ack(client, s)  # the audience changed, so the guard summary is acknowledged again
     review = await _step_review(client, s, s.step_ids[0], limit=50)
     assert review["approved"] is True and review["total"] == 13
     assert all(m["approved"] for m in review["messages"])
@@ -1080,7 +1120,7 @@ async def test_a_test_send_gmail_refused_records_nothing(
             {"messages": [{"enrollment_id": 1, "fingerprint": "x"}]},
         ),
         ("POST", "/review/lint", None),
-        ("POST", "/review/guards/acknowledge", {"summary": "x", "audience_fingerprint": "x"}),
+        ("GET", "/review/guards", None),
         ("POST", "/review/test-send", {"step_id": 1}),
         ("POST", "/activate", None),
     ],
@@ -1212,28 +1252,6 @@ async def test_editing_a_contact_keeps_the_step_approval(
     review = await _step_review(client, s, s.step_ids[0])
     assert review["messages"][0]["approved"] is True
     assert (await client.post(f"{s.base}/activate", headers=CSRF)).status_code == 200
-
-
-async def test_an_old_audience_fingerprint_is_not_acknowledged(
-    client: httpx.AsyncClient, running_app: FastAPI
-) -> None:
-    s = _build(running_app)
-    before = await _review(client, s)
-    _edit(s, "removed")
-    _edit(s, "enrolled")  # the same count, so the same summary, for another audience
-    after = await _review(client, s)
-    assert after["guard_summary"] == before["guard_summary"]
-    response = await client.post(
-        f"{s.base}/review/guards/acknowledge",
-        json={
-            "summary": after["guard_summary"],
-            "audience_fingerprint": before["audience_fingerprint"],
-        },
-        headers=CSRF,
-    )
-    assert response.status_code == 409
-    assert "audience changed" in response.json()["detail"]
-    assert response.json()["code"] == "stale"
 
 
 async def test_a_test_send_renders_for_the_first_pending_enrollment(

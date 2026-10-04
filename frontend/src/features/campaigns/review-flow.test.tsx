@@ -33,9 +33,8 @@ describe('review flow', () => {
       'Test send of each email step: missing, email steps with no current test send: steps 1, 2',
       'Mailbox ok: done',
       'Lint clean: missing, no lint result for the current steps and templates',
-      'Guard summary acknowledged: missing, the guard summary for the current audience is not acknowledged',
     ])
-    expect(section('Activate').getByText(/4 requirements are still missing/)).toBeVisible()
+    expect(section('Activate').getByText(/3 requirements are still missing/)).toBeVisible()
     expect(section('Activate').getByRole('button', { name: 'Activate' })).toBeDisabled()
   })
 
@@ -182,36 +181,72 @@ describe('review flow', () => {
     expect(sends.queryByText(/Sent to/)).toBeNull()
   })
 
-  it('acknowledges the guard summary exactly as shown', async () => {
+  it('shows the guard summary as information, with nothing to acknowledge', async () => {
     const calls: Call[] = []
-    const state = reviewing()
+    mockFetch(campaignBackend(reviewing({ missing: [] }), {}, calls))
+    await renderApp('/campaigns/5')
+
+    const guards = within(await screen.findByRole('region', { name: 'Guard summary' }))
+    expect(guards.getByText('2 will send, 1 skipped (1 do-not-contact)')).toBeVisible()
+    expect(guards.getByText(/activation doesn.t wait on it/)).toBeVisible()
+    expect(guards.queryByRole('button', { name: /acknowledge/i })).toBeNull()
+    // Every requirement met, and the guard summary is not among them (#346).
+    expect(await screen.findByText('Every requirement is met.')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Activate' })).toBeEnabled()
+    expect(calls.some((c) => c.path.endsWith('/review/guards'))).toBe(false)
+  })
+
+  it('shows each skipped contact with every reason on demand', async () => {
+    const calls: Call[] = []
+    mockFetch(campaignBackend(reviewing(), {}, calls))
+    await renderApp('/campaigns/5')
+
+    const guards = within(await screen.findByRole('region', { name: 'Guard summary' }))
+    const show = guards.getByRole('button', { name: 'Show skipped contacts' })
+    expect(show).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(show)
+
+    const skipped = within(await guards.findByRole('list', { name: 'Skipped contacts' }))
+    expect(skipped.getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      'Tobias Wrenfield: do-not-contact, no email',
+    ])
+    expect(calls.filter((c) => c.path.endsWith('/review/guards'))).toHaveLength(1)
+
+    fireEvent.click(guards.getByRole('button', { name: 'Hide skipped contacts' }))
+    expect(guards.queryByRole('list', { name: 'Skipped contacts' })).toBeNull()
+  })
+
+  it('notes who the old tool already emailed', async () => {
     mockFetch(
       campaignBackend(
-        state,
-        {
-          'POST /api/v1/campaigns/5/review/guards/acknowledge': () => {
-            state.review = {
-              ...state.review,
-              guards_acknowledged: '2030-06-15T12:00:00Z',
-              missing: ALL_MISSING.filter((m) => m.requirement !== 'guards'),
-            }
-            return jsonResponse(state.review)
-          },
-        },
-        calls,
+        reviewing({ prior_contact_note: '12 were emailed by the old tool; last on 2026-05-01' }),
       ),
     )
     await renderApp('/campaigns/5')
 
-    const guards = await screen.findByRole('region', { name: 'Guard summary' })
-    expect(within(guards).getByText('3 in audience, 1 excluded: 1 do-not-contact')).toBeVisible()
-    fireEvent.click(within(guards).getByRole('button', { name: 'Acknowledge this summary' }))
+    const guards = within(await screen.findByRole('region', { name: 'Guard summary' }))
+    expect(guards.getByText('12 were emailed by the old tool; last on 2026-05-01.')).toBeVisible()
+  })
 
-    expect(await within(guards).findByText('Acknowledged.')).toBeVisible()
-    expect(calls.find((c) => c.path.endsWith('/guards/acknowledge'))?.body).toEqual({
-      summary: '3 in audience, 1 excluded: 1 do-not-contact',
-      audience_fingerprint: 'aud1ence',
-    })
+  it('says so when the guards skip nobody', async () => {
+    mockFetch(
+      campaignBackend(reviewing({ guard_summary: '3 will send, none skipped' }), {
+        'GET /api/v1/campaigns/5/review/guards': () =>
+          jsonResponse({
+            summary: '3 will send, none skipped',
+            will_send: 3,
+            not_enrolled: 0,
+            skipped: [],
+            prior_contact_note: null,
+          }),
+      }),
+    )
+    await renderApp('/campaigns/5')
+
+    const guards = within(await screen.findByRole('region', { name: 'Guard summary' }))
+    expect(guards.queryByText(/old tool/)).toBeNull()
+    fireEvent.click(guards.getByRole('button', { name: 'Show skipped contacts' }))
+    expect(await guards.findByText('Nobody is skipped.')).toBeVisible()
   })
 
   it('keeps Activate disabled while anything is missing, and lists what', async () => {
@@ -225,7 +260,6 @@ describe('review flow', () => {
       'Each step approved: steps not approved: steps 1, 2',
       'Test send of each email step: email steps with no current test send: steps 1, 2',
       'Lint clean: no lint result for the current steps and templates',
-      'Guard summary acknowledged: the guard summary for the current audience is not acknowledged',
     ])
   })
 
@@ -239,8 +273,8 @@ describe('review flow', () => {
           'POST /api/v1/campaigns/5/activate': () =>
             jsonResponse(
               {
-                detail: 'the review is not complete: test_sends, guards',
-                missing: [ALL_MISSING[1], ALL_MISSING[3]],
+                detail: 'the review is not complete: test_sends, lint',
+                missing: [ALL_MISSING[1], ALL_MISSING[2]],
               },
               409,
             ),
@@ -258,12 +292,12 @@ describe('review flow', () => {
     fireEvent.click(dialog.getByRole('button', { name: 'Activate campaign' }))
 
     expect(await dialog.findByRole('alert')).toHaveTextContent(
-      'the review is not complete: test_sends, guards',
+      'the review is not complete: test_sends, lint',
     )
     const still = within(dialog.getByRole('list', { name: 'Still missing' }))
     expect(still.getAllByRole('listitem').map((li) => li.textContent)).toEqual([
       'Test send of each email step: email steps with no current test send: steps 1, 2',
-      'Guard summary acknowledged: the guard summary for the current audience is not acknowledged',
+      'Lint clean: no lint result for the current steps and templates',
     ])
 
     // The same refusal again: the confirm button is not left dead (#181).
@@ -303,81 +337,5 @@ describe('review flow', () => {
     expect(await screen.findByRole('button', { name: 'Pause' })).toBeVisible()
     expect(screen.queryByRole('heading', { name: 'Review' })).toBeNull()
     expect(calls.filter((c) => c.path.endsWith('/activate'))).toHaveLength(1)
-  })
-
-  it('refreshes the guard summary when it changed since it was shown', async () => {
-    const calls: Call[] = []
-    const state = reviewing()
-    let refusedOnce = false
-    mockFetch(
-      campaignBackend(
-        state,
-        {
-          'POST /api/v1/campaigns/5/review/guards/acknowledge': () => {
-            if (!refusedOnce) {
-              refusedOnce = true
-              state.review = {
-                ...state.review,
-                audience_fingerprint: 'aud1ence-2',
-                guard_summary: '3 in audience, 2 excluded: 2 do-not-contact',
-              }
-              return jsonResponse(
-                {
-                  detail: 'the guard results changed; they are now: 3 in audience, 2 excluded',
-                  code: 'stale',
-                },
-                409,
-              )
-            }
-            state.review = {
-              ...state.review,
-              guards_acknowledged: '2030-06-15T12:00:00Z',
-              missing: ALL_MISSING.filter((m) => m.requirement !== 'guards'),
-            }
-            return jsonResponse(state.review)
-          },
-        },
-        calls,
-      ),
-    )
-    await renderApp('/campaigns/5')
-
-    const guards = within(await screen.findByRole('region', { name: 'Guard summary' }))
-    fireEvent.click(guards.getByRole('button', { name: 'Acknowledge this summary' }))
-
-    expect(await guards.findByRole('status')).toHaveTextContent(
-      'The guard results changed since the summary was shown',
-    )
-    expect(await guards.findByText('3 in audience, 2 excluded: 2 do-not-contact')).toBeVisible()
-    expect(guards.queryByRole('alert')).toBeNull()
-
-    fireEvent.click(guards.getByRole('button', { name: 'Acknowledge this summary' }))
-
-    expect(await guards.findByText('Acknowledged.')).toBeVisible()
-    expect(calls.filter((c) => c.path.endsWith('/guards/acknowledge')).map((c) => c.body)).toEqual([
-      { summary: '3 in audience, 1 excluded: 1 do-not-contact', audience_fingerprint: 'aud1ence' },
-      {
-        summary: '3 in audience, 2 excluded: 2 do-not-contact',
-        audience_fingerprint: 'aud1ence-2',
-      },
-    ])
-  })
-
-  it('shows a real refusal of the guard acknowledgement as an error', async () => {
-    mockFetch(
-      campaignBackend(reviewing(), {
-        'POST /api/v1/campaigns/5/review/guards/acknowledge': () =>
-          jsonResponse({ detail: 'campaign 5 is active, not reviewing' }, 409),
-      }),
-    )
-    await renderApp('/campaigns/5')
-
-    const guards = within(await screen.findByRole('region', { name: 'Guard summary' }))
-    fireEvent.click(guards.getByRole('button', { name: 'Acknowledge this summary' }))
-
-    const refusal = await guards.findByRole('alert')
-    expect(refusal).toHaveTextContent('Not acknowledged.')
-    expect(refusal).toHaveTextContent('campaign 5 is active, not reviewing')
-    expect(guards.queryByRole('status')).toBeNull()
   })
 })

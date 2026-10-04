@@ -42,8 +42,8 @@ from netkeeper.services.campaign_guards import (
     check_enrollment,
     check_step,
     enrollment_state,
-    excluded_summary,
     load_facts,
+    skip_summary,
 )
 
 NOW = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
@@ -215,9 +215,9 @@ def test_the_summary_names_both_address_reasons() -> None:
     verdicts = _verdicts(
         (5, None), (2, Reason.DUPLICATE_ADDRESS), (1, Reason.ADDRESS_BOUNCED_ELSEWHERE)
     )
-    assert excluded_summary(verdicts, contacted_within_days=30) == (
-        "8 in audience, 3 excluded: 2 address already in this campaign,"
-        " 1 address bounced on another contact"
+    assert skip_summary(verdicts, contacted_within_days=30) == (
+        "5 will send, 3 skipped (2 address already in this campaign,"
+        " 1 address bounced on another contact)"
     )
 
 
@@ -356,39 +356,48 @@ def _verdicts(*groups: tuple[int, Reason | None]) -> list[Verdict]:
 
 
 def test_the_summary_is_the_spec_example() -> None:
-    """Spec 11.8's line, generated from the reasons."""
+    """Spec 11.8's line, generated from the reasons, in #346's words."""
     verdicts = _verdicts(
         (175, None),
         (3, Reason.CONTACTED_RECENTLY),
         (30, Reason.NO_EMAIL),
         (4, Reason.DO_NOT_CONTACT),
     )
-    assert excluded_summary(verdicts, contacted_within_days=30) == (
-        "212 in audience, 37 excluded: 30 no email, 4 do-not-contact,"
-        " 3 contacted in the last 30 days"
+    assert skip_summary(verdicts, contacted_within_days=30) == (
+        "175 will send, 37 skipped (30 no email, 4 do-not-contact, 3 contacted in the last 30 days)"
     )
 
 
 def test_the_summary_counts_each_contact_once_under_its_first_reason() -> None:
     both = Verdict(1, (Reason.DO_NOT_CONTACT, Reason.NO_EMAIL))
-    assert excluded_summary([both, Verdict(2, ())], contacted_within_days=30) == (
-        "2 in audience, 1 excluded: 1 do-not-contact"
+    assert skip_summary([both, Verdict(2, ())], contacted_within_days=30) == (
+        "1 will send, 1 skipped (1 do-not-contact)"
     )
 
 
 def test_the_summary_breaks_a_tie_in_reason_order() -> None:
     verdicts = _verdicts((2, Reason.NO_LINKEDIN), (2, Reason.ARCHIVED), (1, Reason.MERGED))
-    assert excluded_summary(verdicts, contacted_within_days=30) == (
-        "5 in audience, 5 excluded: 2 archived, 2 no LinkedIn profile,"
-        " 1 merged into another contact"
+    assert skip_summary(verdicts, contacted_within_days=30) == (
+        "0 will send, 5 skipped (2 archived, 2 no LinkedIn profile, 1 merged into another contact)"
     )
 
 
 def test_the_summary_with_nobody_excluded_and_nobody_at_all() -> None:
-    assert excluded_summary(_verdicts((3, None)), contacted_within_days=30) == (
-        "3 in audience, none excluded"
+    assert skip_summary(_verdicts((3, None)), contacted_within_days=30) == (
+        "3 will send, none skipped"
     )
-    assert excluded_summary([], contacted_within_days=30) == "0 in audience, none excluded"
+    assert skip_summary([], contacted_within_days=30) == "0 will send, none skipped"
+
+
+def test_the_summary_counts_a_contact_not_enrolled_apart() -> None:
+    """#346: "will send" means an enrolled contact no guard skips."""
+    verdicts = [Verdict(1, ()), Verdict(2, ()), Verdict(3, (Reason.NO_EMAIL,))]
+    assert skip_summary(verdicts, contacted_within_days=30, enrolled={1, 3}) == (
+        "1 will send, 1 skipped (1 no email), 1 not enrolled"
+    )
+    assert skip_summary(verdicts[:2], contacted_within_days=30, enrolled={1}) == (
+        "1 will send, none skipped, 1 not enrolled"
+    )
 
 
 def test_every_reason_has_its_label() -> None:
@@ -644,8 +653,8 @@ def test_enrollment_verdicts_come_in_id_order_with_the_summary(
         writer, user, campaign, [blocked.id, good.id, no_email.id, good.id], now=NOW
     )
     assert [v.contact_id for v in verdicts] == sorted([good.id, no_email.id, blocked.id])
-    assert excluded_summary(verdicts, contacted_within_days=30) == (
-        "3 in audience, 2 excluded: 1 do-not-contact, 1 no email"
+    assert skip_summary(verdicts, contacted_within_days=30) == (
+        "1 will send, 2 skipped (1 do-not-contact, 1 no email)"
     )
 
 

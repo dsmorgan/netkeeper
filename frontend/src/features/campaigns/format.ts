@@ -59,7 +59,6 @@ export const REQUIREMENT_LABELS: Record<string, string> = {
   test_sends: 'Test send of each email step',
   mailbox: 'Mailbox ok',
   lint: 'Lint clean',
-  guards: 'Guard summary acknowledged',
 }
 
 /** The checklist's order: every requirement the gate knows, whether or not it is missing. */
@@ -71,7 +70,6 @@ export const REQUIREMENTS = [
   'test_sends',
   'mailbox',
   'lint',
-  'guards',
 ] as const
 
 /** One `missing` entry as a sentence, with the steps or enrollments it names. */

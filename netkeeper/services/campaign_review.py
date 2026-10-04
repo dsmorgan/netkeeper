@@ -13,9 +13,15 @@ every requirement not met, unless each of these is recorded and still current:
 - ``test_sends``: a test send of each email step (:func:`prepare_test_send`,
   then :func:`record_test_send`).
 - ``lint``: every step's template found free of lint errors (:func:`record_lint`).
-- ``guards``: the guard summary acknowledged (:func:`acknowledge_guards`).
 - ``mailbox``: with an email step, the campaign's mailbox still ``ok``, not
   ``reauth_required`` or ``disabled`` since its test send (#299).
+
+**The guard summary gates nothing** (#346). :func:`guard_summary` is one line, such
+as ``"8 will send, 2 skipped (1 contacted in the last 30 days, 1 no email)"``, and
+:func:`guard_report` adds each skipped contact with every reason, and a note of how
+many the old tool emailed (#65). Nobody acknowledges it: the guards apply again
+when each step fires (:func:`~netkeeper.services.campaign_guards.check_step`), so a
+contact they exclude then is never sent anything, whatever the summary said.
 
 **Invalidated on change.** Every record carries the fingerprint of what it was
 made for, and counts only while that fingerprint is still the current one:
@@ -36,10 +42,8 @@ made for, and counts only while that fingerprint is still the current one:
 - The content fingerprint (:func:`content_fingerprint`) covers every step's.
   The lint record counts for it.
 - The audience fingerprint (:func:`audience_fingerprint`) covers the pending
-  enrollments, the audience's source and its contacts. The guard
-  acknowledgement counts for it; a step approval does not, since it covers the
-  messages of contacts enrolled later. The acknowledged summary must also still be the
-  one the guards give now.
+  enrollments, the audience's source and its contacts. No record counts for it: a
+  step approval covers the messages of contacts enrolled later.
 
 **Test sends are never campaign messages.** A test send goes only to the
 campaign mailbox's own address, is rendered for an enrollment but addressed to
@@ -86,6 +90,7 @@ from netkeeper.config import Settings
 from netkeeper.crm import lists as crm_lists
 from netkeeper.crm.contacts import sendable_email
 from netkeeper.crm.filters import compile_filter, parse_filter
+from netkeeper.crm.history import prior_contact
 from netkeeper.db import is_writer
 from netkeeper.localtime import local_today
 from netkeeper.models import (
@@ -109,11 +114,12 @@ from netkeeper.services import campaign_engine, mailboxes
 from netkeeper.services.campaign_guards import (
     UNSENDABLE_EMAIL_STATUSES,
     GuardPolicy,
+    Verdict,
     check_contact,
     check_enrollment,
-    excluded_summary,
     load_facts,
     reason_label,
+    skip_summary,
 )
 
 log = logging.getLogger(__name__)
@@ -145,8 +151,8 @@ class ReviewConflict(ReviewError, ValueError):
 
 
 class ReviewStale(ReviewConflict):
-    """Refused because what the person was shown is no longer current: a preview's or the
-    guard summary's fingerprint changed since. Showing it again and retrying can succeed,
+    """Refused because what the person was shown is no longer current: a step's or a
+    message's fingerprint changed since. Showing it again and retrying can succeed,
     unlike any other :class:`ReviewConflict` (#299)."""
 
 
@@ -287,17 +293,74 @@ def audience_fingerprint(session: Session, user: User, campaign: Campaign) -> st
     return _audience(session, user, campaign)[1]
 
 
+@dataclass(frozen=True, slots=True)
+class SkippedContact:
+    """One contact the guards skip, with every reason, not only the one counted."""
+
+    contact_id: int
+    name: str
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GuardReport:
+    """The guard summary with its details, for the review screen (#346).
+
+    ``prior_contact`` is :meth:`netkeeper.crm.history.PriorContact.note` over the
+    contacts that will send (#65): informational, like the rest."""
+
+    summary: str
+    will_send: int
+    not_enrolled: int
+    skipped: tuple[SkippedContact, ...]
+    prior_contact: str | None
+
+
+def _guard_verdicts(
+    session: Session, user: User, campaign: Campaign, *, now: datetime
+) -> tuple[list[Verdict], set[int]]:
+    """The verdicts over the audience (its source's contacts and the pending ones), and
+    the pending enrollments' contacts."""
+    enrolled = {e.contact_id for e in _pending(session, user, campaign.id)}
+    ids = source_contact_ids(session, user, campaign) | enrolled
+    return check_enrollment(session, user, campaign, ids, now=now), enrolled
+
+
 def guard_summary(session: Session, user: User, campaign: Campaign, *, now: datetime) -> str:
-    """Spec 11.8's line over the audience: its source's contacts and the pending ones.
+    """Spec 11.8's line over the audience: who will send, and who is skipped and why.
 
     From :func:`~netkeeper.services.campaign_guards.check_enrollment` and
-    :func:`~netkeeper.services.campaign_guards.excluded_summary`, never restated.
+    :func:`~netkeeper.services.campaign_guards.skip_summary`, never restated.
     """
-    ids = source_contact_ids(session, user, campaign) | {
-        e.contact_id for e in _pending(session, user, campaign.id)
-    }
-    verdicts = check_enrollment(session, user, campaign, ids, now=now)
-    return excluded_summary(verdicts, contacted_within_days=campaign.contacted_within_days_guard)
+    verdicts, enrolled = _guard_verdicts(session, user, campaign, now=now)
+    return skip_summary(
+        verdicts, contacted_within_days=campaign.contacted_within_days_guard, enrolled=enrolled
+    )
+
+
+def guard_report(session: Session, user: User, campaign: Campaign, *, now: datetime) -> GuardReport:
+    """:func:`guard_summary` with its details on demand: each skipped contact, with every
+    reason that applies, and the old tool's note (#346, #65). Reads only."""
+    verdicts, enrolled = _guard_verdicts(session, user, campaign, now=now)
+    window = campaign.contacted_within_days_guard
+    sending = [v.contact_id for v in verdicts if v.eligible and v.contact_id in enrolled]
+    excluded = [v for v in verdicts if not v.eligible]
+    contacts = _contacts(session, user, [v.contact_id for v in excluded])
+    skipped = tuple(
+        SkippedContact(
+            v.contact_id,
+            _contact_name(contacts.get(v.contact_id)),
+            tuple(reason_label(r, contacted_within_days=window) for r in v.reasons),
+        )
+        for v in excluded
+    )
+    return GuardReport(
+        summary=skip_summary(verdicts, contacted_within_days=window, enrolled=enrolled),
+        will_send=len(sending),
+        not_enrolled=sum(1 for v in verdicts if v.eligible and v.contact_id not in enrolled),
+        skipped=skipped,
+        prior_contact=prior_contact(session, user, sending).note(),
+    )
 
 
 # --- reading ------------------------------------------------------------------------
@@ -836,32 +899,6 @@ def _lint_errors(
     return tuple(out)
 
 
-def acknowledge_guards(
-    session: Session,
-    user: User,
-    campaign_id: int,
-    *,
-    summary_seen: str,
-    audience_fingerprint_seen: str,
-    now: datetime,
-) -> Campaign:
-    """Acknowledge the guard summary the person was shown. Refused unless it is still the
-    current summary for the current audience."""
-    _require_writer(session, "acknowledge_guards")
-    campaign = _reviewing(session, user, campaign_id)
-    audience = audience_fingerprint(session, user, campaign)
-    summary = guard_summary(session, user, campaign, now=now)
-    if audience_fingerprint_seen != audience:
-        raise ReviewStale("the audience changed since the summary was shown; look again")
-    if summary_seen != summary:
-        raise ReviewStale(f"the guard results changed; they are now: {summary}")
-    campaign.guards_acknowledged_at = now
-    campaign.guards_fingerprint = audience
-    campaign.guards_summary = summary
-    session.flush()
-    return campaign
-
-
 # --- the test send ------------------------------------------------------------------
 
 
@@ -1066,7 +1103,7 @@ def missing(
         out.append(Missing("reviewing", f"the campaign is {campaign.status}, not reviewing"))
     steps = _steps(session, user, campaign.id)
     content = content_fingerprint(session, user, campaign, me)
-    pending, audience = _audience(session, user, campaign)
+    pending = _pending(session, user, campaign.id)
     if not pending:
         out.append(Missing("audience", "nobody is enrolled"))
     approvals = _approvals(session, user, campaign.id)
@@ -1137,18 +1174,8 @@ def missing(
         out.append(Missing("lint", "no lint result for the current steps and templates"))
     elif errors := tuple(p for p, issues in _lint_errors(session, user, campaign.id, me) if issues):
         out.append(Missing("lint", "templates with lint errors", step_positions=errors))
-    if campaign.guards_fingerprint != audience:
-        out.append(
-            Missing("guards", "the guard summary for the current audience is not acknowledged")
-        )
-    elif campaign.guards_summary != (summary := guard_summary(session, user, campaign, now=now)):
-        out.append(
-            Missing(
-                "guards",
-                f"the guard results changed since they were acknowledged: {summary}"
-                f" (acknowledged: {campaign.guards_summary})",
-            )
-        )
+    # No guard requirement (#346): the guard summary is informational, and the guards
+    # apply again when each step fires.
     return out
 
 

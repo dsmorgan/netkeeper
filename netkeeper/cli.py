@@ -2980,8 +2980,11 @@ def campaigns_activate(
 
     Refused, with the list of what is missing, unless every review requirement is
     recorded and current: every step approved (each message of a step that uses
-    {{ personal_line }}), a test send of each email step, a clean lint, and the
-    guard summary acknowledged.
+    {{ personal_line }}), a test send of each email step, and a clean lint.
+
+    It prints the guard summary first: who will send, and who the guards skip and
+    why. The summary gates nothing; the guards apply again when each step fires.
+    `netkeeper campaigns guards` lists each skipped contact.
 
     The campaign sends nothing before its scheduled start: `--start`, `--now`, or by
     default the next Tuesday at 09:00 in your time zone. A start outside the
@@ -3000,6 +3003,7 @@ def campaigns_activate(
             timezone = user.timezone
             now = datetime.now(UTC)
             gaps = campaign_review.missing(session, user, campaign, me=me, now=now)
+            guards = campaign_review.guard_report(session, user, campaign, now=now)
             chosen = _start_or_exit(start, now_flag, timezone=timezone, now=now)
             starts_at = campaign_service.resolve_start(
                 user, settings=settings, now=now, starts_at=chosen
@@ -3013,6 +3017,9 @@ def campaigns_activate(
             )
         if gaps:
             _refuse_activation(campaign_id, gaps)
+        typer.echo(f"guards: {guards.summary}")
+        if guards.prior_contact is not None:
+            typer.echo(f"note: {guards.prior_contact}")
         # A --start already past starts the campaign now, as activation records it.
         when = "now" if now_flag or starts_at <= now else _local_start(starts_at, timezone)
         typer.echo(f"starts: {when}")
@@ -3049,6 +3056,33 @@ def campaigns_activate(
         f"campaign {campaign_id} {name!r} is active; it starts"
         f" {_local_start(started, timezone) if started is not None else when}"
     )
+
+
+@campaigns_app.command("guards")
+def campaigns_guards(
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+) -> None:
+    """Show the guard summary and each contact it skips, with every reason
+    (GET /campaigns/{id}/review/guards).
+
+    The summary is informational: activation does not wait on it, and the guards
+    apply again when each step fires.
+    """
+    with _campaign_db() as factory, session_scope(factory) as session, _campaign_errors():
+        user = _local_user_or_exit(session)
+        campaign = campaign_review.get_campaign(session, user, campaign_id)
+        report = campaign_review.guard_report(session, user, campaign, now=datetime.now(UTC))
+    typer.echo(f"guards: {report.summary}")
+    if report.prior_contact is not None:
+        typer.echo(f"note: {report.prior_contact}")
+    if report.skipped:
+        typer.echo(
+            _format_table(
+                ("CONTACT", "NAME", "SKIPPED BECAUSE"),
+                [(str(c.contact_id), c.name or "-", "; ".join(c.reasons)) for c in report.skipped],
+            ),
+            nl=False,
+        )
 
 
 @campaigns_app.command("start")

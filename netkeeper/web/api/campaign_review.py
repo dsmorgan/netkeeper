@@ -13,14 +13,15 @@ The flow, for the campaign builder (P3-11):
    whose template uses ``{{ personal_line }}`` is not approved as a whole:
    ``POST .../review/steps/{step_id}/messages/approve`` approves its messages
    one by one, each with the ``fingerprint`` it came with (#339).
-3. ``POST .../review/lint``, ``POST .../review/guards/acknowledge`` (with the
-   summary and ``audience_fingerprint`` from ``GET .../review``), and
-   ``POST .../review/test-send`` for each email step: sent on a mailbox armed to
-   send, drafted on one armed for drafts only.
+3. ``POST .../review/lint``, and ``POST .../review/test-send`` for each email
+   step: sent on a mailbox armed to send, drafted on one armed for drafts only.
 4. ``POST /campaigns/{id}/activate``: ``409`` with ``missing``, a list of every
    requirement not met, unless each is recorded and current.
 
-``GET .../review`` answers the same ``missing`` list at any time. A campaign,
+``GET .../review`` answers the same ``missing`` list at any time, and the guard
+summary: one line of who will send and who is skipped, which gates nothing (#346).
+``GET .../review/guards`` answers its details: each skipped contact with every
+reason, and how many of those who will send the old tool emailed (#65). A campaign,
 step or enrollment that is not the user's answers ``404``. Every ``POST``
 needs the CSRF header. The test send holds no session while it talks to Gmail.
 """
@@ -122,8 +123,29 @@ class ReviewOut(BaseModel):
     content_fingerprint: str
     audience_fingerprint: str
     guard_summary: str
-    guards_acknowledged: str | None
+    """Who will send and who the guards skip, in one line. Informational: it gates
+    nothing, and the guards apply again when each step fires (#346)."""
+    prior_contact_note: str | None
+    """How many of those who will send the old tool emailed, and when it last did (#65)."""
     missing: list[MissingOut]
+
+
+class SkippedContactOut(BaseModel):
+    contact_id: int
+    name: str
+    reasons: list[str]
+    """Every reason that applies; the summary counts only the first."""
+
+
+class GuardsOut(BaseModel):
+    """The guard summary's details, on demand (#346)."""
+
+    summary: str
+    will_send: int
+    not_enrolled: int
+    """Contacts of the audience's source no guard skips, but not enrolled."""
+    skipped: list[SkippedContactOut]
+    prior_contact_note: str | None
 
 
 class MessagePreviewOut(BaseModel):
@@ -189,11 +211,6 @@ class LintStepOut(BaseModel):
 class LintOut(BaseModel):
     clean: bool
     steps: list[LintStepOut]
-
-
-class GuardsIn(BaseModel):
-    summary: Annotated[str, Field(max_length=2000)]
-    audience_fingerprint: Annotated[str, Field(max_length=64)]
 
 
 class TestSendIn(BaseModel):
@@ -277,13 +294,14 @@ def _step_review_out(r: service.StepReview) -> StepReviewOut:
 def _review(session: Session, user: User, campaign_id: int, me: dict[str, str]) -> ReviewOut:
     now = utcnow()
     campaign = service.get_campaign(session, user, campaign_id)
+    guards = service.guard_report(session, user, campaign, now=now)
     return ReviewOut(
         campaign_id=campaign.id,
         status=campaign.status,
         content_fingerprint=service.content_fingerprint(session, user, campaign, me),
         audience_fingerprint=service.audience_fingerprint(session, user, campaign),
-        guard_summary=service.guard_summary(session, user, campaign, now=now),
-        guards_acknowledged=campaign.guards_summary,
+        guard_summary=guards.summary,
+        prior_contact_note=guards.prior_contact,
         missing=_missing_out(service.missing(session, user, campaign, me=me, now=now)),
     )
 
@@ -407,21 +425,22 @@ def lint_campaign(
     )
 
 
-@router.post("/campaigns/{campaign_id}/review/guards/acknowledge", responses={**NOT_FOUND, **STALE})
-def acknowledge_guards(
-    campaign_id: int, body: GuardsIn, request: Request, session: SessionDep, user: CurrentUser
-) -> ReviewOut:
-    """Acknowledge the guard summary; refused unless it is still the current one."""
+@router.get("/campaigns/{campaign_id}/review/guards", responses=NOT_FOUND)
+def get_guards(campaign_id: int, session: SessionDep, user: CurrentUser) -> GuardsOut:
+    """The guard summary's details: each skipped contact, with every reason (#346)."""
     with translate_errors():
-        service.acknowledge_guards(
-            session,
-            user,
-            campaign_id,
-            summary_seen=body.summary,
-            audience_fingerprint_seen=body.audience_fingerprint,
-            now=utcnow(),
-        )
-        return _review(session, user, campaign_id, _me(request))
+        campaign = service.get_campaign(session, user, campaign_id)
+        report = service.guard_report(session, user, campaign, now=utcnow())
+    return GuardsOut(
+        summary=report.summary,
+        will_send=report.will_send,
+        not_enrolled=report.not_enrolled,
+        skipped=[
+            SkippedContactOut(contact_id=c.contact_id, name=c.name, reasons=list(c.reasons))
+            for c in report.skipped
+        ],
+        prior_contact_note=report.prior_contact,
+    )
 
 
 def _opener(request: Request) -> GmailOpener:

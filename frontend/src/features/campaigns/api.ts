@@ -28,6 +28,8 @@ export type EnrollIn = Schemas['EnrollIn']
 export type EnrollOut = Schemas['EnrollOut']
 export type Missing = Schemas['MissingOut']
 export type Review = Schemas['ReviewOut']
+export type GuardDetails = Schemas['GuardsOut']
+export type SkippedContact = Schemas['SkippedContactOut']
 export type StepReview = Schemas['StepReviewOut']
 export type MessagePreview = Schemas['MessagePreviewOut']
 export type LintResult = Schemas['LintOut']
@@ -81,6 +83,7 @@ export const campaignKeys = {
   list: () => [...campaignKeys.all, 'list'] as const,
   one: (id: number) => [...campaignKeys.all, 'one', id] as const,
   review: (id: number) => [...campaignKeys.all, 'review', id] as const,
+  guards: (id: number) => [...campaignKeys.review(id), 'guards'] as const,
   steps: (id: number) => [...campaignKeys.all, 'step', id] as const,
   step: (id: number, stepId: number, offset: number) =>
     [...campaignKeys.steps(id), stepId, offset] as const,
@@ -163,6 +166,24 @@ export function reviewQuery(id: number) {
         signal,
       })
       if (data === undefined) fail(response.status, error, 'could not load the review')
+      return data
+    },
+  })
+}
+
+/**
+ * The guard summary's details, on demand (#346): each contact the guards skip, with every
+ * reason. Informational: activation does not wait on it.
+ */
+export function guardDetailsQuery(id: number) {
+  return queryOptions({
+    queryKey: campaignKeys.guards(id),
+    queryFn: async ({ signal }): Promise<GuardDetails> => {
+      const { data, error, response } = await api.GET(
+        '/api/v1/campaigns/{campaign_id}/review/guards',
+        { params: { path: { campaign_id: id } }, signal },
+      )
+      if (data === undefined) fail(response.status, error, 'could not load the skipped contacts')
       return data
     },
   })
@@ -322,19 +343,6 @@ export async function testSend(id: number, stepId: number): Promise<TestSend> {
     { params: { path: { campaign_id: id } }, body: { step_id: stepId } },
   )
   if (data === undefined) fail(response.status, error, 'could not send the test')
-  return data
-}
-
-/** Acknowledge the guard summary exactly as it was shown, for the audience it was shown for. */
-export async function acknowledgeGuards(id: number, review: Review): Promise<Review> {
-  const { data, error, response } = await api.POST(
-    '/api/v1/campaigns/{campaign_id}/review/guards/acknowledge',
-    {
-      params: { path: { campaign_id: id } },
-      body: { summary: review.guard_summary, audience_fingerprint: review.audience_fingerprint },
-    },
-  )
-  if (data === undefined) fail(response.status, error, 'could not acknowledge the guards')
   return data
 }
 
