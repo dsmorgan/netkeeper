@@ -31,7 +31,7 @@ from netkeeper.crm import inbox_apply
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.linkedin.browser import BrowserRun, BrowserUnavailable
 from netkeeper.linkedin.classify import Outcome
-from netkeeper.linkedin.inbox import InboxReadStopped, InboxSource
+from netkeeper.linkedin.inbox import BOOTSTRAP_MAX_CONVERSATIONS, InboxReadStopped, InboxSource
 from netkeeper.models import (
     EnrollmentStatus,
     Interaction,
@@ -45,9 +45,16 @@ from netkeeper.scoping import install_scope_guard, scoped
 from netkeeper.services import budgets, runs, scheduler
 from netkeeper.services import heat as heat_service
 from netkeeper.services.budgets import ActionClass
-from netkeeper.services.inbox_poll import INCOMPLETE, MAX_CONVERSATIONS_PER_POLL, READ, poll_inbox
+from netkeeper.services.inbox_poll import (
+    FIRST_SHORT,
+    INCOMPLETE,
+    MAX_CONVERSATIONS_PER_POLL,
+    READ,
+    poll_inbox,
+)
 from netkeeper.services.linkedin_accounts import arm_scheduled_runs, ensure_account
 from netkeeper.services.linkedin_session import flag_session, session_flag
+from netkeeper.services.posture import posture
 from netkeeper.services.runs import HeatSkipped, SessionFlagged
 from netkeeper.services.scheduled_runs import serve_registry
 from netkeeper.services.scheduler import SERVED_SCHEDULES, JobKind
@@ -130,7 +137,7 @@ async def test_a_poll_applies_what_it_read_and_completes(
     (spec,) = source.specs
     assert spec.since is None  # the first poll, and nothing sent to read back to
     assert spec.watched_urns == {ADA}
-    assert spec.max_conversations == MAX_CONVERSATIONS_PER_POLL == 40
+    assert spec.max_conversations == BOOTSTRAP_MAX_CONVERSATIONS == 200  # a first poll
 
 
 async def test_the_next_poll_reads_from_the_last_complete_one(
@@ -693,7 +700,8 @@ async def test_the_first_poll_reads_back_to_the_earliest_live_outreach(
             factories.make_contact(session, user, li_urn=profile_urn("ended")),
             status=EnrollmentStatus.COMPLETED,
         )
-        factories.make_message(session, ended, sent_at=NOW - timedelta(days=30))
+        # Completed, its latest send past WATCH_AFTER_COMPLETED: no longer watched.
+        factories.make_message(session, ended, sent_at=NOW - timedelta(days=31))
     source = FakeInboxSource()
     report = await poll_inbox(
         session_factory, user_id, source, settings=SETTINGS, clock=lambda: NOW
@@ -706,6 +714,7 @@ async def test_the_first_poll_reads_back_to_the_earliest_live_outreach(
         session_factory, user_id, later, settings=SETTINGS, clock=lambda: NOW + timedelta(hours=3)
     )
     assert later.specs[0].since == NOW  # from then on, the last complete poll
+    assert later.specs[0].max_conversations == MAX_CONVERSATIONS_PER_POLL == 40
 
 
 async def test_a_first_poll_with_nothing_to_read_back_to_can_complete(
@@ -717,3 +726,115 @@ async def test_a_first_poll_with_nothing_to_read_back_to_can_complete(
     report = await poll_inbox(session_factory, user_id, full, settings=SETTINGS, clock=lambda: NOW)
     assert full.specs[0].since is None
     assert _run(session_factory, user_id, report.run_id).status is SyncRunStatus.COMPLETED
+
+
+def _outreach(factory: sessionmaker[Session], user_id: int, sent_at: datetime) -> None:
+    with session_scope(factory, write=True) as session:
+        user = _user(session, user_id)
+        contact = factories.make_contact(session, user, li_urn=profile_urn("outreach"))
+        enrollment = factories.make_enrollment(
+            session, factories.make_campaign(session, user), contact
+        )
+        factories.make_message(session, enrollment, sent_at=sent_at)
+
+
+def _posture_warnings(factory: sessionmaker[Session], user_id: int) -> tuple[str, ...]:
+    with session_scope(factory) as session:
+        user = _user(session, user_id)
+        report = posture(
+            session, user, ensure_account(session, user).id, now=NOW, settings=Settings()
+        )
+    (row,) = [p for p in report.protections if p.name == "linkedin reply poll"]
+    return row.warnings
+
+
+async def test_a_first_poll_that_cannot_reach_a_far_since_completes_and_warns(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """A campaign that started 60 days ago, with more conversations since than a first
+    poll may read: it counts as complete, says so on the run, and posture warns."""
+    started = NOW - timedelta(days=60)
+    _outreach(session_factory, user_id, started)
+    short = FakeInboxSource(delta(a_thread_with(ADA, NOW), complete=False))
+    report = await poll_inbox(session_factory, user_id, short, settings=SETTINGS, clock=lambda: NOW)
+
+    assert short.specs[0].since == started
+    assert short.specs[0].max_conversations == BOOTSTRAP_MAX_CONVERSATIONS
+    run = _run(session_factory, user_id, report.run_id)
+    assert (run.status, run.stop_reason) == (SyncRunStatus.COMPLETED, FIRST_SHORT)
+    assert f"could not read back to {started:%Y-%m-%d}" in (run.notes or "")
+    assert run.counts_json is not None and set(run.counts_json) == {
+        "conversations_read",
+        "matched",
+        "ignored_unknown",
+        "skipped_group",
+        "skipped_other",
+        "messages_new",
+    }
+    (warning,) = _posture_warnings(session_factory, user_id)
+    assert warning.startswith(
+        f"the first LinkedIn inbox poll couldn't read back to {started:%Y-%m-%d};"
+        " check older LinkedIn replies by hand"
+    )
+
+    # Later polls move on from it, and an ordinary complete one does not cover the date.
+    later = FakeInboxSource()
+    await poll_inbox(
+        session_factory, user_id, later, settings=SETTINGS, clock=lambda: NOW + timedelta(hours=3)
+    )
+    assert later.specs[0].since == NOW
+    assert len(_posture_warnings(session_factory, user_id)) == 1
+
+    # Acknowledged by hand, it goes.
+    with session_scope(session_factory, write=True) as session:
+        assert inbox_apply.clear_short_first_poll(session, _user(session, user_id))
+    assert _posture_warnings(session_factory, user_id) == ()
+
+
+async def test_a_first_poll_that_reaches_its_since_completes_without_a_warning(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    _outreach(session_factory, user_id, NOW - timedelta(days=60))
+    report = await poll_inbox(
+        session_factory, user_id, FakeInboxSource(), settings=SETTINGS, clock=lambda: NOW
+    )
+    assert _run(session_factory, user_id, report.run_id).stop_reason == READ
+    assert _posture_warnings(session_factory, user_id) == ()
+
+
+async def test_a_complete_poll_whose_window_covers_the_date_clears_the_warning(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    await poll_inbox(
+        session_factory, user_id, FakeInboxSource(), settings=SETTINGS, clock=lambda: NOW
+    )
+    with session_scope(session_factory, write=True) as session:
+        inbox_apply.record_short_first_poll(
+            session, _user(session, user_id), NOW + timedelta(minutes=30)
+        )
+    assert len(_posture_warnings(session_factory, user_id)) == 1
+    partial = FakeInboxSource(delta(complete=False))
+    await poll_inbox(
+        session_factory, user_id, partial, settings=SETTINGS, clock=lambda: NOW + timedelta(hours=1)
+    )
+    assert len(_posture_warnings(session_factory, user_id)) == 1  # incomplete: no cover
+    await poll_inbox(
+        session_factory,
+        user_id,
+        FakeInboxSource(),
+        settings=SETTINGS,
+        clock=lambda: NOW + timedelta(hours=2),
+    )
+    assert _posture_warnings(session_factory, user_id) == ()  # read back from NOW
+
+
+def test_the_cli_acknowledges_a_short_first_poll(cli_db: sessionmaker[Session]) -> None:
+    runner = CliRunner()
+    assert "nothing to acknowledge" in runner.invoke(cli, ["linkedin", "inbox-acknowledge"]).output
+    with session_scope(cli_db, write=True) as session:
+        user = session.scalars(select(User)).one()
+        inbox_apply.record_short_first_poll(session, user, NOW)
+    result = runner.invoke(cli, ["linkedin", "inbox-acknowledge"])
+    assert result.exit_code == 0 and "cleared" in result.output
+    with session_scope(cli_db) as session:
+        assert inbox_apply.short_first_poll(session, session.scalars(select(User)).one()) is None

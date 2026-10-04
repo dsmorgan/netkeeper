@@ -103,7 +103,7 @@ from netkeeper.crm.import_runs import (
     prefetch_contacts,
     snapshot_contact,
 )
-from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction
+from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction, summary_is_invitation
 from netkeeper.crm.positions import PositionCounts
 from netkeeper.crm.tags import RuleRun, ensure_default_rules, run_rules
 from netkeeper.db import is_writer
@@ -839,7 +839,7 @@ class _Interactions:
         if planned > 0:
             self._seen[key] = planned - 1
             return False
-        polled = 0 if _is_invitation(summary) else self._polled.get(key, 0)
+        polled = 0 if summary_is_invitation(summary) else self._polled.get(key, 0)
         if polled > 0:
             self._polled[key] = polled - 1
             return False
@@ -858,11 +858,6 @@ class _Interactions:
 
 #: The kinds the LinkedIn inbox poll records (P4-08), which the ledger also counts.
 _POLLED_KINDS: Final = (InteractionKind.LI_IN, InteractionKind.LI_OUT)
-
-
-def _is_invitation(summary: str | None) -> bool:
-    """An invitation row, marked by its summary: never matched against a polled message."""
-    return summary is not None and summary.startswith(INVITATION_SUMMARY)
 
 
 def _second(at: datetime) -> datetime:

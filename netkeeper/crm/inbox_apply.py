@@ -44,10 +44,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import Select, func
+from sqlalchemy import Select, or_
 from sqlalchemy.orm import Session
 
-from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction
+from netkeeper.crm.interactions import add_interaction, summary_is_invitation
 from netkeeper.db import is_writer
 from netkeeper.linkedin.inbox import (
     MAX_THREADS_OPENED,
@@ -60,6 +60,7 @@ from netkeeper.models import (
     Contact,
     ContactSource,
     Enrollment,
+    EnrollmentStatus,
     Interaction,
     InteractionKind,
     LiConversation,
@@ -73,6 +74,7 @@ from netkeeper.services.campaign_guards import (
     LIVE_ENROLLMENT_STATUSES,
     RUNNING_CAMPAIGN_STATUSES,
 )
+from netkeeper.services.settings_kv import delete_setting, get_setting, set_setting
 
 log = logging.getLogger(__name__)
 
@@ -163,13 +165,19 @@ def has_anything_to_watch(session: Session, user: User) -> bool:
     return session.scalar(statement) is not None
 
 
-def first_live_outreach(session: Session, user: User) -> datetime | None:
-    """The earliest sent outbound campaign message of any live enrollment, any channel.
+def first_live_outreach(session: Session, user: User, *, now: datetime) -> datetime | None:
+    """The earliest sent outbound campaign message the poll watches for replies to.
 
-    The first poll's ``since`` when no poll has completed yet (#388 review, S3): what
-    a reply could be answering starts there. ``None`` when no live enrollment has sent
-    anything. Read-only.
+    The first poll's ``since`` when no poll has completed yet (#388 review, S3): what a
+    reply could be answering starts there. It counts every sent outbound message, any
+    channel, of a live enrollment, and of a ``completed`` one whose latest send is
+    within ``WATCH_AFTER_COMPLETED`` of ``now``, the set the Gmail reply poll watches
+    (``services.campaign_replies``). ``None`` when none has sent anything. Read-only.
     """
+    # Imported here: campaign_replies reaches the campaign engine, which this module
+    # must not load just to be imported.
+    from netkeeper.services.campaign_replies import WATCH_AFTER_COMPLETED
+
     live = (
         scoped(user, Enrollment)
         .join(Campaign, Campaign.id == Enrollment.campaign_id)
@@ -180,16 +188,58 @@ def first_live_outreach(session: Session, user: User) -> datetime | None:
             Campaign.status.in_(RUNNING_CAMPAIGN_STATUSES),
         )
     )
-    statement = (
+    completed = (
+        scoped(user, Enrollment)
+        .with_only_columns(Enrollment.id)
+        .where(Enrollment.status == EnrollmentStatus.COMPLETED)
+    )
+    sent = session.execute(
         scoped(user, Message)
-        .with_only_columns(func.min(Message.sent_at))
+        .with_only_columns(Message.enrollment_id, Message.sent_at)
         .where(
-            Message.enrollment_id.in_(live),
+            or_(Message.enrollment_id.in_(live), Message.enrollment_id.in_(completed)),
             Message.direction == MessageDirection.OUT,
             Message.sent_at.is_not(None),
         )
-    )
-    return session.scalar(statement)
+    ).all()
+    live_ids = set(session.scalars(live))
+    by_enrollment: dict[int, list[datetime]] = {}
+    for enrollment_id, sent_at in sent:
+        by_enrollment.setdefault(enrollment_id, []).append(sent_at)
+    watched = [
+        min(times)
+        for enrollment_id, times in by_enrollment.items()
+        if enrollment_id in live_ids or now - max(times) <= WATCH_AFTER_COMPLETED
+    ]
+    return min(watched, default=None)
+
+
+# --- a first poll that could not read back far enough ------------------------------------
+
+#: The ``settings_kv`` key holding the date a short first poll could not read back to.
+SHORT_FIRST_POLL_KEY: Final = "linkedin.inbox.first_poll_short_of"
+
+
+def short_first_poll(session: Session, user: User) -> datetime | None:
+    """The date the first poll could not read back to, while that still stands. Read-only."""
+    raw = get_setting(session, user, SHORT_FIRST_POLL_KEY)
+    if not isinstance(raw, str):
+        return None
+    try:
+        found = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return found if found.tzinfo is not None else None
+
+
+def record_short_first_poll(session: Session, user: User, since: datetime) -> None:
+    """Remember that the first poll could not read back to ``since``. Needs a writer."""
+    set_setting(session, user, SHORT_FIRST_POLL_KEY, since.isoformat())
+
+
+def clear_short_first_poll(session: Session, user: User) -> bool:
+    """Forget it: a person acknowledged it, or a complete poll covered it. Needs a writer."""
+    return delete_setting(session, user, SHORT_FIRST_POLL_KEY)
 
 
 def threads_to_open(session: Session, user: User) -> frozenset[str]:
@@ -321,11 +371,6 @@ def summary(snippet: str) -> str:
     return f"{SUMMARY_PREFIX}: {text}" if text else SUMMARY_PREFIX
 
 
-def is_invitation(summary: str | None) -> bool:
-    """Whether an archive interaction is an invitation, not a message (its summary says so)."""
-    return summary is not None and summary.startswith(INVITATION_SUMMARY)
-
-
 def _is_group(conversation: InboxConversation) -> bool:
     """A conversation with an inbound message from anyone but its counterpart."""
     return any(
@@ -422,7 +467,7 @@ class _ArchiveLedger:
             .order_by(Interaction.id)
         )
         for row in session.scalars(statement):
-            if is_invitation(row.summary):
+            if summary_is_invitation(row.summary):
                 continue
             key = (row.contact_id, row.kind, row.at.replace(microsecond=0))
             self._rows.setdefault(key, []).append(row)

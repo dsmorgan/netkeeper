@@ -19,11 +19,22 @@ than :data:`MAX_THREADS_OPENED`.
 **Completeness.** ``complete`` is true when the page proved it read back to
 ``since``: it reached a conversation whose last activity is at or before
 ``since``, or the end of the list. With ``since`` set, a source that stopped at
-``max_conversations`` first says false. ``since`` is ``None`` only for a first
-poll with nothing to read back to (the core sends the start of the last complete
-poll, or before the first one the earliest sent outbound message of any live
-enrollment); then a poll that read ``max_conversations`` conversations, or the
-whole list, is complete.
+``max_conversations`` first says false. The source reports what it proved, and
+nothing else; what counts as complete is the core's call:
+
+* After a complete poll, ``since`` is the start of the newest complete poll and
+  ``max_conversations`` is the usual bound. An incomplete read is incomplete, and
+  the next poll reads from the same ``since`` again.
+* Before any poll has completed (the *first* poll), ``since`` is the earliest sent
+  outbound message the poll watches for replies to (a live enrollment's, or a
+  recently completed one's), and ``max_conversations`` is the larger
+  :data:`BOOTSTRAP_MAX_CONVERSATIONS`. If the source still does not reach ``since``,
+  the core counts the poll complete anyway, so later polls can move on, records
+  that it fell short of that date, and posture warns to check older LinkedIn
+  replies by hand until a later complete poll covers the date or a person
+  acknowledges it.
+* ``since`` is ``None`` only for a first poll with nothing to read back to; then a
+  poll that read ``max_conversations`` conversations, or the whole list, is complete.
 
 **When the page is not the inbox.** A source that lands on a wall (a
 checkpoint, a login page, a throttle, a page it cannot read) raises
@@ -49,6 +60,9 @@ SNIPPET_MAX: Final = 200
 
 #: The most threads one poll may open by navigation (P4-06's decision, #374).
 MAX_THREADS_OPENED: Final = 5
+
+#: How many conversations a first poll may read to reach its ``since`` (#388 review).
+BOOTSTRAP_MAX_CONVERSATIONS: Final = 200
 
 
 def _require_aware(value: datetime, name: str) -> None:

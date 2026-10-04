@@ -47,7 +47,13 @@ from netkeeper.crm import inbox_apply
 from netkeeper.db import off_loop, session_scope
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.errors import BrowserError
-from netkeeper.linkedin.inbox import InboxDelta, InboxJobSpec, InboxReadStopped, InboxSource
+from netkeeper.linkedin.inbox import (
+    BOOTSTRAP_MAX_CONVERSATIONS,
+    InboxDelta,
+    InboxJobSpec,
+    InboxReadStopped,
+    InboxSource,
+)
 from netkeeper.linkedin.observe import ObservationFailed
 from netkeeper.models import JsonValue, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.services import budgets, runs
@@ -70,6 +76,11 @@ READ: Final = "inbox_read"
 
 #: The ``stop_reason`` of a poll whose page did not prove that: the next poll reads again.
 INCOMPLETE: Final = "inbox_incomplete"
+
+#: The ``stop_reason`` of a first poll that read :data:`BOOTSTRAP_MAX_CONVERSATIONS`
+#: without reaching its ``since``: counted complete, so later polls can move on, with a
+#: posture warning to check older replies by hand (#388 review, S3).
+FIRST_SHORT: Final = "inbox_first_short"
 
 _HEAT_OUTCOMES: Final = frozenset({Outcome.THROTTLED, Outcome.CHECKPOINT})
 _FLAG_OUTCOMES: Final = frozenset({Outcome.CHECKPOINT, Outcome.LOGGED_OUT})
@@ -109,24 +120,36 @@ def last_complete_poll_start(session: Session, user: User) -> datetime | None:
     return None if run is None else run.started_at
 
 
-def job_spec(session: Session, user: User) -> InboxJobSpec:
+@dataclass(frozen=True, slots=True)
+class PollPlan:
+    """The spec a poll reads with, and whether it is the first (no poll completed yet)."""
+
+    spec: InboxJobSpec
+    first: bool
+
+
+def job_spec(session: Session, user: User, *, now: datetime) -> PollPlan:
     """What the next poll may read: since the last complete poll, the watched contacts'
     URNs, and the threads it may open. Read-only.
 
-    Before any poll has completed, ``since`` is the earliest sent outbound message of
-    any live enrollment (:func:`~netkeeper.crm.inbox_apply.first_live_outreach`), so
-    the first poll has an end it can prove it read back to; with no such message it is
-    ``None``, and a poll that reads ``max_conversations`` counts as complete.
+    A first poll, before any has completed, reads back to the earliest sent outbound
+    message the poll watches for replies to
+    (:func:`~netkeeper.crm.inbox_apply.first_live_outreach`), and may read up to
+    :data:`~netkeeper.linkedin.inbox.BOOTSTRAP_MAX_CONVERSATIONS` to get there. With
+    no such message ``since`` is ``None``, and a poll that reads ``max_conversations``
+    counts as complete.
     """
     since = last_complete_poll_start(session, user)
-    if since is None:
-        since = inbox_apply.first_live_outreach(session, user)
-    return InboxJobSpec(
+    first = since is None
+    if first:
+        since = inbox_apply.first_live_outreach(session, user, now=now)
+    spec = InboxJobSpec(
         since=since,
         watched_urns=inbox_apply.watched_urns(session, user),
-        max_conversations=MAX_CONVERSATIONS_PER_POLL,
+        max_conversations=BOOTSTRAP_MAX_CONVERSATIONS if first else MAX_CONVERSATIONS_PER_POLL,
         open_threads_for=inbox_apply.threads_to_open(session, user),
     )
+    return PollPlan(spec=spec, first=first)
 
 
 def _zero_counts() -> dict[str, JsonValue]:
@@ -164,11 +187,11 @@ async def poll_inbox(
 
     started_run_id, account_id = await off_loop(start, run_id)
 
-    def prepare() -> InboxJobSpec:
+    def prepare() -> PollPlan:
         with session_scope(factory, write=True) as session:
             user = _load_user(session, user_id)
             refuse_if_flagged_or_hot(session, user, account_id, now=clock(), settings=settings)
-            return job_spec(session, user)
+            return job_spec(session, user, now=clock())
 
     def spend() -> str | None:
         """``None`` when the poll may read; otherwise the reason it stops first."""
@@ -219,19 +242,35 @@ async def poll_inbox(
                 flagged = True
         return heat_raised, flagged
 
-    def apply_and_finish(delta: InboxDelta) -> inbox_apply.InboxCounts:
+    def apply_and_finish(
+        delta: InboxDelta, reason: str, since: datetime | None
+    ) -> inbox_apply.InboxCounts:
         try:
             with session_scope(factory, write=True) as session:
                 user = _load_user(session, user_id)
                 counts = inbox_apply.apply_delta(session, user, delta, polled_at=clock())
+                notes: tuple[str, ...] = ()
+                if reason == FIRST_SHORT and since is not None:
+                    inbox_apply.record_short_first_poll(session, user, since)
+                    notes = (
+                        f"the first LinkedIn inbox poll could not read back to {since:%Y-%m-%d};"
+                        " check older LinkedIn replies by hand.",
+                    )
+                elif reason == READ and since is not None:
+                    short_of = inbox_apply.short_first_poll(session, user)
+                    if short_of is not None and since <= short_of:
+                        inbox_apply.clear_short_first_poll(session, user)
                 runs.finish_run(
                     session,
                     user,
                     started_run_id,
-                    status=SyncRunStatus.COMPLETED if delta.complete else SyncRunStatus.ABORTED,
+                    status=SyncRunStatus.ABORTED
+                    if reason == INCOMPLETE
+                    else SyncRunStatus.COMPLETED,
                     now=clock(),
-                    stop_reason=READ if delta.complete else INCOMPLETE,
+                    stop_reason=reason,
                     counts=dict(counts.counts()),
+                    notes=notes,
                 )
                 return counts
         except Exception as exc:
@@ -245,7 +284,8 @@ async def poll_inbox(
             raise InboxPollFailed(f"applying the inbox failed: {type(exc).__name__}") from None
 
     async with runs_recording(factory, user_id, started_run_id, clock=clock):
-        spec = await off_loop(prepare)
+        plan = await off_loop(prepare)
+        spec = plan.spec
         refused = await off_loop(spend)
         if refused is not None:
             await off_loop(finish, SyncRunStatus.ABORTED, refused, _zero_counts(), error=None)
@@ -275,10 +315,16 @@ async def poll_inbox(
                 "inbox poll %d: reading the inbox failed (%s)", started_run_id, type(exc).__name__
             )
             raise InboxPollFailed(f"reading the inbox failed: {type(exc).__name__}") from None
-        counts = await off_loop(apply_and_finish, delta)
+        reason = _ending(delta, plan)
+        counts = await off_loop(apply_and_finish, delta, reason, spec.since)
     return InboxPollReport(
-        run_id=started_run_id,
-        account_id=account_id,
-        stop_reason=READ if delta.complete else INCOMPLETE,
-        counts=counts,
+        run_id=started_run_id, account_id=account_id, stop_reason=reason, counts=counts
     )
+
+
+def _ending(delta: InboxDelta, plan: PollPlan) -> str:
+    """``inbox_read`` for a complete read; for a first poll that could not reach its
+    ``since``, ``inbox_first_short`` (counted complete); otherwise ``inbox_incomplete``."""
+    if delta.complete or (plan.first and plan.spec.since is None):
+        return READ
+    return FIRST_SHORT if plan.first else INCOMPLETE
