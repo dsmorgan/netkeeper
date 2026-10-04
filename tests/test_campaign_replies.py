@@ -24,6 +24,7 @@ from netkeeper.config import Settings
 from netkeeper.crm import do_not_send
 from netkeeper.db import session_scope
 from netkeeper.models import (
+    Campaign,
     CampaignStatus,
     Contact,
     ContactEmail,
@@ -457,6 +458,47 @@ def test_an_ended_campaigns_live_enrollments_are_watched_for_thirty_days(
     assert inbound(mail, late) == []  # past the window: not watched
     assert mail.enrollment(late).status is EnrollmentStatus.ACTIVE
     assert len(mail.gmail.sent()) == 2  # step 2 never went
+
+
+@pytest.mark.parametrize("status", [CampaignStatus.ACTIVE, CampaignStatus.PAUSED])
+def test_a_running_campaigns_live_enrollment_is_watched_past_thirty_days(
+    session_factory: sessionmaker[Session], status: CampaignStatus
+) -> None:
+    """#345 review: the 30-day bound is for an ended campaign only. An active or paused
+    campaign's live enrollment, waiting 45 days for step 2, is still watched on day 35,
+    and a reply then ends it, so step 2 never fires."""
+    mail = make_mail(session_factory, modes=(StepMode.SEND,) * 2, same_thread=(False, True))
+    mail.sender = poller(mail)
+
+    def slow_follow_up(session: Session) -> None:
+        campaign = get_scoped(session, mail.user, Campaign, mail.campaign.id)
+        assert campaign is not None
+        campaign.steps[1].delay_days = 45
+
+    mail.write(slow_follow_up)
+    enrollment_id = mail.enroll(ADA)
+    send_first(mail)
+    if status is CampaignStatus.PAUSED:
+        mail.write(lambda s: campaign_service.pause(s, user_of(mail, s), mail.campaign.id))
+    enrollment = mail.enrollment(enrollment_id)
+    assert enrollment.status is EnrollmentStatus.ACTIVE
+    assert enrollment.next_action_at is not None
+    assert enrollment.next_action_at > NOW + timedelta(days=44)
+
+    for days in (31, 35):
+        assert [w.enrollment_id for w in watched(mail, NOW + timedelta(days=days))] == [
+            enrollment_id
+        ], days
+    day_35 = NOW + timedelta(days=35)
+    mail.gmail.reply(first_sent(mail), sender=ADA, at=day_35)
+    mail.tick(day_35 + timedelta(hours=1))
+
+    enrollment = mail.enrollment(enrollment_id)
+    assert (enrollment.status, enrollment.replied_at) == (EnrollmentStatus.REPLIED, day_35)
+    if status is CampaignStatus.PAUSED:
+        mail.write(lambda s: campaign_service.resume(s, user_of(mail, s), mail.campaign.id))
+    assert mail.tick(NOW + timedelta(days=50)).fired == []
+    assert len(mail.gmail.sent()) == 1  # step 2 never went
 
 
 def watched(mail: Mail, now: datetime) -> list[replies.Watch]:
