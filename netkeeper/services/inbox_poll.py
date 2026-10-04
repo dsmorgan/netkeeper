@@ -256,10 +256,6 @@ async def poll_inbox(
                         f"the first LinkedIn inbox poll could not read back to {since:%Y-%m-%d};"
                         " check older LinkedIn replies by hand.",
                     )
-                elif reason == READ and since is not None:
-                    short_of = inbox_apply.short_first_poll(session, user)
-                    if short_of is not None and since <= short_of:
-                        inbox_apply.clear_short_first_poll(session, user)
                 runs.finish_run(
                     session,
                     user,

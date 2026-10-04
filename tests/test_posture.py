@@ -238,7 +238,6 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "scheduled jobs",
         "scheduled runs",
         "reply poll",
-        "linkedin reply poll",
         "sending hours",
         "next campaign send",
         "campaign templates",

@@ -31,8 +31,7 @@ nothing else; what counts as complete is the core's call:
   :data:`BOOTSTRAP_MAX_CONVERSATIONS`. If the source still does not reach ``since``,
   the core counts the poll complete anyway, so later polls can move on, records
   that it fell short of that date, and posture warns to check older LinkedIn
-  replies by hand until a later complete poll covers the date or a person
-  acknowledges it.
+  replies by hand until a person acknowledges it.
 * ``since`` is ``None`` only for a first poll with nothing to read back to; then a
   poll that read ``max_conversations`` conversations, or the whole list, is complete.
 
