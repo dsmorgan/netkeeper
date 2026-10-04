@@ -81,7 +81,7 @@ When two lanes touch the same model, `core` merges first. Migrations are linear;
 
 ### Critical path
 
-P0-03 → P0-09 → P1-01 → P1-02 → P1-06 → P3-04 → P3-06 → P3-07 → P3-08 → P3-09 → CP6 → CP7 (two weeks of calendar) → P4-03 → CP8 → CP10a (#348) → CP10 (#37, the 1.0 gate). Everything else has slack. Phase 5 and phase 7 are not on the path, because both come after 1.0. If only one lane can run, run this one and pull P2 items into gaps.
+P0-03 → P0-09 → P1-01 → P1-02 → P1-06 → P3-04 → P3-06 → P3-07 → P3-08 → P3-09 → CP6 → CP7 (two weeks of calendar) → P4-03 → CP8 → CP10a (#348) → CP10 (#37, the 1.0 gate). A second chain joins it: P4-06 (the messaging capture) → P4-07 (ADR 0007) → P4-03. Both start now, so they run during CP7's two weeks instead of after them. P4-04 (auto-send) comes after CP8 and is off the path. Everything else has slack. Phase 5 and phase 7 are not on the path, because both come after 1.0. If only one lane can run, run this one and pull P2 items into gaps.
 
 ## 3. Human checkpoints
 
@@ -570,32 +570,79 @@ Done when: each command mirrors the API.
 
 ### Phase 4: LinkedIn messaging
 
-**P4-01 Inbox poll** · lane extractor · M
-Goal: `InboxJobSpec` in, `InboxDelta` out; conversation parsing from fixtures; participant matching by URN; apply as interactions.
-Depends on: P2-02, P2-06.
-Done when: fixtures produce the expected deltas; unknown participants are ignored, not created.
+Phase 4 has two prerequisites before any prefill code: a live capture of LinkedIn's messaging pages (P4-06), because no messaging shape has been observed, and an ADR for the prefill's click and keystrokes (P4-07), because ADR 0006 allows only the Contact info click and no typing. P4-06 to P4-11 were added on 2026-10-03; the earlier items keep their numbers.
 
-**P4-02 LinkedIn reply detection** · lane campaigns · S
-Goal: `campaigns/replies.py` consumes `InboxDelta` and moves enrollments to `replied`.
-Depends on: P4-01, P3-08.
-Done when: a LinkedIn reply suppresses a pending email step in `simulate`.
+**Decisions (maintainer, 2026-10-03).** Each issue states the decisions it implements.
+
+- **Who prefills:** you do. Due LinkedIn steps wait in a "ready to prefill" queue, and you click **Prefill** while you watch Chrome. Nothing prefills on a schedule.
+- **Opening the composer:** navigate to the contact's profile and click **Message**.
+- **Budget:** a new action class `li_prefills`, 10 a day with a hard maximum of 20. Each prefill also spends one `profile_visits` unit.
+- **Inbox poll:** every 3 hours within active hours while any live enrollment has a contact with a URN, plus on demand. It records `li_in` and `li_out` interactions for every one-to-one conversation with a known contact, with a snippet of at most 200 characters that is never logged.
+- **Replies and sends:** a LinkedIn reply is an inbound one-to-one message from the contact after the enrollment's first sent outbound on any channel. The email unsubscribe phrases apply, plus "stop messaging". Your first outbound message in the conversation after the prefill confirms the send, whatever its text.
+- **Stale and discard:** a prefill goes `stale` after 3 days; netkeeper never closes the tab it handed over, and a stale message seen sent later becomes `sent`. Discarding counts the step as fired.
+- **Guard:** a LinkedIn step requires `li_urn`. Contacts with only a slug get raised enrichment priority and wait.
+- **Typing:** lognormal, median 140 ms a character, no typos, a 300-second ceiling. Newlines are typed as Shift+Enter only if P4-06 shows that Shift+Enter never sends; otherwise lint refuses multi-line LinkedIn templates.
+- **Hand-over:** the prefill releases the browser lock after typing and brings the tab to the front. The next inbox poll, or an "I sent it, check now" button, confirms the send.
+- **Review gate:** LinkedIn steps use step approval only (#339). There is no test prefill.
+- **Auto-send (P4-04):** filed now, built only after CP8 signs off.
+- **Calendar:** P4-06, P4-07, P4-08, P4-09, P4-10 and P4-11 start now. P4-08 and P4-09 touch the campaign engine, so they merge only after CP7 (#34) signs off.
+
+**P4-01 Inbox poll, extractor side** · lane extractor · M · `safety`
+Goal: `InboxJobSpec` in, `InboxDelta` out (the contract is P4-08's); a messaging parser built from P4-06's capture; a page source that navigates to `/messaging/`, reads what the page loads, and scrolls (ADR 0006); groups, InMail, sponsored and system items skipped. Wires the real source into the worker and serves the inbox schedule.
+Depends on: P2-02, P2-06, P4-06, P4-08.
+Done when: fixtures produce the expected deltas; unknown participants are ignored, not created; the smoke replica passes.
+
+**P4-02 LinkedIn reply and send detection** · lane campaigns · M · `safety`
+Goal: `services/campaign_replies.py` consumes an applied `InboxDelta`: a LinkedIn reply moves the enrollment to `replied`, an unsubscribe phrase opts the contact out, and a `prefilled` or `stale` message you sent becomes `sent`.
+Depends on: P3-08, P4-08, P4-09.
+Done when: a LinkedIn reply suppresses a pending email step in `simulate`; a prefilled message is reconciled to `sent` from a delta.
 
 **P4-03 Prefill step** · lane extractor · L · `safety`
-Goal: `MessageJobSpec` with `prefill`; open the conversation, type with human timing, stop; `prefilled` state; send confirmation by the inbox poll; `stale` after three days; one open prefill at a time.
-Depends on: P2-01, P2-07, P3-06, P4-01.
-Done when: the smoke suite verifies typing against a local replica; the engine reconciles `prefilled` to `sent` or `stale`.
+Goal: `MessageJobSpec` with `prefill`; navigate to the profile, click **Message**, verify the composer, type with human timing, stop, and hand the tab over; record the outcome through P4-09.
+Depends on: P2-01, P2-07, P3-06, P4-06, P4-07, P4-09, P4-10.
+Done when: the smoke suite verifies typing against a local replica; the engine reconciles `prefilled` to `sent` (with P4-02) or `stale` (P4-09); one open prefill at a time; no code path presses Enter or clicks Send.
 
 **P4-04 Auto-send opt-in** · lane extractor · M · `safety`
-Goal: config flag plus per-step mode; `li_messages_auto` budget; active hours and heat applied; posture highlight; documentation of the risk.
-Depends on: P4-03.
+Goal: config flag plus per-step mode; `li_messages_auto` budget; active hours and heat applied; posture highlight; documentation of the risk. Needs its own ADR amendment for the Send click. Built only after CP8 signs off, possibly in phase 6.
+Depends on: P4-03, CP8.
 Done when: with the flag off, no code path clicks Send; with it on, the budget stops it.
 
-**P4-05 Frontend: LinkedIn steps** · lane frontend · M
-Goal: step builder supports the LinkedIn channel; the waiting-for-you list; posture highlight for auto-send.
-Depends on: P4-03.
+**P4-05 Frontend: LinkedIn steps** · lane frontend · L
+Goal: LinkedIn steps on the campaign page; the prefill queue; the waiting-for-you list; LinkedIn replies in the inbox; the inbox and prefill run kinds on the LinkedIn page; posture highlight for auto-send.
+Depends on: P4-09 to start; P4-02, P4-03, P4-08 and P4-11 to finish.
 Done when: CP8's demo runs in the UI.
 
-**Carried over from phase 2 (maintainer, 2026-10-03).** #149, #180 and #169, the verification that only a live run can do, ride with the supervised capture of CP8's prefill and inbox demo. Each issue holds its own checks.
+**P4-06 Messaging capture** · lane extractor · M · `safety`
+Goal: maintainer-run. You capture LinkedIn's messaging pages by hand in DevTools (inbox, thread, the **Message** control, composer, send, reply, and the "Press Enter to Send" setting). An analysis session you approve then records the structure in `docs/linkedin-messaging-shapes.md` and invented fixtures. The remaining live checks of #149, #180 and #169 happen in the same session.
+Depends on: nothing.
+Done when: the shape note and fixtures are merged, and you have confirmed the Enter-to-send and overlay answers on the issue.
+
+**P4-07 ADR 0007: the prefill's inputs** · lane extractor · S · `safety`
+Goal: an ADR amending ADR 0006 and ADR 0002: one click on **Message**, typing into one verified, empty composer, never Enter or a Send click, and the tab left open. `tests/test_browser_safety.py` changes with P4-03's code, not before.
+Depends on: P4-06 for the final text (a draft starts now).
+Done when: you accept the ADR and it's merged.
+
+**P4-08 Inbox poll, core side** · lane core · L · `safety`
+Goal: the `InboxDelta` contract, apply as interactions and conversation records, the runner, the worker kind, the scheduler handler, the `inbox_polls` budget, and the archive dedupe widened to polled rows. Migration 0034.
+Depends on: P3-08. Merges after CP7.
+Done when: a fake source's delta produces the expected interactions idempotently; the runner can be started by hand.
+
+**P4-09 Engine: LinkedIn steps** · lane campaigns · L · `safety`
+Goal: the ready-to-prefill list, `claim_prefill` with every guard, one open prefill at a time, `record_prefill_outcome`, `stale` after 3 days, discard, the `li_prefills` budget, and the API and CLI for them. Migration 0035.
+Depends on: P3-06, P3-09. Merges after CP7.
+Done when: a LinkedIn step can be claimed only through `claim_prefill`; `prefilled` goes `stale` at 3 days; the tick never touches the browser.
+
+**P4-10 Typing pacing plan** · lane extractor · S · `safety`
+Goal: a pure `typing_plan` in `linkedin/pacing.py` that P4-03 replays: lognormal delays, word and sentence pauses, thinking pauses, newlines as their own steps, and a duration ceiling.
+Depends on: nothing.
+Done when: the plan is merged with pinned constants and tests.
+
+**P4-11 LinkedIn template lint** · lane campaigns · S
+Goal: lint for LinkedIn templates: no subject, a length limit and a long-message warning, and multi-line bodies refused unless P4-06 shows Shift+Enter is safe.
+Depends on: P3-03.
+Done when: a LinkedIn template the prefill would refuse can't pass lint.
+
+**Carried over from phase 2 (maintainer, 2026-10-03).** #149, #180 and #169, the verification that only a live run can do, happen during P4-06's capture session. Each issue holds its own checks.
 
 **CP8** · checkpoint · closes phase 4.
 
