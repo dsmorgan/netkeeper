@@ -67,8 +67,8 @@ gives no value, a comparison or ``in`` is false, and ``default`` and
 Lint
 ----
 :func:`lint` runs at save time over the template text alone. Every rule it
-applies is an error but :attr:`LintRule.LINKEDIN_LONG`, and :func:`has_errors` is
-what blocks activation:
+applies is an error but the two LinkedIn length warnings below, and
+:func:`has_errors` is what blocks activation:
 
 - :attr:`LintRule.SYNTAX`: the template does not parse.
 - :attr:`LintRule.UNSUPPORTED`: anything off the allowlist.
@@ -93,7 +93,9 @@ A LinkedIn template (P4-11) is also held to what LinkedIn and the prefill accept
 - :attr:`LintRule.LINKEDIN_TYPING_TIME`: a body whose expected typing time
   (:func:`~netkeeper.linkedin.pacing.typing_expected_seconds`) is over
   :data:`~netkeeper.linkedin.pacing.TYPING_LINT_SECONDS`, a margin under the
-  prefill's ceiling.
+  prefill's ceiling. A *warning* in the template text, whose tags, comments and
+  untaken branches are never typed; an *error* in a rendered message, which is the
+  hard block.
 - :attr:`LintRule.LINKEDIN_NEWLINE`: a newline (one of
   :data:`~netkeeper.linkedin.pacing.NEWLINE_CHARS`, CR or LF) in the body or one of
   its text literals, while
@@ -102,13 +104,15 @@ A LinkedIn template (P4-11) is also held to what LinkedIn and the prefill accept
   :func:`~netkeeper.linkedin.pacing.is_untypable_cluster` refuses (any other line
   break, a tab or other control character, a bidi control, a stray tag sequence...),
   whatever the newline flag says.
-- :attr:`LintRule.LINKEDIN_LONG`, the one save-time *warning*: a body
+- :attr:`LintRule.LINKEDIN_LONG`, a *warning*: a body
   :func:`~netkeeper.linkedin.pacing.typing_length_warning` warns about.
+
+A body gets at most one of the three length findings, in that order.
 
 The newline, character, and typing-time rules come from the pacing module
 (:mod:`netkeeper.linkedin.pacing`, P4-10) that builds the prefill's typing plan, so
-lint and the prefill can't disagree: a body the plan refuses always has one of these
-errors.
+lint and the prefill can't disagree: a rendered message the plan refuses always has
+one of these errors.
 
 Each issue about one place carries its one-based ``line`` in the part; an issue
 about the whole part (a missing subject, a body with no per-contact field) has
@@ -1133,7 +1137,12 @@ def _lint(
 
 
 def _line_of(source: str, offset: int) -> int:
-    """The one-based line of ``source`` the character at ``offset`` is on, as Jinja counts."""
+    """The one-based line of ``source`` the character at ``offset`` is on, as Jinja counts.
+
+    The LF of a CRLF is on the line the CRLF ends, as its CR is.
+    """
+    if 0 < offset < len(source) and source[offset - 1 : offset + 1] == "\r\n":
+        offset -= 1
     return len(_JINJA_LINE_BREAKS.findall(source, 0, offset)) + 1
 
 
@@ -1168,10 +1177,12 @@ def _linkedin_issues(body: str, *, literals: Collection[tuple[str, int]] | None)
             )
         )
     elif (seconds := typing_expected_seconds(body)) > TYPING_LINT_SECONDS:
+        # A warning in the template text, whose tags, comments and untaken branches are
+        # never typed; an error in a rendered message, which is exactly what is typed.
         issues.append(
             LintIssue(
                 LintRule.LINKEDIN_TYPING_TIME,
-                Severity.ERROR,
+                Severity.WARNING if in_template else Severity.ERROR,
                 Part.BODY,
                 f"{what} takes about {math.ceil(seconds)} seconds to type, over "
                 f"{TYPING_LINT_SECONDS:.0f}; the prefill stops at {MAX_TYPING_SECONDS:.0f}",
@@ -1299,11 +1310,29 @@ def _cluster_name(cluster: str) -> str:
     return names.get(char, f"the character U+{ord(char):04X}")
 
 
+# The LinkedIn length rules, most severe first: a text gets at most one of them.
+_LENGTH_RULES: Final = (
+    LintRule.LINKEDIN_TOO_LONG,
+    LintRule.LINKEDIN_TYPING_TIME,
+    LintRule.LINKEDIN_LONG,
+)
+
+
+def _with_lesser_length_rules(rules: set[LintRule]) -> set[LintRule]:
+    """``rules``, plus every length rule after one of them in :data:`_LENGTH_RULES`."""
+    out = set(rules)
+    for index, rule in enumerate(_LENGTH_RULES):
+        if rule in rules:
+            out.update(_LENGTH_RULES[index + 1 :])
+    return out
+
+
 def lint(channel: TemplateChannel, subject: str | None, body: str) -> list[LintIssue]:
     """Save-time lint of a template's text.
 
-    Every issue it returns is an error but a :attr:`LintRule.LINKEDIN_LONG` warning;
-    :func:`has_errors` of the result is what blocks activation.
+    Every issue it returns is an error but a :attr:`LintRule.LINKEDIN_LONG` or
+    :attr:`LintRule.LINKEDIN_TYPING_TIME` warning; :func:`has_errors` of the result is
+    what blocks activation.
     """
     issues, _ = _lint(channel, subject, body)
     return issues
@@ -1448,14 +1477,14 @@ def render(
     if channel is TemplateChannel.LINKEDIN:
         # A merge value can add length or a line break the template text did not have.
         # Each is reported once: the template text's finding, when it has one, stands.
-        found = {issue.rule for issue in issues}
-        if LintRule.LINKEDIN_TOO_LONG in found:
-            found |= {LintRule.LINKEDIN_TYPING_TIME, LintRule.LINKEDIN_LONG}
-        if LintRule.LINKEDIN_TYPING_TIME in found:
-            found.add(LintRule.LINKEDIN_LONG)
-        added.extend(
-            issue
-            for issue in _linkedin_issues(rendered_body, literals=None)
-            if issue.rule not in found
-        )
+        # Only a template error hides a rendered error; a template warning (a slow or
+        # long template) hides only a rendered warning, so it never hides a rendered
+        # message too slow to type.
+        errors = {issue.rule for issue in issues if issue.severity is Severity.ERROR}
+        hides_error = _with_lesser_length_rules(errors)
+        hides_warning = _with_lesser_length_rules({issue.rule for issue in issues})
+        for issue in _linkedin_issues(rendered_body, literals=None):
+            hidden = hides_error if issue.severity is Severity.ERROR else hides_warning
+            if issue.rule not in hidden:
+                added.append(issue)
     return Rendered(rendered_subject, rendered_body, (*issues, *added))
