@@ -17,7 +17,8 @@
  *
  * The "Draft with your AI assistant" helper (#368) builds a prompt to copy into
  * an AI chat assistant and fills the subject and body from the reply you paste
- * back. A paste lints at once, skipping the typing debounce.
+ * back. A paste lints at once, skipping the typing debounce. A paste that
+ * replaces text you had can be undone until the next edit or paste.
  */
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query'
 import { useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -79,6 +80,7 @@ export function TemplateEditor({
     subjectLint: useId(),
     body: useId(),
     bodyLint: useId(),
+    aiForm: useId(),
   }
   const [confirmDelete, setConfirmDelete] = useState(false)
   const subjectRef = useRef<HTMLInputElement>(null)
@@ -98,6 +100,10 @@ export function TemplateEditor({
   const debounced = useDebounced(text, LINT_DEBOUNCE_MS)
   // Text a paste put in, linted at once rather than after the debounce.
   const [pasted, setPasted] = useState<typeof text | null>(null)
+  // What the last paste replaced, and the draft it left, so it can be undone while
+  // the draft is still exactly that.
+  const [undo, setUndo] = useState<{ before: AppliedText; after: TemplateDraft } | null>(null)
+  const canUndo = undo !== null && sameDraft(draft, undo.after)
   const linted = pasted !== null && sameText(pasted, text) ? text : debounced
   const lint = useQuery({
     queryKey: [...templateKeys.all, 'lint', linted] as const,
@@ -133,7 +139,10 @@ export function TemplateEditor({
     },
   })
 
-  const set = (patch: Partial<TemplateDraft>) => onDraftChange({ ...draft, ...patch })
+  const set = (patch: Partial<TemplateDraft>) => {
+    setUndo(null) // an edit ends the chance to undo a paste
+    onDraftChange({ ...draft, ...patch })
+  }
 
   const fieldOf = (which: InsertTarget) =>
     which === 'subject' ? subjectRef.current : bodyRef.current
@@ -173,6 +182,20 @@ export function TemplateEditor({
 
   const applyPaste = ({ subject, body }: AppliedStep) => {
     const next = { ...draft, body, ...(subject === null ? {} : { subject }) }
+    const overwrites =
+      (draft.subject !== '' && next.subject !== draft.subject) ||
+      (draft.body !== '' && next.body !== draft.body)
+    setUndo(
+      overwrites ? { before: { subject: draft.subject, body: draft.body }, after: next } : null,
+    )
+    setPasted({ channel: next.channel, subject: next.subject, body: next.body })
+    onDraftChange(next)
+  }
+
+  const undoPaste = () => {
+    if (undo === null || !canUndo) return
+    const next = { ...draft, ...undo.before }
+    setUndo(null)
     setPasted({ channel: next.channel, subject: next.subject, body: next.body })
     onDraftChange(next)
   }
@@ -206,7 +229,6 @@ export function TemplateEditor({
             </p>
           </Callout>
         )}
-        <AiDraftHelper channel={draft.channel} disabled={locked} onApply={applyPaste} />
         <form
           className="space-y-3"
           onSubmit={(event) => {
@@ -241,6 +263,15 @@ export function TemplateEditor({
               </Select>
             </div>
           </div>
+          <AiDraftHelper
+            channel={draft.channel}
+            current={{ subject: draft.subject, body: draft.body }}
+            formId={ids.aiForm}
+            disabled={locked}
+            onApply={applyPaste}
+            canUndo={canUndo}
+            onUndo={undoPaste}
+          />
           <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1">
             <Label htmlFor={ids.subject}>Subject</Label>
             <Input
@@ -364,6 +395,8 @@ export function TemplateEditor({
             )}
           </div>
         </form>
+        {/* The helper's own form: its fields belong here, so Enter in one never saves. */}
+        <form id={ids.aiForm} hidden onSubmit={(event) => event.preventDefault()} />
       </CardContent>
       {template !== null && (
         <ConfirmDialog
@@ -383,6 +416,11 @@ export function TemplateEditor({
       )}
     </Card>
   )
+}
+
+interface AppliedText {
+  subject: string
+  body: string
 }
 
 function sameText(

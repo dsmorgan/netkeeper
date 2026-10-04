@@ -10,7 +10,7 @@ import {
   ruleApplies,
   type DraftRequest,
 } from './ai-prompt'
-import { WHY_IT_MATTERS } from './lint'
+import { PROMPT_RULES, WHY_IT_MATTERS } from './lint'
 
 const REQUEST: DraftRequest = {
   goal: 'Say I am looking for a product role',
@@ -87,12 +87,39 @@ describe('buildPrompt', () => {
     expect(prompt).not.toContain('Mention:')
   })
 
-  it("includes lint's own rule sentences for the channel", () => {
+  it("includes lint's rules for the channel, phrased as rules", () => {
     const prompt = buildPrompt(REQUEST, 'email', FIELDS)
-    expect(prompt).toContain(WHY_IT_MATTERS.no_contact_field)
-    expect(prompt).toContain(WHY_IT_MATTERS.undefined_variable)
-    expect(prompt).toContain(WHY_IT_MATTERS.missing_subject)
+    expect(prompt).toContain('- Use only the merge fields listed above, spelled exactly as shown.')
+    expect(prompt).toContain(`- ${PROMPT_RULES.no_contact_field}`)
+    expect(prompt).toContain(`- ${PROMPT_RULES.missing_subject}`)
+    // The rule sentences, not the reasons behind them.
+    expect(prompt).not.toContain(WHY_IT_MATTERS.undefined_variable)
     expect(prompt).not.toContain(WHY_IT_MATTERS.missing_value)
+  })
+
+  it('has a prompt rule for every lint rule but the preview-only one', () => {
+    for (const rule of Object.keys(WHY_IT_MATTERS) as (keyof typeof WHY_IT_MATTERS)[]) {
+      if (rule === 'missing_value') expect(PROMPT_RULES[rule]).toBeNull()
+      else expect(PROMPT_RULES[rule]).toEqual(expect.any(String))
+    }
+  })
+
+  it('leaves the current text out unless asked', () => {
+    const current = { subject: 'Old subject', body: 'Old body, {{ first_name }}' }
+    expect(buildPrompt(REQUEST, 'email', FIELDS)).not.toContain('Current template to improve')
+    const prompt = buildPrompt(REQUEST, 'email', FIELDS, current)
+    expect(prompt).toContain(
+      'Current template to improve:\n\nSubject: Old subject\nBody:\nOld body, {{ first_name }}',
+    )
+    expect(prompt.indexOf('Current template to improve')).toBeLessThan(
+      prompt.indexOf('Answer in exactly this format'),
+    )
+    const linkedin = buildPrompt(REQUEST, 'linkedin', FIELDS, current)
+    expect(linkedin).toContain('Current template to improve:\n\nBody:\nOld body')
+    expect(linkedin).not.toContain('Subject: Old subject')
+    expect(buildPrompt(REQUEST, 'email', FIELDS, { subject: ' ', body: '' })).not.toContain(
+      'Current template to improve',
+    )
   })
 
   it('includes the length guidance', () => {
@@ -116,7 +143,7 @@ describe('buildPrompt', () => {
     const prompt = buildPrompt(REQUEST, 'linkedin', FIELDS)
     expect(prompt).toContain('A LinkedIn message has no subject line.')
     expect(prompt).not.toContain('Subject: <one line>')
-    expect(prompt).not.toContain(WHY_IT_MATTERS.missing_subject)
+    expect(prompt).not.toContain(PROMPT_RULES.missing_subject)
   })
 
   it('keeps the step count between 1 and 5', () => {
@@ -134,7 +161,7 @@ describe('ruleApplies', () => {
   })
 
   it('takes every other rule from the lint metadata', () => {
-    const shared = Object.keys(WHY_IT_MATTERS).length - 2 // missing_subject, missing_value
+    const shared = Object.keys(PROMPT_RULES).length - 2 // missing_subject, missing_value
     expect(lintRulesFor('linkedin')).toHaveLength(shared)
     expect(lintRulesFor('email')).toHaveLength(shared + 1)
   })
@@ -148,12 +175,15 @@ describe('parseReply', () => {
         '<the message, over as many lines as it needs>',
         'Hi {{ first_name }},\n\nIt has been a while.',
       )
-    expect(parseReply(reply)).toEqual([
-      {
-        subject: 'Catching up, {{ first_name }}?',
-        body: 'Hi {{ first_name }},\n\nIt has been a while.',
-      },
-    ])
+    expect(parseReply(reply)).toEqual({
+      steps: [
+        {
+          subject: 'Catching up, {{ first_name }}?',
+          body: 'Hi {{ first_name }},\n\nIt has been a while.',
+        },
+      ],
+      dropped: 0,
+    })
   })
 
   it('ignores chatter around the format, fences, and bold labels', () => {
@@ -171,9 +201,11 @@ describe('parseReply', () => {
       '',
       'Let me know if you want it shorter.',
     ].join('\n')
-    expect(parseReply(reply)).toEqual([
-      { subject: 'Quick hello', body: 'Hi {{ first_name }},\nHope all is well.' },
-    ])
+    // The two chatter lines are counted, so the editor can say they were left out.
+    expect(parseReply(reply)).toEqual({
+      steps: [{ subject: 'Quick hello', body: 'Hi {{ first_name }},\nHope all is well.' }],
+      dropped: 2,
+    })
   })
 
   it('reads several steps, with or without the end markers', () => {
@@ -192,19 +224,100 @@ describe('parseReply', () => {
       'Body:',
       'Last one, {{ first_name }}.',
     ].join('\n')
-    expect(parseReply(reply)).toEqual([
-      { subject: 'First', body: 'Hi {{ first_name }}.' },
-      { subject: 'Second', body: 'Following up, {{ first_name }}.' },
-      { subject: null, body: 'Last one, {{ first_name }}.' },
+    expect(parseReply(reply)).toEqual({
+      steps: [
+        { subject: 'First', body: 'Hi {{ first_name }}.' },
+        { subject: 'Second', body: 'Following up, {{ first_name }}.' },
+        { subject: null, body: 'Last one, {{ first_name }}.' },
+      ],
+      dropped: 0,
+    })
+  })
+
+  it('splits steps on a new subject after a blank line when the step markers are missing', () => {
+    const reply =
+      'Subject: One\nBody:\nA {{ first_name }}\n\nSubject: Two\nBody:\nB {{ first_name }}'
+    expect(parseReply(reply)).toEqual({
+      steps: [
+        { subject: 'One', body: 'A {{ first_name }}' },
+        { subject: 'Two', body: 'B {{ first_name }}' },
+      ],
+      dropped: 0,
+    })
+  })
+
+  it('A: keeps a Subject: line inside a body when no blank line comes before it', () => {
+    const reply =
+      'Subject: Hello\nBody:\nHi {{ first_name }},\nSubject: the offsite photos\nare up.'
+    expect(parseReply(reply)).toEqual({
+      steps: [
+        {
+          subject: 'Hello',
+          body: 'Hi {{ first_name }},\nSubject: the offsite photos\nare up.',
+        },
+      ],
+      dropped: 0,
+    })
+  })
+
+  it('B: keeps a bare Step N line inside a body when no blank line comes before it', () => {
+    const reply = 'Step 1\nSubject: Hello\nBody:\nThe plan, {{ first_name }}:\nStep 2\nis lunch.'
+    expect(parseReply(reply)?.steps).toEqual([
+      { subject: 'Hello', body: 'The plan, {{ first_name }}:\nStep 2\nis lunch.' },
     ])
   })
 
-  it('splits steps on a new subject when the step markers are missing', () => {
-    const reply = 'Subject: One\nBody:\nA {{ first_name }}\nSubject: Two\nBody:\nB {{ first_name }}'
-    expect(parseReply(reply)).toEqual([
+  it('B: but splits on Step N or Subject: inside a body when the reply uses end markers', () => {
+    const reply = [
+      'Step 1',
+      'Subject: One',
+      'Body:',
+      'A {{ first_name }}',
+      'Step 2',
+      'Subject: Two',
+      'Body:',
+      'B {{ first_name }}',
+      'End of step 2',
+    ].join('\n')
+    expect(parseReply(reply)?.steps).toEqual([
       { subject: 'One', body: 'A {{ first_name }}' },
       { subject: 'Two', body: 'B {{ first_name }}' },
     ])
+  })
+
+  it('C: counts the lines it leaves out, around and between the steps', () => {
+    const reply = [
+      'Here are two options.',
+      'Step 1',
+      'Subject: One',
+      'Body:',
+      'A {{ first_name }}',
+      'End of step 1',
+      'And a follow-up:',
+      '',
+      'Step 2',
+      'Subject: Unused',
+      'Subject: Two',
+      'Body:',
+      'B {{ first_name }}',
+      'End of step 2',
+      'Want changes?',
+    ].join('\n')
+    expect(parseReply(reply)).toEqual({
+      steps: [
+        { subject: 'One', body: 'A {{ first_name }}' },
+        { subject: 'Two', body: 'B {{ first_name }}' },
+      ],
+      dropped: 4,
+    })
+  })
+
+  it('stays fast on long lines of spaces', () => {
+    for (const reply of ['Step 1' + ' '.repeat(100_000) + 'x', 'body' + ' '.repeat(100_000)]) {
+      const started = performance.now()
+      parseReply(reply)
+      expect(performance.now() - started).toBeLessThan(50)
+    }
   })
 
   it('gives null for a reply without the labels, so the caller pastes it raw', () => {
@@ -215,8 +328,8 @@ describe('parseReply', () => {
 
   it('reads back what formatStep writes', () => {
     const step = { subject: 'Hello', body: 'Hi {{ first_name }},\n\nBye.' }
-    expect(parseReply(formatStep(step, 2))).toEqual([step])
+    expect(parseReply(formatStep(step, 2))).toEqual({ steps: [step], dropped: 0 })
     const noSubject = { subject: null, body: 'Hi {{ first_name }}.' }
-    expect(parseReply(formatStep(noSubject, 1))).toEqual([noSubject])
+    expect(parseReply(formatStep(noSubject, 1))).toEqual({ steps: [noSubject], dropped: 0 })
   })
 })

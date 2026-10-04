@@ -46,6 +46,28 @@ export const WHY_IT_MATTERS: Readonly<Record<LintRule, string>> = {
     'This contact has no value for the field, so the message has a blank where it goes.',
 }
 
+/**
+ * Each lint rule as an instruction to whoever writes the text, for the prompt
+ * the "Draft with your AI assistant" helper builds (#368). Keyed by rule id next
+ * to {@link WHY_IT_MATTERS}, so a new rule does not build until it has one too.
+ * Null for a rule that is not about the text you write (`missing_value` is about
+ * one contact's data in the preview).
+ */
+export const PROMPT_RULES: Readonly<Record<LintRule, string | null>> = {
+  syntax: 'Write valid placeholders: close every {{ with }}, and every {% if %} with {% endif %}.',
+  unsupported:
+    'Use only placeholders, filters, and simple {% if %} conditions: no loops, {% set %}, macros, or other template code.',
+  unsafe_attribute: 'Never write a name that starts with an underscore.',
+  attribute_access:
+    'Write each placeholder exactly as listed above, with nothing added after a dot.',
+  undefined_variable: 'Use only the merge fields listed above, spelled exactly as shown.',
+  no_contact_field:
+    'Name at least one placeholder about the recipient, such as {{ first_name }}, in every message body.',
+  missing_subject: 'Give every email a subject line.',
+  bad_link: 'Write every link in full, starting with https://.',
+  missing_value: null,
+}
+
 const LINE_PREFIX = /^line (\d+): /
 
 /** Every line break Jinja counts lines by: CRLF, a bare CR, and LF. */

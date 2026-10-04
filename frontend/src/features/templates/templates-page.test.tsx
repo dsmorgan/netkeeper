@@ -22,7 +22,7 @@ import { jsonResponse } from '@/test/fetch'
 
 import type { LintIssue, MergeField, TemplateOut } from './api'
 import { LINT_DEBOUNCE_MS } from './draft'
-import { WHY_IT_MATTERS } from './lint'
+import { PROMPT_RULES } from './lint'
 import { TemplatesPage } from './templates-page'
 
 const WAIT = { timeout: 3000 }
@@ -1099,7 +1099,8 @@ describe('draft with your AI assistant', () => {
     expect(prompt).toContain('{{ first_name }}')
     expect(prompt).toContain('{{ company }}')
     expect(prompt).toContain('{{ previous_send_date | ago }}')
-    expect(prompt).toContain(WHY_IT_MATTERS.no_contact_field)
+    expect(prompt).toContain(PROMPT_RULES.no_contact_field ?? 'missing')
+    expect(prompt).not.toContain('Current template to improve')
     expect(prompt).toContain('Ask for advice on a move into design')
     expect(prompt).toContain('Tone: professional')
     expect(prompt).toContain('End of step 2')
@@ -1148,7 +1149,11 @@ describe('draft with your AI assistant', () => {
 
     expect(screen.getByLabelText('Subject')).toHaveValue('Long time, {{ first_name }}')
     expect(screen.getByLabelText('Body')).toHaveValue(body)
-    expect(within(helper).getByText('Filled the subject and body.')).toBeInTheDocument()
+    expect(
+      within(helper).getByText(
+        'Filled the subject and body. 2 lines outside the labeled format were left out.',
+      ),
+    ).toBeInTheDocument()
     const issues = await screen.findByRole('list', { name: 'Body lint' }, WAIT)
     expect(within(issues).getByText("Loops aren't supported in templates")).toBeInTheDocument()
     expect(requestsTo(seen, 'POST', '/api/v1/templates/lint').at(-1)?.body).toEqual({
@@ -1194,7 +1199,7 @@ describe('draft with your AI assistant', () => {
     expect(within(helper).getByText(/didn't have Subject: and Body: labels/)).toBeInTheDocument()
   })
 
-  it('fills step 1 of several and offers the others', async () => {
+  it('fills step 1 of several and offers the others, step 1 included once you switch', async () => {
     const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined)
     withClipboard(writeText)
     const { helper } = await openHelper()
@@ -1211,6 +1216,7 @@ describe('draft with your AI assistant', () => {
     ).toBeInTheDocument()
 
     const others = within(helper).getByRole('region', { name: 'Other steps' })
+    expect(within(others).queryByRole('button', { name: 'Use step 1 here' })).toBeNull()
     fireEvent.click(within(others).getByRole('button', { name: 'Copy step 2' }))
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(
@@ -1220,6 +1226,110 @@ describe('draft with your AI assistant', () => {
     fireEvent.click(within(others).getByRole('button', { name: 'Use step 2 here' }))
     expect(screen.getByLabelText('Subject')).toHaveValue('Two')
     expect(screen.getByLabelText('Body')).toHaveValue('Second {{ first_name }}')
+    expect(
+      within(helper).getByText('Filled the subject and body from step 2 of 2.'),
+    ).toBeInTheDocument()
+    const after = within(helper).getByRole('region', { name: 'Other steps' })
+    expect(within(after).queryByRole('button', { name: 'Use step 2 here' })).toBeNull()
+    fireEvent.click(within(after).getByRole('button', { name: 'Use step 1 here' }))
+    expect(screen.getByLabelText('Body')).toHaveValue('First {{ first_name }}')
+  })
+
+  it('offers to undo a paste that replaced text, until the next edit', async () => {
+    withClipboard(undefined)
+    const { helper } = await openHelper()
+    const reply = within(helper).getByLabelText("Assistant's reply")
+    fireEvent.change(reply, { target: { value: 'Subject: New\nBody:\nNew {{ first_name }}' } })
+    fireEvent.click(within(helper).getByRole('button', { name: 'Paste result' }))
+    expect(screen.getByLabelText('Body')).toHaveValue('New {{ first_name }}')
+
+    fireEvent.click(within(helper).getByRole('button', { name: 'Undo paste' }))
+    expect(screen.getByLabelText('Subject')).toHaveValue('Hi {{ first_name }}')
+    expect(screen.getByLabelText('Body')).toHaveValue('Hi {{ first_name }} at {{ company }}.')
+    expect(within(helper).queryByRole('button', { name: 'Undo paste' })).toBeNull()
+
+    // Paste again, then type: the edit ends the undo.
+    fireEvent.click(within(helper).getByRole('button', { name: 'Paste result' }))
+    expect(within(helper).getByRole('button', { name: 'Undo paste' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Body'), { target: { value: 'Typed {{ first_name }}' } })
+    expect(within(helper).queryByRole('button', { name: 'Undo paste' })).toBeNull()
+  })
+
+  it('offers to undo Use step N here too', async () => {
+    withClipboard(undefined)
+    const { helper } = await openHelper(template({ subject: '', body: '' }))
+    fireEvent.change(within(helper).getByLabelText("Assistant's reply"), {
+      target: {
+        value:
+          'Step 1\nSubject: One\nBody:\nA {{ first_name }}\n\nStep 2\nSubject: Two\nBody:\nB {{ first_name }}',
+      },
+    })
+    fireEvent.click(within(helper).getByRole('button', { name: 'Paste result' }))
+    // Nothing was there to lose, so nothing to undo.
+    expect(within(helper).queryByRole('button', { name: 'Undo paste' })).toBeNull()
+    fireEvent.click(within(helper).getByRole('button', { name: 'Use step 2 here' }))
+    fireEvent.click(within(helper).getByRole('button', { name: 'Undo paste' }))
+    expect(screen.getByLabelText('Subject')).toHaveValue('One')
+    expect(screen.getByLabelText('Body')).toHaveValue('A {{ first_name }}')
+  })
+
+  it('leaves the subject alone for an email step that has none', async () => {
+    withClipboard(undefined)
+    const { helper } = await openHelper()
+    fireEvent.change(within(helper).getByLabelText("Assistant's reply"), {
+      target: { value: 'Body:\nOnly a body, {{ first_name }}' },
+    })
+    fireEvent.click(within(helper).getByRole('button', { name: 'Paste result' }))
+    expect(screen.getByLabelText('Subject')).toHaveValue('Hi {{ first_name }}')
+    expect(screen.getByLabelText('Body')).toHaveValue('Only a body, {{ first_name }}')
+    expect(within(helper).getByText('Filled the body.')).toBeInTheDocument()
+  })
+
+  it('includes the current text only when you tick the box', async () => {
+    const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined)
+    withClipboard(writeText)
+    const { helper } = await openHelper()
+    const copy = await within(helper).findByRole('button', { name: 'Copy prompt' })
+    await waitFor(() => expect(copy).toBeEnabled(), WAIT)
+    const include = within(helper).getByRole('checkbox', { name: 'Include the current text' })
+    expect(include).not.toBeChecked()
+    expect(include).toHaveAccessibleDescription(/only merge-field placeholders unless you typed/)
+
+    fireEvent.click(copy)
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+    expect(writeText.mock.calls[0]?.[0]).not.toContain('Current template to improve')
+
+    fireEvent.click(include)
+    fireEvent.click(copy)
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2))
+    expect(writeText.mock.calls[1]?.[0]).toContain(
+      'Current template to improve:\n\nSubject: Hi {{ first_name }}\nBody:\nHi {{ first_name }} at {{ company }}.',
+    )
+  })
+
+  it('never saves the template on Enter in the helper', async () => {
+    withClipboard(undefined)
+    const { seen, helper } = await openHelper()
+    const editorForm = screen.getByLabelText('Body').closest('form')
+    expect(editorForm).not.toBeNull()
+    for (const name of ['What the campaign is for', "Who it's for", 'Tone', 'Steps']) {
+      const field = within(helper).getByLabelText(name) as HTMLInputElement | HTMLSelectElement
+      expect(field.form).not.toBe(editorForm)
+      fireEvent.keyDown(field, { key: 'Enter', code: 'Enter' })
+      if (field.form !== null) fireEvent.submit(field.form)
+    }
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    expect(requestsTo(seen, 'PATCH', '/api/v1/templates/1')).toEqual([])
+    expect(requestsTo(seen, 'POST', '/api/v1/templates')).toEqual([])
+  })
+
+  it('sits below the channel and above the subject', async () => {
+    withClipboard(undefined)
+    const { helper } = await openHelper()
+    const follows = (a: Node, b: Node) =>
+      (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+    expect(follows(screen.getByLabelText('Channel'), helper)).toBe(true)
+    expect(follows(helper, screen.getByLabelText('Subject'))).toBe(true)
   })
 
   it('leaves the subject alone for a LinkedIn template, and says why', async () => {
