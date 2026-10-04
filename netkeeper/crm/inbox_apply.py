@@ -238,7 +238,7 @@ def record_short_first_poll(session: Session, user: User, since: datetime) -> No
 
 
 def clear_short_first_poll(session: Session, user: User) -> bool:
-    """Forget it: a person acknowledged it, or a complete poll covered it. Needs a writer."""
+    """Forget it: a person checked older replies by hand and acknowledged it. Needs a writer."""
     return delete_setting(session, user, SHORT_FIRST_POLL_KEY)
 
 

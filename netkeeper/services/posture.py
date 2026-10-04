@@ -530,7 +530,6 @@ def posture(
         _scheduled_jobs(scheduler),
         _scheduled_runs_armed(session, user, account_id),
         _reply_poll(session, user, now=now, settings=settings),
-        _linkedin_reply_poll(session, user),
         _sending_hours(session, user),
         _next_campaign_send(session, user, zone=zone, now=now, settings=settings),
         _campaign_templates(session, user),
@@ -538,6 +537,9 @@ def posture(
         _answer_lost_limit(session, user, account_id),
         _network_aging(session, user),
     ]
+    linkedin_replies = _linkedin_reply_poll(session, user)
+    if linkedin_replies is not None:
+        protections.append(linkedin_replies)
     return PostureReport(
         checked_at=now,
         timezone=linkedin.timezone,
@@ -1602,36 +1604,31 @@ def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settin
     )
 
 
-def _linkedin_reply_poll(session: Session, user: User) -> Protection:
-    """The LinkedIn inbox poll (P4-08): its last complete poll, and a short first one.
+def _linkedin_reply_poll(session: Session, user: User) -> Protection | None:
+    """The LinkedIn inbox poll's row, only while a short first poll stands (P4-08).
 
-    The poll has no page source until P4-01 (#380), so it is not scheduled. A first
-    poll that could not read back to the earliest outreach it watches counted as
-    complete anyway; that stays a warning, because replies older than what it read
-    were never seen, until a later complete poll covers the date or a person
-    acknowledges it (``netkeeper linkedin inbox-acknowledge``).
+    Until P4-01 (#380) wires a page source, no poll can run, so there is no row: the
+    GAPS and the scheduled jobs row already say the poll has no page source, and a row
+    here could only claim a protection that does nothing. P4-01 adds the full row.
+
+    The one exception is a first poll that could not read back to the earliest
+    outreach it watches. It counted as complete anyway, so replies older than what it
+    read were never seen: that is a warning until a person checks them by hand and
+    acknowledges it (``netkeeper linkedin inbox-acknowledge``). The row is ``off``,
+    never ``on``, because those replies are not detected.
     """
-    last = latest_run(session, user, SyncRunKind.INBOX, status=SyncRunStatus.COMPLETED)
-    value = (
-        "no complete poll yet"
-        if last is None
-        else f"last complete poll {last.started_at:%Y-%m-%d %H:%M UTC}"
-    )
-    value += "; no page source yet, so `netkeeper serve` does not schedule it"
     short_of = short_first_poll(session, user)
-    warnings: tuple[str, ...] = ()
-    if short_of is not None:
-        warnings = (
+    if short_of is None:
+        return None
+    return Protection(
+        name="linkedin reply poll",
+        status=Status.OFF,
+        value=f"the first poll fell short of {short_of:%Y-%m-%d}",
+        warnings=(
             f"the first LinkedIn inbox poll couldn't read back to {short_of:%Y-%m-%d};"
             " check older LinkedIn replies by hand, then run"
             " `netkeeper linkedin inbox-acknowledge`",
-        )
-    return Protection(
-        name="linkedin reply poll",
-        status=Status.ON,
-        value=value,
-        warnings=warnings,
-        brief="no complete poll yet" if last is None else f"{last.started_at:%Y-%m-%d}",
+        ),
     )
 
 

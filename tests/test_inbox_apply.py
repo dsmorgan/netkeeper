@@ -24,7 +24,12 @@ from netkeeper.crm import archive as archive_module
 from netkeeper.crm import inbox_apply
 from netkeeper.crm.archive import import_archive
 from netkeeper.crm.identity import merge
-from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction
+from netkeeper.crm.interactions import (
+    INVITATION_SUMMARY,
+    add_interaction,
+    is_invitation,
+    summary_is_invitation,
+)
 from netkeeper.db import session_scope
 from netkeeper.linkedin import inbox
 from netkeeper.linkedin.archive import open_archive
@@ -567,3 +572,26 @@ def test_first_live_outreach_watches_what_the_reply_poll_watches(
     factories.make_message(writer, stale, sent_at=NOW - timedelta(days=90))
     assert timedelta(days=30) == WATCH_AFTER_COMPLETED
     assert inbox_apply.first_live_outreach(writer, user, now=NOW) == NOW - timedelta(days=40)
+
+
+@pytest.mark.parametrize(
+    ("summary", "expected"),
+    [
+        (INVITATION_SUMMARY, True),
+        (f"{INVITATION_SUMMARY}: an invented note", True),
+        (f"{INVITATION_SUMMARY}:\nhello", True),
+        (f"{INVITATION_SUMMARY} requests are piling up, an invented line", False),
+        (None, False),
+    ],
+)
+def test_the_python_and_sql_invitation_checks_agree(
+    writer: Session, user: User, summary: str | None, expected: bool
+) -> None:
+    """One rule, two readers: ``summary_is_invitation`` matches ``is_invitation()``."""
+    ada = _contact(writer, user, ADA)
+    row = add_interaction(writer, user, ada.id, InteractionKind.LI_OUT, NOW, summary)
+    in_sql = writer.scalars(
+        scoped(user, Interaction).where(Interaction.id == row.id, is_invitation())
+    ).all()
+    assert summary_is_invitation(summary) is expected
+    assert bool(in_sql) is expected

@@ -54,7 +54,7 @@ from netkeeper.services.inbox_poll import (
 )
 from netkeeper.services.linkedin_accounts import arm_scheduled_runs, ensure_account
 from netkeeper.services.linkedin_session import flag_session, session_flag
-from netkeeper.services.posture import posture
+from netkeeper.services.posture import PostureReport, Status, posture
 from netkeeper.services.runs import HeatSkipped, SessionFlagged
 from netkeeper.services.scheduled_runs import serve_registry
 from netkeeper.services.scheduler import SERVED_SCHEDULES, JobKind
@@ -738,14 +738,35 @@ def _outreach(factory: sessionmaker[Session], user_id: int, sent_at: datetime) -
         factories.make_message(session, enrollment, sent_at=sent_at)
 
 
-def _posture_warnings(factory: sessionmaker[Session], user_id: int) -> tuple[str, ...]:
-    with session_scope(factory) as session:
+def _posture(factory: sessionmaker[Session], user_id: int) -> PostureReport:
+    with session_scope(factory, write=True) as session:
         user = _user(session, user_id)
-        report = posture(
+        return posture(
             session, user, ensure_account(session, user).id, now=NOW, settings=Settings()
         )
-    (row,) = [p for p in report.protections if p.name == "linkedin reply poll"]
+
+
+def _posture_warnings(factory: sessionmaker[Session], user_id: int) -> tuple[str, ...]:
+    """The ``linkedin reply poll`` row's warnings; the row exists only with a short poll."""
+    rows = [p for p in _posture(factory, user_id).protections if p.name == "linkedin reply poll"]
+    if not rows:
+        return ()
+    (row,) = rows
+    assert row.status is Status.OFF  # never claimed on before P4-01
     return row.warnings
+
+
+def test_without_a_short_first_poll_posture_has_no_linkedin_reply_poll_row(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    report = _posture(session_factory, user_id)
+    assert "linkedin reply poll" not in {p.name for p in report.protections}
+    with session_scope(session_factory, write=True) as session:
+        inbox_apply.record_short_first_poll(session, _user(session, user_id), NOW)
+    report = _posture(session_factory, user_id)
+    (row,) = [p for p in report.protections if p.name == "linkedin reply poll"]
+    assert row.status is Status.OFF and len(row.warnings) == 1
+    assert not report.ok
 
 
 async def test_a_first_poll_that_cannot_reach_a_far_since_completes_and_warns(
@@ -777,7 +798,7 @@ async def test_a_first_poll_that_cannot_reach_a_far_since_completes_and_warns(
         " check older LinkedIn replies by hand"
     )
 
-    # Later polls move on from it, and an ordinary complete one does not cover the date.
+    # Later polls move on from it, and only a person clears the warning.
     later = FakeInboxSource()
     await poll_inbox(
         session_factory, user_id, later, settings=SETTINGS, clock=lambda: NOW + timedelta(hours=3)
@@ -800,32 +821,6 @@ async def test_a_first_poll_that_reaches_its_since_completes_without_a_warning(
     )
     assert _run(session_factory, user_id, report.run_id).stop_reason == READ
     assert _posture_warnings(session_factory, user_id) == ()
-
-
-async def test_a_complete_poll_whose_window_covers_the_date_clears_the_warning(
-    session_factory: sessionmaker[Session], user_id: int
-) -> None:
-    await poll_inbox(
-        session_factory, user_id, FakeInboxSource(), settings=SETTINGS, clock=lambda: NOW
-    )
-    with session_scope(session_factory, write=True) as session:
-        inbox_apply.record_short_first_poll(
-            session, _user(session, user_id), NOW + timedelta(minutes=30)
-        )
-    assert len(_posture_warnings(session_factory, user_id)) == 1
-    partial = FakeInboxSource(delta(complete=False))
-    await poll_inbox(
-        session_factory, user_id, partial, settings=SETTINGS, clock=lambda: NOW + timedelta(hours=1)
-    )
-    assert len(_posture_warnings(session_factory, user_id)) == 1  # incomplete: no cover
-    await poll_inbox(
-        session_factory,
-        user_id,
-        FakeInboxSource(),
-        settings=SETTINGS,
-        clock=lambda: NOW + timedelta(hours=2),
-    )
-    assert _posture_warnings(session_factory, user_id) == ()  # read back from NOW
 
 
 def test_the_cli_acknowledges_a_short_first_poll(cli_db: sessionmaker[Session]) -> None:
