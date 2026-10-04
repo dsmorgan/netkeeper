@@ -48,6 +48,7 @@ from netkeeper.models import (
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped, unscoped
 from netkeeper.services import campaign_engine, campaign_review
+from netkeeper.services import campaigns as campaign_service
 from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.campaign_guards import Reason, check_enrollment
 from netkeeper.services.campaign_sender import GmailSender
@@ -1035,6 +1036,35 @@ async def test_a_mailbox_armed_for_drafts_gets_a_test_draft_and_never_a_send(
     review = await _review(client, s)
     [untested] = [m for m in review["missing"] if m["requirement"] == "test_sends"]
     assert untested["step_positions"] == [2]  # step 1's test draft counts
+
+
+async def test_a_test_draft_for_a_campaign_deleted_meanwhile_is_named_for_the_person(
+    client: httpx.AsyncClient,
+    running_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#345 review: the campaign is deleted while Gmail makes the test draft. netkeeper
+    never deletes a Gmail draft (ADR 0003), so the answer and the log name the draft for
+    the person to delete by hand."""
+    s = _build(running_app, people=1, arm=ARMED_FOR_DRAFTS)
+    real = campaign_review.record_test_send
+
+    def deleted_first(session: Session, user: User, *args: Any, **kwargs: Any) -> Any:
+        campaign_service.delete_campaign(session, user, s.campaign_id)
+        return real(session, user, *args, **kwargs)
+
+    monkeypatch.setattr(campaign_review, "record_test_send", deleted_first)
+    caplog.set_level("WARNING")
+    response = await client.post(
+        f"{s.base}/review/test-send", json={"step_id": s.step_ids[0]}, headers=CSRF
+    )
+
+    assert response.status_code == 404
+    [draft_id] = s.gmail.drafts()
+    assert f"(draft {draft_id})" in response.json()["detail"]
+    assert "delete it from Gmail's Drafts by hand" in response.json()["detail"]
+    assert f"Gmail draft {draft_id} was made" in caplog.text
 
 
 @pytest.mark.parametrize("arm", [ARMED_FOR_SEND, ARMED_FOR_DRAFTS], ids=["sent", "drafted"])

@@ -524,7 +524,7 @@ def test_end_asks_then_ends_and_archive_and_unarchive_follow(world: World) -> No
     assert _campaign(world, campaign_id).status is CampaignStatus.ACTIVE
     refused = _run("campaigns", "archive", ident)
     assert refused.exit_code == 1
-    assert "end it before archiving it" in refused.output
+    assert "end it first" in refused.output
 
     ended = _run("campaigns", "end", ident, input="y\n")
     assert ended.exit_code == 0, ended.output

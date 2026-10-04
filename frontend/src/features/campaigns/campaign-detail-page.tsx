@@ -4,7 +4,7 @@
  * Its scheduled start, changeable until the first send, and each step's timing,
  * changeable until the campaign is over (#338). Once it is active, its results:
  * sends per day, and replies, bounces and opt-outs per step (#350). Its lifecycle
- * (#345): end a running campaign, archive and unarchive a concluded one, delete one
+ * (#345): end a running campaign, archive and unarchive an ended one, delete one
  * that was never activated.
  */
 import { Link, useNavigate } from '@tanstack/react-router'
@@ -211,6 +211,8 @@ function Lifecycle({ campaign }: { campaign: Campaign }) {
     },
   })
   const running = campaign.status === 'active' || campaign.status === 'paused'
+  // Archive takes only an ended campaign (#345): End first, then Archive appears.
+  const archivable = campaign.status === 'completed' || campaign.status === 'archived'
 
   return (
     <>
@@ -222,7 +224,7 @@ function Lifecycle({ campaign }: { campaign: Campaign }) {
           </p>
         </Callout>
       )}
-      {(running || campaign.concluded || campaign.deletable) && (
+      {(running || archivable || campaign.deletable) && (
         <div className="flex flex-wrap items-center gap-2">
           {running && (
             <Button
@@ -236,7 +238,7 @@ function Lifecycle({ campaign }: { campaign: Campaign }) {
               End campaign
             </Button>
           )}
-          {campaign.concluded && (
+          {archivable && (
             <Button
               variant="outline"
               className="w-fit"
@@ -263,9 +265,11 @@ function Lifecycle({ campaign }: { campaign: Campaign }) {
               ? 'It never sent anything, so you can delete it.'
               : campaign.status === 'archived'
                 ? 'Unarchive brings it back to the list, as completed.'
-                : campaign.concluded
+                : archivable
                   ? 'Archive hides it from the list and the dashboard; you can unarchive it.'
-                  : 'End it to stop it for good; then you can archive it.'}
+                  : campaign.concluded
+                    ? 'Every enrollment has finished. End it, then you can archive it.'
+                    : 'End it to stop it for good; then you can archive it.'}
           </span>
         </div>
       )}
@@ -354,6 +358,13 @@ function DeleteDialog({
                 ))}
               </ul>
             </>
+          )}
+          {plan.data.unverifies !== null && plan.data.unverifies !== undefined && (
+            <p className="text-foreground">
+              These are the only test drafts that could verify {plan.data.unverifies}. Once the
+              campaign is deleted, the mailbox needs a new test draft from another campaign to be
+              verified.
+            </p>
           )}
         </>
       )}
