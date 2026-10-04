@@ -20,6 +20,11 @@ activates a campaign. ``netkeeper campaigns`` mirrors each route.
 - ``GET /campaigns/{id}/results`` is what the campaign has done (#350): sends per
   local day, and replies, bounces and opt-outs per step, with the totals
   (:mod:`netkeeper.services.campaign_results` says what counts).
+- The lifecycle (#345): ``POST .../end`` ends an active or paused campaign for
+  good; ``POST .../archive`` and ``.../unarchive`` hide and show a concluded one;
+  ``GET .../delete-plan`` and ``DELETE /campaigns/{id}`` delete one that was never
+  activated and has no messages, listing the Gmail drafts left behind.
+  ``GET /campaigns`` leaves archived campaigns out unless ``archived=true``.
 
 A campaign, template, mailbox or list that is not the user's answers ``404``.
 """
@@ -182,6 +187,33 @@ class CampaignOut(BaseModel):
     next_action_at: datetime | None
     missing: list[MissingOut]
     """What the review gate still needs, for a ``draft`` or ``reviewing`` campaign."""
+    concluded: bool = False
+    """Whether ``POST .../archive`` takes it (#345): ended, or every enrollment finished."""
+    deletable: bool = False
+    """Whether ``DELETE /campaigns/{id}`` takes it (#345): never activated, no messages."""
+
+
+class LeftoverDraftOut(BaseModel):
+    """A test-send Gmail draft that deleting the campaign leaves for you to delete."""
+
+    step_position: int
+    to_address: str
+    drafted_at: datetime
+    gmail_draft_id: str
+
+
+class DeletePlanOut(BaseModel):
+    """What deleting the campaign removes and leaves, or why it is refused (#345)."""
+
+    campaign_id: int
+    name: str
+    deletable: bool
+    refusal: str | None
+    """Why it cannot be deleted; None when it can."""
+    steps: int
+    enrollments: int
+    leftover_drafts: list[LeftoverDraftOut]
+    """Gmail drafts netkeeper never deletes (ADR 0003): delete them by hand."""
 
 
 class DaySendsOut(BaseModel):
@@ -363,6 +395,8 @@ def _campaign_out(detail: service.CampaignDetail) -> CampaignOut:
         ],
         enrollments=dict(detail.enrollments),
         next_action_at=detail.next_action_at,
+        concluded=detail.concluded,
+        deletable=detail.deletable,
         missing=[
             MissingOut(
                 requirement=m.requirement,
@@ -383,9 +417,16 @@ def _detail(session: Session, user: User, campaign_id: int, request: Request) ->
 
 
 @router.get("/campaigns", operation_id="list_campaigns")
-def list_campaigns(session: SessionDep, user: CurrentUser) -> list[CampaignSummaryOut]:
-    """Every campaign, newest first, with its enrollment counts by status."""
-    return [_summary_out(row) for row in service.list_campaigns(session, user)]
+def list_campaigns(
+    session: SessionDep,
+    user: CurrentUser,
+    archived: Annotated[
+        bool, Query(description="Only the archived campaigns, in place of the others.")
+    ] = False,
+) -> list[CampaignSummaryOut]:
+    """Every campaign that is not archived, newest first, with its enrollment counts by
+    status. ``archived=true`` lists only the archived ones (#345)."""
+    return [_summary_out(row) for row in service.list_campaigns(session, user, archived=archived)]
 
 
 @router.post(
@@ -625,3 +666,91 @@ def set_step_schedule(
             send_time=body.send_time,
         )
         return _detail(session, user, campaign_id, request)
+
+
+def _plan_out(plan: service.DeletePlan) -> DeletePlanOut:
+    return DeletePlanOut(
+        campaign_id=plan.campaign_id,
+        name=plan.name,
+        deletable=plan.deletable,
+        refusal=plan.refusal,
+        steps=plan.steps,
+        enrollments=plan.enrollments,
+        leftover_drafts=[
+            LeftoverDraftOut(
+                step_position=d.step_position,
+                to_address=d.to_address,
+                drafted_at=d.drafted_at,
+                gmail_draft_id=d.gmail_draft_id,
+            )
+            for d in plan.leftover_drafts
+        ],
+    )
+
+
+@router.post(
+    "/campaigns/{campaign_id}/end",
+    operation_id="end_campaign",
+    responses={**NOT_FOUND, **CONFLICT},
+)
+def end(campaign_id: int, request: Request, session: SessionDep, user: CurrentUser) -> CampaignOut:
+    """``active`` or ``paused`` to ``completed``, for good (#345): nothing fires again.
+    Enrollments keep their state, so replies to a step already sent still count."""
+    with translate_errors():
+        service.end(session, user, campaign_id)
+        return _detail(session, user, campaign_id, request)
+
+
+@router.post(
+    "/campaigns/{campaign_id}/archive",
+    operation_id="archive_campaign",
+    responses={**NOT_FOUND, **CONFLICT},
+)
+def archive(
+    campaign_id: int, request: Request, session: SessionDep, user: CurrentUser
+) -> CampaignOut:
+    """Hide a concluded campaign from the list and the dashboard (#345), keeping its
+    messages and results. ``409`` while an active or paused campaign still has an
+    enrollment in progress (end it first), and for one never activated (delete it)."""
+    with translate_errors():
+        service.archive(session, user, campaign_id)
+        return _detail(session, user, campaign_id, request)
+
+
+@router.post(
+    "/campaigns/{campaign_id}/unarchive",
+    operation_id="unarchive_campaign",
+    responses={**NOT_FOUND, **CONFLICT},
+)
+def unarchive(
+    campaign_id: int, request: Request, session: SessionDep, user: CurrentUser
+) -> CampaignOut:
+    """``archived`` back to ``completed`` (#345). It never sends again."""
+    with translate_errors():
+        service.unarchive(session, user, campaign_id)
+        return _detail(session, user, campaign_id, request)
+
+
+@router.get(
+    "/campaigns/{campaign_id}/delete-plan",
+    operation_id="get_campaign_delete_plan",
+    responses=NOT_FOUND,
+)
+def delete_plan(campaign_id: int, session: SessionDep, user: CurrentUser) -> DeletePlanOut:
+    """What ``DELETE /campaigns/{id}`` would remove, the Gmail drafts it would leave,
+    or why it is refused (#345). Changes nothing."""
+    with translate_errors():
+        return _plan_out(service.delete_plan(session, user, campaign_id))
+
+
+@router.delete(
+    "/campaigns/{campaign_id}",
+    operation_id="delete_campaign",
+    responses={**NOT_FOUND, **CONFLICT},
+)
+def delete_campaign(campaign_id: int, session: SessionDep, user: CurrentUser) -> DeletePlanOut:
+    """Delete a campaign never activated and with no messages (#345), with its steps and
+    enrollments. ``409``, with the reason, for any other: archive one that sent. The
+    answer lists the Gmail drafts left behind: netkeeper never deletes one (ADR 0003)."""
+    with translate_errors():
+        return _plan_out(service.delete_campaign(session, user, campaign_id))

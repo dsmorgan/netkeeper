@@ -1190,6 +1190,11 @@
             ],
             "title": "Approved At"
           },
+          "concluded": {
+            "default": false,
+            "title": "Concluded",
+            "type": "boolean"
+          },
           "contacted_within_days_guard": {
             "title": "Contacted Within Days Guard",
             "type": "integer"
@@ -1209,6 +1214,11 @@
               }
             ],
             "title": "Daily Cap"
+          },
+          "deletable": {
+            "default": false,
+            "title": "Deletable",
+            "type": "boolean"
           },
           "enrollments": {
             "additionalProperties": {
@@ -3445,6 +3455,60 @@
           "sent"
         ],
         "title": "DaySendsOut",
+        "type": "object"
+      },
+      "DeletePlanOut": {
+        "description": "What deleting the campaign removes and leaves, or why it is refused (#345).",
+        "properties": {
+          "campaign_id": {
+            "title": "Campaign Id",
+            "type": "integer"
+          },
+          "deletable": {
+            "title": "Deletable",
+            "type": "boolean"
+          },
+          "enrollments": {
+            "title": "Enrollments",
+            "type": "integer"
+          },
+          "leftover_drafts": {
+            "items": {
+              "$ref": "#/components/schemas/LeftoverDraftOut"
+            },
+            "title": "Leftover Drafts",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "refusal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refusal"
+          },
+          "steps": {
+            "title": "Steps",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "campaign_id",
+          "name",
+          "deletable",
+          "refusal",
+          "steps",
+          "enrollments",
+          "leftover_drafts"
+        ],
+        "title": "DeletePlanOut",
         "type": "object"
       },
       "DoNotSendIn": {
@@ -6500,6 +6564,36 @@
           "op"
         ],
         "title": "LastContacted",
+        "type": "object"
+      },
+      "LeftoverDraftOut": {
+        "description": "A test-send Gmail draft that deleting the campaign leaves for you to delete.",
+        "properties": {
+          "drafted_at": {
+            "format": "date-time",
+            "title": "Drafted At",
+            "type": "string"
+          },
+          "gmail_draft_id": {
+            "title": "Gmail Draft Id",
+            "type": "string"
+          },
+          "step_position": {
+            "title": "Step Position",
+            "type": "integer"
+          },
+          "to_address": {
+            "title": "To Address",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_position",
+          "to_address",
+          "drafted_at",
+          "gmail_draft_id"
+        ],
+        "title": "LeftoverDraftOut",
         "type": "object"
       },
       "LinkKind": {
@@ -12251,8 +12345,22 @@
     },
     "/api/v1/campaigns": {
       "get": {
-        "description": "Every campaign, newest first, with its enrollment counts by status.",
+        "description": "Every campaign that is not archived, newest first, with its enrollment counts by\nstatus. ``archived=true`` lists only the archived ones (#345).",
         "operationId": "list_campaigns",
+        "parameters": [
+          {
+            "description": "Only the archived campaigns, in place of the others.",
+            "in": "query",
+            "name": "archived",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Only the archived campaigns, in place of the others.",
+              "title": "Archived",
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -12267,6 +12375,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Campaigns",
@@ -12315,6 +12433,53 @@
       }
     },
     "/api/v1/campaigns/{campaign_id}": {
+      "delete": {
+        "description": "Delete a campaign never activated and with no messages (#345), with its steps and\nenrollments. ``409``, with the reason, for any other: archive one that sent. The\nanswer lists the Gmail drafts left behind: netkeeper never deletes one (ADR 0003).",
+        "operationId": "delete_campaign",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletePlanOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "409": {
+            "description": "Refused in the campaign's state, or a name taken"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Campaign",
+        "tags": [
+          "campaigns"
+        ]
+      },
       "get": {
         "description": "One campaign: steps and their progress, enrollments, next fire, what review misses.",
         "operationId": "get_campaign",
@@ -12421,6 +12586,150 @@
           }
         },
         "summary": "Activate Campaign",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/archive": {
+      "post": {
+        "description": "Hide a concluded campaign from the list and the dashboard (#345), keeping its\nmessages and results. ``409`` while an active or paused campaign still has an\nenrollment in progress (end it first), and for one never activated (delete it).",
+        "operationId": "archive_campaign",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "409": {
+            "description": "Refused in the campaign's state, or a name taken"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Archive",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/delete-plan": {
+      "get": {
+        "description": "What ``DELETE /campaigns/{id}`` would remove, the Gmail drafts it would leave,\nor why it is refused (#345). Changes nothing.",
+        "operationId": "get_campaign_delete_plan",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletePlanOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Plan",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/end": {
+      "post": {
+        "description": "``active`` or ``paused`` to ``completed``, for good (#345): nothing fires again.\nEnrollments keep their state, so replies to a step already sent still count.",
+        "operationId": "end_campaign",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "409": {
+            "description": "Refused in the campaign's state, or a name taken"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "End",
         "tags": [
           "campaigns"
         ]
@@ -13385,6 +13694,55 @@
           }
         },
         "summary": "Set Step Schedule",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/unarchive": {
+      "post": {
+        "description": "``archived`` back to ``completed`` (#345). It never sends again.",
+        "operationId": "unarchive_campaign",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "409": {
+            "description": "Refused in the campaign's state, or a name taken"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unarchive",
         "tags": [
           "campaigns"
         ]

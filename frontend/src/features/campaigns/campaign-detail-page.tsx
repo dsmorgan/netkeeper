@@ -3,14 +3,17 @@
  * gate while it is a draft or reviewing, its enrollments, and pause and resume.
  * Its scheduled start, changeable until the first send, and each step's timing,
  * changeable until the campaign is over (#338). Once it is active, its results:
- * sends per day, and replies, bounces and opt-outs per step (#350).
+ * sends per day, and replies, bounces and opt-outs per step (#350). Its lifecycle
+ * (#345): end a running campaign, archive and unarchive a concluded one, delete one
+ * that was never activated.
  */
-import { Link } from '@tanstack/react-router'
+import { Link, useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 
 import { Facts } from '@/components/facts'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
@@ -22,13 +25,19 @@ import { stepTimeWarning } from '@/features/settings/sending-hours'
 import {
   CampaignApiError,
   ENROLLMENT_PAGE,
+  archiveCampaign,
   campaignKeys,
   campaignQuery,
   campaignResultsQuery,
+  deleteCampaign,
+  deletePlanQuery,
+  endCampaign,
   enroll,
   enrollmentsQuery,
+  errorText,
   pauseCampaign,
   resumeCampaign,
+  unarchiveCampaign,
   setCampaignStart,
   setStepSchedule,
   type Campaign,
@@ -159,8 +168,196 @@ function Overview({ campaign }: { campaign: Campaign }) {
         )}
         {toggle.isError && <ErrorNote label="Not changed." error={toggle.error} />}
         {campaign.start_editable && <ChangeStart campaign={campaign} />}
+        <Lifecycle campaign={campaign} />
       </CardContent>
     </Card>
+  )
+}
+
+/**
+ * End, archive, unarchive and delete (#345). End and delete ask first; archive is
+ * undone by unarchive, so it does not.
+ */
+function Lifecycle({ campaign }: { campaign: Campaign }) {
+  const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const [ending, setEnding] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const settle = (updated: Campaign) => {
+    queryClient.setQueryData(campaignKeys.one(campaign.id), updated)
+    void queryClient.invalidateQueries({ queryKey: campaignKeys.all })
+  }
+  const end = useMutation({
+    mutationFn: () => endCampaign(campaign.id),
+    onSuccess: (updated) => {
+      settle(updated)
+      setEnding(false)
+    },
+  })
+  const archive = useMutation({
+    mutationFn: () =>
+      campaign.status === 'archived'
+        ? unarchiveCampaign(campaign.id)
+        : archiveCampaign(campaign.id),
+    onSuccess: settle,
+  })
+  const remove = useMutation({
+    mutationFn: () => deleteCampaign(campaign.id),
+    onSuccess: async () => {
+      setDeleting(false)
+      queryClient.removeQueries({ queryKey: campaignKeys.one(campaign.id) })
+      void queryClient.invalidateQueries({ queryKey: campaignKeys.list() })
+      await navigate({ to: '/campaigns' })
+    },
+  })
+  const running = campaign.status === 'active' || campaign.status === 'paused'
+
+  return (
+    <>
+      {campaign.status === 'archived' && (
+        <Callout title="Archived">
+          <p>
+            Hidden from the campaign list and the dashboard. Its messages, results and contact
+            timelines stay.
+          </p>
+        </Callout>
+      )}
+      {(running || campaign.concluded || campaign.deletable) && (
+        <div className="flex flex-wrap items-center gap-2">
+          {running && (
+            <Button
+              variant="outline"
+              className="w-fit"
+              onClick={() => {
+                end.reset()
+                setEnding(true)
+              }}
+            >
+              End campaign
+            </Button>
+          )}
+          {campaign.concluded && (
+            <Button
+              variant="outline"
+              className="w-fit"
+              disabled={archive.isPending}
+              onClick={() => archive.mutate()}
+            >
+              {campaign.status === 'archived' ? 'Unarchive' : 'Archive'}
+            </Button>
+          )}
+          {campaign.deletable && (
+            <Button
+              variant="destructive"
+              className="w-fit"
+              onClick={() => {
+                remove.reset()
+                setDeleting(true)
+              }}
+            >
+              Delete campaign
+            </Button>
+          )}
+          <span className="text-muted-foreground">
+            {campaign.deletable
+              ? 'It never sent anything, so you can delete it.'
+              : campaign.status === 'archived'
+                ? 'Unarchive brings it back to the list, as completed.'
+                : campaign.concluded
+                  ? 'Archive hides it from the list and the dashboard; you can unarchive it.'
+                  : 'End it to stop it for good; then you can archive it.'}
+          </span>
+        </div>
+      )}
+      {archive.isError && <ErrorNote label="Not changed." error={archive.error} />}
+      <ConfirmDialog
+        open={ending}
+        onOpenChange={setEnding}
+        title={`End ${campaign.name}?`}
+        confirmLabel="End campaign"
+        onConfirm={() => end.mutateAsync()}
+        pending={end.isPending}
+        error={end.isError ? errorText(end.error) : null}
+      >
+        <p>
+          Nothing more is sent, and you cannot resume it. Each enrollment keeps its state, so a
+          reply to a step already sent still counts in the results.
+        </p>
+        <p>
+          A message already handed to Gmail is not recalled, and a Gmail draft stays yours to send
+          or delete. Once it is ended, you can archive it.
+        </p>
+      </ConfirmDialog>
+      {deleting && (
+        <DeleteDialog
+          campaign={campaign}
+          onOpenChange={setDeleting}
+          onConfirm={() => remove.mutateAsync()}
+          pending={remove.isPending}
+          error={remove.isError ? errorText(remove.error) : null}
+        />
+      )}
+    </>
+  )
+}
+
+function DeleteDialog({
+  campaign,
+  onOpenChange,
+  onConfirm,
+  pending,
+  error,
+}: {
+  campaign: Campaign
+  onOpenChange: (open: boolean) => void
+  onConfirm: () => Promise<unknown>
+  pending: boolean
+  error: string | null
+}) {
+  const plan = useQuery(deletePlanQuery(campaign.id))
+  const refusal = plan.data?.refusal ?? null
+  return (
+    <ConfirmDialog
+      open
+      onOpenChange={onOpenChange}
+      title={`Delete ${campaign.name}?`}
+      confirmLabel="Delete campaign"
+      onConfirm={() => {
+        if (plan.data === undefined || refusal !== null) return Promise.resolve()
+        return onConfirm()
+      }}
+      pending={pending || plan.isPending}
+      error={error ?? refusal ?? (plan.isError ? errorText(plan.error) : null)}
+    >
+      {plan.data === undefined ? (
+        <p>Checking what the delete removes…</p>
+      ) : (
+        <>
+          <p>
+            Deletes the campaign, its {plan.data.steps} {plan.data.steps === 1 ? 'step' : 'steps'}{' '}
+            and its {plan.data.enrollments}{' '}
+            {plan.data.enrollments === 1 ? 'enrollment' : 'enrollments'}. Your templates stay. You
+            cannot undo this.
+          </p>
+          {plan.data.leftover_drafts.length > 0 && (
+            <>
+              <p className="text-foreground">
+                netkeeper never deletes a Gmail draft. These test drafts stay in Gmail; delete them
+                by hand:
+              </p>
+              <ul aria-label="Gmail drafts left behind" className="list-disc pl-5">
+                {plan.data.leftover_drafts.map((d) => (
+                  <li key={d.gmail_draft_id}>
+                    Step {d.step_position} test to {d.to_address}, drafted{' '}
+                    {formatWhen(d.drafted_at)}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </>
+      )}
+    </ConfirmDialog>
   )
 }
 

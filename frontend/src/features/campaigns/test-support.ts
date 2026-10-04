@@ -124,6 +124,8 @@ export function campaign(overrides: Partial<Campaign> = {}): Campaign {
     enrollments: {},
     next_action_at: null,
     missing: [],
+    concluded: false,
+    deletable: false,
     ...overrides,
   }
 }

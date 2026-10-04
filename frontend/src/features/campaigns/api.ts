@@ -40,6 +40,8 @@ export type StartOptions = Schemas['StartOptionsOut']
 export type CampaignResults = Schemas['CampaignResultsOut']
 export type StepResults = Schemas['StepResultsOut']
 export type DaySends = Schemas['DaySendsOut']
+export type DeletePlan = Schemas['DeletePlanOut']
+export type LeftoverDraft = Schemas['LeftoverDraftOut']
 
 /** A request the backend refused: its status, its sentence, and `missing` when it sent one. */
 export class CampaignApiError extends Error {
@@ -81,6 +83,7 @@ export function errorText(error: unknown): string {
 export const campaignKeys = {
   all: ['campaigns'] as const,
   list: () => [...campaignKeys.all, 'list'] as const,
+  archived: () => [...campaignKeys.list(), 'archived'] as const,
   one: (id: number) => [...campaignKeys.all, 'one', id] as const,
   review: (id: number) => [...campaignKeys.all, 'review', id] as const,
   guards: (id: number) => [...campaignKeys.review(id), 'guards'] as const,
@@ -92,6 +95,7 @@ export const campaignKeys = {
   startOptions: (id: number, at: string | null) =>
     [...campaignKeys.all, 'start-options', id, at] as const,
   results: (id: number) => [...campaignKeys.all, 'results', id] as const,
+  deletePlan: (id: number) => [...campaignKeys.all, 'delete-plan', id] as const,
 }
 
 /**
@@ -116,6 +120,7 @@ export function startOptionsQuery(id: number, at: string | null) {
   })
 }
 
+/** Every campaign that is not archived, newest first. */
 export const campaignsQuery = queryOptions({
   queryKey: campaignKeys.list(),
   queryFn: async ({ signal }): Promise<CampaignSummary[]> => {
@@ -124,6 +129,37 @@ export const campaignsQuery = queryOptions({
     return data
   },
 })
+
+/** Only the archived campaigns, newest first (#345). */
+export const archivedCampaignsQuery = queryOptions({
+  queryKey: campaignKeys.archived(),
+  queryFn: async ({ signal }): Promise<CampaignSummary[]> => {
+    const { data, error, response } = await api.GET('/api/v1/campaigns', {
+      params: { query: { archived: true } },
+      signal,
+    })
+    if (data === undefined) fail(response.status, error, 'could not load the archived campaigns')
+    return data
+  },
+})
+
+/**
+ * What deleting the campaign would remove, the Gmail drafts it would leave, or why it
+ * is refused (#345). Changes nothing.
+ */
+export function deletePlanQuery(id: number) {
+  return queryOptions({
+    queryKey: campaignKeys.deletePlan(id),
+    queryFn: async ({ signal }): Promise<DeletePlan> => {
+      const { data, error, response } = await api.GET(
+        '/api/v1/campaigns/{campaign_id}/delete-plan',
+        { params: { path: { campaign_id: id } }, signal },
+      )
+      if (data === undefined) fail(response.status, error, 'could not check the delete')
+      return data
+    },
+  })
+}
 
 export function campaignQuery(id: number) {
   return queryOptions({
@@ -246,6 +282,44 @@ export async function resumeCampaign(id: number): Promise<Campaign> {
     params: { path: { campaign_id: id } },
   })
   if (data === undefined) fail(response.status, error, 'could not resume the campaign')
+  return data
+}
+
+/** End an active or paused campaign for good (#345): nothing fires again. */
+export async function endCampaign(id: number): Promise<Campaign> {
+  const { data, error, response } = await api.POST('/api/v1/campaigns/{campaign_id}/end', {
+    params: { path: { campaign_id: id } },
+  })
+  if (data === undefined) fail(response.status, error, 'could not end the campaign')
+  return data
+}
+
+/** Hide a concluded campaign from the list and the dashboard, keeping its history (#345). */
+export async function archiveCampaign(id: number): Promise<Campaign> {
+  const { data, error, response } = await api.POST('/api/v1/campaigns/{campaign_id}/archive', {
+    params: { path: { campaign_id: id } },
+  })
+  if (data === undefined) fail(response.status, error, 'could not archive the campaign')
+  return data
+}
+
+export async function unarchiveCampaign(id: number): Promise<Campaign> {
+  const { data, error, response } = await api.POST('/api/v1/campaigns/{campaign_id}/unarchive', {
+    params: { path: { campaign_id: id } },
+  })
+  if (data === undefined) fail(response.status, error, 'could not unarchive the campaign')
+  return data
+}
+
+/**
+ * Delete a campaign never activated and with no messages (#345). 409 for any other.
+ * The answer lists the Gmail drafts left behind: netkeeper never deletes one.
+ */
+export async function deleteCampaign(id: number): Promise<DeletePlan> {
+  const { data, error, response } = await api.DELETE('/api/v1/campaigns/{campaign_id}', {
+    params: { path: { campaign_id: id } },
+  })
+  if (data === undefined) fail(response.status, error, 'could not delete the campaign')
   return data
 }
 

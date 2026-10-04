@@ -45,6 +45,7 @@ from netkeeper.models import (
 )
 from netkeeper.scoping import get_scoped, install_scope_guard, scoped, scoped_delete, unscoped
 from netkeeper.services import campaign_engine as engine_module
+from netkeeper.services import campaigns as campaign_service
 from netkeeper.services import sending_hours
 from netkeeper.services.campaign_engine import (
     REVIEW_GATE,
@@ -56,6 +57,7 @@ from netkeeper.services.campaign_engine import (
     Skip,
     TickResult,
     activate,
+    end_campaign,
     enroll,
     next_send_at,
     pause_campaign,
@@ -877,7 +879,15 @@ def test_an_enrollment_that_is_not_active_never_fires_whatever_its_due_time(
     assert result.fired == [] and enrollment_id not in result.skipped()
 
 
-@pytest.mark.parametrize("status", [CampaignStatus.PAUSED, CampaignStatus.REVIEWING])
+@pytest.mark.parametrize(
+    "status",
+    [
+        CampaignStatus.PAUSED,
+        CampaignStatus.REVIEWING,
+        CampaignStatus.COMPLETED,
+        CampaignStatus.ARCHIVED,
+    ],
+)
 def test_a_campaign_that_is_not_active_fires_nothing(
     session_factory: sessionmaker[Session], status: CampaignStatus
 ) -> None:
@@ -885,6 +895,56 @@ def test_a_campaign_that_is_not_active_fires_nothing(
     enrollment_id = world.enroll_new()
     result = world.tick(NOW + timedelta(days=30))
     assert result.fired == [] and enrollment_id not in result.skipped()  # never even selected
+
+
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize("channels", [(EMAIL, EMAIL), (LINKEDIN, EMAIL)])
+def test_an_ended_or_archived_campaign_is_never_ticked(
+    session_factory: sessionmaker[Session],
+    archived: bool,
+    channels: tuple[TemplateChannel, ...],
+) -> None:
+    """#345: once ended (and archived), nothing of the campaign is selected, fired,
+    reported as a LinkedIn step, or listed as upcoming, however long the tick runs on.
+    Its enrollments keep their state and due times."""
+    world = make_world(session_factory, channels=channels)
+    first = world.enroll_new()
+    paused = world.enroll_new(status=EnrollmentStatus.PAUSED)
+    world.write(lambda s: end_campaign(s, world.user, world.campaign.id))
+    if archived:
+        world.write(lambda s: campaign_service.archive(s, world.user, world.campaign.id))
+
+    for days in (0, 1, 8, 30, 400):
+        result = world.tick(NOW + timedelta(days=days))
+        assert result.fired == [] and result.decisions == [], days
+    assert world.sender.firings == []
+    assert world.messages() == []
+    assert world.read(lambda s: engine_module.upcoming(s, world.user, limit=10)) == ([], 0)
+    assert (
+        world.read(lambda s: engine_module._linkedin_due(s, world.user, NOW + timedelta(days=30)))
+        == []
+    )
+    assert (world.enrollment(first).status, world.enrollment(first).next_action_at) == (
+        EnrollmentStatus.ACTIVE,
+        NOW,
+    )
+    assert world.enrollment(paused).status is EnrollmentStatus.PAUSED
+
+
+def test_ending_a_campaign_between_ticks_stops_its_next_step(world: World) -> None:
+    """Step 1 fired; once the campaign is ended, step 2 never does, though it comes due."""
+    enrollment_id = world.enroll_new()
+    [(firing, _)] = world.tick().fired
+    assert firing.step_position == 1
+    due = world.enrollment(enrollment_id).next_action_at
+    assert due is not None
+    world.write(lambda s: end_campaign(s, world.user, world.campaign.id))
+    assert world.tick(due + timedelta(days=1)).fired == []
+    assert [m.id for m in world.messages(enrollment_id)] == [firing.message_id]
+    with pytest.raises(CampaignEngineError, match="only an active or paused"):
+        world.write(lambda s: end_campaign(s, world.user, world.campaign.id))
+    with pytest.raises(CampaignEngineError, match="not paused"):
+        world.write(lambda s: resume_campaign(s, world.user, world.campaign.id))
 
 
 def test_pause_and_resume_a_campaign(world: World) -> None:

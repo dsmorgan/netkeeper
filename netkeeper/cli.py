@@ -2518,8 +2518,15 @@ def _step_or_exit(raw: str) -> campaign_service.StepSpec:
 
 
 @campaigns_app.command("list")
-def campaigns_list() -> None:
-    """List the campaigns, newest first, with their enrollments by status (GET /campaigns)."""
+def campaigns_list(
+    archived: Annotated[
+        bool, typer.Option("--archived", help="List only the archived campaigns.")
+    ] = False,
+) -> None:
+    """List the campaigns, newest first, with their enrollments by status (GET /campaigns).
+
+    Archived campaigns are left out; `--archived` lists only them.
+    """
     with _campaign_db() as factory, session_scope(factory) as session:
         user = _local_user_or_exit(session)
         rows = [
@@ -2530,10 +2537,14 @@ def campaigns_list() -> None:
                 str(row.steps),
                 _counts_cell(row.enrollments),
             )
-            for row in campaign_service.list_campaigns(session, user)
+            for row in campaign_service.list_campaigns(session, user, archived=archived)
         ]
     if not rows:
-        typer.echo("no campaigns; create one with `netkeeper campaigns create`")
+        typer.echo(
+            "no archived campaigns"
+            if archived
+            else "no campaigns; create one with `netkeeper campaigns create`"
+        )
         return
     typer.echo(_format_table(("ID", "NAME", "STATUS", "STEPS", "ENROLLMENTS"), rows), nl=False)
 
@@ -3256,6 +3267,114 @@ def campaigns_resume(
         user = _local_user_or_exit(session)
         campaign_service.resume(session, user, campaign_id)
     typer.echo(f"campaign {campaign_id} resumed")
+
+
+_YES = typer.Option("--yes", help="Skip the confirmation prompt.")
+
+
+@campaigns_app.command("end")
+def campaigns_end(
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+    yes: Annotated[bool, _YES] = False,
+) -> None:
+    """End an active or paused campaign for good (POST /campaigns/{id}/end).
+
+    Nothing fires again, and it cannot be resumed. Each enrollment keeps its state, so
+    a reply to a step already sent still counts. A step already handed to Gmail is not
+    recalled, and a Gmail draft stays yours to send or delete. Asks first; `--yes`
+    skips the prompt.
+    """
+    with _campaign_db() as factory:
+        if not yes and not typer.confirm(
+            f"end campaign {campaign_id} for good? nothing more is sent, and it cannot be resumed"
+        ):
+            typer.echo(f"cancelled: campaign {campaign_id} is not ended")
+            raise typer.Exit(code=1)
+        with session_scope(factory, write=True) as session, _campaign_errors():
+            user = _local_user_or_exit(session)
+            campaign_service.end(session, user, campaign_id)
+    typer.echo(f"campaign {campaign_id} ended; archive it with `netkeeper campaigns archive`")
+
+
+@campaigns_app.command("archive")
+def campaigns_archive(
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+) -> None:
+    """Archive a concluded campaign (POST /campaigns/{id}/archive).
+
+    It leaves the campaign list and the dashboard; its messages, results and contact
+    timelines stay. Refused while an active or paused campaign still has enrollments
+    in progress: end it first. `unarchive` undoes it.
+    """
+    with (
+        _campaign_db() as factory,
+        session_scope(factory, write=True) as session,
+        _campaign_errors(),
+    ):
+        user = _local_user_or_exit(session)
+        campaign_service.archive(session, user, campaign_id)
+    typer.echo(f"campaign {campaign_id} archived")
+
+
+@campaigns_app.command("unarchive")
+def campaigns_unarchive(
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+) -> None:
+    """Bring an archived campaign back to the list, as completed (POST .../unarchive)."""
+    with (
+        _campaign_db() as factory,
+        session_scope(factory, write=True) as session,
+        _campaign_errors(),
+    ):
+        user = _local_user_or_exit(session)
+        campaign_service.unarchive(session, user, campaign_id)
+    typer.echo(f"campaign {campaign_id} unarchived; it is completed")
+
+
+def _leftover_lines(drafts: Sequence[campaign_service.LeftoverDraft]) -> list[str]:
+    if not drafts:
+        return []
+    return [
+        f"Gmail drafts netkeeper does not delete ({len(drafts)}); delete them by hand:",
+        *(
+            f"  - step {d.step_position} test to {d.to_address},"
+            f" drafted {d.drafted_at.isoformat(timespec='minutes')} (draft {d.gmail_draft_id})"
+            for d in drafts
+        ),
+    ]
+
+
+@campaigns_app.command("delete")
+def campaigns_delete(
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+    yes: Annotated[bool, _YES] = False,
+) -> None:
+    """Delete a campaign that was never activated and has no messages (DELETE /campaigns/{id}).
+
+    Its steps and enrollments go with it; its templates stay. A campaign that ever sent
+    is archived instead. netkeeper never deletes a Gmail draft: it lists the test-send
+    drafts left behind, for you to delete by hand. Asks first; `--yes` skips the prompt.
+    """
+    with _campaign_db() as factory:
+        with session_scope(factory) as session, _campaign_errors():
+            user = _local_user_or_exit(session)
+            plan = campaign_service.delete_plan(session, user, campaign_id)
+        if plan.refusal is not None:
+            typer.echo(f"error: {plan.refusal}", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(
+            f"deletes campaign {campaign_id} ({plan.name}): {plan.steps} steps,"
+            f" {plan.enrollments} enrollments"
+        )
+        if lines := _leftover_lines(plan.leftover_drafts):
+            typer.echo("\n".join(lines))
+        if not yes and not typer.confirm(f"delete campaign {campaign_id}? this cannot be undone"):
+            typer.echo(f"cancelled: campaign {campaign_id} is not deleted")
+            raise typer.Exit(code=1)
+        with session_scope(factory, write=True) as session, _campaign_errors():
+            user = _local_user_or_exit(session)
+            campaign_service.delete_campaign(session, user, campaign_id)
+    typer.echo(f"campaign {campaign_id} deleted")
 
 
 @campaigns_app.command("sending-hours")
