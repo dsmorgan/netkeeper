@@ -69,4 +69,5 @@ export const ACTION_CLASS_LABELS: Record<string, string> = {
   profile_visits: 'Profile visits',
   inbox_polls: 'Inbox polls',
   li_messages_auto: 'Auto-sent LinkedIn messages',
+  li_prefills: 'LinkedIn prefills',
 }

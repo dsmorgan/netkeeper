@@ -46,7 +46,9 @@ The tick
    campaign with no start, or one still to come, is never a candidate, and is
    refused again below if it ever were (#338). Status is what selects: a held pause keeps
    ``next_action_at``, so a due time alone means nothing (#242 review). A
-   candidate whose next step is on LinkedIn is left unfired (P4) and reported.
+   candidate whose next step is on LinkedIn is left unfired and reported as ready
+   to prefill: a person claims it (:mod:`netkeeper.services.linkedin_steps`,
+   P4-09). The tick never claims one, and never touches a browser.
    Blocked and LinkedIn rows are left out of the query itself, so however many
    there are, they never crowd out a row that could fire.
    For the rest, in this order, what the campaign or mailbox decides first:
@@ -233,6 +235,7 @@ class Skip(enum.StrEnum):
     """Why the tick did not fire a due enrollment, beyond the guards' own reasons."""
 
     LINKEDIN_STEP = "linkedin_step"
+    READY_TO_PREFILL = "ready_to_prefill"
     CAMPAIGN_BLOCKED = "campaign_blocked"
     REPLIED = "replied"
     STEP_ALREADY_SENT = "step_already_sent"
@@ -475,6 +478,7 @@ def enroll(
     fresh = [i for i in ids if i not in present]
     verdicts = check_enrollment(session, user, campaign, fresh, now=now)
     enrolled = [v.contact_id for v in verdicts if v.eligible]
+    _ask_for_linkedin_ids(session, user, campaign_id, verdicts)
     for contact_id in enrolled:
         session.add(
             Enrollment(
@@ -493,6 +497,50 @@ def enroll(
         len(present),
     )
     return EnrollResult(tuple(enrolled), tuple(sorted(present)), tuple(verdicts))
+
+
+LINKEDIN_ENRICH_PRIORITY: Final = 1
+"""``contacts.enrich_priority`` a contact gets at enrollment when its campaign has a
+LinkedIn step and it has no ``li_urn`` (spec 9.6's first tier; P4-09). A higher ask
+already there is kept."""
+
+
+def _ask_for_linkedin_ids(
+    session: Session, user: User, campaign_id: int, verdicts: Iterable[Verdict]
+) -> None:
+    """Raise the enrichment priority of each contact enrolled, or kept out only for its
+    missing LinkedIn member id, when the campaign has a LinkedIn step (P4-09). An
+    email-only campaign changes nothing."""
+    has_linkedin_step = session.scalar(
+        scoped(user, CampaignStep)
+        .with_only_columns(CampaignStep.id)
+        .where(
+            CampaignStep.campaign_id == campaign_id,
+            CampaignStep.channel == TemplateChannel.LINKEDIN,
+        )
+        .limit(1)
+    )
+    if has_linkedin_step is None:
+        return
+    asked = [v.contact_id for v in verdicts if v.eligible or set(v.reasons) == {Reason.NO_LINKEDIN}]
+    if not asked:
+        return
+    contacts = session.scalars(
+        scoped(user, Contact).where(
+            Contact.id.in_(asked),
+            Contact.li_urn.is_(None),
+            Contact.enrich_priority < LINKEDIN_ENRICH_PRIORITY,
+        )
+    ).all()
+    for contact in contacts:
+        contact.enrich_priority = LINKEDIN_ENRICH_PRIORITY
+    if contacts:
+        session.flush()
+        log.info(
+            "campaign %d: %d contacts need a LinkedIn member id; enrichment asked for them",
+            campaign_id,
+            len(contacts),
+        )
 
 
 REVIEW_GATE: Final = object()
@@ -1190,7 +1238,9 @@ def _due(
 
 
 def _linkedin_due(session: Session, user: User, now: datetime) -> list[int]:
-    """Some of the due enrollments whose next step is on LinkedIn, to report them (P4)."""
+    """Some of the due enrollments whose next step is on LinkedIn, to report them as ready
+    to prefill (P4-09). :func:`netkeeper.services.linkedin_steps.ready_to_prefill` lists
+    them from the same selection."""
     return list(
         session.scalars(
             _selected(user, now)
@@ -1200,6 +1250,36 @@ def _linkedin_due(session: Session, user: User, now: datetime) -> list[int]:
             .limit(PAGE_SIZE)
         )
     )
+
+
+PREFILL_STALE_AFTER: Final = timedelta(days=3)
+"""A ``prefilled`` LinkedIn message not seen sent this long after its prefill goes
+``stale`` (spec 11.6; P4-09). netkeeper never closes the tab it handed over, and a
+stale message seen sent later still becomes ``sent`` (P4-02)."""
+
+
+def mark_stale(session: Session, user: User, *, now: datetime) -> int:
+    """Each ``prefilled`` LinkedIn message :data:`PREFILL_STALE_AFTER` or more after its
+    prefill becomes ``stale``. Its enrollment stays parked, and the message waits for a
+    person. Returns how many changed. Needs a writer session."""
+    _require_writer(session, "mark_stale")
+    stale = session.scalars(
+        scoped(user, Message).where(
+            Message.channel == TemplateChannel.LINKEDIN,
+            Message.direction == MessageDirection.OUT,
+            Message.status == MessageStatus.PREFILLED,
+            Message.prefilled_at.is_not(None),
+            Message.prefilled_at <= now - PREFILL_STALE_AFTER,
+        )
+    ).all()
+    for message in stale:
+        message.status = MessageStatus.STALE
+        log.info(
+            "message %d not seen sent %s after its prefill; stale", message.id, PREFILL_STALE_AFTER
+        )
+    if stale:
+        session.flush()
+    return len(stale)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1212,22 +1292,32 @@ class UpcomingFire:
     step: CampaignStep | None
     contact: Contact
 
+    @property
+    def ready_to_prefill(self) -> bool:
+        """A LinkedIn step: a person prefills it (P4-09); the tick never fires it."""
+        return self.step is not None and self.step.channel is TemplateChannel.LINKEDIN
 
-def upcoming(session: Session, user: User, *, limit: int) -> tuple[list[UpcomingFire], int]:
+
+def upcoming(
+    session: Session, user: User, *, limit: int, include_linkedin: bool = False
+) -> tuple[list[UpcomingFire], int]:
     """The next ``limit`` fires, soonest first, and how many there are in all.
 
     A read for the dashboard: nothing here changes a row. It is
     :func:`_selectable`, the tick's own selection with no bound on the due time,
     so a row already due is the next tick's and is listed first. As in
     :func:`_due`, a row whose next step is on LinkedIn is left out: the tick
-    never fires it (P4). A held pause keeps its ``next_action_at`` and is not
-    listed (#242 review).
+    never fires it. ``include_linkedin`` lists those rows too, for the dashboard,
+    where each is ready to prefill once due (:attr:`UpcomingFire.ready_to_prefill`,
+    P4-09). A held pause keeps its ``next_action_at`` and is not listed (#242 review).
     """
     statement = (
         _selectable(user)
         .join(Contact, Contact.id == Enrollment.contact_id)
-        .where(Contact.user_id == user.id, _not_on_linkedin())
+        .where(Contact.user_id == user.id)
     )
+    if not include_linkedin:
+        statement = statement.where(_not_on_linkedin())
     total = session.scalar(statement.with_only_columns(func.count(Enrollment.id)).order_by(None))
     rows = session.execute(
         statement.add_columns(Campaign, CampaignStep, Contact)
@@ -1249,16 +1339,18 @@ def upcoming(session: Session, user: User, *, limit: int) -> tuple[list[Upcoming
 
 
 def _next_due(session: Session, user: User, now: datetime) -> datetime | None:
+    """The soonest due time, or campaign start, after ``now``. LinkedIn rows count (P4-09):
+    the tick then lists them as ready to prefill, and never fires them."""
     due = session.scalar(
         _selectable(user)
         .with_only_columns(func.min(Enrollment.next_action_at))
-        .where(Enrollment.next_action_at > now, _not_on_linkedin())
+        .where(Enrollment.next_action_at > now)
     )
     # A campaign still to start: its enrollments may already be due, and wait for it.
     starts = session.scalar(
         _selectable(user)
         .with_only_columns(func.min(Campaign.starts_at))
-        .where(Campaign.starts_at > now, _not_on_linkedin())
+        .where(Campaign.starts_at > now)
     )
     found = [at for at in (due, starts) if at is not None]
     return min(found) if found else None
@@ -1318,8 +1410,13 @@ class _Chooser:
 
     def choose(self) -> _Claim | None:
         claimed: _Claim | None = None
+        # A prefill nobody sent goes stale (P4-09). LinkedIn messages only: nothing a
+        # Gmail send left changes here.
+        mark_stale(self.session, self.user, now=self.now)
+        # Listed as ready to prefill (P4-09): a person claims each one
+        # (services.linkedin_steps); the tick never does, and never touches a browser.
         for enrollment_id in _linkedin_due(self.session, self.user, self.now):
-            self.result.decisions.append(Decision(enrollment_id, False, (Skip.LINKEDIN_STEP,)))
+            self.result.decisions.append(Decision(enrollment_id, False, (Skip.READY_TO_PREFILL,)))
         seen: list[int] = []
         while claimed is None and len(seen) < SCAN_LIMIT:
             page = _due(

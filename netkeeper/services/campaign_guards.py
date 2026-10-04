@@ -151,6 +151,10 @@ class ContactFacts:
     on another enrollment in this campaign (see :func:`load_facts` for which).
     Both are ``False`` for a contact with no sendable address.
 
+    ``has_linkedin`` is the contact's ``li_urn``, never its slug alone (P4-09): a
+    prefill checks the composer's recipient against the member id, so a contact with
+    only a slug waits for enrichment.
+
     ``do_not_send`` is why the do-not-send list holds the contact's address (#238,
     Part B), or ``None``: an opt-out on any of the contact's addresses, otherwise
     the entry for its sendable address.
@@ -471,7 +475,7 @@ _LABELS: Final[Mapping[Reason, str]] = {
     Reason.EMAIL_INVALID: "invalid email",
     Reason.DO_NOT_SEND: "address on the do-not-send list",
     Reason.ADDRESS_BOUNCED_ELSEWHERE: "address bounced on another contact",
-    Reason.NO_LINKEDIN: "no LinkedIn profile",
+    Reason.NO_LINKEDIN: "no LinkedIn member id (needs enrichment first)",
     Reason.DUPLICATE_ADDRESS: "address already in this campaign",
     Reason.IN_ANOTHER_CAMPAIGN: "in another campaign",
 }
@@ -593,7 +597,9 @@ def load_facts(
             disconnected=contact.li_disconnected_at is not None,
             email_statuses=tuple(e.status for e in contact.emails),
             sendable_email=sendable.get(contact.id),
-            has_linkedin=bool(contact.li_urn or contact.li_public_id),
+            # The URN, never the slug alone (P4-09): a prefill checks the composer's
+            # recipient against it. A slug-only contact waits for enrichment.
+            has_linkedin=contact.li_urn is not None,
             other_campaigns=frozenset(others.get(contact.id, ())),
             last_outbound_at=last_out.get(contact.id),
             address_bounced_elsewhere=contact.id in bounced,

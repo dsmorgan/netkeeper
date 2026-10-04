@@ -3522,6 +3522,32 @@
         "title": "DeletePlanOut",
         "type": "object"
       },
+      "DiscardedOut": {
+        "properties": {
+          "enrollment_id": {
+            "title": "Enrollment Id",
+            "type": "integer"
+          },
+          "enrollment_status": {
+            "$ref": "#/components/schemas/EnrollmentStatus"
+          },
+          "message_id": {
+            "title": "Message Id",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MessageStatus"
+          }
+        },
+        "required": [
+          "message_id",
+          "status",
+          "enrollment_id",
+          "enrollment_status"
+        ],
+        "title": "DiscardedOut",
+        "type": "object"
+      },
       "DoNotSendIn": {
         "properties": {
           "email": {
@@ -7654,6 +7680,22 @@
         "title": "MessagePreviewOut",
         "type": "object"
       },
+      "MessageStatus": {
+        "description": "Where one message is (spec 11.5, 11.6, 11.7).\n\nOutbound: ``scheduled`` (rendered, waiting for its send), ``drafted`` (a\nGmail draft, waiting for you), ``prefilled`` (typed into LinkedIn's compose\nbox, waiting for you), ``sent``, ``stale`` (a prefill not seen sent within\nthree days), ``discarded`` (a draft you deleted instead of sending),\n``bounced``, ``failed`` (with ``error``). Inbound: ``received``.",
+        "enum": [
+          "scheduled",
+          "drafted",
+          "prefilled",
+          "sent",
+          "stale",
+          "discarded",
+          "bounced",
+          "failed",
+          "received"
+        ],
+        "title": "MessageStatus",
+        "type": "string"
+      },
       "MessagesApproveIn": {
         "description": "Each message with the ``fingerprint`` it came with.",
         "properties": {
@@ -7793,7 +7835,7 @@
         "type": "object"
       },
       "NextFireOut": {
-        "description": "One campaign step the minute tick will consider at ``due`` (spec 11.4).\n\nThe contact is named and nothing more: no address, no message text. ``due``\nin the past means the next tick's. ``step_position`` is null only for an\nenrollment with no next step, which the tick completes rather than sends.",
+        "description": "One campaign step the minute tick will consider at ``due`` (spec 11.4).\n\nThe contact is named and nothing more: no address, no message text. ``due``\nin the past means the next tick's. ``step_position`` is null only for an\nenrollment with no next step, which the tick completes rather than sends.\n``ready_to_prefill`` marks a LinkedIn step: once due, it waits for a person to\nprefill it (P4-09); the tick never fires it.",
         "properties": {
           "campaign_id": {
             "title": "Campaign Id",
@@ -7830,6 +7872,11 @@
           "enrollment_id": {
             "title": "Enrollment Id",
             "type": "integer"
+          },
+          "ready_to_prefill": {
+            "default": false,
+            "title": "Ready To Prefill",
+            "type": "boolean"
           },
           "step_position": {
             "anyOf": [
@@ -8399,6 +8446,99 @@
         "title": "PreferredNameOut",
         "type": "object"
       },
+      "PrefillAccepted": {
+        "description": "The ``202`` of a prefill: the claimed message, its run, and the task running it.",
+        "properties": {
+          "enrollment_id": {
+            "title": "Enrollment Id",
+            "type": "integer"
+          },
+          "message_id": {
+            "title": "Message Id",
+            "type": "integer"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "task_id": {
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enrollment_id",
+          "message_id",
+          "run_id",
+          "task_id"
+        ],
+        "title": "PrefillAccepted",
+        "type": "object"
+      },
+      "PrefillIn": {
+        "description": "One of the two: an enrollment, or ``next`` for the oldest ready one.",
+        "properties": {
+          "enrollment_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enrollment Id"
+          },
+          "next": {
+            "default": false,
+            "title": "Next",
+            "type": "boolean"
+          }
+        },
+        "title": "PrefillIn",
+        "type": "object"
+      },
+      "PrefillRefused": {
+        "description": "Why nothing was claimed: the reasons as words, and one line for a person.",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "enrollment_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enrollment Id"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          }
+        },
+        "required": [
+          "enrollment_id",
+          "reasons",
+          "detail"
+        ],
+        "title": "PrefillRefused",
+        "type": "object"
+      },
       "ProtectionOut": {
         "description": "One row of the posture report (spec section 9): what it is, whether it is in\nforce, and anything wrong with it. ``status`` is `netkeeper.services.posture.Status`'s\nvalue (``on``, ``off``, ``unknown``); ``off``/``unknown`` always carry a warning.\n``notes`` describe a choice the user made, not a fault, and never affect ``ok``.\n``summary`` is the row in a few words, for the collapsed view (#340): the same\nas ``value`` for most rows, a one-line form of it for the long ones. ``value``\nkeeps the full detail.",
         "properties": {
@@ -8442,6 +8582,85 @@
           "notes"
         ],
         "title": "ProtectionOut",
+        "type": "object"
+      },
+      "ReadyOut": {
+        "description": "One due LinkedIn step. The contact is named and nothing more: no message text.",
+        "properties": {
+          "campaign_id": {
+            "title": "Campaign Id",
+            "type": "integer"
+          },
+          "campaign_name": {
+            "title": "Campaign Name",
+            "type": "string"
+          },
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "contact_name": {
+            "title": "Contact Name",
+            "type": "string"
+          },
+          "due": {
+            "format": "date-time",
+            "title": "Due",
+            "type": "string"
+          },
+          "enrollment_id": {
+            "title": "Enrollment Id",
+            "type": "integer"
+          },
+          "held_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Held Until"
+          },
+          "step_position": {
+            "title": "Step Position",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enrollment_id",
+          "campaign_id",
+          "campaign_name",
+          "step_position",
+          "contact_id",
+          "contact_name",
+          "due",
+          "held_until"
+        ],
+        "title": "ReadyOut",
+        "type": "object"
+      },
+      "ReadyPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ReadyOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "ReadyPage",
         "type": "object"
       },
       "RefusedOut": {
@@ -12137,6 +12356,83 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "WaitingOut": {
+        "description": "One LinkedIn message waiting for you. No message text.",
+        "properties": {
+          "campaign_id": {
+            "title": "Campaign Id",
+            "type": "integer"
+          },
+          "campaign_name": {
+            "title": "Campaign Name",
+            "type": "string"
+          },
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "contact_name": {
+            "title": "Contact Name",
+            "type": "string"
+          },
+          "enrollment_id": {
+            "title": "Enrollment Id",
+            "type": "integer"
+          },
+          "message_id": {
+            "title": "Message Id",
+            "type": "integer"
+          },
+          "prefilled_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prefilled At"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MessageStatus"
+          }
+        },
+        "required": [
+          "message_id",
+          "status",
+          "enrollment_id",
+          "campaign_id",
+          "campaign_name",
+          "contact_id",
+          "contact_name",
+          "prefilled_at"
+        ],
+        "title": "WaitingOut",
+        "type": "object"
+      },
+      "WaitingPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/WaitingOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "WaitingPage",
+        "type": "object"
       }
     }
   },
@@ -12527,6 +12823,280 @@
           }
         },
         "summary": "Create Campaign",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/linkedin/messages/{message_id}/check": {
+      "post": {
+        "description": "\"I sent it, check now\": start a manual inbox poll, which finds the message sent.",
+        "operationId": "check_linkedin_prefill_sent",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "title": "Message Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such message"
+          },
+          "409": {
+            "description": "It does not wait for you, a run is running, the session is flagged, heat is too high, or it is outside active hours"
+          },
+          "422": {
+            "description": "The inbox poll has no runner"
+          },
+          "503": {
+            "description": "This process has no browser worker"
+          }
+        },
+        "summary": "Check Sent",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/linkedin/messages/{message_id}/discard": {
+      "post": {
+        "description": "You will not send it: ``discarded``. The step counts as fired, and the enrollment\nmoves to its next step or completes. Nothing changes in LinkedIn.",
+        "operationId": "discard_linkedin_prefill",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "title": "Message Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscardedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such message"
+          },
+          "409": {
+            "description": "It does not wait for you"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Discard",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/linkedin/prefill": {
+      "post": {
+        "description": "Claim one LinkedIn step and submit its prefill; answers at once, before any browser\nwork. A refusal answers ``409`` with its reasons; what the refusal changed (a reply\nthat ended the enrollment, a step parked) is kept.",
+        "operationId": "prefill_linkedin_step",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrefillIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrefillAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such enrollment, or nothing is ready"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrefillRefused"
+                }
+              }
+            },
+            "description": "Refused: the reasons are in the body"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "This process has no browser worker"
+          }
+        },
+        "summary": "Prefill",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/linkedin/ready": {
+      "get": {
+        "description": "Due LinkedIn steps, ready to prefill, oldest due first.",
+        "operationId": "list_linkedin_ready",
+        "parameters": [
+          {
+            "description": "Items per page.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "description": "Items per page.",
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Items to skip.",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Ready",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/linkedin/waiting": {
+      "get": {
+        "description": "Prefilled and stale LinkedIn messages, waiting for you to send or discard them.",
+        "operationId": "list_linkedin_waiting",
+        "parameters": [
+          {
+            "description": "Items per page.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "description": "Items per page.",
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Items to skip.",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WaitingPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Waiting",
         "tags": [
           "campaigns"
         ]
@@ -15695,7 +16265,7 @@
     },
     "/api/v1/dashboard/next-fires": {
       "get": {
-        "description": "The next campaign steps due, soonest first (``next_action_at``, spec 11.4).",
+        "description": "The next campaign steps due, soonest first (``next_action_at``, spec 11.4).\n\nA LinkedIn step is listed too, with ``ready_to_prefill``: a person prefills it\n(P4-09), and the tick never fires it.",
         "operationId": "list_next_fires",
         "parameters": [
           {

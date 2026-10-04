@@ -57,6 +57,7 @@ from netkeeper.linkedin.rehearse import rehearse as run_rehearsal
 from netkeeper.linkedin.rehearse import render as render_rehearsal
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import (
+    Contact,
     EnrollmentStatus,
     HistoryReplyKind,
     ImportResolution,
@@ -83,6 +84,7 @@ from netkeeper.services import (
     enrich_plan,
     history_scan,
     keychain,
+    linkedin_steps,
     route_breaker,
     runs,
     simulate_campaign,
@@ -178,6 +180,11 @@ campaigns_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(campaigns_app, name="campaigns")
+campaigns_linkedin_app = typer.Typer(
+    help="A campaign's LinkedIn steps: ready to prefill, one at a time, while you watch Chrome.",
+    no_args_is_help=True,
+)
+campaigns_app.add_typer(campaigns_linkedin_app, name="linkedin")
 do_not_send_app = typer.Typer(
     help="The do-not-send list: addresses no campaign sends to.", no_args_is_help=True
 )
@@ -3486,6 +3493,185 @@ def campaigns_sending_hours(
                 raise typer.Exit(code=1) from exc
     verb = "now" if changing else "are"
     typer.echo(f"sending hours {verb}: {hours.describe()} ({timezone})")
+
+
+# --- a campaign's LinkedIn steps (P4-09) -----------------------------------------
+#
+# Each command mirrors a `/campaigns/linkedin` route. The minute tick never claims a
+# LinkedIn step: these commands, which a person runs, are how one is prefilled.
+
+
+def _contact_label(contact: Contact) -> str:
+    first = contact.preferred_name or contact.first_name
+    return " ".join(part for part in (first, contact.last_name) if part) or f"#{contact.id}"
+
+
+@campaigns_linkedin_app.command("ready")
+def campaigns_linkedin_ready(ctx: typer.Context) -> None:
+    """List the due LinkedIn steps, oldest first (GET /campaigns/linkedin/ready)."""
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
+    with _campaign_db() as factory, session_scope(factory) as session:
+        user = _local_user_or_exit(session)
+        rows, total = linkedin_steps.ready_to_prefill(
+            session,
+            user,
+            now=datetime.now(UTC),
+            settings=settings,
+            limit=linkedin_steps.READY_PAGE_MAX,
+        )
+        lines = [
+            f"enrollment {row.enrollment.id}: {_contact_label(row.contact)},"
+            f" {row.campaign.name!r} step {row.step.position}, due {row.due:%Y-%m-%d %H:%M UTC}"
+            + (
+                ""
+                if row.held_until is None
+                else f"; sending hours hold it until {row.held_until:%Y-%m-%d %H:%M UTC}"
+            )
+            for row in rows
+        ]
+    typer.echo(f"{total} ready to prefill")
+    for line in lines:
+        typer.echo(f"  {line}")
+
+
+@campaigns_linkedin_app.command("waiting")
+def campaigns_linkedin_waiting() -> None:
+    """List prefilled and stale LinkedIn messages waiting for you (GET .../waiting)."""
+    with _campaign_db() as factory, session_scope(factory) as session:
+        user = _local_user_or_exit(session)
+        rows, total = linkedin_steps.waiting_for_you(
+            session, user, limit=linkedin_steps.READY_PAGE_MAX
+        )
+        lines = [
+            f"message {row.message.id}: {row.message.status.value},"
+            f" {_contact_label(row.contact)}, {row.campaign.name!r}"
+            for row in rows
+        ]
+    typer.echo(f"{total} waiting for you")
+    for line in lines:
+        typer.echo(f"  {line}")
+
+
+@campaigns_linkedin_app.command("prefill")
+def campaigns_linkedin_prefill(
+    ctx: typer.Context,
+    enrollment_id: Annotated[
+        int | None, typer.Argument(help="The enrollment whose LinkedIn step to prefill.")
+    ] = None,
+    next_ready: Annotated[
+        bool, typer.Option("--next", help="Prefill the oldest ready LinkedIn step.")
+    ] = False,
+) -> None:
+    """Prefill one LinkedIn step, in this terminal, while you watch Chrome
+    (POST /campaigns/linkedin/prefill).
+
+    It types the message into LinkedIn's composer and stops: it never sends. Send it
+    yourself, then `netkeeper campaigns linkedin check <message id>`, or let the next
+    inbox poll find it. One prefill is open at a time.
+    """
+    if (enrollment_id is None) == (not next_ready):
+        typer.echo("error: give an enrollment id or --next, not both", err=True)
+        raise typer.Exit(code=1)
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
+    with _campaign_db() as factory:
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            user_id = user.id
+            now = datetime.now(UTC)
+            try:
+                claim = (
+                    linkedin_steps.claim_next(session, user, now=now, settings=settings)
+                    if enrollment_id is None
+                    else linkedin_steps.claim_prefill(
+                        session, user, enrollment_id, now=now, settings=settings
+                    )
+                )
+            except LookupError as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+        # The writer session has committed: what a refusal changed is kept.
+        if claim is None:
+            typer.echo("nothing is ready to prefill")
+            return
+        if not claim.claimed or claim.run_id is None:
+            detail = f" ({claim.detail})" if claim.detail else ""
+            typer.echo(
+                f"error: enrollment {claim.enrollment_id} not prefilled:"
+                f" {', '.join(claim.reasons)}{detail}",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        typer.echo(
+            f"message {claim.message_id} claimed; run {claim.run_id} prefills it."
+            " It never sends: you do."
+        )
+        _execute_by_hand(settings, factory, claim.run_id, user_id)
+
+
+@campaigns_linkedin_app.command("check")
+def campaigns_linkedin_check(
+    ctx: typer.Context,
+    message_id: Annotated[int, typer.Argument(help="The prefilled message's ID.")],
+) -> None:
+    """I sent it, check now: run one inbox poll, in this terminal
+    (POST /campaigns/linkedin/messages/{id}/check)."""
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
+    with _campaign_db() as factory:
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            user_id = user.id
+            try:
+                run = linkedin_steps.check_sent(
+                    session, user, message_id, now=datetime.now(UTC), settings=settings
+                )
+            except (
+                LookupError,
+                runs.RunError,
+                runs.HeatSkipped,
+                runs.SessionFlagged,
+                runs.OutsideActiveHours,
+            ) as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            run_id = run.id
+        _execute_by_hand(settings, factory, run_id, user_id)
+
+
+@campaigns_linkedin_app.command("discard")
+def campaigns_linkedin_discard(
+    ctx: typer.Context,
+    message_id: Annotated[int, typer.Argument(help="The prefilled message's ID.")],
+) -> None:
+    """You will not send it: discard it (POST /campaigns/linkedin/messages/{id}/discard).
+
+    The step counts as fired and the enrollment moves on. Nothing changes in LinkedIn.
+    """
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
+    with _campaign_db() as factory, session_scope(factory, write=True) as session:
+        user = _local_user_or_exit(session)
+        try:
+            linkedin_steps.discard(session, user, message_id, settings=settings)
+        except LookupError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+    typer.echo(f"message {message_id} discarded; its step counts as fired")
+
+
+def _execute_by_hand(
+    settings: Settings, factory: sessionmaker[Session], run_id: int, user_id: int
+) -> None:
+    """Run a recorded run in this terminal, and print how it ended (as `linkedin sync`)."""
+    bus = EventBus()
+    worker = BrowserWorker(_provider(settings), factory, settings.linkedin, bus=bus)
+    asyncio.run(_execute_printing(worker, bus, run_id, user_id))
+    with session_scope(factory) as session:
+        finished = runs.get_run(session, _local_user_or_exit(session), run_id)
+        lines = _run_lines(finished)
+        failed = finished.status is SyncRunStatus.FAILED
+    for line in lines:
+        typer.echo(line)
+    if failed:
+        raise typer.Exit(code=1)
 
 
 # --- the do-not-send list (#238) -----------------------------------------------

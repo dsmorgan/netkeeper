@@ -1136,6 +1136,25 @@ async def test_a_linkedin_step_has_no_test_send(
     assert (await client.post(f"{s.base}/activate", headers=CSRF)).status_code == 200
 
 
+async def test_a_linkedin_step_is_activated_only_once_approved(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """P4-09: a LinkedIn step uses step approval only (#339), and never a test send. The
+    prefill claim refuses a campaign that is not active, so an unapproved step is never
+    claimed."""
+    s = _build(running_app, channels=(TemplateChannel.LINKEDIN,))
+    await _complete(client, s, skip="step_approvals")
+    review = await _review(client, s)
+    assert _missing(review) == {"step_approvals"}
+    [gap] = review["missing"]
+    assert gap["step_positions"] == [1]
+    assert (await client.post(f"{s.base}/activate", headers=CSRF)).status_code == 409
+    assert _campaign(s)[0] is CampaignStatus.REVIEWING
+    await _approve_steps(client, s)
+    assert (await client.post(f"{s.base}/activate", headers=CSRF)).status_code == 200
+    assert s.gmail.calls == []
+
+
 async def test_a_test_send_gmail_refused_records_nothing(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:

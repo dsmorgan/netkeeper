@@ -94,7 +94,9 @@ function formatDay(iso: string): string {
 
 function stepText(fire: NextFire): string {
   const step = fire.step_position === null ? 'no step left' : `step ${fire.step_position}`
-  return `${fire.campaign_name} · ${step}`
+  // A LinkedIn step never sends on its own: once due, it waits for you to prefill it (P4-09).
+  const prefill = fire.ready_to_prefill ? ' · LinkedIn, ready to prefill' : ''
+  return `${fire.campaign_name} · ${step}${prefill}`
 }
 
 // --- what happens next ------------------------------------------------------------------

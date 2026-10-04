@@ -436,6 +436,28 @@ def _seed_next_fires(session: Session, user: User) -> int:
     return 2
 
 
+def _seed_linkedin_ready(session: Session, user: User) -> int:
+    """Two due enrollments of ``user`` in one active LinkedIn campaign (P4-09)."""
+    campaign = factories.make_campaign(session, user, channels=(TemplateChannel.LINKEDIN,))
+    for _ in range(2):
+        factories.make_enrollment(
+            session, campaign, factories.make_contact(session, user), next_action_at=SEED_AT
+        )
+    return 2
+
+
+def _seed_linkedin_waiting(session: Session, user: User) -> int:
+    """A prefilled and a stale LinkedIn message of ``user``, and a sent one that waits for
+    nobody (P4-09)."""
+    campaign = factories.make_campaign(session, user, channels=(TemplateChannel.LINKEDIN,))
+    for status in (MessageStatus.PREFILLED, MessageStatus.STALE, MessageStatus.SENT):
+        enrollment = factories.make_enrollment(
+            session, campaign, factories.make_contact(session, user)
+        )
+        factories.make_message(session, enrollment, status=status, prefilled_at=SEED_AT)
+    return 2
+
+
 def _seed_campaigns(session: Session, user: User) -> int:
     """Two draft campaigns of ``user`` from the campaign service (P3-13)."""
     mailbox = mailbox_service.connect(
@@ -612,5 +634,7 @@ REGISTRY: list[ListEndpoint] = [
     ListEndpoint(f"{API_PREFIX}/inbox", _seed_inbox, paged_count),
     ListEndpoint(f"{API_PREFIX}/do-not-send", _seed_do_not_send, array_count),
     ListEndpoint(f"{API_PREFIX}/dashboard/next-fires", _seed_next_fires, paged_count),
+    ListEndpoint(f"{API_PREFIX}/campaigns/linkedin/ready", _seed_linkedin_ready, paged_count),
+    ListEndpoint(f"{API_PREFIX}/campaigns/linkedin/waiting", _seed_linkedin_waiting, paged_count),
     ListEndpoint(f"{API_PREFIX}/dashboard/changed-jobs", _seed_changed_jobs, paged_count),
 ]

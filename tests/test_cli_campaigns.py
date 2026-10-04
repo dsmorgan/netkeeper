@@ -39,6 +39,7 @@ from netkeeper.models import (
     ListKind,
     Mailbox,
     Message,
+    MessageStatus,
     StepCondition,
     StepMode,
     Template,
@@ -995,3 +996,50 @@ def test_status_json_matches_the_api(world: World) -> None:
     missing = _run("campaigns", "status", "999", "--json")
     assert missing.exit_code == 1
     assert "error: no campaign 999" in missing.output
+
+
+# --- a campaign's LinkedIn steps (P4-09) ----------------------------------------------
+
+
+def _linkedin_enrollment(factory: sessionmaker[Session], **message: Any) -> tuple[int, int | None]:
+    """A due enrollment in an active LinkedIn campaign; with ``message``, its step's message."""
+    with session_scope(factory, write=True) as session:
+        user = _local(session)
+        campaign = factories.make_campaign(session, user, channels=(TemplateChannel.LINKEDIN,))
+        contact = factories.make_contact(session, user, first_name="Fictional", last_name="Lane")
+        enrollment = factories.make_enrollment(
+            session, campaign, contact, next_action_at=datetime.now(UTC) - timedelta(minutes=5)
+        )
+        made = factories.make_message(session, enrollment, **message) if message else None
+        return enrollment.id, None if made is None else made.id
+
+
+def test_linkedin_ready_lists_a_due_step(cli_db: sessionmaker[Session]) -> None:
+    enrollment_id, _ = _linkedin_enrollment(cli_db)
+    output = _ok("campaigns", "linkedin", "ready")
+    assert "1 ready to prefill" in output
+    assert f"enrollment {enrollment_id}: Fictional Lane" in output
+
+
+def test_linkedin_prefill_refused_writes_nothing(cli_db: sessionmaker[Session]) -> None:
+    """``message_send`` has no runner yet (P4-03), so whatever the clock says, the claim is
+    refused and nothing is recorded; a browser is never reached."""
+    enrollment_id, _ = _linkedin_enrollment(cli_db)
+    result = _run("campaigns", "linkedin", "prefill", str(enrollment_id))
+    assert result.exit_code == 1
+    assert f"enrollment {enrollment_id} not prefilled" in result.output
+    with session_scope(cli_db) as session:
+        assert session.scalars(scoped(_local(session), Message)).all() == []
+    both = _run("campaigns", "linkedin", "prefill", str(enrollment_id), "--next")
+    assert both.exit_code == 1
+
+
+def test_linkedin_waiting_and_discard(cli_db: sessionmaker[Session]) -> None:
+    _, message_id = _linkedin_enrollment(
+        cli_db, status=MessageStatus.PREFILLED, sent_at=None, prefilled_at=datetime.now(UTC)
+    )
+    assert "1 waiting for you" in _ok("campaigns", "linkedin", "waiting")
+    output = _ok("campaigns", "linkedin", "discard", str(message_id))
+    assert f"message {message_id} discarded" in output
+    again = _run("campaigns", "linkedin", "discard", str(message_id))
+    assert again.exit_code == 1 and "nothing waits on it" in again.output
