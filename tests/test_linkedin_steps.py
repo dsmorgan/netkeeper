@@ -22,6 +22,7 @@ import factories
 import pytest
 from campaign_fakes import NOW, SETTINGS, FakeSender, make_mailbox
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.render import LintIssue, LintRule, Part, Rendered, Severity
@@ -1099,10 +1100,19 @@ def test_the_open_prefill_index_holds_when_the_check_is_bypassed(
     """S4: the partial unique index (0036) refuses a second open prefill, and the claim
     answers prefill_open with nothing left behind, its run included."""
     first, second = lane.enroll(), lane.enroll()
-    lane.prefill(first)
-    monkeypatch.setattr(linkedin_steps, "_open_prefill", lambda *_: None)
+    open_id = lane.prefill(first)
+    real = linkedin_steps._open_prefill
+    calls: list[int] = []
+
+    def blind_once(session: Session, user: User, now: datetime) -> Message | None:
+        calls.append(1)
+        return None if len(calls) == 1 else real(session, user, now)
+
+    monkeypatch.setattr(linkedin_steps, "_open_prefill", blind_once)
     claim = lane.claim(second)
-    assert (claim.reasons, claim.detail) == ((Refusal.PREFILL_OPEN,), "another prefill is open")
+    assert claim.reasons == (Refusal.PREFILL_OPEN,)
+    assert claim.detail == f"message {open_id} is prefilled; send or discard it first"
+    assert len(calls) == 2  # the check, then the re-check after the index refused
     assert lane.messages(second) == []
     assert [run.status for run in lane.runs()] == [SyncRunStatus.COMPLETED]
     assert lane.enrollment(second).next_action_at == NOW
@@ -1218,3 +1228,63 @@ def test_a_prefill_never_counts_against_the_campaigns_email_cap(lane: Lane) -> N
         )
     )
     assert count == 0
+
+
+def test_another_integrity_error_is_raised_not_called_prefill_open(
+    lane: Lane, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the one-open-prefill index is a refusal: with nothing open, the error is raised."""
+    enrollment_id = lane.enroll()
+
+    def broken_run(session: Session, user: User, now: datetime) -> SyncRun:
+        raise IntegrityError("INSERT", {}, Exception("some other constraint"))
+
+    with pytest.raises(IntegrityError):
+        lane.claim(enrollment_id, start_run=broken_run)
+    assert lane.messages(enrollment_id) == []
+
+
+def test_step_three_counts_from_a_later_discard_not_an_earlier_send(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """N11: the anchor is the latest step fired (max, never min)."""
+    lane = make_lane(session_factory, channels=(EMAIL, LINKEDIN, EMAIL))
+    _sent_hours(lane, any_time=True)
+    t0 = NOW - timedelta(days=20)
+    enrollment_id = lane.enroll(current_step=1)
+    _sent_step_one(lane, enrollment_id, at=t0)
+    message_id = lane.prefill(enrollment_id)
+    lane.write(lambda s, u: discard(s, u, message_id, settings=lane.settings, now=NOW))
+    due = lane.enrollment(enrollment_id).next_action_at
+    assert due is not None and due >= NOW + timedelta(days=7)
+    assert lane.read(lambda s, u: engine.latest_fired(s, u, enrollment_id)) == NOW
+
+
+@pytest.mark.parametrize("sent_first", [True, False])
+def test_reschedule_step_counts_from_a_discard(
+    session_factory: sessionmaker[Session], sent_first: bool
+) -> None:
+    """N18: a schedule change recomputes from the discard, with or without a send before it."""
+    channels = (EMAIL, LINKEDIN, EMAIL) if sent_first else (LINKEDIN, EMAIL)
+    lane = make_lane(session_factory, channels=channels)
+    _sent_hours(lane, any_time=True)
+    enrollment_id = lane.enroll(current_step=1 if sent_first else None)
+    if sent_first:
+        _sent_step_one(lane, enrollment_id, at=NOW - timedelta(days=20))
+    message_id = lane.prefill(enrollment_id)
+    lane.write(lambda s, u: discard(s, u, message_id, settings=lane.settings, now=NOW))
+    position = 3 if sent_first else 2
+
+    def change(session: Session, user: User) -> datetime | None:
+        campaign = get_scoped(session, user, Campaign, lane.campaign_id)
+        assert campaign is not None
+        step = next(s for s in campaign.steps if s.position == position)
+        step.delay_days = 2
+        assert engine.reschedule_step(session, user, step, settings=lane.settings) == 1
+        enrollment = get_scoped(session, user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        return enrollment.next_action_at
+
+    due = lane.write(change)
+    assert due is not None
+    assert NOW + timedelta(days=2) <= due < NOW + timedelta(days=3)

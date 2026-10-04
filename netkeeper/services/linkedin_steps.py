@@ -566,8 +566,13 @@ class _Claimer:
         except runs.RunError as exc:
             return self.refuse(enrollment, Refusal.RUN_REFUSED, detail=str(exc))
         except IntegrityError:
+            # The savepoint is rolled back. Only the one-open-prefill index is a refusal;
+            # any other integrity failure is a bug, and is raised.
+            opened = _open_prefill(session, user, now)
+            if opened is None:
+                raise
             log.warning("enrollment %d: another prefill opened meanwhile", enrollment.id)
-            return self.refuse(enrollment, Refusal.PREFILL_OPEN, detail="another prefill is open")
+            return self.refuse(enrollment, Refusal.PREFILL_OPEN, detail=_open_detail(opened))
         enrollment.next_action_at = None
         session.flush()
         log.info(
