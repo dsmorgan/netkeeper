@@ -519,7 +519,7 @@ def test_a_long_linkedin_message_is_a_warning_that_does_not_block_lint(
     session_factory: sessionmaker[Session],
 ) -> None:
     user, campaign_id = _linkedin_reviewing(
-        session_factory, subject=None, body="Hi {{ first_name }} " + "x" * 1500
+        session_factory, subject=None, body="Hi {{ first_name }} " + "x" * 1100
     )
     with session_scope(session_factory, write=True) as session:
         result = campaign_review.record_lint(session, user, campaign_id, now=NOW)
@@ -532,7 +532,7 @@ def test_a_linkedin_subject_with_a_long_body_gives_only_the_subject_error(
 ) -> None:
     """The long-message warning is never listed among the errors that block activation."""
     user, campaign_id = _linkedin_reviewing(
-        session_factory, subject="Hello", body="Hi {{ first_name }} " + "x" * 1500
+        session_factory, subject="Hello", body="Hi {{ first_name }} " + "x" * 1100
     )
     with session_scope(session_factory, write=True) as session:
         result = campaign_review.record_lint(session, user, campaign_id, now=NOW)

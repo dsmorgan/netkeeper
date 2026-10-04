@@ -88,14 +88,27 @@ what blocks activation:
 A LinkedIn template (P4-11) is also held to what LinkedIn and the prefill accept:
 
 - :attr:`LintRule.LINKEDIN_SUBJECT`: a subject. LinkedIn messages have none.
-- :attr:`LintRule.LINKEDIN_TOO_LONG`: a body over :data:`LINKEDIN_MESSAGE_MAX_CHARS`.
-- :attr:`LintRule.LINKEDIN_NEWLINE`: a CR or LF in the body or one of its text
-  literals, while :data:`LINKEDIN_ALLOW_NEWLINES` is false. The prefill never
-  presses Enter.
-- :attr:`LintRule.LINKEDIN_UNTYPABLE`: any other control character (a tab, NUL, VT,
-  FF, NEL...) or U+2028 or U+2029, whatever the flag says.
-- :attr:`LintRule.LINKEDIN_LONG`, the one save-time *warning*: a body over
-  :data:`LINKEDIN_MESSAGE_LONG_CHARS`, which takes minutes to type.
+- :attr:`LintRule.LINKEDIN_TOO_LONG`: a body over :data:`LINKEDIN_MESSAGE_MAX_CHARS`,
+  LinkedIn's own limit.
+- :attr:`LintRule.LINKEDIN_TYPING_TIME`: a body whose expected typing time
+  (:func:`~netkeeper.linkedin.pacing.typing_expected_seconds`) is over
+  :data:`~netkeeper.linkedin.pacing.TYPING_LINT_SECONDS`, a margin under the
+  prefill's ceiling.
+- :attr:`LintRule.LINKEDIN_NEWLINE`: a newline (one of
+  :data:`~netkeeper.linkedin.pacing.NEWLINE_CHARS`, CR or LF) in the body or one of
+  its text literals, while
+  :data:`~netkeeper.linkedin.pacing.SHIFT_ENTER_NEWLINES_ALLOWED` is false.
+- :attr:`LintRule.LINKEDIN_UNTYPABLE`: a grapheme cluster
+  :func:`~netkeeper.linkedin.pacing.is_untypable_cluster` refuses (any other line
+  break, a tab or other control character, a bidi control, a stray tag sequence...),
+  whatever the newline flag says.
+- :attr:`LintRule.LINKEDIN_LONG`, the one save-time *warning*: a body
+  :func:`~netkeeper.linkedin.pacing.typing_length_warning` warns about.
+
+The newline, character, and typing-time rules come from the pacing module
+(:mod:`netkeeper.linkedin.pacing`, P4-10) that builds the prefill's typing plan, so
+lint and the prefill can't disagree: a body the plan refuses always has one of these
+errors.
 
 Each issue about one place carries its one-based ``line`` in the part; an issue
 about the whole part (a missing subject, a body with no per-contact field) has
@@ -112,6 +125,7 @@ from __future__ import annotations
 import bisect
 import enum
 import functools
+import math
 import operator
 import re
 import sys
@@ -123,6 +137,7 @@ from types import SimpleNamespace
 from typing import Any, Final
 from urllib.parse import urlsplit
 
+import regex
 from jinja2 import ChainableUndefined, TemplateError, TemplateSyntaxError, nodes
 from jinja2.compiler import CodeGenerator, Frame
 from jinja2.exceptions import FilterArgumentError, SecurityError
@@ -131,6 +146,17 @@ from jinja2.runtime import Context, Undefined
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from jinja2.tests import TESTS
 
+from netkeeper.linkedin.pacing import (
+    MAX_TYPING_SECONDS,
+    NEWLINE_CHARS,
+    SHIFT_ENTER_NEWLINES_ALLOWED,
+    TYPING_LINT_SECONDS,
+    TYPING_WARN_CHARS,
+    is_untypable,
+    is_untypable_cluster,
+    typing_expected_seconds,
+    typing_length_warning,
+)
 from netkeeper.models.campaigns import TemplateChannel
 
 CONTACT_FIELDS: Final = (
@@ -304,18 +330,6 @@ LINKEDIN_MESSAGE_MAX_CHARS: Final = 8000
 """The longest LinkedIn message lint lets through (P4-11). Longer is an error, in the
 template text and in a rendered message."""
 
-LINKEDIN_MESSAGE_LONG_CHARS: Final = 1000
-"""A LinkedIn message longer than this is a warning (P4-11): the prefill types it a
-character at a time, about 140 ms each, so 1,000 characters already take over two
-minutes, and typing stops at 300 seconds (P4-10)."""
-
-LINKEDIN_ALLOW_NEWLINES: Final = False
-"""Whether a LinkedIn message may have more than one line (P4-11). False until the
-messaging capture (P4-06) shows Shift+Enter never sends, whatever LinkedIn's "Press
-Enter to Send" setting is: the prefill never presses Enter, so a line break can't be
-typed safely. While it is False, a CR or LF in a LinkedIn body is an error. It decides
-only about CR and LF; every other line break is always an error."""
-
 MAX_NESTING: Final = 50
 """The deepest a template's tree may go. ``a * b * c`` nests one level per term, and Python's
 own compiler refuses a template nested past about 200 (and gets slow well before that)."""
@@ -386,12 +400,11 @@ _NODE_NAMES: Final[Mapping[type[nodes.Node], str]] = {
 _LINE_BREAKS = re.compile(r"[\r\n\x0b\x0c\x1c-\x1e\x85\u2028\u2029]+")
 # The line breaks Jinja counts lines by, so a line number here is the one lint reports.
 _JINJA_LINE_BREAKS = re.compile(r"\r\n|\r|\n")
-# The line breaks LINKEDIN_ALLOW_NEWLINES decides about (P4-11).
-_CR_LF = re.compile(r"[\r\n]")
-# What a LinkedIn message may never contain, whatever LINKEDIN_ALLOW_NEWLINES says: every
-# other control character (tab, NUL, VT, FF, FS/GS/RS, NEL...) and the Unicode line and
-# paragraph separators. Interim, until the pacing module's predicate (#386) replaces it.
-_UNTYPABLE = re.compile(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029]")
+# The line breaks SHIFT_ENTER_NEWLINES_ALLOWED decides about (P4-11): the pacing
+# module's NEWLINE_CHARS, CR and LF. A run of them splits a text into the pieces whose
+# grapheme clusters the prefill types.
+_NEWLINES = regex.compile("([" + "".join(sorted(NEWLINE_CHARS)) + "]+)")
+_GRAPHEME = regex.compile(r"\X")
 
 # A candidate http(s) link: the scheme and whatever follows up to whitespace. Matched
 # case-insensitively and loosely on purpose, so ``http:/example.com`` is caught as broken
@@ -424,6 +437,7 @@ class LintRule(enum.StrEnum):
     REMOVED_FIELD = "removed_field"
     LINKEDIN_SUBJECT = "linkedin_subject"
     LINKEDIN_TOO_LONG = "linkedin_too_long"
+    LINKEDIN_TYPING_TIME = "linkedin_typing_time"
     LINKEDIN_LONG = "linkedin_long"
     LINKEDIN_NEWLINE = "linkedin_newline"
     LINKEDIN_UNTYPABLE = "linkedin_untypable"
@@ -1124,7 +1138,12 @@ def _line_of(source: str, offset: int) -> int:
 
 
 def _linkedin_issues(body: str, *, literals: Collection[tuple[str, int]] | None) -> list[LintIssue]:
-    """What LinkedIn and the prefill refuse in a body (P4-11).
+    """What LinkedIn and the prefill refuse or warn about in a body (P4-11).
+
+    The newline, character, and typing-time rules are the pacing module's own
+    (:mod:`netkeeper.linkedin.pacing`), so whatever
+    :func:`~netkeeper.linkedin.pacing.typing_plan` refuses for a rendered message has
+    an error here.
 
     For the template text, ``literals`` are its text literals with their lines, checked
     too, since ``{{ "\\n" }}`` renders a line break its source does not contain; each
@@ -1135,6 +1154,8 @@ def _linkedin_issues(body: str, *, literals: Collection[tuple[str, int]] | None)
     issues: list[LintIssue] = []
     what = "the body" if in_template else "the rendered message"
     size = len(body)
+    # One length finding at most: LinkedIn's limit, then the typing time, then the
+    # long-message warning.
     if size > LINKEDIN_MESSAGE_MAX_CHARS:
         issues.append(
             LintIssue(
@@ -1146,25 +1167,36 @@ def _linkedin_issues(body: str, *, literals: Collection[tuple[str, int]] | None)
                 line=_line_of(body, LINKEDIN_MESSAGE_MAX_CHARS) if in_template else None,
             )
         )
-    elif size > LINKEDIN_MESSAGE_LONG_CHARS:
+    elif (seconds := typing_expected_seconds(body)) > TYPING_LINT_SECONDS:
+        issues.append(
+            LintIssue(
+                LintRule.LINKEDIN_TYPING_TIME,
+                Severity.ERROR,
+                Part.BODY,
+                f"{what} takes about {math.ceil(seconds)} seconds to type, over "
+                f"{TYPING_LINT_SECONDS:.0f}; the prefill stops at {MAX_TYPING_SECONDS:.0f}",
+                line=_line_of(body, _typing_time_offset(body)) if in_template else None,
+            )
+        )
+    elif typing_length_warning(body):
         issues.append(
             LintIssue(
                 LintRule.LINKEDIN_LONG,
                 Severity.WARNING,
                 Part.BODY,
-                f"{what} is {size:,} characters; over {LINKEDIN_MESSAGE_LONG_CHARS:,}, "
+                f"{what} is {size:,} characters; over {TYPING_WARN_CHARS:,}, "
                 "the prefill takes minutes to type it",
-                line=_line_of(body, LINKEDIN_MESSAGE_LONG_CHARS) if in_template else None,
+                line=_line_of(body, TYPING_WARN_CHARS) if in_template else None,
             )
         )
-    # Where each character rule is first broken, (line, the character): in the text
+    # Where each character rule is first broken, (line, what broke it): in the text
     # itself or in a literal, whichever comes first.
     texts: list[tuple[str, Callable[[int], int | None]]] = [
         (body, partial(_line_of, body) if in_template else _no_line)
     ]
     texts.extend((value, partial(_same_line, line)) for value, line in literals or ())
-    newline = _first(texts, _CR_LF) if not LINKEDIN_ALLOW_NEWLINES else None
-    untypable = _first(texts, _UNTYPABLE)
+    newline = None if SHIFT_ENTER_NEWLINES_ALLOWED else _first(texts, _first_newline)
+    untypable = _first(texts, _first_untypable)
     if newline is not None:
         issues.append(
             LintIssue(
@@ -1181,22 +1213,64 @@ def _linkedin_issues(body: str, *, literals: Collection[tuple[str, int]] | None)
                 LintRule.LINKEDIN_UNTYPABLE,
                 Severity.ERROR,
                 Part.BODY,
-                f"{what} contains {_char_name(untypable[1])}, which the prefill can't type",
+                f"{what} contains {_cluster_name(untypable[1])}, which the prefill can't type",
                 line=untypable[0],
             )
         )
     return issues
 
 
+def _typing_time_offset(body: str) -> int:
+    """The first offset at which ``body``'s expected typing time passes
+    :data:`~netkeeper.linkedin.pacing.TYPING_LINT_SECONDS`, for the finding's line.
+
+    The expected time of a prefix never falls as the prefix grows, so this bisects it.
+    The caller has already found that the whole body is over.
+    """
+    low, high = 0, len(body)  # body[:low] is not over; body[:high] is
+    while high - low > 1:
+        middle = (low + high) // 2
+        if typing_expected_seconds(body[:middle]) > TYPING_LINT_SECONDS:
+            high = middle
+        else:
+            low = middle
+    return low
+
+
+def _first_newline(text: str) -> tuple[int, str] | None:
+    """The offset and character of ``text``'s first newline (CR or LF), if it has one."""
+    found = _NEWLINES.search(text)
+    return None if found is None else (found.start(), found.group()[0])
+
+
+def _first_untypable(text: str) -> tuple[int, str] | None:
+    """The offset of the first grapheme cluster in ``text`` that
+    :func:`~netkeeper.linkedin.pacing.is_untypable_cluster` refuses, with the cluster.
+
+    The text is split into clusters as the typing plan splits it: at each newline
+    first, then into extended grapheme clusters. Newlines themselves are left to the
+    newline rule.
+    """
+    offset = 0
+    for index, piece in enumerate(_NEWLINES.split(text)):
+        if index % 2 == 0:
+            for cluster in _GRAPHEME.finditer(piece):
+                if is_untypable_cluster(cluster.group()):
+                    return offset + cluster.start(), cluster.group()
+        offset += len(piece)
+    return None
+
+
 def _first(
-    texts: Collection[tuple[str, Callable[[int], int | None]]], pattern: re.Pattern[str]
+    texts: Collection[tuple[str, Callable[[int], int | None]]],
+    find: Callable[[str], tuple[int, str] | None],
 ) -> tuple[int | None, str] | None:
-    """The earliest line any of ``texts`` matches ``pattern`` on, with the character."""
+    """The earliest line ``find`` finds anything on in any of ``texts``, with what it found."""
     hits = []
     for text, line in texts:
-        found = pattern.search(text)
+        found = find(text)
         if found is not None:
-            hits.append((line(found.start()), found.group()))
+            hits.append((line(found[0]), found[1]))
     if not hits:
         return None
     return min(hits, key=lambda hit: hit[0] or 0)
@@ -1210,15 +1284,19 @@ def _same_line(line: int, _offset: int) -> int:
     return line
 
 
-def _char_name(char: str) -> str:
-    """How a finding names a character the prefill can't type: its name, or its code point."""
+def _cluster_name(cluster: str) -> str:
+    """How a finding names a cluster the prefill can't type: its first untypable
+    character's name or code point, or what kind of sequence it is."""
     names = {
         "\t": "a tab",
         "\x00": "a NUL character",
         "\u2028": "a line separator (U+2028)",
         "\u2029": "a paragraph separator (U+2029)",
     }
-    return names.get(char, f"the control character U+{ord(char):04X}")
+    char = next((char for char in cluster if is_untypable(char)), None)
+    if char is None:
+        return "a tag or variation-selector sequence"
+    return names.get(char, f"the character U+{ord(char):04X}")
 
 
 def lint(channel: TemplateChannel, subject: str | None, body: str) -> list[LintIssue]:
@@ -1372,6 +1450,8 @@ def render(
         # Each is reported once: the template text's finding, when it has one, stands.
         found = {issue.rule for issue in issues}
         if LintRule.LINKEDIN_TOO_LONG in found:
+            found |= {LintRule.LINKEDIN_TYPING_TIME, LintRule.LINKEDIN_LONG}
+        if LintRule.LINKEDIN_TYPING_TIME in found:
             found.add(LintRule.LINKEDIN_LONG)
         added.extend(
             issue
