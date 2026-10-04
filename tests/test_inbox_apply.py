@@ -312,7 +312,8 @@ def test_threads_to_open_are_the_newest_five_prefilled_stale_or_live(
     for n in range(7):
         contact = _contact(writer, user, profile_urn(f"p{n}"))
         enrollment = factories.make_enrollment(writer, campaign, contact)
-        status = MessageStatus.PREFILLED if n % 2 else MessageStatus.STALE
+        # One open prefill per user (P4-09's index, 0036): the rest are stale.
+        status = MessageStatus.PREFILLED if n == 5 else MessageStatus.STALE
         urn = f"urn:li:msg_conversation:INVENTEDP{n}"
         sent = factories.make_message(
             writer, enrollment, status=status, sent_at=None, li_conversation_urn=urn
