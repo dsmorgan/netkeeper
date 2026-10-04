@@ -37,6 +37,9 @@ export type ContactEmailOut = components['schemas']['ContactEmailOut']
 export type ContactPhoneOut = components['schemas']['ContactPhoneOut']
 export type ContactLinkOut = components['schemas']['ContactLinkOut']
 export type ContactPositionOut = components['schemas']['ContactPositionOut']
+export type MergePreview = components['schemas']['MergePreviewOut']
+export type MergeMoves = components['schemas']['MergeMovesOut']
+export type PossibleDuplicate = components['schemas']['PossibleDuplicateOut']
 
 export const MET_VALUES = [
   'unknown',

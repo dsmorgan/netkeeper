@@ -40,6 +40,8 @@
 
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
 
+import type { ContactDetail } from '@/features/contacts/types'
+
 import {
   AHEAD_PAGE,
   TriageError,
@@ -261,6 +263,8 @@ export interface TriageQueue extends TriageQueueState {
   rename: (contactId: number, preferredName: string) => Promise<void>
   /** Confirm or reject a contact read off a connections-page card (#184). */
   review: (contactId: number, verdict: 'confirm' | 'reject') => Promise<void>
+  /** A merge landed (#363): mark the loser merged away and refresh the survivor's card. */
+  merged: (survivor: ContactDetail, loserId: number) => void
   addTag: (contactId: number, tag: TriageTag) => Promise<void>
   removeTag: (contactId: number, tagId: number) => Promise<void>
   applyBulk: (key: string, expectedCount: number) => Promise<BulkOutcome>
@@ -350,6 +354,36 @@ function remember(passed: PassedCard[], entry: PassedCard): PassedCard[] {
 }
 
 /** Rewrite one contact wherever the queue is holding it: in hand or in the trail. */
+/** The card fields a merge can change, read off the survivor the merge answered with. */
+const MERGED_FIELDS = [
+  'first_name',
+  'last_name',
+  'preferred_name',
+  'headline',
+  'current_title',
+  'current_company',
+  'location',
+  'connected_on',
+  'li_public_id',
+  'li_url',
+  'met',
+  'met_source',
+  'triaged_at',
+  'do_not_contact',
+  'notes',
+  'needs_review_at',
+  'archived_at',
+  'updated_at',
+] as const satisfies ReadonlyArray<keyof TriageContact & keyof ContactDetail>
+
+function fromSurvivor(contact: TriageContact, survivor: ContactDetail): TriageContact {
+  const picked = Object.fromEntries(MERGED_FIELDS.map((field) => [field, survivor[field]])) as Pick<
+    TriageContact,
+    (typeof MERGED_FIELDS)[number]
+  >
+  return { ...contact, ...picked }
+}
+
 function patchContact(
   state: TriageQueueState,
   contactId: number,
@@ -1025,6 +1059,25 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
     [commit, enqueue],
   )
 
+  const merged = useCallback(
+    (survivor: ContactDetail, loserId: number) => {
+      commit((state) => {
+        const away = patchContact(state, loserId, (contact) => ({
+          ...contact,
+          merged_into_id: survivor.id,
+        }))
+        const kept = patchContact(away, survivor.id, (contact) => fromSurvivor(contact, survivor))
+        // Not a triage decision, so not on the undo stack: nothing takes a merge back.
+        return {
+          ...kept,
+          notice:
+            'Merged. The contact merged away leaves the queue; → moves on. A merge can’t be undone.',
+        }
+      })
+    },
+    [commit],
+  )
+
   const patchTags = useCallback(
     (contactId: number, update: (tags: TriageTag[]) => TriageTag[]) => {
       commit((state) =>
@@ -1151,6 +1204,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
     ),
     rename,
     review,
+    merged,
     addTag,
     removeTag,
     applyBulk,

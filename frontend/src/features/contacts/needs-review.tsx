@@ -13,6 +13,7 @@
  * Reject archives the contact; contacts are never deleted.
  */
 
+import type { ReactNode } from 'react'
 import { useRef, useState } from 'react'
 
 import { Badge } from '@/components/ui/badge'
@@ -33,6 +34,7 @@ export function NeedsReviewNotice({
   pending,
   onConfirm,
   onReject,
+  hint,
 }: {
   /** Who the card says this is, for the buttons' accessible names. */
   name: string
@@ -47,6 +49,8 @@ export function NeedsReviewNotice({
    */
   onConfirm: () => Promise<unknown> | void
   onReject: () => Promise<unknown> | void
+  /** The possible-duplicate hint (#363), inside the band it is about. */
+  hint?: ReactNode
 }) {
   const sending = useRef(false)
   const [busy, setBusy] = useState(false)
@@ -86,6 +90,7 @@ export function NeedsReviewNotice({
           Rejected: it&apos;s archived, not deleted. Confirming it still leaves it archived.
         </p>
       )}
+      {hint}
       <div className="flex flex-wrap gap-2">
         <Button
           size="sm"

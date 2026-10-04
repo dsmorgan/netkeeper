@@ -34,10 +34,12 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from netkeeper.crm import contacts as service
+from netkeeper.crm import duplicates as duplicate_service
 from netkeeper.crm import interactions as timeline_service
 from netkeeper.crm import new_contact
 from netkeeper.crm.confirmation import InvalidToken, selection_digest
 from netkeeper.crm.filters import FilterError, FilterTree
+from netkeeper.crm.merge_preview import MergeMoves, Moved, preview_merge
 from netkeeper.crm.provenance import overridden_fields
 from netkeeper.models import Contact, ContactSource, User
 from netkeeper.web.deps import Confirmations, CurrentUser, SessionDep, read_only
@@ -72,6 +74,10 @@ from netkeeper.web.schemas import (
     DuplicateContact,
     MergedConflict,
     MergeIn,
+    MergeMovesOut,
+    MergePreviewOut,
+    MovedOut,
+    PossibleDuplicateOut,
     RevertFieldIn,
     SnapshotOut,
     SyncedValueOut,
@@ -355,6 +361,94 @@ def merge_contacts(
     with translate_errors():
         contact = service.merge_contacts(session, user, contact_id, body.loser_id)
     return _detail(session, user, contact, None)
+
+
+@router.post(
+    "/contacts/{contact_id}/merge/preview",
+    operation_id="preview_merge_contacts",
+    responses={**WRITE, 409: {"description": "The two cannot be merged"}},
+)
+def preview_merge_contacts(
+    contact_id: int, body: MergeIn, user: CurrentUser, session: SessionDep
+) -> MergePreviewOut:
+    """What merging `loser_id` into this contact would do, without doing it (#363).
+
+    Runs the merge itself in a savepoint and rolls it back, so `result` is what
+    `POST /contacts/{id}/merge` would answer with now, under every merge rule.
+    Answers what the merge answers when the two cannot be merged. A `POST`
+    because the savepoint writes before it is undone, which needs a writer
+    session; the database keeps nothing.
+    """
+    with translate_errors():
+        preview = preview_merge(
+            session,
+            user,
+            contact_id,
+            body.loser_id,
+            render=lambda contact: _detail(session, user, contact, None),
+        )
+    return MergePreviewOut(
+        survivor=preview.survivor,
+        loser=preview.loser,
+        result=preview.result,
+        moves=_moves_out(preview.moves),
+    )
+
+
+@router.get(
+    "/contacts/{contact_id}/duplicates",
+    operation_id="list_possible_duplicates",
+    responses=NO_SUCH_CONTACT,
+)
+def list_possible_duplicates(
+    contact_id: int, user: CurrentUser, session: SessionDep
+) -> list[PossibleDuplicateOut]:
+    """Other live contacts that may be this person, strongest match first (#363).
+
+    A hint for a person to act on, never a merge: by email, phone, the same
+    name, or the same name under a LinkedIn slug changed before any sync. Two
+    contacts with different LinkedIn URNs never match. Only this user's
+    contacts, at most five. A merged-away id stands for its survivor.
+    """
+    with translate_errors():
+        _, found = duplicate_service.possible_duplicates(session, user, contact_id)
+    return [
+        PossibleDuplicateOut(
+            contact_id=match.contact.id,
+            first_name=match.contact.first_name,
+            last_name=match.contact.last_name,
+            preferred_name=match.contact.preferred_name,
+            current_title=match.contact.current_title,
+            current_company=match.contact.current_company,
+            li_public_id=match.contact.li_public_id,
+            needs_review=match.contact.needs_review_at is not None,
+            matched_by=list(match.matched_by),
+        )
+        for match in found
+    ]
+
+
+def _moved_out(moved: Moved) -> MovedOut:
+    return MovedOut(moved=moved.moved, dropped=moved.dropped)
+
+
+def _moves_out(moves: MergeMoves) -> MergeMovesOut:
+    return MergeMovesOut(
+        emails=_moved_out(moves.emails),
+        phones=_moved_out(moves.phones),
+        links=_moved_out(moves.links),
+        positions=_moved_out(moves.positions),
+        snapshots=moves.snapshots,
+        interactions=moves.interactions,
+        tags_added=list(moves.tags_added),
+        tags_removed=list(moves.tags_removed),
+        lists_added=list(moves.lists_added),
+        enrollments_moved=moves.enrollments_moved,
+        enrollments_combined=moves.enrollments_combined,
+        messages_moved=moves.messages_moved,
+        messages_discarded=moves.messages_discarded,
+        history_rows=moves.history_rows,
+    )
 
 
 # --- bulk -------------------------------------------------------------------

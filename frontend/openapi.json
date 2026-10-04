@@ -7255,6 +7255,121 @@
         "title": "MergeIn",
         "type": "object"
       },
+      "MergeMovesOut": {
+        "description": "What a merge moves from the loser to the survivor (#363), read off the merge itself.",
+        "properties": {
+          "emails": {
+            "$ref": "#/components/schemas/MovedOut"
+          },
+          "enrollments_combined": {
+            "title": "Enrollments Combined",
+            "type": "integer"
+          },
+          "enrollments_moved": {
+            "title": "Enrollments Moved",
+            "type": "integer"
+          },
+          "history_rows": {
+            "title": "History Rows",
+            "type": "integer"
+          },
+          "interactions": {
+            "title": "Interactions",
+            "type": "integer"
+          },
+          "links": {
+            "$ref": "#/components/schemas/MovedOut"
+          },
+          "lists_added": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Lists Added",
+            "type": "array"
+          },
+          "messages_discarded": {
+            "title": "Messages Discarded",
+            "type": "integer"
+          },
+          "messages_moved": {
+            "title": "Messages Moved",
+            "type": "integer"
+          },
+          "phones": {
+            "$ref": "#/components/schemas/MovedOut"
+          },
+          "positions": {
+            "$ref": "#/components/schemas/MovedOut"
+          },
+          "snapshots": {
+            "title": "Snapshots",
+            "type": "integer"
+          },
+          "tags_added": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags Added",
+            "type": "array"
+          },
+          "tags_removed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags Removed",
+            "type": "array"
+          }
+        },
+        "required": [
+          "emails",
+          "phones",
+          "links",
+          "positions",
+          "snapshots",
+          "interactions",
+          "tags_added",
+          "tags_removed",
+          "lists_added",
+          "enrollments_moved",
+          "enrollments_combined",
+          "messages_moved",
+          "messages_discarded",
+          "history_rows"
+        ],
+        "title": "MergeMovesOut",
+        "type": "object"
+      },
+      "MergePreviewOut": {
+        "description": "A merge, done and taken back (#363): both contacts before, the survivor after.\n\n``result`` is what ``POST /contacts/{id}/merge`` would answer with right now:\nthe preview runs that merge in a savepoint and rolls it back. ``undoable``\nis false: nothing takes a merge back.",
+        "properties": {
+          "loser": {
+            "$ref": "#/components/schemas/ContactDetail"
+          },
+          "moves": {
+            "$ref": "#/components/schemas/MergeMovesOut"
+          },
+          "result": {
+            "$ref": "#/components/schemas/ContactDetail"
+          },
+          "survivor": {
+            "$ref": "#/components/schemas/ContactDetail"
+          },
+          "undoable": {
+            "const": false,
+            "default": false,
+            "title": "Undoable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "survivor",
+          "loser",
+          "result",
+          "moves"
+        ],
+        "title": "MergePreviewOut",
+        "type": "object"
+      },
       "MergedConflict": {
         "description": "The ``409`` body of a write to a merged-away contact: where it went.",
         "properties": {
@@ -7442,6 +7557,25 @@
           "detail"
         ],
         "title": "MissingOut",
+        "type": "object"
+      },
+      "MovedOut": {
+        "description": "The loser's rows of one kind: how many move, how many the survivor already holds.",
+        "properties": {
+          "dropped": {
+            "title": "Dropped",
+            "type": "integer"
+          },
+          "moved": {
+            "title": "Moved",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "moved",
+          "dropped"
+        ],
+        "title": "MovedOut",
         "type": "object"
       },
       "Neq": {
@@ -7914,6 +8048,90 @@
           "last_name"
         ],
         "title": "PinOut",
+        "type": "object"
+      },
+      "PossibleDuplicateOut": {
+        "description": "Another contact that may be the same person (#363). A hint; nothing merges on its own.\n\n``matched_by``, strongest first: ``email`` (an address on both), ``phone`` (a\nnumber on both), ``slug`` (the same name under a LinkedIn slug changed before\nany sync), ``name`` (the same first or preferred name and last name).",
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "current_company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Company"
+          },
+          "current_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Title"
+          },
+          "first_name": {
+            "title": "First Name",
+            "type": "string"
+          },
+          "last_name": {
+            "title": "Last Name",
+            "type": "string"
+          },
+          "li_public_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Public Id"
+          },
+          "matched_by": {
+            "items": {
+              "enum": [
+                "name",
+                "email",
+                "phone",
+                "slug"
+              ],
+              "type": "string"
+            },
+            "title": "Matched By",
+            "type": "array"
+          },
+          "needs_review": {
+            "title": "Needs Review",
+            "type": "boolean"
+          },
+          "preferred_name": {
+            "title": "Preferred Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contact_id",
+          "first_name",
+          "last_name",
+          "preferred_name",
+          "current_title",
+          "current_company",
+          "li_public_id",
+          "needs_review",
+          "matched_by"
+        ],
+        "title": "PossibleDuplicateOut",
         "type": "object"
       },
       "PostureOut": {
@@ -13603,6 +13821,56 @@
         ]
       }
     },
+    "/api/v1/contacts/{contact_id}/duplicates": {
+      "get": {
+        "description": "Other live contacts that may be this person, strongest match first (#363).\n\nA hint for a person to act on, never a merge: by email, phone, the same\nname, or the same name under a LinkedIn slug changed before any sync. Two\ncontacts with different LinkedIn URNs never match. Only this user's\ncontacts, at most five. A merged-away id stands for its survivor.",
+        "operationId": "list_possible_duplicates",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PossibleDuplicateOut"
+                  },
+                  "title": "Response List Possible Duplicates",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Possible Duplicates",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
     "/api/v1/contacts/{contact_id}/emails": {
       "post": {
         "description": "Add an address. The first one is primary; `is_primary` on a later one demotes the rest.",
@@ -14146,6 +14414,65 @@
           }
         },
         "summary": "Merge Contacts",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/merge/preview": {
+      "post": {
+        "description": "What merging `loser_id` into this contact would do, without doing it (#363).\n\nRuns the merge itself in a savepoint and rolls it back, so `result` is what\n`POST /contacts/{id}/merge` would answer with now, under every merge rule.\nAnswers what the merge answers when the two cannot be merged. A `POST`\nbecause the savepoint writes before it is undone, which needs a writer\nsession; the database keeps nothing.",
+        "operationId": "preview_merge_contacts",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergePreviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "description": "The two cannot be merged"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Merge Contacts",
         "tags": [
           "contacts"
         ]

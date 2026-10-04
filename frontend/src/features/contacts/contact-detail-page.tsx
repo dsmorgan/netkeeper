@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
-import { ArrowLeft, ExternalLink, Mail } from 'lucide-react'
+import { Link, useNavigate } from '@tanstack/react-router'
+import { ArrowLeft, ExternalLink, Mail, Merge } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { useState } from 'react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from '@/components/ui/button'
@@ -22,8 +23,10 @@ import {
 } from './field-editor'
 import { useContactWrite } from './use-contact-write'
 import { displayName, formatDate, formatDateTime, gmailSearchUrl } from './format'
+import { MergePanel, type MergeTarget, type Survivor } from './merge-panel'
 import { WriteError } from './merged-notice'
 import { NeedsReviewBadge, NeedsReviewNotice } from './needs-review'
+import { PossibleDuplicates } from './possible-duplicates'
 import { MET_LABELS } from './types'
 
 /** The fields you can type into, in the order the screen shows them. */
@@ -76,9 +79,14 @@ function ExternalAction({
   )
 }
 
+/** The merge panel, closed or open on a contact (and maybe a picked duplicate). */
+type Merging = { target: MergeTarget | null; survivor: Survivor } | null
+
 export function ContactDetailPage({ contactId }: { contactId: number }) {
   const detail = useQuery(contactQuery(contactId))
   const archive = useContactWrite(contactId)
+  const navigate = useNavigate()
+  const [merging, setMerging] = useState<Merging>(null)
 
   if (detail.isPending) {
     return <p className="text-muted-foreground">Loading contact…</p>
@@ -130,6 +138,17 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
           <Button
             size="sm"
             variant="outline"
+            aria-expanded={merging !== null}
+            onClick={() =>
+              setMerging((open) => (open === null ? { target: null, survivor: 'this' } : null))
+            }
+          >
+            <Merge data-icon="inline-start" />
+            Merge with…
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
             disabled={archive.isPending}
             onClick={() => archive.mutate(() => setArchived(contact.id, !archived))}
           >
@@ -137,6 +156,26 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
           </Button>
         </div>
       </div>
+
+      {merging !== null && (
+        <MergePanel
+          // A new pick from the hint starts the panel over on that contact.
+          key={`${contact.id}-${merging.target?.id ?? 'pick'}`}
+          contact={{ id: contact.id, name }}
+          initialTarget={merging.target}
+          initialSurvivor={merging.survivor}
+          onClose={() => setMerging(null)}
+          onMerged={(survivor) => {
+            setMerging(null)
+            if (survivor.id !== contact.id) {
+              void navigate({
+                to: '/contacts/$contactId',
+                params: { contactId: String(survivor.id) },
+              })
+            }
+          }}
+        />
+      )}
 
       {contact.resolved_from !== null && (
         <p role="status" className="rounded-lg bg-muted/60 px-3 py-2">
@@ -156,6 +195,18 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
           pending={archive.isPending}
           onConfirm={() => archive.mutateAsync(() => reviewContact(contact.id, 'confirm'))}
           onReject={() => archive.mutateAsync(() => reviewContact(contact.id, 'reject'))}
+          hint={
+            <PossibleDuplicates
+              contactId={contact.id}
+              onMerge={(match) =>
+                setMerging({
+                  target: { id: match.contact_id, name: displayName(match) },
+                  // A card contact folds into the confirmed one it duplicates.
+                  survivor: match.needs_review ? 'this' : 'other',
+                })
+              }
+            />
+          }
         />
       )}
       <WriteError error={archive.error} />

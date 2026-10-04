@@ -11,6 +11,7 @@ import { detailMessage } from '@/api/errors'
 
 import type { ColumnId } from './columns'
 import { requestedColumns } from './columns'
+import { nameSearchFilter } from './name-search'
 import type {
   BulkAction,
   BulkCountOut,
@@ -23,7 +24,10 @@ import type {
   ContactTagOut,
   ContactList,
   DuplicateContact,
+  FilterNode,
   FilterTree,
+  MergePreview,
+  PossibleDuplicate,
   ProvenanceField,
   SavedView,
   SortKey,
@@ -56,6 +60,9 @@ export const contactsKeys = {
   detail: (id: number) => [...contactsKeys.all, 'detail', id] as const,
   timeline: (id: number) => [...contactsKeys.all, 'timeline', id] as const,
   tags: (id: number) => [...contactsKeys.all, 'tags', id] as const,
+  duplicates: (id: number) => [...contactsKeys.all, 'duplicates', id] as const,
+  mergePreview: (survivorId: number, loserId: number) =>
+    [...contactsKeys.all, 'merge-preview', survivorId, loserId] as const,
 }
 
 export interface ContactsPageRequest {
@@ -516,5 +523,120 @@ export function refusalMessage(refusal: BulkRefusal): string {
       return `The confirmation was refused: ${refusal.detail}.`
     case 'failed':
       return `The action could not be applied: ${refusal.detail}.`
+  }
+}
+
+// --- merge (#363) -------------------------------------------------------------
+
+/**
+ * Other live contacts that may be this person (#363): a read-only hint, never a
+ * merge. The backend keeps it conservative and scoped to the current user.
+ */
+export function duplicatesQuery(contactId: number) {
+  return queryOptions({
+    queryKey: contactsKeys.duplicates(contactId),
+    queryFn: async ({ signal }): Promise<PossibleDuplicate[]> => {
+      const { data, error, response } = await api.GET('/api/v1/contacts/{contact_id}/duplicates', {
+        params: { path: { contact_id: contactId } },
+        signal,
+      })
+      if (data === undefined) fail('possible duplicates', response.status, error)
+      return data
+    },
+    retry: false,
+  })
+}
+
+/**
+ * What merging `loserId` into `survivorId` would do. The backend runs the real
+ * merge in a savepoint and rolls it back, so `result` is the merge's own answer.
+ * Never cached: a preview is only good for the moment it was asked.
+ */
+export function mergePreviewQuery(survivorId: number, loserId: number) {
+  return queryOptions({
+    queryKey: contactsKeys.mergePreview(survivorId, loserId),
+    queryFn: async ({ signal }): Promise<MergePreview> => {
+      const { data, error, response } = await api.POST(
+        '/api/v1/contacts/{contact_id}/merge/preview',
+        { params: { path: { contact_id: survivorId } }, body: { loser_id: loserId }, signal },
+      )
+      if (data === undefined) fail('merge preview', response.status, error)
+      return data
+    },
+    gcTime: 0,
+    staleTime: 0,
+    retry: false,
+  })
+}
+
+/** Folds `loserId` into `survivorId`; answers with the survivor. */
+export async function mergeContacts(survivorId: number, loserId: number): Promise<ContactDetail> {
+  const { data, error, response } = await api.POST('/api/v1/contacts/{contact_id}/merge', {
+    params: { path: { contact_id: survivorId } },
+    body: { loser_id: loserId },
+  })
+  if (data === undefined) fail('merge', response.status, error)
+  return data
+}
+
+/** How many contacts the merge picker lists. */
+export const MERGE_PICKER_LIMIT = 10
+
+export interface MergeCandidate {
+  id: number
+  first_name: string
+  last_name: string
+  preferred_name: string
+  current_title: string | null
+  current_company: string | null
+  primary_email: string | null
+  archived: boolean
+}
+
+/**
+ * Contacts to merge with, by name (first, last, preferred) or email. Archived
+ * contacts are included and say so; merged-away ones never come back.
+ */
+export async function searchMergeCandidates(
+  text: string,
+  signal?: AbortSignal,
+): Promise<{ items: MergeCandidate[]; total: number }> {
+  const trimmed = text.trim()
+  const names = nameSearchFilter(trimmed)
+  if (names === null) return { items: [], total: 0 }
+  const where: FilterNode = {
+    op: 'or',
+    children: [names, { op: 'email_contains', value: trimmed }],
+  }
+  const { data, error, response } = await api.POST('/api/v1/contacts/query', {
+    body: {
+      filter: { include_archived: true, where },
+      sort: [],
+      limit: MERGE_PICKER_LIMIT,
+      offset: 0,
+      columns: [
+        'first_name',
+        'last_name',
+        'preferred_name',
+        'current_title',
+        'current_company',
+        'archived_at',
+      ],
+    },
+    signal,
+  })
+  if (data === undefined) fail('contact search', response.status, error)
+  return {
+    total: data.total,
+    items: data.items.map((row) => ({
+      id: row.id,
+      first_name: row.first_name ?? '',
+      last_name: row.last_name ?? '',
+      preferred_name: row.preferred_name ?? '',
+      current_title: row.current_title ?? null,
+      current_company: row.current_company ?? null,
+      primary_email: row.primary_email ?? null,
+      archived: (row.archived_at ?? null) !== null,
+    })),
   }
 }

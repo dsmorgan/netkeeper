@@ -734,6 +734,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/contacts/{contact_id}/duplicates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Possible Duplicates
+         * @description Other live contacts that may be this person, strongest match first (#363).
+         *
+         *     A hint for a person to act on, never a merge: by email, phone, the same
+         *     name, or the same name under a LinkedIn slug changed before any sync. Two
+         *     contacts with different LinkedIn URNs never match. Only this user's
+         *     contacts, at most five. A merged-away id stands for its survivor.
+         */
+        get: operations["list_possible_duplicates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/contacts/{contact_id}/emails": {
         parameters: {
             query?: never;
@@ -851,6 +876,32 @@ export interface paths {
          *     one, so the client retries against the survivor it names.
          */
         post: operations["merge_contacts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/merge/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Merge Contacts
+         * @description What merging `loser_id` into this contact would do, without doing it (#363).
+         *
+         *     Runs the merge itself in a savepoint and rolls it back, so `result` is what
+         *     `POST /contacts/{id}/merge` would answer with now, under every merge rule.
+         *     Answers what the merge answers when the two cannot be merged. A `POST`
+         *     because the savepoint writes before it is undone, which needs a writer
+         *     session; the database keeps nothing.
+         */
+        post: operations["preview_merge_contacts"];
         delete?: never;
         options?: never;
         head?: never;
@@ -5217,6 +5268,56 @@ export interface components {
             loser_id: number;
         };
         /**
+         * MergeMovesOut
+         * @description What a merge moves from the loser to the survivor (#363), read off the merge itself.
+         */
+        MergeMovesOut: {
+            emails: components["schemas"]["MovedOut"];
+            /** Enrollments Combined */
+            enrollments_combined: number;
+            /** Enrollments Moved */
+            enrollments_moved: number;
+            /** History Rows */
+            history_rows: number;
+            /** Interactions */
+            interactions: number;
+            links: components["schemas"]["MovedOut"];
+            /** Lists Added */
+            lists_added: string[];
+            /** Messages Discarded */
+            messages_discarded: number;
+            /** Messages Moved */
+            messages_moved: number;
+            phones: components["schemas"]["MovedOut"];
+            positions: components["schemas"]["MovedOut"];
+            /** Snapshots */
+            snapshots: number;
+            /** Tags Added */
+            tags_added: string[];
+            /** Tags Removed */
+            tags_removed: string[];
+        };
+        /**
+         * MergePreviewOut
+         * @description A merge, done and taken back (#363): both contacts before, the survivor after.
+         *
+         *     ``result`` is what ``POST /contacts/{id}/merge`` would answer with right now:
+         *     the preview runs that merge in a savepoint and rolls it back. ``undoable``
+         *     is false: nothing takes a merge back.
+         */
+        MergePreviewOut: {
+            loser: components["schemas"]["ContactDetail"];
+            moves: components["schemas"]["MergeMovesOut"];
+            result: components["schemas"]["ContactDetail"];
+            survivor: components["schemas"]["ContactDetail"];
+            /**
+             * Undoable
+             * @default false
+             * @constant
+             */
+            undoable: false;
+        };
+        /**
          * MergedConflict
          * @description The ``409`` body of a write to a merged-away contact: where it went.
          */
@@ -5294,6 +5395,16 @@ export interface components {
             requirement: string;
             /** Step Positions */
             step_positions?: number[];
+        };
+        /**
+         * MovedOut
+         * @description The loser's rows of one kind: how many move, how many the survivor already holds.
+         */
+        MovedOut: {
+            /** Dropped */
+            dropped: number;
+            /** Moved */
+            moved: number;
         };
         /** Neq */
         Neq: {
@@ -5489,6 +5600,34 @@ export interface components {
             first_name: string | null;
             /** Last Name */
             last_name: string | null;
+        };
+        /**
+         * PossibleDuplicateOut
+         * @description Another contact that may be the same person (#363). A hint; nothing merges on its own.
+         *
+         *     ``matched_by``, strongest first: ``email`` (an address on both), ``phone`` (a
+         *     number on both), ``slug`` (the same name under a LinkedIn slug changed before
+         *     any sync), ``name`` (the same first or preferred name and last name).
+         */
+        PossibleDuplicateOut: {
+            /** Contact Id */
+            contact_id: number;
+            /** Current Company */
+            current_company: string | null;
+            /** Current Title */
+            current_title: string | null;
+            /** First Name */
+            first_name: string;
+            /** Last Name */
+            last_name: string;
+            /** Li Public Id */
+            li_public_id: string | null;
+            /** Matched By */
+            matched_by: ("name" | "email" | "phone" | "slug")[];
+            /** Needs Review */
+            needs_review: boolean;
+            /** Preferred Name */
+            preferred_name: string;
         };
         /**
          * PostureOut
@@ -8483,6 +8622,44 @@ export interface operations {
             };
         };
     };
+    list_possible_duplicates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PossibleDuplicateOut"][];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     add_contact_email: {
         parameters: {
             query?: never;
@@ -8880,6 +9057,55 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ContactDetail"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The two cannot be merged */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_merge_contacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MergeIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MergePreviewOut"];
                 };
             };
             /** @description No such contact */

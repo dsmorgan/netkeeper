@@ -9,8 +9,11 @@
  * skip still work on the card, and undo never reaches a confirm or a reject.
  */
 
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
+
+import { contactDetail } from '@/test/contacts-fixtures'
+import { jsonResponse } from '@/test/fetch'
 
 import { createFakeBackend } from './test-backend'
 import { currentName, renderTriage } from './test-render'
@@ -94,5 +97,115 @@ describe('a contact read off a connections-page card', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/locked/)
     expect(screen.getByRole('region', { name: 'Needs review' })).toBeInTheDocument()
     expect(backend.byId(1).needs_review_at).not.toBeNull()
+  })
+})
+
+describe('a possible duplicate of a card contact (#363)', () => {
+  const kept = contactDetail({
+    id: 2,
+    first_name: 'Ada',
+    last_name: 'Ventura',
+    preferred_name: 'Ada',
+  })
+  const moves = {
+    emails: { moved: 0, dropped: 0 },
+    phones: { moved: 0, dropped: 0 },
+    links: { moved: 0, dropped: 0 },
+    positions: { moved: 0, dropped: 0 },
+    snapshots: 0,
+    interactions: 0,
+    tags_added: [],
+    tags_removed: [],
+    lists_added: [],
+    enrollments_moved: 0,
+    enrollments_combined: 0,
+    messages_moved: 0,
+    messages_discarded: 0,
+    history_rows: 0,
+  }
+
+  function renderWithDuplicate() {
+    const backend = backendWithACard()
+    const posted: string[] = []
+    const utils = renderTriage({
+      backend,
+      intercept: async (request, next) => {
+        const { pathname } = new URL(request.url)
+        if (pathname === '/api/v1/contacts/1/duplicates') {
+          return jsonResponse([
+            {
+              contact_id: 2,
+              first_name: 'Ada',
+              last_name: 'Ventura',
+              preferred_name: 'Ada',
+              current_title: null,
+              current_company: null,
+              li_public_id: 'ada-ventura',
+              needs_review: false,
+              matched_by: ['name'],
+            },
+          ])
+        }
+        if (pathname === '/api/v1/contacts/2/merge/preview') {
+          posted.push(pathname)
+          const loser = contactDetail({ id: 1, needs_review_at: '2026-09-24T12:00:00Z' })
+          return jsonResponse({ survivor: kept, loser, result: kept, moves, undoable: false })
+        }
+        if (pathname === '/api/v1/contacts/2/merge') {
+          posted.push(pathname)
+          backend.mergeAway(1, 2)
+          return jsonResponse(kept)
+        }
+        return next(request)
+      },
+    })
+    return { ...utils, posted }
+  }
+
+  it('shows the hint in the review band and merges only after the confirmation', async () => {
+    const { backend, posted } = renderWithDuplicate()
+    await currentName()
+
+    const band = screen.getByRole('region', { name: 'Needs review' })
+    const hint = await within(band).findByRole('list', { name: 'Possible duplicates' })
+    expect(hint).toHaveTextContent('Possible duplicate of Ada Ventura')
+    // The other contact opens in a new tab, so the run keeps its place.
+    expect(within(hint).getByRole('link', { name: 'Ada Ventura' })).toHaveAttribute(
+      'target',
+      '_blank',
+    )
+
+    fireEvent.click(within(hint).getByRole('button', { name: 'Merge with Ada Ventura' }))
+    const panel = await screen.findByRole('region', { name: 'Merge contacts' })
+    await within(panel).findByRole('columnheader', { name: 'Stays: Ada Ventura' })
+
+    // While the panel is open, the keyboard map stands aside: no key decides the card.
+    fireEvent.keyDown(window, { key: 'm' })
+    expect(backend.countOf('/api/v1/triage/decisions')).toBe(0)
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Merge…' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent(/A merge can.t be undone/)
+    expect(posted).not.toContain('/api/v1/contacts/2/merge')
+
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Merge' }))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(screen.getByTestId('triage-notice')).toHaveTextContent(/Merged/))
+    expect(posted.filter((path) => path === '/api/v1/contacts/2/merge')).toHaveLength(1)
+    expect(screen.queryByRole('region', { name: 'Merge contacts' })).toBeNull()
+    // The card merged away no longer offers confirm or reject.
+    expect(screen.queryByRole('region', { name: 'Needs review' })).toBeNull()
+    expect(backend.byId(1).met).toBe('unknown')
+  })
+
+  it('shows no hint for an ordinary contact', async () => {
+    const backend = backendWithACard()
+    backend.diverge(1, { needs_review_at: null })
+    renderTriage({ backend })
+    await currentName()
+    expect(screen.queryByRole('list', { name: 'Possible duplicates' })).toBeNull()
+    expect(backend.seen.some((entry) => entry.path.endsWith('/duplicates'))).toBe(false)
   })
 })

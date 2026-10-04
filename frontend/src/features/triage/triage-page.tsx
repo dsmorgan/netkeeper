@@ -38,7 +38,10 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { displayName } from '@/features/contacts/format'
+import { MergePanel, type MergeTarget, type Survivor } from '@/features/contacts/merge-panel'
 import { NeedsReviewNotice } from '@/features/contacts/needs-review'
+import { PossibleDuplicates } from '@/features/contacts/possible-duplicates'
 
 import { ActionBar } from './action-bar'
 import { CardSteps } from './card-steps'
@@ -160,6 +163,12 @@ function AutomaticPass({
 export function TriagePage() {
   const [filter, setFilter] = useState<QueueFilter>('unknown')
   const [overlay, setOverlay] = useState<OpenEditorFor>(CLOSED)
+  /** The merge panel a possible-duplicate hint opened (#363), and for which contact. */
+  const [merging, setMerging] = useState<{
+    contactId: number
+    target: MergeTarget
+    survivor: Survivor
+  } | null>(null)
   const queue = useTriageQueue(filter)
   const client = useQueryClient()
   /** Anything that may have moved the suggestion's count re-runs its preview. */
@@ -232,9 +241,13 @@ export function TriagePage() {
     [previewAgain],
   )
 
-  useTriageKeys({ enabled: true, onAction })
-
   const card = queue.current
+  // Derived, like the editors below: a merge panel opened for one contact closes
+  // itself once the card moves on. While it is open the keyboard map stands
+  // aside, so a key pressed on its buttons or its confirmation never decides the
+  // contact behind it.
+  const mergingHere = merging !== null && merging.contactId === card?.contact.id ? merging : null
+  useTriageKeys({ enabled: mergingHere === null, onAction })
   // Derived rather than stored: an editor opened for a contact closes itself
   // the moment the card moves on, so a name typed for one person can never be
   // submitted against the next.
@@ -411,8 +424,37 @@ export function TriagePage() {
                         pending={false}
                         onConfirm={() => queue.review(card.contact.id, 'confirm')}
                         onReject={() => queue.review(card.contact.id, 'reject')}
+                        hint={
+                          <PossibleDuplicates
+                            contactId={card.contact.id}
+                            newTab
+                            onMerge={(match) =>
+                              setMerging({
+                                contactId: card.contact.id,
+                                target: { id: match.contact_id, name: displayName(match) },
+                                survivor: match.needs_review ? 'this' : 'other',
+                              })
+                            }
+                          />
+                        }
                       />
                     )}
+                  {mergingHere !== null && (
+                    <MergePanel
+                      key={`${mergingHere.contactId}-${mergingHere.target.id}`}
+                      contact={{
+                        id: card.contact.id,
+                        name: `${card.contact.preferred_name} ${card.contact.last_name}`.trim(),
+                      }}
+                      initialTarget={mergingHere.target}
+                      initialSurvivor={mergingHere.survivor}
+                      onClose={() => setMerging(null)}
+                      onMerged={(survivor, loserId) => {
+                        setMerging(null)
+                        queue.merged(survivor, loserId)
+                      }}
+                    />
+                  )}
                   <EvidencePanel card={card} />
                 </div>
               </div>
