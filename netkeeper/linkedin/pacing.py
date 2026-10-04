@@ -688,8 +688,9 @@ def plan_enrichment(
 #: Spec decision 2026-10-03: no plan whose delays add up to more than this many
 #: seconds is ever typed.
 MAX_TYPING_SECONDS: Final = 300.0
-#: Spec decision 2026-10-03: a body this many characters long or longer earns a
-#: warning. P4-11's (#377) lint raises it; :func:`typing_length_warning` is the rule.
+#: Spec decision 2026-10-03: a body longer than this many characters earns a
+#: warning; exactly this many is clean. P4-11's (#377) lint raises it;
+#: :func:`typing_length_warning` is the rule.
 TYPING_WARN_CHARS: Final = 1000
 #: The expected typing time (:func:`typing_expected_seconds`) above which P4-11's
 #: lint flags a body. Set with a margin under :data:`MAX_TYPING_SECONDS`, so a body
@@ -697,7 +698,9 @@ TYPING_WARN_CHARS: Final = 1000
 TYPING_LINT_SECONDS: Final = 240.0
 #: Whether a newline may be typed (as Shift+Enter). ``False`` until P4-06 (#374)
 #: shows that Shift+Enter never sends a LinkedIn message; until then a multi-line
-#: body is refused.
+#: body is refused. This is the single source of truth for the newline flag: P4-11's
+#: (#377) lint imports it rather than keeping its own, and P4-03 (#382) flips this
+#: one flag, here, when P4-06's finding allows it.
 SHIFT_ENTER_NEWLINES_ALLOWED: Final = False
 
 #: Every code point treated as a line break, the same set
@@ -829,11 +832,11 @@ def plan_duration(plan: TypingPlan) -> float:
 
 
 def typing_length_warning(text: str) -> bool:
-    """Whether ``text`` is long enough, :data:`TYPING_WARN_CHARS` or more, to warn about.
+    """Whether ``text`` is longer than :data:`TYPING_WARN_CHARS`, and so earns a warning.
 
     Counts code points, line breaks included.
     """
-    return len(text) >= TYPING_WARN_CHARS
+    return len(text) > TYPING_WARN_CHARS
 
 
 def _units(text: str) -> list[str]:
