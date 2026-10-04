@@ -447,6 +447,7 @@ class StepStatus:
     fired: int
     """Outbound messages of the step, whatever became of them."""
     sent: int
+    """Those that went out: ``sent``, or ``bounced`` after they were sent (#350)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,7 +492,7 @@ def campaign_status(
     ).tuples():
         if step_id is not None:
             outbound[step_id, False] += n
-            if status is MessageStatus.SENT:
+            if status in (MessageStatus.SENT, MessageStatus.BOUNCED):
                 outbound[step_id, True] += n
     step_rows = []
     for step in steps:

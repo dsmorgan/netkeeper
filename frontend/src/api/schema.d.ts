@@ -264,6 +264,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/campaigns/{campaign_id}/results": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Campaign Results
+         * @description Sends per local day, and replies, bounces and opt-outs per step, with the totals.
+         */
+        get: operations["get_campaign_results"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/campaigns/{campaign_id}/resume": {
         parameters: {
             query?: never;
@@ -3357,6 +3377,18 @@ export interface components {
             /** Steps */
             steps: components["schemas"]["StepOut"][];
         };
+        /** CampaignResultsOut */
+        CampaignResultsOut: {
+            /** Campaign Id */
+            campaign_id: number;
+            /** Sends Per Day */
+            sends_per_day: components["schemas"]["DaySendsOut"][];
+            /** Steps */
+            steps: components["schemas"]["StepResultsOut"][];
+            /** Timezone */
+            timezone: string;
+            totals: components["schemas"]["ResultTotalsOut"];
+        };
         /**
          * CampaignStatus
          * @description Where a campaign is in its life (spec 8.5, 11.8).
@@ -4021,6 +4053,16 @@ export interface components {
             detail: "count mismatch";
             /** Expected Count */
             expected_count: number;
+        };
+        /** DaySendsOut */
+        DaySendsOut: {
+            /**
+             * Date
+             * Format: date
+             */
+            date: string;
+            /** Sent */
+            sent: number;
         };
         /** DoNotSendIn */
         DoNotSendIn: {
@@ -5557,6 +5599,21 @@ export interface components {
              */
             op: "replied_in";
         };
+        /** ResultTotalsOut */
+        ResultTotalsOut: {
+            /** Bounced */
+            bounced: number;
+            /** Contacted */
+            contacted: number;
+            /** Opted Out */
+            opted_out: number;
+            /** Replied */
+            replied: number;
+            /** Reply Rate */
+            reply_rate: number | null;
+            /** Sent */
+            sent: number;
+        };
         /**
          * RevertFieldIn
          * @description The field to put back to its last synced value (spec 10.5, CP1 #28).
@@ -6067,6 +6124,21 @@ export interface components {
             template_name: string;
             /** Template Version */
             template_version: number;
+        };
+        /** StepResultsOut */
+        StepResultsOut: {
+            /** Bounced */
+            bounced: number;
+            /** Opted Out */
+            opted_out: number;
+            /** Position */
+            position: number;
+            /** Replied */
+            replied: number;
+            /** Sent */
+            sent: number;
+            /** Step Id */
+            step_id: number;
         };
         /**
          * StepReviewOut
@@ -7407,6 +7479,44 @@ export interface operations {
             };
             /** @description Refused in the campaign's state, or a name taken */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_campaign_results: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignResultsOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

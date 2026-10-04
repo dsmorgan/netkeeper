@@ -284,9 +284,11 @@ describe('campaign detail', () => {
     await renderApp('/campaigns/5')
 
     const stepRow = (await screen.findByRole('rowheader', { name: '1' })).closest('tr')
-    const cells = within(stepRow as HTMLElement).getAllByRole('cell')
-    // Fired, sent, and the timing editor's cell (#338).
-    expect(cells.slice(-3).map((c) => c.textContent)).toEqual(['2', '1', 'Timing'])
+    // Fired, sent, replied, bounced, opted out (#350), and the timing editor's cell (#338).
+    await waitFor(() => {
+      const cells = within(stepRow as HTMLElement).getAllByRole('cell')
+      expect(cells.slice(-6).map((c) => c.textContent)).toEqual(['2', '1', '0', '0', '0', 'Timing'])
+    })
     expect(screen.queryByRole('heading', { name: 'Review' })).toBeNull()
 
     const enrollment = (await screen.findByRole('link', { name: 'Tobias Marrowbone' })).closest(

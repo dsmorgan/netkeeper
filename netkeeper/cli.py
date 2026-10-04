@@ -77,6 +77,7 @@ from netkeeper.scoping import install_scope_guard
 from netkeeper.services import (
     budgets,
     campaign_engine,
+    campaign_results,
     campaign_review,
     enrich_plan,
     history_scan,
@@ -126,6 +127,7 @@ from netkeeper.services.simulate_run import DEFAULT_THROTTLES as DEFAULT_SIMULAT
 from netkeeper.services.simulate_run import InvalidSimulation, run_simulation
 from netkeeper.services.simulate_run import render as render_simulation
 from netkeeper.services.users import ensure_local_user
+from netkeeper.web.api.campaigns import results_out
 from netkeeper.web.app import create_app, openapi_json
 from netkeeper.worker import BrowserWorker, serve_app
 
@@ -2536,21 +2538,56 @@ def campaigns_list() -> None:
     typer.echo(_format_table(("ID", "NAME", "STATUS", "STEPS", "ENROLLMENTS"), rows), nl=False)
 
 
+def _rate(rate: float | None) -> str:
+    return "-" if rate is None else f"{rate:.0%}"
+
+
+def _results_lines(results: campaign_results.CampaignResults) -> list[str]:
+    """The totals, then the sends per local day, as `campaigns status` prints them."""
+    t = results.totals
+    lines = [
+        f"results: {t.sent} sent to {t.contacted}, {t.replied} replied"
+        f" (reply rate {_rate(t.reply_rate)}), {t.bounced} bounced, {t.opted_out} opted out"
+    ]
+    if not results.sends_per_day:
+        lines.append("sends per day: none yet")
+    else:
+        lines.append(f"sends per day ({results.timezone}):")
+        lines.extend(f"  {d.day.isoformat()}  {d.sent}" for d in results.sends_per_day)
+    return lines
+
+
 @campaigns_app.command("status")
 def campaigns_status(
     ctx: typer.Context,
     campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+    as_json: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Print the results as GET /campaigns/{id}/results answers them, and nothing else.",
+        ),
+    ] = False,
 ) -> None:
-    """Show one campaign: its steps, enrollments, next fire, and review (GET /campaigns/{id}).
+    """Show one campaign: its steps, enrollments, results, next fire, and review
+    (GET /campaigns/{id} and GET /campaigns/{id}/results).
 
-    For a draft or reviewing campaign it lists what activation still needs.
+    The results are the sends per day in your time zone, and the replies, bounces and
+    opt-outs per step. For a draft or reviewing campaign it lists what activation
+    still needs.
     """
     settings = _load_settings_or_exit(ctx.ensure_object(CliState))
     with _campaign_db() as factory, session_scope(factory) as session, _campaign_errors():
         user = _local_user_or_exit(session)
+        now = datetime.now(UTC)
+        results = campaign_results.campaign_results(session, user, campaign_id, now=now)
+        if as_json:
+            typer.echo(results_out(results).model_dump_json(indent=2))
+            return
         detail = campaign_service.campaign_status(
-            session, user, campaign_id, me=me_fields(settings.me), now=datetime.now(UTC)
+            session, user, campaign_id, me=me_fields(settings.me), now=now
         )
+        by_step = {r.step_id: r for r in results.steps}
         c = detail.campaign
         lines = [
             f"campaign {c.id}: {c.name}",
@@ -2579,12 +2616,15 @@ def campaigns_status(
                 f"{s.template_name} v{s.template_version}",
                 str(s.fired),
                 str(s.sent),
+                str(by_step[s.step.id].replied),
+                str(by_step[s.step.id].bounced),
+                str(by_step[s.step.id].opted_out),
             )
             for s in detail.steps
         ]
         missing = detail.missing
         status = c.status
-    typer.echo("\n".join(lines))
+    typer.echo("\n".join([*lines, *_results_lines(results)]))
     typer.echo(
         _format_table(
             (
@@ -2597,6 +2637,9 @@ def campaigns_status(
                 "TEMPLATE",
                 "FIRED",
                 "SENT",
+                "REPLIED",
+                "BOUNCED",
+                "OPTED OUT",
             ),
             steps,
         ),

@@ -17,12 +17,16 @@ activates a campaign. ``netkeeper campaigns`` mirrors each route.
   its first send.
 - ``PUT /campaigns/{id}/steps/{step_id}/schedule`` sets a step's day offset and
   time of day, while the campaign is not over.
+- ``GET /campaigns/{id}/results`` is what the campaign has done (#350): sends per
+  local day, and replies, bounces and opt-outs per step, with the totals
+  (:mod:`netkeeper.services.campaign_results` says what counts).
 
 A campaign, template, mailbox or list that is not the user's answers ``404``.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -46,6 +50,7 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.models.base import utcnow
+from netkeeper.services import campaign_results
 from netkeeper.services import campaigns as service
 from netkeeper.services.campaign_engine import hours_for
 from netkeeper.web.api.campaign_review import MissingOut
@@ -151,7 +156,9 @@ class StepOut(BaseModel):
     template_name: str
     template_version: int
     fired: int
+    """Outbound messages of the step, whatever became of them."""
     sent: int
+    """Those that went out: ``sent``, or ``bounced`` after they were sent."""
 
 
 class CampaignOut(BaseModel):
@@ -175,6 +182,74 @@ class CampaignOut(BaseModel):
     next_action_at: datetime | None
     missing: list[MissingOut]
     """What the review gate still needs, for a ``draft`` or ``reviewing`` campaign."""
+
+
+class DaySendsOut(BaseModel):
+    date: dt.date
+    """A local calendar day, in ``CampaignResultsOut.timezone``."""
+    sent: int
+
+
+class StepResultsOut(BaseModel):
+    step_id: int
+    position: int
+    sent: int
+    """Messages of the step that went out, ``bounced`` ones included."""
+    replied: int
+    """Enrollments whose first reply came after this step, before the next one sent."""
+    bounced: int
+    opted_out: int
+
+
+class ResultTotalsOut(BaseModel):
+    sent: int
+    contacted: int
+    """Enrollments with at least one send: the reply rate's denominator."""
+    replied: int
+    reply_rate: float | None
+    """``replied / contacted``, from 0 to 1; None while nobody has been sent anything."""
+    bounced: int
+    opted_out: int
+
+
+class CampaignResultsOut(BaseModel):
+    campaign_id: int
+    timezone: str
+    """The time zone ``sends_per_day`` counts days in: yours."""
+    sends_per_day: list[DaySendsOut]
+    """From the first send's day to today, a zero for a day with none; empty before
+    the first send."""
+    steps: list[StepResultsOut]
+    totals: ResultTotalsOut
+
+
+def results_out(results: campaign_results.CampaignResults) -> CampaignResultsOut:
+    """The API's answer for ``results``; ``netkeeper campaigns status --json`` prints it too."""
+    t = results.totals
+    return CampaignResultsOut(
+        campaign_id=results.campaign_id,
+        timezone=results.timezone,
+        sends_per_day=[DaySendsOut(date=d.day, sent=d.sent) for d in results.sends_per_day],
+        steps=[
+            StepResultsOut(
+                step_id=s.step_id,
+                position=s.position,
+                sent=s.sent,
+                replied=s.replied,
+                bounced=s.bounced,
+                opted_out=s.opted_out,
+            )
+            for s in results.steps
+        ],
+        totals=ResultTotalsOut(
+            sent=t.sent,
+            contacted=t.contacted,
+            replied=t.replied,
+            reply_rate=t.reply_rate,
+            bounced=t.bounced,
+            opted_out=t.opted_out,
+        ),
+    )
 
 
 class StartOptionsOut(BaseModel):
@@ -355,6 +430,20 @@ def get_campaign(
     """One campaign: steps and their progress, enrollments, next fire, what review misses."""
     with translate_errors():
         return _detail(session, user, campaign_id, request)
+
+
+@router.get(
+    "/campaigns/{campaign_id}/results",
+    operation_id="get_campaign_results",
+    responses=NOT_FOUND,
+)
+def get_campaign_results(
+    campaign_id: int, session: SessionDep, user: CurrentUser
+) -> CampaignResultsOut:
+    """Sends per local day, and replies, bounces and opt-outs per step, with the totals."""
+    with translate_errors():
+        results = campaign_results.campaign_results(session, user, campaign_id, now=utcnow())
+    return results_out(results)
 
 
 @router.get(

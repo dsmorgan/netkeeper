@@ -140,3 +140,21 @@ export function timingText(step: {
   const days = `${step.delay_days} ${step.delay_days === 1 ? 'day' : 'days'} ${after}`
   return time === null ? `${days}, next suggested slot` : `${days}, at ${time}`
 }
+
+/** A reply rate from 0 to 1 as a whole percentage; a dash while nothing was sent. */
+export function formatRate(rate: number | null | undefined): string {
+  if (rate === null || rate === undefined) return '—'
+  return `${Math.round(rate * 100)}%`
+}
+
+/**
+ * A local calendar day, `YYYY-MM-DD`, as "Jun 3". Read as a date, not a time, so it
+ * is the same day in every time zone the reader is in.
+ */
+export function formatDay(day: string): string {
+  const [year, month, date] = day.split('-').map(Number)
+  if (year === undefined || month === undefined || date === undefined) return day
+  const when = new Date(year, month - 1, date)
+  if (Number.isNaN(when.getTime())) return day
+  return when.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}

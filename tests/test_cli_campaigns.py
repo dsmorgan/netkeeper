@@ -49,10 +49,11 @@ from netkeeper.models import (
     UserKind,
 )
 from netkeeper.scoping import get_scoped, install_scope_guard, scoped
-from netkeeper.services import campaign_engine, campaign_review, sending_hours
+from netkeeper.services import campaign_engine, campaign_results, campaign_review, sending_hours
 from netkeeper.services import campaigns as campaign_service
 from netkeeper.services.settings_kv import set_setting
 from netkeeper.services.users import ensure_local_user
+from netkeeper.web.api.campaigns import CampaignResultsOut, results_out
 
 runner = CliRunner()
 BODY = "Hi {{ first_name }}, it has been a while."
@@ -823,3 +824,59 @@ def test_simulate_warns_when_the_campaign_is_partway_through(world: World) -> No
     _ok("campaigns", "enroll", str(fresh))
     quiet = _ok("simulate", "--campaign", str(fresh), "--start", "2026-09-28", "--days", "2")
     assert "warning:" not in quiet
+
+
+# --- results (#350) -----------------------------------------------------------------
+
+
+def _campaign_with_results(world: World) -> int:
+    """Two steps sent to one contact, who replied after step 2; step 1 sent to another."""
+    with session_scope(world.factory, write=True) as session:
+        user = _local(session)
+        campaign = factories.make_campaign(session, user, channels=(TemplateChannel.EMAIL,) * 2)
+        at = datetime.now(UTC) - timedelta(days=3)
+        replied = factories.make_enrollment(
+            session,
+            campaign,
+            factories.make_contact(session, user),
+            replied_at=at + timedelta(days=2),
+        )
+        factories.make_message(session, replied, position=1, sent_at=at)
+        factories.make_message(session, replied, position=2, sent_at=at + timedelta(days=1))
+        quiet = factories.make_enrollment(session, campaign, factories.make_contact(session, user))
+        factories.make_message(session, quiet, position=1, sent_at=at)
+        return campaign.id
+
+
+def test_status_shows_the_results(world: World) -> None:
+    campaign_id = _campaign_with_results(world)
+
+    output = _ok("campaigns", "status", str(campaign_id))
+
+    assert "results: 3 sent to 2, 1 replied (reply rate 50%), 0 bounced, 0 opted out" in output
+    assert "REPLIED" in output and "BOUNCED" in output and "OPTED OUT" in output
+    assert re.search(r"^\s*2\s.*\s1\s+0\s+0\s*$", output, re.MULTILINE), output
+    assert "sends per day (" in output
+    assert len(re.findall(r"^  \d{4}-\d{2}-\d{2}  \d+$", output, re.MULTILINE)) >= 4
+
+
+def test_status_json_matches_the_api(world: World) -> None:
+    campaign_id = _campaign_with_results(world)
+
+    printed = CampaignResultsOut.model_validate_json(
+        _ok("campaigns", "status", str(campaign_id), "--json")
+    )
+
+    with session_scope(world.factory) as session:
+        expected = results_out(
+            campaign_results.campaign_results(
+                session, _local(session), campaign_id, now=datetime.now(UTC)
+            )
+        )
+    assert printed == expected
+    assert [s.replied for s in printed.steps] == [0, 1]
+    assert printed.totals.sent == 3
+
+    missing = _run("campaigns", "status", "999", "--json")
+    assert missing.exit_code == 1
+    assert "error: no campaign 999" in missing.output
