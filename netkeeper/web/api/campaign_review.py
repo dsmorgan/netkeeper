@@ -19,9 +19,9 @@ The flow, for the campaign builder (P3-11):
    requirement not met, unless each is recorded and current.
 
 ``GET .../review`` answers the same ``missing`` list at any time, and the guard
-summary: one line of who will send and who is skipped, which gates nothing (#346).
+summary: one line of who will start and who is skipped, which gates nothing (#346).
 ``GET .../review/guards`` answers its details: each skipped contact with every
-reason, and how many of those who will send the old tool emailed (#65). A campaign,
+reason, and how many of those who will start the old tool emailed (#65). A campaign,
 step or enrollment that is not the user's answers ``404``. Every ``POST``
 needs the CSRF header. The test send holds no session while it talks to Gmail.
 """
@@ -123,10 +123,10 @@ class ReviewOut(BaseModel):
     content_fingerprint: str
     audience_fingerprint: str
     guard_summary: str
-    """Who will send and who the guards skip, in one line. Informational: it gates
+    """Who will start and who the guards skip, in one line. Informational: it gates
     nothing, and the guards apply again when each step fires (#346)."""
     prior_contact_note: str | None
-    """How many of those who will send the old tool emailed, and when it last did (#65)."""
+    """How many of those who will start the old tool emailed, and when it last did (#65)."""
     missing: list[MissingOut]
 
 
@@ -141,10 +141,15 @@ class GuardsOut(BaseModel):
     """The guard summary's details, on demand (#346)."""
 
     summary: str
-    will_send: int
+    will_start: int
+    """Pending enrollments no guard skips for the first step's channel. Each later step
+    is checked again when it fires, on its own channel."""
     not_enrolled: int
     """Contacts of the audience's source no guard skips, but not enrolled."""
     skipped: list[SkippedContactOut]
+    """The first ``limit`` skipped contacts, by contact id."""
+    skipped_total: int
+    """Every skipped contact: more than ``skipped`` holds when the limit cut it short."""
     prior_contact_note: str | None
 
 
@@ -294,14 +299,14 @@ def _step_review_out(r: service.StepReview) -> StepReviewOut:
 def _review(session: Session, user: User, campaign_id: int, me: dict[str, str]) -> ReviewOut:
     now = utcnow()
     campaign = service.get_campaign(session, user, campaign_id)
-    guards = service.guard_report(session, user, campaign, now=now)
+    summary, note = service.guard_summary_and_note(session, user, campaign, now=now)
     return ReviewOut(
         campaign_id=campaign.id,
         status=campaign.status,
         content_fingerprint=service.content_fingerprint(session, user, campaign, me),
         audience_fingerprint=service.audience_fingerprint(session, user, campaign),
-        guard_summary=guards.summary,
-        prior_contact_note=guards.prior_contact,
+        guard_summary=summary,
+        prior_contact_note=note,
         missing=_missing_out(service.missing(session, user, campaign, me=me, now=now)),
     )
 
@@ -426,19 +431,26 @@ def lint_campaign(
 
 
 @router.get("/campaigns/{campaign_id}/review/guards", responses=NOT_FOUND)
-def get_guards(campaign_id: int, session: SessionDep, user: CurrentUser) -> GuardsOut:
-    """The guard summary's details: each skipped contact, with every reason (#346)."""
+def get_guards(
+    campaign_id: int,
+    session: SessionDep,
+    user: CurrentUser,
+    limit: Annotated[int, Query(ge=1, le=service.GUARD_DETAILS_MAX)] = service.GUARD_DETAILS_MAX,
+) -> GuardsOut:
+    """The guard summary's details: the first ``limit`` skipped contacts, each with every
+    reason (#346)."""
     with translate_errors():
         campaign = service.get_campaign(session, user, campaign_id)
-        report = service.guard_report(session, user, campaign, now=utcnow())
+        report = service.guard_report(session, user, campaign, now=utcnow(), limit=limit)
     return GuardsOut(
         summary=report.summary,
-        will_send=report.will_send,
+        will_start=report.will_start,
         not_enrolled=report.not_enrolled,
         skipped=[
             SkippedContactOut(contact_id=c.contact_id, name=c.name, reasons=list(c.reasons))
             for c in report.skipped
         ],
+        skipped_total=report.skipped_total,
         prior_contact_note=report.prior_contact,
     )
 

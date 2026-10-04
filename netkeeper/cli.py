@@ -2982,7 +2982,7 @@ def campaigns_activate(
     recorded and current: every step approved (each message of a step that uses
     {{ personal_line }}), a test send of each email step, and a clean lint.
 
-    It prints the guard summary first: who will send, and who the guards skip and
+    It prints the guard summary first: who will start, and who the guards skip and
     why. The summary gates nothing; the guards apply again when each step fires.
     `netkeeper campaigns guards` lists each skipped contact.
 
@@ -3003,7 +3003,7 @@ def campaigns_activate(
             timezone = user.timezone
             now = datetime.now(UTC)
             gaps = campaign_review.missing(session, user, campaign, me=me, now=now)
-            guards = campaign_review.guard_report(session, user, campaign, now=now)
+            guards, note = campaign_review.guard_summary_and_note(session, user, campaign, now=now)
             chosen = _start_or_exit(start, now_flag, timezone=timezone, now=now)
             starts_at = campaign_service.resolve_start(
                 user, settings=settings, now=now, starts_at=chosen
@@ -3017,9 +3017,9 @@ def campaigns_activate(
             )
         if gaps:
             _refuse_activation(campaign_id, gaps)
-        typer.echo(f"guards: {guards.summary}")
-        if guards.prior_contact is not None:
-            typer.echo(f"note: {guards.prior_contact}")
+        typer.echo(f"guards: {guards}")
+        if note is not None:
+            typer.echo(f"note: {note}")
         # A --start already past starts the campaign now, as activation records it.
         when = "now" if now_flag or starts_at <= now else _local_start(starts_at, timezone)
         typer.echo(f"starts: {when}")
@@ -3061,6 +3061,15 @@ def campaigns_activate(
 @campaigns_app.command("guards")
 def campaigns_guards(
     campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            min=1,
+            max=campaign_review.GUARD_DETAILS_MAX,
+            help="List at most this many skipped contacts.",
+        ),
+    ] = campaign_review.GUARD_DETAILS_MAX,
 ) -> None:
     """Show the guard summary and each contact it skips, with every reason
     (GET /campaigns/{id}/review/guards).
@@ -3071,7 +3080,9 @@ def campaigns_guards(
     with _campaign_db() as factory, session_scope(factory) as session, _campaign_errors():
         user = _local_user_or_exit(session)
         campaign = campaign_review.get_campaign(session, user, campaign_id)
-        report = campaign_review.guard_report(session, user, campaign, now=datetime.now(UTC))
+        report = campaign_review.guard_report(
+            session, user, campaign, now=datetime.now(UTC), limit=limit
+        )
     typer.echo(f"guards: {report.summary}")
     if report.prior_contact is not None:
         typer.echo(f"note: {report.prior_contact}")
@@ -3082,6 +3093,10 @@ def campaigns_guards(
                 [(str(c.contact_id), c.name or "-", "; ".join(c.reasons)) for c in report.skipped],
             ),
             nl=False,
+        )
+    if report.skipped_total > len(report.skipped):
+        typer.echo(
+            f"showing the first {len(report.skipped)} of {report.skipped_total} skipped contacts"
         )
 
 

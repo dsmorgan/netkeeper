@@ -7,7 +7,7 @@
  * messages (a step whose template uses `{{ personal_line }}` has each message
  * approved on its own instead), lint, a test per email step to your own
  * mailbox (a draft in your Drafts while Gmail is armed for drafts, a message sent
- * to you once it is armed to send). The guard summary is one line of who will send
+ * to you once it is armed to send). The guard summary is one line of who will start
  * and who is skipped, with each skipped contact on demand; it gates nothing, since the
  * guards apply again when each step fires (#346). Activation asks first, with the
  * scheduled start (#338), and a `409` shows what is still missing.
@@ -599,14 +599,22 @@ function GuardsSection({
         ) : details.data.skipped.length === 0 ? (
           <p className="text-sm text-muted-foreground">Nobody is skipped.</p>
         ) : (
-          <ul aria-label="Skipped contacts" className="flex flex-col gap-1 text-sm">
-            {details.data.skipped.map((c) => (
-              <li key={c.contact_id}>
-                <span className="font-medium">{c.name || `Contact ${c.contact_id}`}</span>
-                <span className="text-muted-foreground">: {c.reasons.join(', ')}</span>
-              </li>
-            ))}
-          </ul>
+          <>
+            <ul aria-label="Skipped contacts" className="flex flex-col gap-1 text-sm">
+              {details.data.skipped.map((c) => (
+                <li key={c.contact_id}>
+                  <span className="font-medium">{c.name || `Contact ${c.contact_id}`}</span>
+                  <span className="text-muted-foreground">: {c.reasons.join(', ')}</span>
+                </li>
+              ))}
+            </ul>
+            {details.data.skipped_total > details.data.skipped.length && (
+              <p className="text-sm text-muted-foreground">
+                Showing the first {details.data.skipped.length} of {details.data.skipped_total}{' '}
+                skipped contacts.
+              </p>
+            )}
+          </>
         ))}
     </Section>
   )

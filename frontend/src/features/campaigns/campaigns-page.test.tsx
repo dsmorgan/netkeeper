@@ -203,7 +203,7 @@ describe('campaign detail', () => {
               excluded: 1,
               removed: 0,
               pending: 2,
-              summary: '2 will send, 1 skipped (1 do-not-contact)',
+              summary: '2 will start, 1 skipped (1 do-not-contact)',
             }),
         },
         calls,
@@ -214,7 +214,7 @@ describe('campaign detail', () => {
     expect(await screen.findByText(/From the list Old colleagues/)).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'Enroll the audience' }))
 
-    const outcome = await screen.findByText('2 will send, 1 skipped (1 do-not-contact)', {
+    const outcome = await screen.findByText('2 will start, 1 skipped (1 do-not-contact)', {
       selector: 'p',
     })
     expect(outcome).toBeVisible()
@@ -237,7 +237,7 @@ describe('campaign detail', () => {
               excluded: 0,
               removed: 2,
               pending: 5,
-              summary: '5 will send, none skipped',
+              summary: '5 will start, none skipped',
             }),
         },
         calls,

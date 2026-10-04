@@ -60,6 +60,7 @@ REQUIREMENTS = ("step_approvals", "test_sends", "lint")
 def test_the_step_review_limits_are_pinned() -> None:
     assert (campaign_review.STEP_PAGE, campaign_review.STEP_PAGE_MAX) == (20, 50)
     assert campaign_review.APPROVE_MAX == 50
+    assert campaign_review.GUARD_DETAILS_MAX == 500
 
 
 @dataclass
@@ -462,8 +463,8 @@ async def test_a_contact_a_guard_excludes_after_the_review_does_not_block_activa
         contact.do_not_contact = True
     after = await _review(client, s)
     assert (before["guard_summary"], after["guard_summary"]) == (
-        "12 will send, none skipped",
-        "11 will send, 1 skipped (1 do-not-contact)",
+        "12 will start, none skipped",
+        "11 will start, 1 skipped (1 do-not-contact)",
     )
     assert _missing(after) == set()
     assert (await client.post(f"{s.base}/activate", headers=CSRF)).status_code == 200
@@ -496,21 +497,29 @@ async def test_the_guard_details_list_each_skipped_contact_with_every_reason(
             for e in s.enrollment_ids[:2]
         )
     details = await _ok(await client.get(f"{s.base}/review/guards"))
-    summary = "2 will send, 2 skipped (1 do-not-contact, 1 no email)"
+    summary = "2 will start, 2 skipped (1 do-not-contact, 1 no email)"
     assert details["summary"] == summary == (await _review(client, s))["guard_summary"]
-    assert (details["will_send"], details["not_enrolled"]) == (2, 0)
+    assert (details["will_start"], details["not_enrolled"]) == (2, 0)
     assert [(c["contact_id"], c["reasons"]) for c in details["skipped"]] == [
         (first, ["do-not-contact", "no email"]),  # every reason, not only the counted one
         (second, ["no email"]),
     ]
     assert all(c["name"] for c in details["skipped"])
+    assert details["skipped_total"] == 2
+
+    first_only = await _ok(await client.get(f"{s.base}/review/guards", params={"limit": 1}))
+    assert [c["contact_id"] for c in first_only["skipped"]] == [first]
+    assert (first_only["skipped_total"], first_only["summary"]) == (2, summary)
+    for bad in (0, 501):
+        too_many = await client.get(f"{s.base}/review/guards", params={"limit": bad})
+        assert too_many.status_code == 422
     assert details["prior_contact_note"] is None
 
 
 async def test_the_review_notes_who_the_old_tool_emailed(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
-    """#65: informational, over the contacts that will send, and gating nothing."""
+    """#65: informational, over the contacts that will start, and gating nothing."""
     s = _build(running_app, people=3)
     _block(s, s.enrollment_ids[2], "do_not_contact")
     with session_scope(s.factory, write=True) as session:
@@ -545,8 +554,8 @@ async def test_a_source_contact_no_guard_skips_but_not_enrolled_is_counted_apart
         list_service.add_members(session, user, source.id, members)
         campaign.source_list_id = source.id
     details = await _ok(await client.get(f"{s.base}/review/guards"))
-    assert details["summary"] == "2 will send, none skipped, 1 not enrolled"
-    assert (details["will_send"], details["not_enrolled"], details["skipped"]) == (2, 1, [])
+    assert details["summary"] == "2 will start, none skipped, 1 not enrolled"
+    assert (details["will_start"], details["not_enrolled"], details["skipped"]) == (2, 1, [])
 
 
 async def test_a_template_edited_after_the_review_was_shown_refuses_the_approval(

@@ -14,7 +14,7 @@ or ``None``. :func:`check_contact` runs them all and returns a :class:`Verdict`.
 reads the contacts and their history in a few scoped queries, and never
 writes. :func:`check_enrollment` and :func:`check_step` put the two together
 for the two moments spec 11.9 names. :func:`skip_summary` turns a set of
-verdicts into the review screen's "8 will send, 2 skipped (...)" line
+verdicts into the review screen's "8 will start, 2 skipped (...)" line
 (spec 11.8; #346).
 
 The channel's own health (a mailbox under its cap, a browser under its budget)
@@ -43,7 +43,7 @@ from __future__ import annotations
 import enum
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Final
 
@@ -473,34 +473,36 @@ def skip_summary(
     contacted_within_days: int,
     enrolled: Collection[int] | None = None,
 ) -> str:
-    """The review screen's line: ``"8 will send, 2 skipped (1 no email, 1 do-not-contact)"``.
+    """The review screen's line: ``"8 will start, 2 skipped (1 no email, 1 do-not-contact)"``.
 
     Generated from the verdicts, never written by hand (spec 11.8; #346). A contact
-    no guard excludes will send; with ``enrolled`` given, only if it is one of those
-    contacts, and the others are counted as ``not enrolled``. Each skipped contact is
+    no guard excludes will start the campaign: the verdicts are for its first step's
+    channel, and each later step is checked again when it fires, on its own channel.
+    With ``enrolled`` given, only one of those contacts will start, and the others are
+    counted as ``not enrolled``. Each skipped contact is
     counted once, under :attr:`Verdict.reason`, so the parts add up to the number
     skipped. Parts go largest first, and in :data:`REASON_ORDER` on a tie. The line
     is informational: it gates nothing, and the guards apply again at every send.
     """
     counts: Counter[Reason] = Counter()
-    will_send = not_enrolled = 0
+    will_start = not_enrolled = 0
     for verdict in verdicts:
         if verdict.reason is not None:
             counts[verdict.reason] += 1
         elif enrolled is None or verdict.contact_id in enrolled:
-            will_send += 1
+            will_start += 1
         else:
             not_enrolled += 1
     skipped = sum(counts.values())
     if not skipped:
-        line = f"{will_send} will send, none skipped"
+        line = f"{will_start} will start, none skipped"
     else:
         ordered = sorted(counts, key=lambda r: (-counts[r], REASON_ORDER.index(r)))
         parts = ", ".join(
             f"{counts[r]} {reason_label(r, contacted_within_days=contacted_within_days)}"
             for r in ordered
         )
-        line = f"{will_send} will send, {skipped} skipped ({parts})"
+        line = f"{will_start} will start, {skipped} skipped ({parts})"
     return f"{line}, {not_enrolled} not enrolled" if not_enrolled else line
 
 
@@ -590,6 +592,46 @@ def load_facts(
     return facts
 
 
+def load_pending_facts(
+    session: Session, user: User, pending: Sequence[tuple[int, int]], *, campaign_id: int
+) -> dict[int, ContactFacts]:
+    """The facts for a campaign's pending enrollments, ``(enrollment_id, contact_id)``
+    pairs, keyed by contact id, as :func:`check_step` reads them when each one's first
+    step fires (#346 review): a duplicate address, or another campaign, counts only
+    for an enrollment older than this one. :func:`load_facts` at enrollment time
+    would count every enrollment, so two pending enrollments sharing an address would
+    both look excluded while the engine sends to the older one.
+
+    The other facts are the same either way: a pending enrollment has sent nothing,
+    so there are no messages of its own for recent contact to ignore. Read in a few
+    queries for every enrollment, not one :func:`load_facts` each. Reads only.
+    """
+    facts = load_facts(session, user, [c for _, c in pending], campaign_id=campaign_id)
+    sendable = {c: f.sendable_email for c, f in facts.items() if f.sendable_email is not None}
+    holders = _address_holders(session, user, sendable, campaign_id) if sendable else []
+    others = _other_enrollments(session, user, sorted(facts), campaign_id) if facts else []
+    out: dict[int, ContactFacts] = {}
+    for enrollment_id, contact_id in pending:
+        found = facts.get(contact_id)
+        if found is None:
+            continue
+        address = sendable.get(contact_id)
+        out[contact_id] = replace(
+            found,
+            duplicate_address=address is not None
+            and any(
+                held == address and holder != contact_id and held_by < enrollment_id
+                for held, holder, held_by in holders
+            ),
+            other_campaigns=frozenset(
+                other
+                for held_by, holder, other in others
+                if holder == contact_id and held_by < enrollment_id
+            ),
+        )
+    return out
+
+
 def _listed(
     contact: Contact, sendable: str | None, listed: Mapping[str, DoNotSendReason]
 ) -> DoNotSendReason | None:
@@ -638,9 +680,26 @@ def _duplicate_addresses(
                 found.add(contact_id)
     if not sendable or campaign_id is None:
         return found
+    holders: dict[str, set[int]] = {}
+    for address, holder, held_by in _address_holders(session, user, sendable, campaign_id):
+        if enrollment_id is None or held_by < enrollment_id:
+            holders.setdefault(address, set()).add(holder)
+    found.update(
+        contact_id
+        for contact_id, address in sendable.items()
+        if holders.get(address, set()) - {contact_id}
+    )
+    return found
+
+
+def _address_holders(
+    session: Session, user: User, sendable: Mapping[int, str], campaign_id: int
+) -> list[tuple[str, int, int]]:
+    """``(address, contact_id, enrollment_id)`` for every enrollment in the campaign whose
+    contact, not merged away, holds one of the ``sendable`` addresses."""
     statement = (
         scoped(user, Enrollment)
-        .with_only_columns(ContactEmail.email, Enrollment.contact_id)
+        .with_only_columns(ContactEmail.email, Enrollment.contact_id, Enrollment.id)
         .join(Contact, Contact.id == Enrollment.contact_id)
         .join(ContactEmail, ContactEmail.contact_id == Contact.id)
         .where(
@@ -651,17 +710,7 @@ def _duplicate_addresses(
             ContactEmail.email.in_(sorted(set(sendable.values()))),
         )
     )
-    if enrollment_id is not None:
-        statement = statement.where(Enrollment.id < enrollment_id)
-    holders: dict[str, set[int]] = {}
-    for address, holder in session.execute(statement).tuples():
-        holders.setdefault(address, set()).add(holder)
-    found.update(
-        contact_id
-        for contact_id, address in sendable.items()
-        if holders.get(address, set()) - {contact_id}
-    )
-    return found
+    return list(session.execute(statement).tuples())
 
 
 def _other_campaigns(
@@ -671,8 +720,21 @@ def _other_campaigns(
     campaign_id: int | None,
     enrollment_id: int | None,
 ) -> dict[int, set[int]]:
+    found: dict[int, set[int]] = {}
+    for held_by, contact_id, other in _other_enrollments(session, user, ids, campaign_id):
+        if enrollment_id is None or held_by < enrollment_id:
+            found.setdefault(contact_id, set()).add(other)
+    return found
+
+
+def _other_enrollments(
+    session: Session, user: User, ids: Sequence[int], campaign_id: int | None
+) -> list[tuple[int, int, int]]:
+    """``(enrollment_id, contact_id, campaign_id)`` for each live enrollment of ``ids``
+    in a running campaign other than ``campaign_id``."""
     statement = (
         scoped(user, Enrollment)
+        .with_only_columns(Enrollment.id, Enrollment.contact_id, Enrollment.campaign_id)
         .join(Campaign, Campaign.id == Enrollment.campaign_id)
         .where(
             Campaign.user_id == user.id,
@@ -683,12 +745,7 @@ def _other_campaigns(
     )
     if campaign_id is not None:
         statement = statement.where(Enrollment.campaign_id != campaign_id)
-    if enrollment_id is not None:
-        statement = statement.where(Enrollment.id < enrollment_id)
-    found: dict[int, set[int]] = {}
-    for enrollment in session.scalars(statement):
-        found.setdefault(enrollment.contact_id, set()).add(enrollment.campaign_id)
-    return found
+    return list(session.execute(statement).tuples())
 
 
 def _last_outbound(
@@ -754,13 +811,65 @@ def check_enrollment(
     if campaign.user_id != user.id:
         raise ValueError("a campaign can only enroll its own user's contacts")
     ids = sorted(set(contact_ids))
+    window, first = _first_step(session, user, campaign)
+    if window is None:  # deleted since: nobody to enroll in it
+        return [Verdict(i, (Reason.CAMPAIGN_NOT_ACTIVE,)) for i in ids]
+    if first is None:
+        return [Verdict(i, (Reason.UNKNOWN_CHANNEL,)) for i in ids]
+    facts = load_facts(session, user, ids, campaign_id=campaign.id)
+    policy = GuardPolicy(contacted_within_days=window)
+    return [check_contact(facts.get(i), i, first, policy, now=now) for i in ids]
+
+
+def check_audience(
+    session: Session,
+    user: User,
+    campaign: Campaign,
+    contact_ids: Collection[int],
+    pending: Sequence[tuple[int, int]],
+    *,
+    now: datetime,
+) -> list[Verdict]:
+    """The review's verdicts over a campaign's audience, in contact id order (#346).
+
+    ``pending`` holds the pending enrollments, ``(enrollment_id, contact_id)``. Each is
+    judged as :func:`check_step` will judge its first step
+    (:func:`load_pending_facts`), so the review counts what the engine will send. Every
+    other contact of ``contact_ids`` is judged as enrolling it now would be
+    (:func:`check_enrollment`), against the pending enrollments too. Checked against
+    the first step's channel. Reads only.
+    """
+    enrolled = {c for _, c in pending}
+    outside = sorted(set(contact_ids) - enrolled)
+    verdicts = {
+        v.contact_id: v for v in check_enrollment(session, user, campaign, outside, now=now)
+    }
+    if pending:
+        window, first = _first_step(session, user, campaign)
+        if window is None or first is None:
+            reason = Reason.CAMPAIGN_NOT_ACTIVE if window is None else Reason.UNKNOWN_CHANNEL
+            verdicts.update((c, Verdict(c, (reason,))) for c in enrolled)
+        else:
+            facts = load_pending_facts(session, user, pending, campaign_id=campaign.id)
+            policy = GuardPolicy(contacted_within_days=window)
+            verdicts.update(
+                (c, check_contact(facts.get(c), c, first, policy, now=now)) for c in enrolled
+            )
+    return [verdicts[c] for c in sorted(verdicts)]
+
+
+def _first_step(
+    session: Session, user: User, campaign: Campaign
+) -> tuple[int | None, TemplateChannel | None]:
+    """The campaign's recency window and first step's channel, read fresh; ``None`` for
+    a campaign deleted since, or one with no steps."""
     window = session.scalar(
         scoped(user, Campaign)
         .with_only_columns(Campaign.contacted_within_days_guard)
         .where(Campaign.id == campaign.id)
     )
-    if window is None:  # deleted since: nobody to enroll in it
-        return [Verdict(i, (Reason.CAMPAIGN_NOT_ACTIVE,)) for i in ids]
+    if window is None:
+        return None, None
     first = session.scalar(
         scoped(user, CampaignStep)
         .with_only_columns(CampaignStep.channel)
@@ -768,11 +877,7 @@ def check_enrollment(
         .order_by(CampaignStep.position)
         .limit(1)
     )
-    if first is None:
-        return [Verdict(i, (Reason.UNKNOWN_CHANNEL,)) for i in ids]
-    facts = load_facts(session, user, ids, campaign_id=campaign.id)
-    policy = GuardPolicy(contacted_within_days=window)
-    return [check_contact(facts.get(i), i, first, policy, now=now) for i in ids]
+    return window, first
 
 
 def check_step(

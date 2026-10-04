@@ -333,7 +333,8 @@ export interface paths {
         };
         /**
          * Get Guards
-         * @description The guard summary's details: each skipped contact, with every reason (#346).
+         * @description The guard summary's details: the first ``limit`` skipped contacts, each with every
+         *     reason (#346).
          */
         get: operations["get_guards_api_v1_campaigns__campaign_id__review_guards_get"];
         put?: never;
@@ -4413,10 +4414,12 @@ export interface components {
             prior_contact_note: string | null;
             /** Skipped */
             skipped: components["schemas"]["SkippedContactOut"][];
+            /** Skipped Total */
+            skipped_total: number;
             /** Summary */
             summary: string;
-            /** Will Send */
-            will_send: number;
+            /** Will Start */
+            will_start: number;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -7780,7 +7783,9 @@ export interface operations {
     };
     get_guards_api_v1_campaigns__campaign_id__review_guards_get: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: number;
+            };
             header?: never;
             path: {
                 campaign_id: number;
