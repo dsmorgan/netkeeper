@@ -23,8 +23,8 @@ import {
 } from './field-editor'
 import { useContactWrite } from './use-contact-write'
 import { displayName, formatDate, formatDateTime, gmailSearchUrl } from './format'
-import { MergePanel, type MergeTarget, type Survivor } from './merge-panel'
-import { labelled, labelledDetail } from './merge-text'
+import { MergePanel, type Survivor } from './merge-panel'
+import { nameableOf, type Nameable } from './merge-text'
 import { WriteError } from './merged-notice'
 import { NeedsReviewBadge, NeedsReviewNotice } from './needs-review'
 import { PossibleDuplicates } from './possible-duplicates'
@@ -81,7 +81,7 @@ function ExternalAction({
 }
 
 /** The merge panel, closed or open on a contact (and maybe a picked duplicate). */
-type Merging = { target: MergeTarget | null; survivor: Survivor } | null
+type Merging = { target: Nameable | null; survivor: Survivor } | null
 
 export function ContactDetailPage({ contactId }: { contactId: number }) {
   const detail = useQuery(contactQuery(contactId))
@@ -162,7 +162,7 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
         <MergePanel
           // A new pick from the hint starts the panel over on that contact.
           key={`${contact.id}-${merging.target?.id ?? 'pick'}`}
-          contact={{ id: contact.id, name: labelledDetail(contact) }}
+          contact={nameableOf(contact)}
           initialTarget={merging.target}
           initialSurvivor={merging.survivor}
           onClose={() => setMerging(null)}
@@ -201,10 +201,7 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
               contactId={contact.id}
               onMerge={(match) =>
                 setMerging({
-                  target: {
-                    id: match.contact_id,
-                    name: labelled({ ...match, id: match.contact_id }),
-                  },
+                  target: { ...match, id: match.contact_id },
                   // A card contact folds into the confirmed one it duplicates.
                   survivor: match.needs_review ? 'this' : 'other',
                 })

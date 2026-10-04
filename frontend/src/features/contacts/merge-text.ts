@@ -2,10 +2,13 @@
  * A merge's moves in sentences (#363), for the preview and its confirmation.
  */
 
-import { displayName } from './format'
+import { displayName, formatDate } from './format'
 import type { ContactDetail, MergeMoves } from './types'
 
-/** What `labelled` needs: a name, and whatever of the distinguishing details is known. */
+/**
+ * A contact in a merge: its id, its name, and whatever details are known. A
+ * detail left `undefined` is unknown (not loaded yet); `null` is known to be empty.
+ */
 export interface Nameable {
   id: number
   first_name?: string | null
@@ -14,26 +17,59 @@ export interface Nameable {
   primary_email?: string | null
   current_company?: string | null
   li_public_id?: string | null
+  created_at?: string | null
+}
+
+/** A contact in full as a {@link Nameable}: its primary email is among its emails. */
+export function nameableOf(contact: ContactDetail): Nameable {
+  const email = contact.emails.find((row) => row.is_primary) ?? contact.emails[0]
+  return { ...contact, primary_email: email?.email ?? null }
+}
+
+interface Detail {
+  read: (contact: Nameable) => string | null | undefined
+  show: (value: string | null) => string
+}
+
+/** The details that tell two records of one name apart, in the order they are tried. */
+const DETAILS: readonly Detail[] = [
+  {
+    read: (c) =>
+      typeof c.primary_email === 'string' ? c.primary_email.toLowerCase() : c.primary_email,
+    show: (v) => v ?? 'no email',
+  },
+  { read: (c) => c.current_company, show: (v) => v ?? 'no company' },
+  { read: (c) => c.li_public_id, show: (v) => v ?? 'no LinkedIn id' },
+  {
+    read: (c) => (c.created_at === undefined ? undefined : formatDate(c.created_at)),
+    show: (v) => (v === null ? 'added on an unknown date' : `added ${v}`),
+  },
+]
+
+function known(value: string | null | undefined): string | null | undefined {
+  if (value === undefined) return undefined
+  const trimmed = value?.trim() ?? ''
+  return trimmed === '' ? null : trimmed
 }
 
 /**
- * A name with one detail that tells it apart, so two records of one name never
- * read the same in a merge: the primary email, else the company, else the
- * LinkedIn slug, else the contact id. "Ada Quill (ada@quill.test)".
+ * The two contacts of a merge, named so they never read alike. Different names
+ * need nothing more. One name gets the first detail that differs between the
+ * two, of the primary email, the company, the LinkedIn slug, and the date each
+ * was added, and else the contact id: "Ada Quill (ada@quill.test)" against
+ * "Ada Quill (ada.q@quill.test)". A detail unknown on either side is skipped.
+ * Every place the merge names the two uses this, so each reads the same throughout.
  */
-export function labelled(contact: Nameable): string {
-  const detail =
-    contact.primary_email ||
-    contact.current_company ||
-    contact.li_public_id ||
-    `contact ${contact.id}`
-  return `${displayName(contact)} (${detail})`
-}
-
-/** {@link labelled} for a contact in full, whose primary email is among its emails. */
-export function labelledDetail(contact: ContactDetail): string {
-  const email = contact.emails.find((row) => row.is_primary) ?? contact.emails[0]
-  return labelled({ ...contact, primary_email: email?.email ?? null })
+export function labelPair(one: Nameable, other: Nameable): [string, string] {
+  const names = [displayName(one), displayName(other)] as const
+  if (names[0].toLowerCase() !== names[1].toLowerCase()) return [names[0], names[1]]
+  for (const detail of DETAILS) {
+    const a = known(detail.read(one))
+    const b = known(detail.read(other))
+    if (a === undefined || b === undefined || a === b) continue
+    return [`${names[0]} (${detail.show(a)})`, `${names[1]} (${detail.show(b)})`]
+  }
+  return [`${names[0]} (contact ${one.id})`, `${names[1]} (contact ${other.id})`]
 }
 
 function count(n: number, one: string, many: string = `${one}s`): string {
