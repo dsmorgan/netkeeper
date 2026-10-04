@@ -52,6 +52,7 @@ from netkeeper.campaigns.render import (
     placeholder_example,
     render,
 )
+from netkeeper.campaigns.schedule import local_today
 from netkeeper.crm.positions import last_position_change
 from netkeeper.db import is_writer
 from netkeeper.models import (
@@ -456,6 +457,7 @@ def render_preview(
     *,
     me: dict[str, str],
     today: date | None = None,
+    timezone: str = "UTC",
     personal_line: str | None = None,
 ) -> Rendered:
     """Render ``row`` for ``contact``, outside any campaign.
@@ -465,10 +467,13 @@ def render_preview(
     names them gets a missing-value warning for each, as it does for missing
     contact data. Raises :class:`~netkeeper.campaigns.render.TemplateRenderError`
     only for a template that does not compile or reaches past the sandbox.
+
+    ``today`` defaults to the day it is in ``timezone`` (the user's), as the engine
+    counts it, so the date fields match what a send would render.
     """
     if row.user_id != contact.user_id:
         raise ValueError("a template can only be previewed against its own user's contact")
-    day = utcnow().date() if today is None else today
+    day = local_today(timezone, utcnow()) if today is None else today
     values = MergeValues(contact=contact_fields(contact, day), me=me, personal_line=personal_line)
     return render(row.channel, row.subject, row.body, values, today=day)
 
@@ -495,7 +500,11 @@ class FieldExample:
 
 
 def field_examples(
-    me: Mapping[str, str], contact: Contact | None = None, *, today: date | None = None
+    me: Mapping[str, str],
+    contact: Contact | None = None,
+    *,
+    today: date | None = None,
+    timezone: str = "UTC",
 ) -> list[FieldExample]:
     """Every merge field (:func:`~netkeeper.campaigns.render.merge_fields`) with an example.
 
@@ -505,7 +514,7 @@ def field_examples(
     them. ``personal_line`` and the campaign fields have no value outside a
     campaign, so they keep their placeholders either way.
     """
-    day = utcnow().date() if today is None else today
+    day = local_today(timezone, utcnow()) if today is None else today
     values = None if contact is None else contact_fields(contact, day)
     out: list[FieldExample] = []
     for item in merge_fields(me.keys()):

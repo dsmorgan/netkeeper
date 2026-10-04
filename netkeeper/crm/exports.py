@@ -120,19 +120,18 @@ step that can fail, happens before the caller commits to a ``200``.
 
 from __future__ import annotations
 
-import contextlib
 import csv
 import json
 import uuid
 from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, tzinfo
+from datetime import date, datetime
 from typing import Any, Final, Literal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import ColumnElement, Select, and_, exists
 from sqlalchemy.orm import Session, selectinload
 
+from netkeeper.campaigns.schedule import local_today
 from netkeeper.crm import do_not_send
 from netkeeper.crm.filters import FilterTree, SortKey, apply_sort, compile_filter, paginate
 from netkeeper.crm.identity import phone_key
@@ -235,14 +234,6 @@ def _iter_contacts(session: Session, base: Select[tuple[Contact]]) -> Iterator[C
         if len(batch) < _BATCH_SIZE:
             return
         offset += _BATCH_SIZE
-
-
-def _local_today(user: User, now: datetime) -> date:
-    """``now`` as a date in ``user``'s timezone, falling back to UTC for a bad zone."""
-    tz: tzinfo = UTC
-    with contextlib.suppress(ZoneInfoNotFoundError):
-        tz = ZoneInfo(user.timezone)
-    return now.astimezone(tz).date()
 
 
 # --- shared field helpers -------------------------------------------------------
@@ -876,7 +867,7 @@ def export_stream(
     """
     if preset in VCARD_ONLY_PRESETS and output_format != "vcard":
         raise ExportError(f"the {preset} preset is vCard only; ask for format vcard")
-    today = _local_today(user, now)
+    today = local_today(user.timezone, now)
     held_out: list[ColumnElement[bool]] = []
     listed: frozenset[str] = frozenset()
     if preset in ("campaign-audience", "macos-contacts"):

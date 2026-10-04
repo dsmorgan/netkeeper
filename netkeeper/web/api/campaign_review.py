@@ -39,6 +39,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.gmail import Gmail, GmailError
 from netkeeper.campaigns.render import me_fields
+from netkeeper.campaigns.schedule import local_today
 from netkeeper.config import Settings
 from netkeeper.db import session_scope
 from netkeeper.models import CampaignStatus, MailboxArm, User
@@ -456,7 +457,7 @@ def test_send(
             body.step_id,
             enrollment_id=body.enrollment_id,
             me=me,
-            today=utcnow().date(),
+            today=local_today(user.timezone, utcnow()),
         )
     what = f"of step {plan.step_position} of campaign {plan.campaign_id}"
     purpose = f"test {what}"

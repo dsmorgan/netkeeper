@@ -331,3 +331,12 @@ def test_hold_exempts_only_the_first_step_on_the_starts_day() -> None:
         starts_at=start,
         first_step=True,
     ) == at("2026-10-03 22:00")
+
+
+def test_local_today_counts_the_day_in_the_users_zone() -> None:
+    now = datetime(2026, 9, 21, 3, 0, tzinfo=UTC)
+    assert schedule.local_today("America/Los_Angeles", now) == date(2026, 9, 20)
+    assert schedule.local_today("UTC", now) == date(2026, 9, 21)
+    assert schedule.local_today("Nowhere/Land", now) == date(2026, 9, 21)
+    with pytest.raises(ValueError):
+        schedule.local_today("UTC", datetime(2026, 9, 21, 3, 0))
