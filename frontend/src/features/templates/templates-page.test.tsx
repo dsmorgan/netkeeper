@@ -133,6 +133,40 @@ function routes(rows: TemplateOut[], extra: Record<string, RouteHandler> = {}) {
 }
 
 describe('lint', () => {
+  it('counts only errors in the red badge and warnings in an outlined one', async () => {
+    const long: LintIssue = {
+      rule: 'linkedin_long',
+      severity: 'warning',
+      part: 'body',
+      message: 'the body is 1,500 characters; over 1,000, the prefill takes minutes to type it',
+      field: null,
+      line: 1,
+    }
+    const subject: LintIssue = {
+      rule: 'linkedin_subject',
+      severity: 'error',
+      part: 'subject',
+      message: 'LinkedIn messages have no subject, so clear it',
+      field: null,
+      line: 1,
+    }
+    mockApi(
+      routes([
+        template({ id: 1, name: 'long one', channel: 'linkedin', subject: null, lint: [long] }),
+        template({ id: 2, name: 'both', channel: 'linkedin', lint: [subject, long] }),
+      ]),
+    )
+    await renderPage()
+    const list = await screen.findByRole('list', { name: 'Templates' }, WAIT)
+    const items = within(list).getAllByRole('listitem')
+    expect(items).toHaveLength(2)
+    const [first, second] = items as [HTMLElement, HTMLElement]
+    expect(within(first).queryByText(/lint error/)).toBeNull()
+    expect(within(first).getByText('1 warning')).toBeInTheDocument()
+    expect(within(second).getByText('1 lint error')).toBeInTheDocument()
+    expect(within(second).getByText('1 warning')).toBeInTheDocument()
+  })
+
   it('shows a lint error, with its line and a plain sentence, before anything is saved', async () => {
     const seen = mockApi(routes([]))
     await renderPage()

@@ -20,6 +20,7 @@ from campaign_fakes import ARMED_FOR_SEND, NOW, SETTINGS, FakeSender, make_mailb
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.render import LintRule
+from netkeeper.campaigns.templates import activation_errors
 from netkeeper.crm import do_not_send
 from netkeeper.crm import lists as list_service
 from netkeeper.crm.self_contact import update_self_contact
@@ -463,8 +464,15 @@ def test_the_summary_alone_never_reads_the_old_tools_history(
         ) == ("3 will start, 1 skipped (1 do-not-contact)", None)
 
 
-def _linkedin_reviewing(factory: sessionmaker[Session], *, subject: str | None, body: str) -> Any:
-    """A one-step LinkedIn campaign under review, with one contact enrolled."""
+def _linkedin_reviewing(
+    factory: sessionmaker[Session],
+    *,
+    subject: str | None,
+    body: str,
+    locations: tuple[str, ...] = ("Lisbon",),
+) -> Any:
+    """A one-step LinkedIn campaign under review, with a contact enrolled for each of
+    ``locations``."""
     with session_scope(factory, write=True) as session:
         user = factories.make_user(session)
         campaign = factories.make_campaign(
@@ -473,8 +481,9 @@ def _linkedin_reviewing(factory: sessionmaker[Session], *, subject: str | None, 
         template = get_scoped(session, user, Template, campaign.steps[0].template_id)
         assert template is not None
         template.subject, template.body = subject, body
-        contact = factories.make_contact(session, user)
-        factories.make_enrollment(session, campaign, contact, status=EnrollmentStatus.PENDING)
+        for location in locations:
+            contact = factories.make_contact(session, user, location=location)
+            factories.make_enrollment(session, campaign, contact, status=EnrollmentStatus.PENDING)
         return user, campaign.id
 
 
@@ -516,3 +525,64 @@ def test_a_long_linkedin_message_is_a_warning_that_does_not_block_lint(
         result = campaign_review.record_lint(session, user, campaign_id, now=NOW)
         assert result.clean
         assert result.steps == ((1, ()),)
+
+
+def test_a_linkedin_subject_with_a_long_body_gives_only_the_subject_error(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The long-message warning is never listed among the errors that block activation."""
+    user, campaign_id = _linkedin_reviewing(
+        session_factory, subject="Hello", body="Hi {{ first_name }} " + "x" * 1500
+    )
+    with session_scope(session_factory, write=True) as session:
+        result = campaign_review.record_lint(session, user, campaign_id, now=NOW)
+        assert not result.clean
+        [(_position, issues)] = result.steps
+        assert [issue.rule for issue in issues] == [LintRule.LINKEDIN_SUBJECT]
+        campaign = campaign_review.get_campaign(session, user, campaign_id)
+        template = campaign.steps[0].template
+        assert [i.rule for i in activation_errors(template)] == [LintRule.LINKEDIN_SUBJECT]
+
+
+def test_a_message_whose_render_has_a_lint_error_cannot_be_approved(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """P4-11: a merge value that makes a LinkedIn message multi-line blocks it, and a
+    per-message approval of it is refused, not stored."""
+    user, campaign_id = _linkedin_reviewing(
+        session_factory,
+        subject=None,
+        body="Hi {{ first_name }} {{ personal_line }} in {{ location }}",
+        locations=("Lisbon", "Two\nlines"),
+    )
+    with session_scope(session_factory) as session:
+        campaign = campaign_review.get_campaign(session, user, campaign_id)
+        step_id = campaign.steps[0].id
+        review = campaign_review.review_step(session, user, campaign_id, step_id, now=NOW)
+    every = {m.enrollment_id: m for m in (*review.messages, *review.blocked)}
+    bad = [m for m in every.values() if m.blocked is not None]
+    good = [m for m in every.values() if m.blocked is None]
+    assert len(bad) == 1 and len(good) == 1
+    assert bad[0].blocked == (
+        "lint error: LinkedIn messages must be one paragraph: the prefill never presses Enter"
+    )
+    refused = pytest.raises(campaign_review.ReviewConflict, match="can't be approved: lint error")
+    with session_scope(session_factory, write=True) as session, refused:
+        campaign_review.approve_messages(
+            session,
+            user,
+            campaign_id,
+            step_id,
+            {bad[0].enrollment_id: bad[0].fingerprint},
+            now=NOW,
+        )
+    with session_scope(session_factory, write=True) as session:
+        approved = campaign_review.approve_messages(
+            session,
+            user,
+            campaign_id,
+            step_id,
+            {good[0].enrollment_id: good[0].fingerprint},
+            now=NOW,
+        )
+        assert [row.enrollment_id for row in approved] == [good[0].enrollment_id]

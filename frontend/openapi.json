@@ -6781,7 +6781,8 @@
           "linkedin_subject",
           "linkedin_too_long",
           "linkedin_long",
-          "linkedin_newline"
+          "linkedin_newline",
+          "linkedin_untypable"
         ],
         "title": "LintRule",
         "type": "string"

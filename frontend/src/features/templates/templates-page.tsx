@@ -17,7 +17,7 @@ import { DiscardChangesDialog, UnsavedChangesGuard } from '@/components/unsaved-
 import { Callout, EmptyState, ErrorNote, LoadingNote } from '@/features/crm/controls'
 
 import { templateKeys, templatesQuery, versionsQuery } from './api'
-import type { ContactRow, TemplateOut } from './api'
+import type { ContactRow, LintIssue, TemplateOut } from './api'
 import { LintList } from './lint-list'
 import { PreviewPanel } from './preview-panel'
 import { draftOf, sameDraft } from './draft'
@@ -95,11 +95,7 @@ export function TemplatesPage() {
                         <span className="truncate">{row.name}</span>
                         <span className="ml-auto flex gap-1">
                           {row.in_use && <Badge variant="outline">In use</Badge>}
-                          {row.lint.length > 0 && (
-                            <Badge variant="destructive">
-                              {row.lint.length} lint {row.lint.length === 1 ? 'error' : 'errors'}
-                            </Badge>
-                          )}
+                          <LintBadges lint={row.lint} />
                         </span>
                       </Button>
                     </li>
@@ -295,5 +291,25 @@ function OlderVersion({ row, onBack }: { row: TemplateOut; onBack: () => void })
         </Button>
       </CardContent>
     </Card>
+  )
+}
+
+/** The list's lint badges: errors in red, warnings (such as a long LinkedIn message) outlined. */
+function LintBadges({ lint }: { lint: readonly LintIssue[] }) {
+  const errors = lint.filter((issue) => issue.severity === 'error').length
+  const warnings = lint.filter((issue) => issue.severity === 'warning').length
+  return (
+    <>
+      {errors > 0 && (
+        <Badge variant="destructive">
+          {errors} lint {errors === 1 ? 'error' : 'errors'}
+        </Badge>
+      )}
+      {warnings > 0 && (
+        <Badge variant="outline">
+          {warnings} {warnings === 1 ? 'warning' : 'warnings'}
+        </Badge>
+      )}
+    </>
   )
 }

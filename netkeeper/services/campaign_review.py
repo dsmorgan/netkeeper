@@ -828,6 +828,36 @@ def approve_step(
     return row
 
 
+def _check_sendable(
+    template: Template | None,
+    contact: Contact | None,
+    campaign: Campaign,
+    step: CampaignStep,
+    now: datetime,
+    *,
+    enrollment_id: int,
+) -> None:
+    """Refuse (:class:`ReviewConflict`) a message that can't be sent as it renders: the
+    contact is gone, it does not render, or its render has a lint error, such as a
+    LinkedIn message a merge value made multi-line (P4-11). Approving it would cover
+    nothing the engine could send."""
+    where = f"enrollment {enrollment_id}'s message for step {step.position}"
+    if contact is None:
+        raise ReviewConflict(f"{where} can't be approved: the contact is gone")
+    today = now.date()
+    try:
+        rendered = _render_step(
+            template,
+            merge_values(contact, campaign, step, today, enrollment_id=enrollment_id),
+            today,
+        )
+    except TemplateRenderError as exc:
+        raise ReviewConflict(f"{where} can't be approved: it does not render: {exc}") from exc
+    errors = [i for i in rendered.issues if i.severity is Severity.ERROR]
+    if errors:
+        raise ReviewConflict(f"{where} can't be approved: lint error: {errors[0].message}")
+
+
 def approve_messages(
     session: Session,
     user: User,
@@ -840,7 +870,8 @@ def approve_messages(
     """Approve single messages of a ``personal_line`` step. ``seen`` maps each pending
     enrollment to the ``fingerprint`` its message came with: refused
     (:class:`ReviewStale`) when the step, its template or the contact changed since.
-    Refused for any other step, which is approved as a whole (:func:`approve_step`)."""
+    Refused for any other step, which is approved as a whole (:func:`approve_step`), and
+    for a message with a lint error once rendered (:func:`_check_sendable`)."""
     _require_writer(session, "approve_messages")
     campaign = _reviewing(session, user, campaign_id)
     step = _step(session, user, campaign_id, step_id)
@@ -876,6 +907,9 @@ def approve_messages(
                 f"enrollment {enrollment_id}'s message for step {step.position} changed since"
                 " it was shown; review it again"
             )
+    for enrollment_id in ids:
+        contact = contacts.get(pending[enrollment_id].contact_id)
+        _check_sendable(template, contact, campaign, step, now, enrollment_id=enrollment_id)
     rows = {r.enrollment_id: r for r in _approvals(session, user, campaign_id, step.id)}
     out = []
     for enrollment_id in ids:
