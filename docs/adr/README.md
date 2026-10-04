@@ -14,3 +14,4 @@ An ADR records one decision, the context that forced it, and its consequences. T
 | [0004](0004-manual-linkedin-sends-by-default.md) | LinkedIn messages are prefilled, not sent, by default | Accepted |
 | [0005](0005-user-boundary-from-the-first-migration.md) | Carry a user boundary from the first migration | Accepted |
 | [0006](0006-observe-dont-request.md) | Observe, don't request | Accepted |
+| [0007](0007-prefill-inputs.md) | The prefill's inputs: one Message click, typing into one verified composer, never Enter | Proposed |

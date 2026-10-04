@@ -24,3 +24,4 @@ netkeeper supports only `attach`. It connects over CDP to a Chrome the user laun
 ## Amendments
 
 - 2026-09-24: [ADR 0006](0006-observe-dont-request.md) records how netkeeper reads LinkedIn through the attached tab: it reads the responses the page itself loads and never intercepts or sends a request. It also records the one exception to scrolling being the only input netkeeper gives a page: one click on **Contact info** per profile visit.
+- 2026-10-03 (proposed, #375): [ADR 0007](0007-prefill-inputs.md) adds the prefill's inputs: one click on **Message** and typing into one verified, empty composer, never Enter and never a Send click. It also adds a way to end a run that leaves its tab open: the prefill hands its tab to the user, and no later run reuses or closes it. This amendment takes effect when ADR 0007 is accepted.
