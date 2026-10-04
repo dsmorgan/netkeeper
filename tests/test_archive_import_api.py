@@ -30,7 +30,7 @@ from netkeeper.db import session_scope
 from netkeeper.linkedin import archive as linkedin_archive
 from netkeeper.linkedin.archive import ArchiveRefusalCode
 from netkeeper.models import Contact, Interaction, User
-from netkeeper.scoping import scoped_count
+from netkeeper.scoping import scoped_contacts_count, scoped_count
 from netkeeper.web.api import imports as imports_api
 from netkeeper.web.errors import ApiError
 
@@ -95,7 +95,7 @@ async def _upload(
 def _counts(session_factory: sessionmaker[Session]) -> tuple[int, int]:
     with session_scope(session_factory) as session:
         user = session.scalars(select(User)).one()
-        contacts = session.scalar(scoped_count(user, Contact))
+        contacts = session.scalar(scoped_contacts_count(user))
         interactions = session.scalar(scoped_count(user, Interaction))
     return contacts or 0, interactions or 0
 

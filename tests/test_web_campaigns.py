@@ -59,7 +59,6 @@ def _seed(app: FastAPI) -> dict[str, Any]:
                 channel=channel,
                 subject="Catching up" if channel is TemplateChannel.EMAIL else None,
                 body="Hi {{ first_name }}",
-                me_keys=(),
             ).id
 
         email, linkedin = (

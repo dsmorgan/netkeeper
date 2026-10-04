@@ -80,6 +80,7 @@ class Reason(enum.StrEnum):
     CAMPAIGN_NOT_ACTIVE = "campaign_not_active"
     ENROLLMENT_NOT_ACTIVE = "enrollment_not_active"
     UNKNOWN_CONTACT = "unknown_contact"
+    SELF = "self"
     MERGED = "merged"
     ARCHIVED = "archived"
     NEEDS_REVIEW = "needs_review"
@@ -158,6 +159,8 @@ class ContactFacts:
     contact_id: int
     merged: bool
     archived: bool
+    # The self contact, your own details (#342): nobody to send a campaign to.
+    is_self: bool
     needs_review: bool
     do_not_contact: bool
     disconnected: bool
@@ -206,6 +209,11 @@ class Verdict:
 # --- the guards --------------------------------------------------------------------
 
 Guard = Callable[[ContactFacts, TemplateChannel, GuardPolicy, datetime], Reason | None]
+
+
+def not_self(facts: ContactFacts, *_: object) -> Reason | None:
+    """The self contact holds your own details for test sends (#342); it is never enrolled."""
+    return Reason.SELF if facts.is_self else None
 
 
 def not_merged(facts: ContactFacts, *_: object) -> Reason | None:
@@ -326,6 +334,7 @@ def not_contacted_recently(
 
 
 GUARDS: Final[tuple[Guard, ...]] = (
+    not_self,
     not_merged,
     not_archived,
     not_waiting_for_review,
@@ -450,6 +459,7 @@ _LABELS: Final[Mapping[Reason, str]] = {
     Reason.CAMPAIGN_NOT_ACTIVE: "campaign not active",
     Reason.ENROLLMENT_NOT_ACTIVE: "enrollment not active",
     Reason.UNKNOWN_CONTACT: "not found",
+    Reason.SELF: "you (your own details)",
     Reason.MERGED: "merged into another contact",
     Reason.ARCHIVED: "archived",
     Reason.NEEDS_REVIEW: "waiting for review",
@@ -577,6 +587,7 @@ def load_facts(
             contact_id=contact.id,
             merged=contact.merged_into_id is not None,
             archived=contact.archived_at is not None,
+            is_self=contact.is_self,
             needs_review=contact.needs_review_at is not None,
             do_not_contact=contact.do_not_contact,
             disconnected=contact.li_disconnected_at is not None,

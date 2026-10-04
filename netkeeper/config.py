@@ -2,10 +2,12 @@
 
 Resolution order (spec section 15): ``--config``, ``$NETKEEPER_CONFIG``,
 ``./config.toml``, ``<data_dir>/config.toml``, then the built-in defaults below.
-Unknown sections and keys are logged and ignored, except under ``[me]``, where
-unknown keys are kept as extra merge fields on purpose; wrong types raise
+Unknown sections and keys are logged and ignored; wrong types raise
 :class:`ConfigError`. A key netkeeper no longer reads (:data:`DEPRECATED_KEYS`) is
-ignored too, with one deprecation warning per file that names each such key.
+ignored too, with one deprecation warning per file that names each such key. So is
+the ``[me]`` section (#342): templates no longer have ``me.*`` fields, and your own
+details are the self contact. Its ``name``, ``website`` and ``city`` are kept aside
+as :class:`LegacyMe`, only to seed the self contact the first time it is created.
 """
 
 from __future__ import annotations
@@ -29,7 +31,6 @@ log = logging.getLogger(__name__)
 # Field metadata roles the loader and renderer understand.
 _ROLE = "netkeeper.config"
 _SKIP = {_ROLE: "skip"}  # not a config key (for example Settings.source_path)
-_EXTRA = {_ROLE: "extra"}  # collects the table's unknown string keys
 
 
 class ConfigError(ValueError):
@@ -56,16 +57,24 @@ class WebSettings:
     port: int = 8000
 
 
+ME_SECTION_ADVICE = (
+    "templates no longer have me.* fields, and a test send renders with your own details,"
+    " which you edit under Settings, About you. Remove [me] from the file"
+)
+
+
 @dataclass(frozen=True, slots=True)
-class MeSettings:
-    """Merge fields describing the operator. Extra string keys land in ``extra``."""
+class LegacyMe:
+    """What an older config's ``[me]`` section held that the self contact can use (#342).
+
+    Never a merge field. Read only to seed the self contact when netkeeper first
+    creates it (:func:`netkeeper.crm.self_contact.ensure_self_contact`); after that,
+    the self contact is what you edit, and these are ignored.
+    """
 
     name: str = ""
     website: str = ""
-    scheduling_link: str = ""
-    signature: str = ""
     city: str = ""
-    extra: dict[str, str] = field(default_factory=dict, metadata=_EXTRA)
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,12 +154,13 @@ class Settings:
     """Every section of ``config.toml``. ``source_path`` is None when defaults were used."""
 
     web: WebSettings = field(default_factory=WebSettings)
-    me: MeSettings = field(default_factory=MeSettings)
     linkedin: LinkedInSettings = field(default_factory=LinkedInSettings)
     campaigns: CampaignSettings = field(default_factory=CampaignSettings)
     llm: LlmSettings = field(default_factory=LlmSettings)
     backup: BackupSettings = field(default_factory=BackupSettings)
     source_path: Path | None = field(default=None, metadata=_SKIP)
+    # A deprecated [me] section's values, when the file had one (see LegacyMe).
+    legacy_me: LegacyMe | None = field(default=None, metadata=_SKIP)
 
 
 def load_settings(explicit: Path | None = None) -> Settings:
@@ -178,9 +188,29 @@ def _load_file(path: Path) -> Settings:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
     raw = _drop_deprecated(raw, source=path)
+    raw, legacy_me = _drop_me(raw, source=path)
     settings = _from_table(Settings, raw, prefix="", source=path)
     log.debug("loaded settings from %s", path)
-    return replace(settings, source_path=path)
+    return replace(settings, source_path=path, legacy_me=legacy_me)
+
+
+def _drop_me(raw: dict[str, Any], *, source: Path) -> tuple[dict[str, Any], LegacyMe | None]:
+    """``raw`` without its ``[me]`` section, with one warning, and what it held for the
+    self contact. A value that is not a string is left out, not an error: the whole
+    section is ignored, so nothing in it can stop netkeeper from starting."""
+    if "me" not in raw:
+        return raw, None
+    cleaned = {k: v for k, v in raw.items() if k != "me"}
+    log.warning("%s: ignoring the deprecated [me] section (#342): %s", source, ME_SECTION_ADVICE)
+    table = raw["me"]
+    if not isinstance(table, Mapping):
+        return cleaned, None
+    values = {
+        name: value.strip()
+        for name in ("name", "website", "city")
+        if isinstance(value := table.get(name), str)
+    }
+    return cleaned, LegacyMe(**values)
 
 
 def _drop_deprecated(raw: dict[str, Any], *, source: Path) -> dict[str, Any]:
@@ -213,59 +243,23 @@ def _from_table[T: DataclassInstance](
     hints = get_type_hints(cls)
     kwargs: dict[str, object] = {}
     known: set[str] = set()
-    extra_field: str | None = None
     for f in fields(cls):
-        role = f.metadata.get(_ROLE)
-        if role == "skip":
-            continue
-        if role == "extra":
-            extra_field = f.name
+        if f.metadata.get(_ROLE) == "skip":
             continue
         known.add(f.name)
         if f.name in raw:
             key = _join(prefix, f.name)
             kwargs[f.name] = _convert(raw[f.name], hints[f.name], key=key, source=source)
-    unknown = [name for name in raw if name not in known]
-    if extra_field is not None:
-        kwargs[extra_field] = _extra_strings(raw, unknown, prefix=prefix, source=source)
-    else:
-        for name in unknown:
-            key = _join(prefix, name)
-            if isinstance(raw[name], Mapping):
-                log.warning("%s: ignoring unknown section [%s]", source, key)
-            else:
-                log.warning("%s: ignoring unknown key %s", source, key)
+    for name in raw:
+        if name in known:
+            continue
+        key = _join(prefix, name)
+        if isinstance(raw[name], Mapping):
+            log.warning("%s: ignoring unknown section [%s]", source, key)
+        else:
+            log.warning("%s: ignoring unknown key %s", source, key)
     build: Callable[..., T] = cls
     return build(**kwargs)
-
-
-def is_me_key(key: str) -> bool:
-    """True for a ``[me]`` key a template can name as ``me.<key>``: an identifier that does
-    not start with ``_``. Template lint refuses any other (#344)."""
-    return key.isidentifier() and not key.startswith("_")
-
-
-def _extra_strings(
-    raw: Mapping[str, object], names: list[str], *, prefix: str, source: Path
-) -> dict[str, str]:
-    extra: dict[str, str] = {}
-    for name in names:
-        value = raw[name]
-        if not isinstance(value, str):
-            raise ConfigError(
-                f"{source}: {_join(prefix, name)} must be a string"
-                f" (extra merge fields are strings), got {_kind(value)}"
-            )
-        if not is_me_key(name):
-            # Kept, as every extra key is, but no template can name it.
-            log.warning(
-                "%s: %s cannot be used as a merge field: a key under [me] must be letters, "
-                "digits and _, must not start with a digit or _",
-                source,
-                _join(prefix, name),
-            )
-        extra[name] = value
-    return extra
 
 
 def _convert(value: object, hint: Any, *, key: str, source: Path) -> object:
@@ -362,9 +356,7 @@ def _render_table(obj: DataclassInstance, *, prefix: str, lines: list[str]) -> N
         value = getattr(obj, f.name)
         if value is None:
             continue  # TOML has no null; an absent key reads back as the None default
-        if role == "extra":
-            scalars.extend(f"{name} = {_toml_value(item)}" for name, item in value.items())
-        elif is_dataclass(value) and not isinstance(value, type):
+        if is_dataclass(value) and not isinstance(value, type):
             nested.append((f.name, value))
         else:
             scalars.append(f"{f.name} = {_toml_value(value)}")

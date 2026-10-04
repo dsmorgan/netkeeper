@@ -5,8 +5,9 @@ What this module decides
 - A template's lint runs on every save and is stored in ``lint_json`` for the
   editor. It never blocks a save: a draft with an undefined variable is a
   draft. It blocks activation instead, through :func:`activation_errors`,
-  which lints again rather than trusting ``lint_json``, because the
-  ``me.<key>`` fields that exist can change with the config after the save.
+  which lints again rather than trusting ``lint_json``, because the rules can
+  change after the save: a template saved with a ``me.*`` field before #342
+  removed them has clean stored lint and an error now.
 - Versions (spec 8.5). The newest row of a ``previous_id`` chain is the
   template; :func:`list_templates` shows only those. Editing one that
   :func:`is_in_use` adds a new row pointing back at it, so a campaign keeps the
@@ -31,7 +32,7 @@ from __future__ import annotations
 
 import enum
 import logging
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Final
@@ -260,9 +261,7 @@ def _check_name_free(
         raise DuplicateTemplateName(f"a template named {name!r} already exists")
 
 
-def lint_draft(
-    channel: TemplateChannel, subject: str | None, body: str, me_keys: Collection[str]
-) -> list[LintIssue]:
+def lint_draft(channel: TemplateChannel, subject: str | None, body: str) -> list[LintIssue]:
     """Lint text that is not saved yet, exactly as a save of it would (P3-10's editor).
 
     A blank subject is no subject here too, so the editor shows the lint the saved
@@ -271,7 +270,7 @@ def lint_draft(
     """
     cleaned_subject = _clean_subject(subject)
     _check_body(body)
-    return lint(channel, cleaned_subject, body, me_keys)
+    return lint(channel, cleaned_subject, body)
 
 
 # --- writes -----------------------------------------------------------------
@@ -285,7 +284,6 @@ def create_template(
     channel: TemplateChannel,
     subject: str | None,
     body: str,
-    me_keys: Collection[str],
 ) -> Template:
     """Store a new template, version 1, with its lint. Lint errors do not block a save."""
     _require_writer(session)
@@ -299,7 +297,7 @@ def create_template(
         channel=channel,
         subject=cleaned_subject,
         body=body,
-        lint_json=_lint_json(lint(channel, cleaned_subject, body, me_keys)),
+        lint_json=_lint_json(lint(channel, cleaned_subject, body)),
         version=1,
     )
     session.add(row)
@@ -312,7 +310,6 @@ def update_template(
     user: User,
     template_id: int,
     *,
-    me_keys: Collection[str],
     name: str | None = None,
     channel: TemplateChannel | None = None,
     subject: str | Unset | None = UNSET,
@@ -344,7 +341,7 @@ def update_template(
         return row
     if new_name != row.name:
         _check_name_free(session, user, new_name, except_id=row.id)
-    lint_json = _lint_json(lint(new_channel, new_subject, new_body, me_keys))
+    lint_json = _lint_json(lint(new_channel, new_subject, new_body))
 
     if is_in_use(session, user, row):
         replacement = Template(
@@ -407,14 +404,14 @@ def delete_template(session: Session, user: User, template_id: int) -> None:
 # --- the gate and the preview -------------------------------------------------------
 
 
-def activation_errors(row: Template, me_keys: Collection[str]) -> list[LintIssue]:
+def activation_errors(row: Template) -> list[LintIssue]:
     """The lint errors that keep this template out of an active campaign; empty when none.
 
-    Lints the text again rather than reading ``lint_json``: the ``me.<key>``
-    fields that exist come from the config, which may have changed since the
-    save. Campaign activation (P3-06 and later) calls this.
+    Lints the text again rather than reading ``lint_json``: the rules may have
+    changed since the save, as they did when #342 removed the ``me.*`` fields.
+    Campaign activation (P3-06 and later) calls this.
     """
-    issues = lint(row.channel, row.subject, row.body, me_keys)
+    issues = lint(row.channel, row.subject, row.body)
     return issues if has_errors(issues) else []
 
 
@@ -455,7 +452,6 @@ def render_preview(
     row: Template,
     contact: Contact,
     *,
-    me: dict[str, str],
     today: date | None = None,
     timezone: str = "UTC",
     personal_line: str | None = None,
@@ -474,7 +470,7 @@ def render_preview(
     if row.user_id != contact.user_id:
         raise ValueError("a template can only be previewed against its own user's contact")
     day = local_today(timezone, utcnow()) if today is None else today
-    values = MergeValues(contact=contact_fields(contact, day), me=me, personal_line=personal_line)
+    values = MergeValues(contact=contact_fields(contact, day), personal_line=personal_line)
     return render(row.channel, row.subject, row.body, values, today=day)
 
 
@@ -485,14 +481,13 @@ class ExampleSource(enum.StrEnum):
     """Where a field's example value came from."""
 
     CONTACT = "contact"
-    CONFIG = "config"
     PLACEHOLDER = "placeholder"
 
 
 @dataclass(frozen=True, slots=True)
 class FieldExample:
-    """A merge field with an example value. ``example`` is ``None`` when the picked contact,
-    or ``[me]``, has no value for it: the field would render empty."""
+    """A merge field with an example value. ``example`` is ``None`` when the picked contact
+    has no value for it: the field would render empty."""
 
     field: MergeField
     example: str | None
@@ -500,7 +495,6 @@ class FieldExample:
 
 
 def field_examples(
-    me: Mapping[str, str],
     contact: Contact | None = None,
     *,
     today: date | None = None,
@@ -509,20 +503,16 @@ def field_examples(
     """Every merge field (:func:`~netkeeper.campaigns.render.merge_fields`) with an example.
 
     With no ``contact``, every example is an invented placeholder, never anyone's
-    data. With one, the contact fields show that contact's values and the
-    ``me.<key>`` fields show ``[me]``, as a preview for that contact would render
-    them. ``personal_line`` and the campaign fields have no value outside a
-    campaign, so they keep their placeholders either way.
+    data. With one, the contact fields show that contact's values, as a preview
+    for that contact would render them. ``personal_line`` and the campaign fields
+    have no value outside a campaign, so they keep their placeholders either way.
     """
     day = local_today(timezone, utcnow()) if today is None else today
     values = None if contact is None else contact_fields(contact, day)
     out: list[FieldExample] = []
-    for item in merge_fields(me.keys()):
+    for item in merge_fields():
         if values is not None and item.group is FieldGroup.CONTACT:
             out.append(FieldExample(item, _shown(values.get(item.name)), ExampleSource.CONTACT))
-        elif values is not None and item.group is FieldGroup.ME:
-            value = me.get(item.name.removeprefix("me."))
-            out.append(FieldExample(item, _shown(value), ExampleSource.CONFIG))
         else:
             out.append(
                 FieldExample(item, placeholder_example(item.name), ExampleSource.PLACEHOLDER)

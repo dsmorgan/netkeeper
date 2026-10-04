@@ -516,9 +516,10 @@ function TestSendSection({
   return (
     <Section title="Test sends">
       <p className="text-sm text-muted-foreground">
-        Each email step goes once to your own address, {to}, with a [Test] subject. It never goes to
-        a contact and counts toward no cap. Arm Gmail in Settings first. Armed for drafts, the test
-        is a draft in your Drafts, and netkeeper never sends it. Armed to send, it's sent to you.
+        Each email step goes once to your own address, {to}, with a [Test] subject, filled in with
+        your own details from Settings, About you, never a contact&apos;s. It never goes to a
+        contact and counts toward no cap. Arm Gmail in Settings first. Armed for drafts, the test is
+        a draft in your Drafts, and netkeeper never sends it. Armed to send, it&apos;s sent to you.
       </p>
       {emailSteps.length === 0 ? (
         <p className="text-sm text-muted-foreground">No email steps, so no test send is needed.</p>

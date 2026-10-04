@@ -3997,7 +3997,6 @@
         "description": "Where a field's example value came from.",
         "enum": [
           "contact",
-          "config",
           "placeholder"
         ],
         "title": "ExampleSource",
@@ -4008,7 +4007,6 @@
         "enum": [
           "contact",
           "personal",
-          "me",
           "campaign"
         ],
         "title": "FieldGroup",
@@ -6762,7 +6760,8 @@
           "no_contact_field",
           "missing_subject",
           "bad_link",
-          "missing_value"
+          "missing_value",
+          "removed_field"
         ],
         "title": "LintRule",
         "type": "string"
@@ -9333,6 +9332,85 @@
         "title": "ScheduledJobOut",
         "type": "object"
       },
+      "SelfContactIn": {
+        "properties": {
+          "current_company": {
+            "default": "",
+            "maxLength": 300,
+            "title": "Current Company",
+            "type": "string"
+          },
+          "current_title": {
+            "default": "",
+            "maxLength": 300,
+            "title": "Current Title",
+            "type": "string"
+          },
+          "first_name": {
+            "default": "",
+            "maxLength": 200,
+            "title": "First Name",
+            "type": "string"
+          },
+          "last_name": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Last Name",
+            "type": "string"
+          },
+          "location": {
+            "default": "",
+            "maxLength": 300,
+            "title": "Location",
+            "type": "string"
+          }
+        },
+        "title": "SelfContactIn",
+        "type": "object"
+      },
+      "SelfContactOut": {
+        "properties": {
+          "current_company": {
+            "default": "",
+            "maxLength": 300,
+            "title": "Current Company",
+            "type": "string"
+          },
+          "current_title": {
+            "default": "",
+            "maxLength": 300,
+            "title": "Current Title",
+            "type": "string"
+          },
+          "exists": {
+            "title": "Exists",
+            "type": "boolean"
+          },
+          "first_name": {
+            "default": "",
+            "maxLength": 200,
+            "title": "First Name",
+            "type": "string"
+          },
+          "last_name": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Last Name",
+            "type": "string"
+          },
+          "location": {
+            "default": "",
+            "maxLength": 300,
+            "title": "Location",
+            "type": "string"
+          }
+        },
+        "required": [
+          "exists"
+        ],
+        "title": "SelfContactOut",
+        "type": "object"
+      },
       "SendingHoursIn": {
         "properties": {
           "days": {
@@ -10714,17 +10792,6 @@
       },
       "TestSendIn": {
         "properties": {
-          "enrollment_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Enrollment Id"
-          },
           "step_id": {
             "title": "Step Id",
             "type": "integer"
@@ -13479,7 +13546,7 @@
     },
     "/api/v1/campaigns/{campaign_id}/review/test-send": {
       "post": {
-        "description": "Test one email step, rendered for an enrollment, addressed to the campaign\nmailbox's own address. Follows the mailbox's arming, read again just before the\nGmail call: armed to send, it is sent; armed for drafts only, it is a draft in the\nmailbox's Drafts (never ``messages.send``); disarmed, ``409``. Never a campaign\nmessage: it counts toward no cap or recency and advances no enrollment.",
+        "description": "Test one email step, rendered with the self contact (your own details, #342) and\naddressed to the campaign mailbox's own address. Follows the mailbox's arming, read\nagain just before the Gmail call: armed to send, it is sent; armed for drafts only,\nit is a draft in the mailbox's Drafts (never ``messages.send``); disarmed, ``409``.\nNever a campaign message: it counts toward no cap or recency and advances no enrollment.",
         "operationId": "test_send_api_v1_campaigns__campaign_id__review_test_send_post",
         "parameters": [
           {
@@ -18579,6 +18646,61 @@
         ]
       }
     },
+    "/api/v1/settings/self-contact": {
+      "get": {
+        "description": "Your own details: what a test send renders the contact fields with.",
+        "operationId": "get_self_contact",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SelfContactOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Self Contact",
+        "tags": [
+          "settings"
+        ]
+      },
+      "put": {
+        "description": "Replace your own details. The next test send renders with them.",
+        "operationId": "set_self_contact",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelfContactIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SelfContactOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "A value that is too long"
+          }
+        },
+        "summary": "Set Self Contact",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
     "/api/v1/settings/sending-hours": {
       "get": {
         "description": "The sending hours: when campaign email may go out, after each campaign's start.\n``readable`` is false, with the defaults, when the stored value cannot be read.",
@@ -18954,7 +19076,7 @@
     },
     "/api/v1/templates/merge-fields": {
       "get": {
-        "description": "Every merge field a template may name, with a description and an example value.\n\nThe list is the one lint checks names against, so the editor's field list\nfollows any change to it. The ``me.<key>`` fields include any extra keys\nunder ``[me]`` in the config.",
+        "description": "Every merge field a template may name, with a description and an example value.\n\nThe list is the one lint checks names against, so the editor's field list\nfollows any change to it.",
         "operationId": "list_merge_fields",
         "parameters": [
           {

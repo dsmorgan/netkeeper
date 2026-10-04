@@ -19,9 +19,9 @@ import pytest
 from campaign_fakes import ARMED_FOR_SEND, NOW, SETTINGS, FakeSender, make_mailbox
 from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.campaigns.render import me_fields
 from netkeeper.crm import do_not_send
 from netkeeper.crm import lists as list_service
+from netkeeper.crm.self_contact import update_self_contact
 from netkeeper.db import session_scope
 from netkeeper.models import (
     Campaign,
@@ -44,7 +44,6 @@ from netkeeper.services import campaign_engine, campaign_review
 from netkeeper.services.campaign_engine import Decision, Skip, run_tick
 from netkeeper.services.campaign_guards import Reason, check_step
 
-ME = me_fields(SETTINGS.me)
 
 
 @dataclass
@@ -99,7 +98,7 @@ def _reviewing(
 def _review(r: Reviewed) -> campaign_review.StepReview:
     with session_scope(r.factory) as session:
         return campaign_review.review_step(
-            session, r.user, r.campaign_id, r.step_id, me=ME, now=NOW
+            session, r.user, r.campaign_id, r.step_id, now=NOW
         )
 
 
@@ -112,16 +111,16 @@ def _complete_and_activate(r: Reviewed, review: campaign_review.StepReview) -> N
             r.campaign_id,
             r.step_id,
             fingerprint_seen=review.fingerprint,
-            me=ME,
             now=NOW,
         )
+        update_self_contact(session, user, {"first_name": "Selfie"})  # the test renders it
         plan = campaign_review.prepare_test_send(
-            session, user, r.campaign_id, r.step_id, enrollment_id=r.ok[0], me=ME, today=NOW.date()
+            session, user, r.campaign_id, r.step_id, today=NOW.date()
         )
         campaign_review.record_test_send(session, user, plan, gmail_message_id="fake", now=NOW)
-        assert campaign_review.record_lint(session, user, r.campaign_id, me=ME, now=NOW).clean
+        assert campaign_review.record_lint(session, user, r.campaign_id, now=NOW).clean
         campaign_review.activate(
-            session, user, r.campaign_id, settings=SETTINGS, me=ME, now=NOW, starts_at=NOW
+            session, user, r.campaign_id, settings=SETTINGS, now=NOW, starts_at=NOW
         )
 
 
@@ -436,15 +435,14 @@ def test_a_lint_error_blocks_every_message_and_activation(
             r.campaign_id,
             r.step_id,
             fingerprint_seen=review.fingerprint,
-            me=ME,
             now=NOW,
         )
         campaign = campaign_review.get_campaign(session, r.user, r.campaign_id)
-        gaps = campaign_review.missing(session, r.user, campaign, me=ME, now=NOW)
+        gaps = campaign_review.missing(session, r.user, campaign, now=NOW)
         assert "lint" in {g.requirement for g in gaps}
         with pytest.raises(campaign_review.ReviewIncomplete):
             campaign_review.activate(
-                session, r.user, r.campaign_id, settings=SETTINGS, me=ME, now=NOW, starts_at=NOW
+                session, r.user, r.campaign_id, settings=SETTINGS, now=NOW, starts_at=NOW
             )
 
 

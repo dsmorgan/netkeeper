@@ -2,13 +2,6 @@
 host = "127.0.0.1"
 port = 8000
 
-[me]
-name = "Your Name"
-website = "https://example.com"
-scheduling_link = ""
-signature = "Your first name"
-city = ""
-
 [linkedin]
 cdp_url = "http://127.0.0.1:9222"
 timezone = "America/New_York"

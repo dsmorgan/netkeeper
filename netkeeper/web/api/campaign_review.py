@@ -39,7 +39,6 @@ from pydantic import AwareDatetime, BaseModel, Field
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.gmail import Gmail, GmailError
-from netkeeper.campaigns.render import me_fields
 from netkeeper.config import Settings
 from netkeeper.db import session_scope
 from netkeeper.localtime import local_today
@@ -222,7 +221,6 @@ class TestSendIn(BaseModel):
     __test__ = False  # not a pytest class, whatever its name
 
     step_id: int
-    enrollment_id: int | None = None
 
 
 @contextmanager
@@ -260,10 +258,6 @@ def _settings(request: Request) -> Settings:
     return settings
 
 
-def _me(request: Request) -> dict[str, str]:
-    return me_fields(_settings(request).me)
-
-
 def _message_out(m: service.MessagePreview) -> MessagePreviewOut:
     return MessagePreviewOut(
         enrollment_id=m.enrollment_id,
@@ -296,18 +290,18 @@ def _step_review_out(r: service.StepReview) -> StepReviewOut:
     )
 
 
-def _review(session: Session, user: User, campaign_id: int, me: dict[str, str]) -> ReviewOut:
+def _review(session: Session, user: User, campaign_id: int) -> ReviewOut:
     now = utcnow()
     campaign = service.get_campaign(session, user, campaign_id)
     summary, note = service.guard_summary_and_note(session, user, campaign, now=now)
     return ReviewOut(
         campaign_id=campaign.id,
         status=campaign.status,
-        content_fingerprint=service.content_fingerprint(session, user, campaign, me),
+        content_fingerprint=service.content_fingerprint(session, user, campaign),
         audience_fingerprint=service.audience_fingerprint(session, user, campaign),
         guard_summary=summary,
         prior_contact_note=note,
-        missing=_missing_out(service.missing(session, user, campaign, me=me, now=now)),
+        missing=_missing_out(service.missing(session, user, campaign, now=now)),
     )
 
 
@@ -317,7 +311,7 @@ def get_review(
 ) -> ReviewOut:
     """Where the review stands: the fingerprints, the guard summary, what is missing."""
     with translate_errors():
-        return _review(session, user, campaign_id, _me(request))
+        return _review(session, user, campaign_id)
 
 
 @router.post("/campaigns/{campaign_id}/review/start", responses={**NOT_FOUND, **CONFLICT})
@@ -327,7 +321,7 @@ def start_review(
     """``draft`` to ``reviewing``: needs a step and someone enrolled."""
     with translate_errors():
         service.start_review(session, user, campaign_id)
-        return _review(session, user, campaign_id, _me(request))
+        return _review(session, user, campaign_id)
 
 
 @router.get("/campaigns/{campaign_id}/review/steps/{step_id}", responses={**NOT_FOUND, **CONFLICT})
@@ -349,7 +343,6 @@ def review_step(
                 user,
                 campaign_id,
                 step_id,
-                me=_me(request),
                 now=utcnow(),
                 offset=offset,
                 limit=limit,
@@ -378,10 +371,9 @@ def approve_step(
             campaign_id,
             step_id,
             fingerprint_seen=body.fingerprint,
-            me=_me(request),
             now=utcnow(),
         )
-        return _review(session, user, campaign_id, _me(request))
+        return _review(session, user, campaign_id)
 
 
 @router.post(
@@ -405,10 +397,9 @@ def approve_messages(
             campaign_id,
             step_id,
             {m.enrollment_id: m.fingerprint for m in body.messages},
-            me=_me(request),
             now=utcnow(),
         )
-        return _review(session, user, campaign_id, _me(request))
+        return _review(session, user, campaign_id)
 
 
 @router.post("/campaigns/{campaign_id}/review/lint", responses={**NOT_FOUND, **CONFLICT})
@@ -417,7 +408,7 @@ def lint_campaign(
 ) -> LintOut:
     """Lint every step's template; the result is recorded only when there is no error."""
     with translate_errors():
-        result = service.record_lint(session, user, campaign_id, me=_me(request), now=utcnow())
+        result = service.record_lint(session, user, campaign_id, now=utcnow())
     return LintOut(
         clean=result.clean,
         steps=[
@@ -473,21 +464,18 @@ def _opener(request: Request) -> GmailOpener:
 def test_send(
     campaign_id: int, body: TestSendIn, request: Request, user: CurrentUser
 ) -> TestSendOut:
-    """Test one email step, rendered for an enrollment, addressed to the campaign
-    mailbox's own address. Follows the mailbox's arming, read again just before the
-    Gmail call: armed to send, it is sent; armed for drafts only, it is a draft in the
-    mailbox's Drafts (never ``messages.send``); disarmed, ``409``. Never a campaign
-    message: it counts toward no cap or recency and advances no enrollment."""
+    """Test one email step, rendered with the self contact (your own details, #342) and
+    addressed to the campaign mailbox's own address. Follows the mailbox's arming, read
+    again just before the Gmail call: armed to send, it is sent; armed for drafts only,
+    it is a draft in the mailbox's Drafts (never ``messages.send``); disarmed, ``409``.
+    Never a campaign message: it counts toward no cap or recency and advances no enrollment."""
     factory: sessionmaker[Session] = request.app.state.session_factory
-    me = _me(request)
     with session_scope(factory) as session, translate_errors():
         plan = service.prepare_test_send(
             session,
             user,
             campaign_id,
             body.step_id,
-            enrollment_id=body.enrollment_id,
-            me=me,
             today=local_today(user.timezone, utcnow()),
         )
     what = f"of step {plan.step_position} of campaign {plan.campaign_id}"
@@ -585,8 +573,7 @@ def activate_campaign(
             user,
             campaign_id,
             settings=_settings(request),
-            me=_me(request),
             now=now,
             starts_at=starts_at,
         )
-        return _review(session, user, campaign_id, _me(request))
+        return _review(session, user, campaign_id)

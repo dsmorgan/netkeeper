@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 
 from netkeeper.db import is_writer
 from netkeeper.models import Contact, SyncRun, User
-from netkeeper.scoping import scoped
+from netkeeper.scoping import scoped_contacts
 from netkeeper.services.settings_kv import get_setting, set_setting
 
 log = logging.getLogger(__name__)
@@ -118,7 +118,7 @@ def in_page_order(
     position = {urn: index for index, urn in enumerate(urns) if urn is not None}
     held = {
         contact.id: contact.li_urn
-        for contact in session.scalars(scoped(user, Contact).where(Contact.id.in_(touched)))
+        for contact in session.scalars(scoped_contacts(user).where(Contact.id.in_(touched)))
     }
 
     def place(contact_id: int) -> tuple[int, int]:
@@ -141,7 +141,7 @@ def recent(session: Session, user: User, run: SyncRun) -> list[TouchedContact]:
     ids = {contact_id for contact_id, _ in items}
     names = {
         contact.id: contact
-        for contact in session.scalars(scoped(user, Contact).where(Contact.id.in_(ids)))
+        for contact in session.scalars(scoped_contacts(user).where(Contact.id.in_(ids)))
     }
     return [
         TouchedContact(

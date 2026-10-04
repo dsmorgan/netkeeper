@@ -34,7 +34,7 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.models.base import utcnow
-from netkeeper.scoping import get_scoped, scoped
+from netkeeper.scoping import get_scoped, get_scoped_contact, scoped
 
 PAGE_MAX: Final = 200
 """The most items one page holds."""
@@ -176,7 +176,7 @@ def set_handled(session: Session, user: User, message_id: int, handled: bool) ->
         message.handled_at = utcnow()
     session.flush()
     enrollment = get_scoped(session, user, Enrollment, message.enrollment_id)
-    contact = get_scoped(session, user, Contact, message.contact_id)
+    contact = get_scoped_contact(session, user, message.contact_id)
     assert enrollment is not None and contact is not None  # plain foreign keys, same user
     campaign = get_scoped(session, user, Campaign, enrollment.campaign_id)
     assert campaign is not None

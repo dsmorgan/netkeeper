@@ -146,7 +146,14 @@ from netkeeper.models import (
 )
 from netkeeper.models.base import utcnow
 from netkeeper.models.imports import FILENAME_MAX_LENGTH, PRESET_NAME_MAX_LENGTH
-from netkeeper.scoping import get_scoped, scoped, scoped_count, scoped_delete
+from netkeeper.scoping import (
+    get_scoped,
+    get_scoped_contact,
+    scoped,
+    scoped_contacts,
+    scoped_count,
+    scoped_delete,
+)
 from netkeeper.services.settings_kv import get_setting, set_setting
 
 log = logging.getLogger(__name__)
@@ -869,7 +876,7 @@ def _join(*parts: str | None) -> str | None:
 
 
 def _owned(session: Session, user: User, contact_id: int) -> Contact:
-    contact = get_scoped(session, user, Contact, contact_id)
+    contact = get_scoped_contact(session, user, contact_id)
     if contact is None:
         raise ContactNotFound(f"contact {contact_id} is not one of this user's contacts")
     return contact
@@ -932,7 +939,7 @@ def prefetch_contacts(
     loaded: list[Contact] = []
 
     def load(condition: Any) -> None:
-        statement = scoped(user, Contact).where(condition).options(*loaders)
+        statement = scoped_contacts(user).where(condition).options(*loaders)
         loaded.extend(session.scalars(statement))
 
     for chunk in _chunks(sorted(urns)):
@@ -1509,7 +1516,7 @@ def _restore(
     session: Session, user: User, contact_id: int, changes: RowChanges
 ) -> tuple[int, int] | None:
     """Put one enriched contact back. ``(fields restored, child rows deleted)``, or None."""
-    contact = get_scoped(session, user, Contact, contact_id)
+    contact = get_scoped_contact(session, user, contact_id)
     if contact is None:
         return None  # deleted since the import; there is nothing to put back
     # Which fields are still this run's to undo, decided once and before the first
@@ -1616,11 +1623,11 @@ def _merged_since(session: Session, user: User, contact_ids: Iterable[int]) -> l
     if not ids:
         return []
     involved: set[int] = set()
-    merged_away = scoped(user, Contact).where(
+    merged_away = scoped_contacts(user).where(
         Contact.id.in_(ids), Contact.merged_into_id.is_not(None)
     )
     involved.update(contact.id for contact in session.scalars(merged_away))
-    survivors = scoped(user, Contact).where(Contact.merged_into_id.in_(ids))
+    survivors = scoped_contacts(user).where(Contact.merged_into_id.in_(ids))
     involved.update(
         contact.merged_into_id
         for contact in session.scalars(survivors)
@@ -1734,7 +1741,7 @@ def _acquired_since(
             )
     edited = enriched = 0
     ours = {run.source_kind.value, ContactSource.MANUAL.value}
-    for contact in session.scalars(scoped(user, Contact).where(Contact.id.in_(ids))):
+    for contact in session.scalars(scoped_contacts(user).where(Contact.id.in_(ids))):
         sources = set((contact.field_sources or {}).values())
         if (
             ContactSource.MANUAL.value in sources

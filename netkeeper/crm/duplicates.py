@@ -46,7 +46,7 @@ from sqlalchemy.orm import Session
 from netkeeper.crm.contacts import NotFound
 from netkeeper.crm.identity import resolve_survivor
 from netkeeper.models import Contact, ContactEmail, ContactPhone, User
-from netkeeper.scoping import scoped
+from netkeeper.scoping import scoped, scoped_contacts
 
 MatchedBy = Literal["name", "email", "phone"]
 
@@ -144,7 +144,7 @@ def possible_duplicates(
 
 
 def _live_others(user: User, contact: Contact) -> Select[tuple[Contact]]:
-    return scoped(user, Contact).where(
+    return scoped_contacts(user).where(
         Contact.id != contact.id,
         Contact.merged_into_id.is_(None),
         Contact.archived_at.is_(None),

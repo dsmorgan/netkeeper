@@ -532,11 +532,11 @@ export interface paths {
         put?: never;
         /**
          * Test Send
-         * @description Test one email step, rendered for an enrollment, addressed to the campaign
-         *     mailbox's own address. Follows the mailbox's arming, read again just before the
-         *     Gmail call: armed to send, it is sent; armed for drafts only, it is a draft in the
-         *     mailbox's Drafts (never ``messages.send``); disarmed, ``409``. Never a campaign
-         *     message: it counts toward no cap or recency and advances no enrollment.
+         * @description Test one email step, rendered with the self contact (your own details, #342) and
+         *     addressed to the campaign mailbox's own address. Follows the mailbox's arming, read
+         *     again just before the Gmail call: armed to send, it is sent; armed for drafts only,
+         *     it is a draft in the mailbox's Drafts (never ``messages.send``); disarmed, ``409``.
+         *     Never a campaign message: it counts toward no cap or recency and advances no enrollment.
          */
         post: operations["test_send_api_v1_campaigns__campaign_id__review_test_send_post"];
         delete?: never;
@@ -2488,6 +2488,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/settings/self-contact": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Self Contact
+         * @description Your own details: what a test send renders the contact fields with.
+         */
+        get: operations["get_self_contact"];
+        /**
+         * Set Self Contact
+         * @description Replace your own details. The next test send renders with them.
+         */
+        put: operations["set_self_contact"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/settings/sending-hours": {
         parameters: {
             query?: never;
@@ -2664,8 +2688,7 @@ export interface paths {
          * @description Every merge field a template may name, with a description and an example value.
          *
          *     The list is the one lint checks names against, so the editor's field list
-         *     follows any change to it. The ``me.<key>`` fields include any extra keys
-         *     under ``[me]`` in the config.
+         *     follows any change to it.
          */
         get: operations["list_merge_fields"];
         put?: never;
@@ -4435,13 +4458,13 @@ export interface components {
          * @description Where a field's example value came from.
          * @enum {string}
          */
-        ExampleSource: "contact" | "config" | "placeholder";
+        ExampleSource: "contact" | "placeholder";
         /**
          * FieldGroup
          * @description Where a merge field's value comes from.
          * @enum {string}
          */
-        FieldGroup: "contact" | "personal" | "me" | "campaign";
+        FieldGroup: "contact" | "personal" | "campaign";
         "FilterNode-Input": components["schemas"]["And-Input"] | components["schemas"]["Or-Input"] | components["schemas"]["Not-Input"] | components["schemas"]["Eq"] | components["schemas"]["Neq"] | components["schemas"]["Contains"] | components["schemas"]["StartsWith"] | components["schemas"]["IsEmpty"] | components["schemas"]["Gt"] | components["schemas"]["Gte"] | components["schemas"]["Lt"] | components["schemas"]["Lte"] | components["schemas"]["Between"] | components["schemas"]["HasEmail"] | components["schemas"]["HasPhone"] | components["schemas"]["HasLiUrl"] | components["schemas"]["HasPosition"] | components["schemas"]["EmailContains"] | components["schemas"]["LastContacted"] | components["schemas"]["ConnectedWithinDays"] | components["schemas"]["ChangedJobsWithinDays"] | components["schemas"]["TagAny"] | components["schemas"]["TagAll"] | components["schemas"]["TagNone"] | components["schemas"]["ListMember"] | components["schemas"]["EnrolledIn"] | components["schemas"]["RepliedIn"];
         "FilterNode-Output": components["schemas"]["And-Output"] | components["schemas"]["Or-Output"] | components["schemas"]["Not-Output"] | components["schemas"]["Eq"] | components["schemas"]["Neq"] | components["schemas"]["Contains"] | components["schemas"]["StartsWith"] | components["schemas"]["IsEmpty"] | components["schemas"]["Gt"] | components["schemas"]["Gte"] | components["schemas"]["Lt"] | components["schemas"]["Lte"] | components["schemas"]["Between"] | components["schemas"]["HasEmail"] | components["schemas"]["HasPhone"] | components["schemas"]["HasLiUrl"] | components["schemas"]["HasPosition"] | components["schemas"]["EmailContains"] | components["schemas"]["LastContacted"] | components["schemas"]["ConnectedWithinDays"] | components["schemas"]["ChangedJobsWithinDays"] | components["schemas"]["TagAny"] | components["schemas"]["TagAll"] | components["schemas"]["TagNone"] | components["schemas"]["ListMember"] | components["schemas"]["EnrolledIn"] | components["schemas"]["RepliedIn"];
         /**
@@ -5190,7 +5213,7 @@ export interface components {
          * LintRule
          * @enum {string}
          */
-        LintRule: "syntax" | "unsupported" | "unsafe_attribute" | "attribute_access" | "undefined_variable" | "no_contact_field" | "missing_subject" | "bad_link" | "missing_value";
+        LintRule: "syntax" | "unsupported" | "unsafe_attribute" | "attribute_access" | "undefined_variable" | "no_contact_field" | "missing_subject" | "bad_link" | "missing_value" | "removed_field";
         /** LintStepOut */
         LintStepOut: {
             /** Errors */
@@ -6193,6 +6216,64 @@ export interface components {
             /** Next Due */
             next_due: string | null;
         };
+        /** SelfContactIn */
+        SelfContactIn: {
+            /**
+             * Current Company
+             * @default
+             */
+            current_company: string;
+            /**
+             * Current Title
+             * @default
+             */
+            current_title: string;
+            /**
+             * First Name
+             * @default
+             */
+            first_name: string;
+            /**
+             * Last Name
+             * @default
+             */
+            last_name: string;
+            /**
+             * Location
+             * @default
+             */
+            location: string;
+        };
+        /** SelfContactOut */
+        SelfContactOut: {
+            /**
+             * Current Company
+             * @default
+             */
+            current_company: string;
+            /**
+             * Current Title
+             * @default
+             */
+            current_title: string;
+            /** Exists */
+            exists: boolean;
+            /**
+             * First Name
+             * @default
+             */
+            first_name: string;
+            /**
+             * Last Name
+             * @default
+             */
+            last_name: string;
+            /**
+             * Location
+             * @default
+             */
+            location: string;
+        };
         /** SendingHoursIn */
         SendingHoursIn: {
             /** Days */
@@ -6744,8 +6825,6 @@ export interface components {
         };
         /** TestSendIn */
         TestSendIn: {
-            /** Enrollment Id */
-            enrollment_id?: number | null;
             /** Step Id */
             step_id: number;
         };
@@ -12410,6 +12489,57 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["PostureOut"];
                 };
+            };
+        };
+    };
+    get_self_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SelfContactOut"];
+                };
+            };
+        };
+    };
+    set_self_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SelfContactIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SelfContactOut"];
+                };
+            };
+            /** @description A value that is too long */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

@@ -84,7 +84,7 @@ from netkeeper.models import (
     SyncRunTrigger,
     User,
 )
-from netkeeper.scoping import scoped
+from netkeeper.scoping import scoped_contacts
 from netkeeper.services import runs
 from netkeeper.services.settings_kv import get_setting, set_setting
 
@@ -118,7 +118,7 @@ class PlanFinished(ValueError):
 
 
 def _eligible(user: User) -> Select[tuple[Contact]]:
-    return scoped(user, Contact).where(
+    return scoped_contacts(user).where(
         Contact.merged_into_id.is_(None),
         Contact.archived_at.is_(None),
         Contact.li_disconnected_at.is_(None),

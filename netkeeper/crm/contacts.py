@@ -87,7 +87,13 @@ from netkeeper.models import (
     single_address,
 )
 from netkeeper.models.base import utcnow
-from netkeeper.scoping import get_scoped, scoped, scoped_count, scoped_update
+from netkeeper.scoping import (
+    get_scoped_contact,
+    scoped,
+    scoped_contacts,
+    scoped_contacts_count,
+    scoped_contacts_update,
+)
 
 log = logging.getLogger(__name__)
 
@@ -293,7 +299,7 @@ def contact_stats(session: Session, user: User) -> ContactStats:
     live = (Contact.archived_at.is_(None), Contact.merged_into_id.is_(None))
 
     def count(*clauses: ColumnElement[bool]) -> int:
-        statement = scoped_count(user, Contact)
+        statement = scoped_contacts_count(user)
         if clauses:
             statement = statement.where(*clauses)
         return session.scalar(statement) or 0
@@ -343,7 +349,7 @@ def latest_snapshots(
 def live_contact(session: Session, user: User, contact_id: int) -> Contact:
     """One of ``user``'s contacts, for writing: :class:`NotFound`, or :class:`Merged`
     when the contact was merged away (the survivor is named)."""
-    contact = get_scoped(session, user, Contact, contact_id)
+    contact = get_scoped_contact(session, user, contact_id)
     if contact is None:
         raise NotFound("no such contact")
     if contact.merged_into_id is not None:
@@ -430,7 +436,7 @@ def _set_public_id(session: Session, user: User, contact: Contact, value: object
         return
     if slug is not None:
         holder = session.scalars(
-            scoped(user, Contact)
+            scoped_contacts(user)
             .where(Contact.li_public_id == slug, Contact.id != contact.id)
             .limit(1)
         ).first()
@@ -462,7 +468,7 @@ def revert_field(session: Session, user: User, contact_id: int, field: str) -> C
     if field in ("li_urn", "li_public_id") and synced["value"] is not None:
         column = Contact.li_urn if field == "li_urn" else Contact.li_public_id
         holder = session.scalars(
-            scoped(user, Contact)
+            scoped_contacts(user)
             .where(column == synced["value"], Contact.id != contact.id)
             .limit(1)
         ).first()
@@ -550,7 +556,7 @@ def merge_contacts(session: Session, user: User, survivor_id: int, loser_id: int
     """
     _require_writer(session)
     live_contact(session, user, survivor_id)
-    if get_scoped(session, user, Contact, loser_id) is None:
+    if get_scoped_contact(session, user, loser_id) is None:
         raise NotFound("no such contact")
     try:
         return merge(session, user, survivor_id, loser_id)
@@ -589,7 +595,7 @@ def count_selection(
     if selection.tree is not None:
         return session.scalar(compile_count(user, selection.tree, session=session, now=now)) or 0
     assert selection.ids is not None
-    statement: Select[tuple[int]] = scoped_count(user, Contact).where(
+    statement: Select[tuple[int]] = scoped_contacts_count(user).where(
         Contact.id.in_(selection.ids), Contact.merged_into_id.is_(None)
     )
     return session.scalar(statement) or 0
@@ -683,7 +689,7 @@ def _selection_update(
     # "auto" synchronization would issue its own unscoped SELECT to find the rows
     # (see netkeeper.crm.filters.compile_update); the caller expires the session.
     return (
-        scoped_update(user, Contact)
+        scoped_contacts_update(user)
         .where(Contact.id.in_(selection.ids), Contact.merged_into_id.is_(None))
         .execution_options(synchronize_session=False)
     )

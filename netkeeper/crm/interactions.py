@@ -44,7 +44,12 @@ from netkeeper.models import (
     Message,
     User,
 )
-from netkeeper.scoping import get_scoped, scoped, scoped_update
+from netkeeper.scoping import (
+    get_scoped,
+    get_scoped_contact,
+    scoped,
+    scoped_contacts_update,
+)
 
 log = logging.getLogger(__name__)
 
@@ -310,7 +315,7 @@ def recompute_last_contacted(
         .correlate(Contact)
         .scalar_subquery()
     )
-    statement = scoped_update(user, Contact).values(last_contacted_at=newest)
+    statement = scoped_contacts_update(user).values(last_contacted_at=newest)
     if contact_ids is not None:
         statement = statement.where(Contact.id.in_(contact_ids))
     # "auto" would issue its own unscoped SELECT to find the rows (see
@@ -461,7 +466,7 @@ def _check_message(session: Session, user: User, contact_id: int, message_id: in
 
 
 def _owned_contact(session: Session, user: User, contact_id: int) -> Contact:
-    contact = get_scoped(session, user, Contact, contact_id)
+    contact = get_scoped_contact(session, user, contact_id)
     if contact is None:
         raise NotFound(f"contact {contact_id} is not one of user {user.id}'s")
     return contact

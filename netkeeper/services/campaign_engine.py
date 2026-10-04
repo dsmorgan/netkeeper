@@ -148,7 +148,7 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from netkeeper.campaigns import schedule
 from netkeeper.campaigns.compose import ComposeError, campaign_label, message_id_for
-from netkeeper.campaigns.render import MergeValues, TemplateRenderError, me_fields, render
+from netkeeper.campaigns.render import MergeValues, TemplateRenderError, render
 from netkeeper.campaigns.templates import activation_errors, contact_fields
 from netkeeper.config import Settings
 from netkeeper.crm.contacts import sendable_email
@@ -172,7 +172,7 @@ from netkeeper.models import (
     UserKind,
 )
 from netkeeper.models.base import utcnow
-from netkeeper.scoping import get_scoped, scoped
+from netkeeper.scoping import get_scoped, scoped, scoped_contacts
 from netkeeper.services import sending_hours
 from netkeeper.services.campaign_guards import (
     UNSENDABLE_EMAIL_STATUSES,
@@ -538,10 +538,9 @@ def activate(
         raise CampaignEngineError(f"campaign {campaign_id} has no steps")
     if campaign.mailbox_id is None and any(s.channel is TemplateChannel.EMAIL for s in steps):
         raise CampaignEngineError(f"campaign {campaign_id} has email steps and no mailbox")
-    me_keys = me_fields(settings.me).keys()
     for step in steps:
         template = get_scoped(session, user, Template, step.template_id)
-        if template is None or activation_errors(template, me_keys):
+        if template is None or activation_errors(template):
             raise CampaignEngineError(f"step {step.position}'s template has lint errors")
     start = max(starts_at, now)
     first_due = first_step_due(settings, user, steps[0], start, hours_for(session, user))
@@ -1545,12 +1544,11 @@ class _Chooser:
     ) -> _Claim | None:
         session, user = self.session, self.user
         template = get_scoped(session, user, Template, step.template_id)
-        me = me_fields(self.settings.me)
-        if template is None or activation_errors(template, me.keys()):
+        if template is None or activation_errors(template):
             self.park(enrollment, Skip.TEMPLATE_ERRORS)
             return None
         contact = session.scalars(
-            scoped(user, Contact)
+            scoped_contacts(user)
             .where(Contact.id == enrollment.contact_id)
             .options(selectinload(Contact.emails), selectinload(Contact.positions))
             .execution_options(populate_existing=True)
@@ -1566,7 +1564,6 @@ class _Chooser:
         today = slots.local_date(self.now)
         values = MergeValues(
             contact=contact_fields(contact, today),
-            me=me,
             campaign_name=campaign.name,
             step_number=step.position,
             previous_send_date=latest,

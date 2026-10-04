@@ -27,8 +27,9 @@ contact they exclude then is never sent anything, whatever the summary said.
 made for, and counts only while that fingerprint is still the current one:
 
 - A step's fingerprint (:func:`step_fingerprint`) covers the step's own fields,
-  its template's text, the campaign's name and mailbox, and the ``[me]``
-  values. A test send counts for its step's fingerprint.
+  its template's text, and the campaign's name and mailbox. A test send counts
+  for its step's fingerprint. (Until #342 it covered the ``[me]`` values too, so
+  every record made before that is stale once and must be made again.)
 - A step approval counts for its step's fingerprint, so a change to the step or
   its template (an edit, or a new version) undoes it. While it holds, it covers
   every message of the step, including messages rendered later for contacts
@@ -46,8 +47,8 @@ made for, and counts only while that fingerprint is still the current one:
   step approval covers the messages of contacts enrolled later.
 
 **Test sends are never campaign messages.** A test send goes only to the
-campaign mailbox's own address, is rendered for an enrollment but addressed to
-nobody else, has a ``[Test]`` subject, and is recorded in
+campaign mailbox's own address, is rendered with the self contact, your own
+details (#342), never a contact's, has a ``[Test]`` subject, and is recorded in
 ``campaign_test_sends``, never in ``messages`` or ``interactions``. The caps,
 the recency guard and the engine read only those two, so a test send never
 counts toward a cap or recency and never advances an enrollment.
@@ -91,6 +92,7 @@ from netkeeper.crm import lists as crm_lists
 from netkeeper.crm.contacts import sendable_email
 from netkeeper.crm.filters import compile_filter, parse_filter
 from netkeeper.crm.history import prior_contact
+from netkeeper.crm.self_contact import get_self_contact
 from netkeeper.db import is_writer
 from netkeeper.localtime import local_today
 from netkeeper.models import (
@@ -109,7 +111,7 @@ from netkeeper.models import (
     TestSend,
     User,
 )
-from netkeeper.scoping import get_scoped, scoped
+from netkeeper.scoping import get_scoped, scoped, scoped_contacts
 from netkeeper.services import campaign_engine, mailboxes
 from netkeeper.services.campaign_guards import (
     UNSENDABLE_EMAIL_STATUSES,
@@ -184,9 +186,7 @@ def _digest(value: object) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def step_fingerprint(
-    step: CampaignStep, template: Template | None, campaign: Campaign, me: Mapping[str, str]
-) -> str:
+def step_fingerprint(step: CampaignStep, template: Template | None, campaign: Campaign) -> str:
     """What a test send of ``step`` shows: see the module docstring."""
     return _digest(
         {
@@ -206,7 +206,6 @@ def step_fingerprint(
             if template is None
             else [template.id, template.channel, template.subject, template.body],
             "campaign": [campaign.name, campaign.mailbox_id],
-            "me": dict(me),
         }
     )
 
@@ -226,13 +225,11 @@ def _template(session: Session, user: User, step: CampaignStep) -> Template | No
     return get_scoped(session, user, Template, step.template_id)
 
 
-def content_fingerprint(
-    session: Session, user: User, campaign: Campaign, me: Mapping[str, str]
-) -> str:
+def content_fingerprint(session: Session, user: User, campaign: Campaign) -> str:
     """Every step's fingerprint, in order: what a preview shows."""
     return _digest(
         [
-            step_fingerprint(step, _template(session, user, step), campaign, me)
+            step_fingerprint(step, _template(session, user, step), campaign)
             for step in _steps(session, user, campaign.id)
         ]
     )
@@ -455,7 +452,7 @@ def start_review(session: Session, user: User, campaign_id: int) -> Campaign:
 
 def _contact(session: Session, user: User, contact_id: int) -> Contact | None:
     return session.scalars(
-        scoped(user, Contact)
+        scoped_contacts(user)
         .where(Contact.id == contact_id)
         .options(selectinload(Contact.emails), selectinload(Contact.positions))
         .execution_options(populate_existing=True)
@@ -476,7 +473,6 @@ def merge_values(
     contact: Contact,
     campaign: Campaign,
     step: CampaignStep,
-    me: Mapping[str, str],
     today: date,
     *,
     enrollment_id: int,
@@ -485,7 +481,6 @@ def merge_values(
     context the engine builds at a fire, less the previous send's date."""
     return MergeValues(
         contact=contact_fields(contact, today),
-        me=me,
         campaign_name=campaign.name,
         step_number=step.position,
         personal_line=personal_line_for(enrollment_id, step),
@@ -579,7 +574,7 @@ def _contacts(session: Session, user: User, contact_ids: Collection[int]) -> dic
     if not contact_ids:
         return {}
     found = session.scalars(
-        scoped(user, Contact)
+        scoped_contacts(user)
         .where(Contact.id.in_(sorted(set(contact_ids))))
         .options(selectinload(Contact.emails), selectinload(Contact.positions))
         .execution_options(populate_existing=True)
@@ -605,7 +600,6 @@ def message_fingerprint(
     contact: Contact | None,
     campaign: Campaign,
     step: CampaignStep,
-    me: Mapping[str, str],
     today: date,
     *,
     enrollment_id: int,
@@ -619,10 +613,9 @@ def message_fingerprint(
     the contact or its personal line undoes it."""
     if contact is None:
         return _digest([step_print, None])
-    values = merge_values(contact, campaign, step, me, today, enrollment_id=enrollment_id)
+    values = merge_values(contact, campaign, step, today, enrollment_id=enrollment_id)
     context = {
         "contact": dict(values.contact),
-        "me": dict(values.me),
         "campaign_name": values.campaign_name,
         "step_number": values.step_number,
         "personal_line": values.personal_line,
@@ -664,7 +657,6 @@ def _render_messages(
     step: CampaignStep,
     template: Template | None,
     pending: Sequence[Enrollment],
-    me: Mapping[str, str],
     now: datetime,
     *,
     step_approved: bool,
@@ -681,7 +673,7 @@ def _render_messages(
         session, user, [(e.id, e.contact_id) for e in pending], campaign_id=campaign.id
     )
     policy = GuardPolicy(contacted_within_days=campaign.contacted_within_days_guard)
-    step_print = step_fingerprint(step, template, campaign, me)
+    step_print = step_fingerprint(step, template, campaign)
     per_message = is_per_message(template)
     out: list[MessagePreview] = []
     for enrollment in pending:
@@ -700,7 +692,7 @@ def _render_messages(
             try:
                 rendered = _render_step(
                     template,
-                    merge_values(contact, campaign, step, me, today, enrollment_id=enrollment.id),
+                    merge_values(contact, campaign, step, today, enrollment_id=enrollment.id),
                     today,
                 )
             except TemplateRenderError as exc:
@@ -718,7 +710,7 @@ def _render_messages(
             )
             blocked = f"excluded by a guard: {label}"
         fingerprint = message_fingerprint(
-            step_print, contact, campaign, step, me, today, enrollment_id=enrollment.id
+            step_print, contact, campaign, step, today, enrollment_id=enrollment.id
         )
         if per_message:
             approved = approved_messages.get(enrollment.id) == fingerprint
@@ -747,7 +739,6 @@ def review_step(
     campaign_id: int,
     step_id: int,
     *,
-    me: Mapping[str, str],
     now: datetime,
     offset: int = 0,
     limit: int = STEP_PAGE,
@@ -759,7 +750,7 @@ def review_step(
     campaign = get_campaign(session, user, campaign_id)
     step = _step(session, user, campaign_id, step_id)
     template = _template(session, user, step)
-    fingerprint = step_fingerprint(step, template, campaign, me)
+    fingerprint = step_fingerprint(step, template, campaign)
     per_message = is_per_message(template)
     rows = _approvals(session, user, campaign_id, step.id)
     approved = not per_message and _step_approved(rows, step.id, fingerprint)
@@ -770,7 +761,6 @@ def review_step(
         step,
         template,
         _pending(session, user, campaign_id),
-        me,
         now,
         step_approved=approved,
         approved_messages=_messages_approved(rows, step.id),
@@ -800,7 +790,6 @@ def approve_step(
     step_id: int,
     *,
     fingerprint_seen: str,
-    me: Mapping[str, str],
     now: datetime,
 ) -> StepApproval:
     """Approve every message of a step at once, for the step ``fingerprint`` its review
@@ -817,7 +806,7 @@ def approve_step(
             f"step {step.position} uses {{{{ personal_line }}}}, so each of its messages"
             " is approved on its own"
         )
-    fingerprint = step_fingerprint(step, template, campaign, me)
+    fingerprint = step_fingerprint(step, template, campaign)
     if fingerprint_seen != fingerprint:
         raise ReviewStale(
             f"step {step.position} changed since it was shown (its template, its settings or"
@@ -846,7 +835,6 @@ def approve_messages(
     step_id: int,
     seen: Mapping[int, str],
     *,
-    me: Mapping[str, str],
     now: datetime,
 ) -> list[StepApproval]:
     """Approve single messages of a ``personal_line`` step. ``seen`` maps each pending
@@ -869,7 +857,7 @@ def approve_messages(
     unknown = [i for i in ids if i not in pending]
     if unknown:
         raise ReviewConflict(f"enrollment {unknown[0]} is not pending in this campaign")
-    step_print = step_fingerprint(step, template, campaign, me)
+    step_print = step_fingerprint(step, template, campaign)
     contacts = _contacts(session, user, [pending[i].contact_id for i in ids])
     current = {
         i: message_fingerprint(
@@ -877,7 +865,6 @@ def approve_messages(
             contacts.get(pending[i].contact_id),
             campaign,
             step,
-            me,
             local_today(user.timezone, now),
             enrollment_id=i,
         )
@@ -918,30 +905,28 @@ class LintResult:
     steps: tuple[tuple[int, tuple[LintIssue, ...]], ...]
 
 
-def record_lint(
-    session: Session, user: User, campaign_id: int, *, me: Mapping[str, str], now: datetime
-) -> LintResult:
+def record_lint(session: Session, user: User, campaign_id: int, *, now: datetime) -> LintResult:
     """Lint every step's template; recorded only when none has an error."""
     _require_writer(session, "record_lint")
     campaign = _reviewing(session, user, campaign_id)
-    found = _lint_errors(session, user, campaign_id, me)
+    found = _lint_errors(session, user, campaign_id)
     clean = not any(issues for _, issues in found)
     if clean:
         campaign.lint_checked_at = now
-        campaign.lint_fingerprint = content_fingerprint(session, user, campaign, me)
+        campaign.lint_fingerprint = content_fingerprint(session, user, campaign)
         session.flush()
     return LintResult(clean, found)
 
 
 def _lint_errors(
-    session: Session, user: User, campaign_id: int, me: Mapping[str, str]
+    session: Session, user: User, campaign_id: int
 ) -> tuple[tuple[int, tuple[LintIssue, ...]], ...]:
     out = []
     for step in _steps(session, user, campaign_id):
         template = _template(session, user, step)
         if template is None:
             raise ReviewConflict(f"step {step.position}'s template is gone")
-        out.append((step.position, tuple(activation_errors(template, me.keys()))))
+        out.append((step.position, tuple(activation_errors(template))))
     return tuple(out)
 
 
@@ -970,13 +955,13 @@ def prepare_test_send(
     campaign_id: int,
     step_id: int,
     *,
-    enrollment_id: int | None,
-    me: Mapping[str, str],
     today: date,
 ) -> TestSendPlan:
-    """A test send of an email step, rendered for one of the campaign's pending
-    enrollments (the given one, else the first) and addressed to the campaign mailbox's
-    own address, never the contact's.
+    """A test send of an email step, rendered with the self contact (your own details,
+    #342) and addressed to the campaign mailbox's own address, never a contact's.
+
+    Before the self contact is first created, the contact fields have no value and
+    render empty, each with a missing-value warning, as any contact's would.
 
     Refused (:class:`ReviewConflict`) unless the mailbox is ``ok`` and armed, for
     drafts or for send. Whether it is drafted or sent is decided just before the
@@ -1002,21 +987,16 @@ def prepare_test_send(
         )
     if mailbox.status is not MailboxStatus.OK:
         raise ReviewConflict(f"{mailbox.email} is {mailbox.status}")
-    pending = _pending(session, user, campaign_id)
-    if enrollment_id is None:  # the first pending one
-        enrollment = pending[0] if pending else None
-    else:
-        enrollment = next((e for e in pending if e.id == enrollment_id), None)
-    if enrollment is None:
-        raise ReviewNotFound(f"no pending enrollment to render step {step.position} for")
-    contact = _contact(session, user, enrollment.contact_id)
+    you = get_self_contact(session, user) or Contact(user_id=user.id, is_self=True)
     template = _template(session, user, step)
     try:
-        if contact is None:
-            raise TemplateRenderError("the contact is gone")
         rendered = _render_step(
             template,
-            merge_values(contact, campaign, step, me, today, enrollment_id=enrollment.id),
+            MergeValues(
+                contact=contact_fields(you, today),
+                campaign_name=campaign.name,
+                step_number=step.position,
+            ),
             today,
         )
     except TemplateRenderError as exc:
@@ -1040,7 +1020,7 @@ def prepare_test_send(
         step.position,
         mailbox.id,
         to,
-        step_fingerprint(step, template, campaign, me),
+        step_fingerprint(step, template, campaign),
         rfc822_message_id,
         message,
     )
@@ -1140,15 +1120,13 @@ def record_test_drafts_not_found(
 # --- the gate -----------------------------------------------------------------------
 
 
-def missing(
-    session: Session, user: User, campaign: Campaign, *, me: Mapping[str, str], now: datetime
-) -> list[Missing]:
+def missing(session: Session, user: User, campaign: Campaign, *, now: datetime) -> list[Missing]:
     """Every activation requirement not recorded, or recorded for something since changed."""
     out: list[Missing] = []
     if campaign.status is not CampaignStatus.REVIEWING:
         out.append(Missing("reviewing", f"the campaign is {campaign.status}, not reviewing"))
     steps = _steps(session, user, campaign.id)
-    content = content_fingerprint(session, user, campaign, me)
+    content = content_fingerprint(session, user, campaign)
     pending = _pending(session, user, campaign.id)
     if not pending:
         out.append(Missing("audience", "nobody is enrolled"))
@@ -1159,7 +1137,7 @@ def missing(
     contacts: dict[int, Contact] | None = None
     for step in steps:
         template = _template(session, user, step)
-        fingerprint = step_fingerprint(step, template, campaign, me)
+        fingerprint = step_fingerprint(step, template, campaign)
         if not is_per_message(template):
             if not _step_approved(approvals, step.id, fingerprint):
                 whole.append(step.position)
@@ -1176,7 +1154,6 @@ def missing(
                 contacts.get(e.contact_id),
                 campaign,
                 step,
-                me,
                 local_today(user.timezone, now),
                 enrollment_id=e.id,
             )
@@ -1206,7 +1183,7 @@ def missing(
         step.position
         for step in steps
         if step.channel is TemplateChannel.EMAIL
-        and step_fingerprint(step, _template(session, user, step), campaign, me) not in sent
+        and step_fingerprint(step, _template(session, user, step), campaign) not in sent
     )
     if untested:
         out.append(
@@ -1218,7 +1195,7 @@ def missing(
         out.append(Missing("lint", "the campaign has no steps"))
     elif campaign.lint_fingerprint != content:
         out.append(Missing("lint", "no lint result for the current steps and templates"))
-    elif errors := tuple(p for p, issues in _lint_errors(session, user, campaign.id, me) if issues):
+    elif errors := tuple(p for p, issues in _lint_errors(session, user, campaign.id) if issues):
         out.append(Missing("lint", "templates with lint errors", step_positions=errors))
     # No guard requirement (#346): the guard summary is informational, and the guards
     # apply again when each step fires.
@@ -1255,7 +1232,6 @@ def activate(
     campaign_id: int,
     *,
     settings: Settings,
-    me: Mapping[str, str],
     now: datetime,
     starts_at: datetime,
 ) -> Campaign:
@@ -1267,7 +1243,7 @@ def activate(
     it. Callers default it to :func:`netkeeper.campaigns.schedule.default_start`."""
     _require_writer(session, "activate")
     campaign = get_campaign(session, user, campaign_id)
-    gaps = missing(session, user, campaign, me=me, now=now)
+    gaps = missing(session, user, campaign, now=now)
     if gaps:
         raise ReviewIncomplete(gaps)
     campaign.approved_at = now

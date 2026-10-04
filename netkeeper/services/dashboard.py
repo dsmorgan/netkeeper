@@ -50,7 +50,7 @@ from netkeeper.models import (
     InteractionKind,
     User,
 )
-from netkeeper.scoping import scoped
+from netkeeper.scoping import scoped, scoped_contacts
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +93,7 @@ def changed_jobs(
         .subquery()
     )
     statement = (
-        scoped(user, Contact)
+        scoped_contacts(user)
         .join(latest, latest.c.contact_id == Contact.id)
         .where(
             Contact.archived_at.is_(None),

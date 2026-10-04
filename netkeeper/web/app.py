@@ -2,7 +2,7 @@
 
 :func:`create_app` builds the app. Its lifespan builds the engine (or takes the
 one passed in), migrates the database to head, makes sure the local user exists
-with the default auto-tag rules seeded, installs the scope guard on the session
+with the default auto-tag rules and the self contact seeded, installs the scope guard on the session
 factory, marks runs a stopped process left ``running`` as failed, and starts
 the event bus and the task runner, all kept on ``app.state``, along with the
 signer behind bulk count confirmations. Given an extractor (``netkeeper
@@ -35,6 +35,7 @@ from netkeeper.campaigns.gmail_oauth import GoogleEndpoints
 from netkeeper.config import Settings, load_settings
 from netkeeper.crm.confirmation import Signer
 from netkeeper.crm.lists import ensure_validated_list
+from netkeeper.crm.self_contact import ensure_self_contact
 from netkeeper.crm.tags import ensure_default_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.models.base import utcnow
@@ -165,6 +166,8 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
         ensure_default_rules(session, user)  # once per user; a deleted default stays deleted
         ensure_validated_list(session, user)  # once per user; a deleted "Validated" stays deleted
         ensure_account(session, user)  # the account budgets, heat, and runs belong to
+        # Your own details, for test sends (#342); seeded from a deprecated [me] the first time.
+        ensure_self_contact(session, user, legacy=settings.legacy_me)
         # Runs a stopped process left "running" are over; none is resumed on its own.
         # One whose account's browser lock is held right now belongs to a live
         # process (a `netkeeper linkedin sync` in a terminal) and is left alone.

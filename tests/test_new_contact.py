@@ -42,7 +42,7 @@ from netkeeper.models import (
     User,
     UserKind,
 )
-from netkeeper.scoping import install_scope_guard, scoped, scoped_count
+from netkeeper.scoping import install_scope_guard, scoped, scoped_contacts_count, scoped_count
 from netkeeper.services.users import ensure_local_user
 
 CSRF = {"X-Netkeeper-Client": "1"}
@@ -453,7 +453,7 @@ async def test_post_contacts_answers_409_with_the_existing_contact(
     with session_scope(factory) as session:
         user = session.get(User, owner.id)
         assert user is not None
-        assert session.scalar(scoped_count(user, Contact)) == 2
+        assert session.scalar(scoped_contacts_count(user)) == 2
 
 
 @pytest.mark.parametrize(
@@ -595,4 +595,4 @@ def test_cli_contacts_add_refuses_a_duplicate_and_a_bad_value(
 
     with session_scope(cli_db) as session:
         user = ensure_local_user(session)
-        assert session.scalar(scoped_count(user, Contact)) == 2
+        assert session.scalar(scoped_contacts_count(user)) == 2

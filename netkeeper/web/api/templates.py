@@ -3,9 +3,8 @@
 A template that is not the current user's answers ``404``, never a status that
 would confirm the id exists for someone else. Lint runs on every save and
 never blocks one; it blocks activation instead
-(:func:`netkeeper.campaigns.templates.activation_errors`). The ``me.<key>``
-fields a template may name come from ``[me]`` in the config the app started
-with.
+(:func:`netkeeper.campaigns.templates.activation_errors`). A template names
+contact fields only; the ``me.*`` fields were removed (#342).
 """
 
 from __future__ import annotations
@@ -17,10 +16,9 @@ from typing import Annotated, Any
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from netkeeper.campaigns import templates as service
-from netkeeper.campaigns.render import LintIssue, TemplateRenderError, me_fields
-from netkeeper.config import Settings
-from netkeeper.models import Contact, Template
-from netkeeper.scoping import get_scoped
+from netkeeper.campaigns.render import LintIssue, TemplateRenderError
+from netkeeper.models import Template
+from netkeeper.scoping import get_scoped_contact
 from netkeeper.web.deps import CurrentUser, SessionDep, read_only
 from netkeeper.web.schemas import (
     LintIssueOut,
@@ -61,11 +59,6 @@ def translate_errors() -> Iterator[None]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (service.InvalidTemplateValue, TemplateRenderError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-def _me(request: Request) -> dict[str, str]:
-    settings: Settings = request.app.state.settings
-    return me_fields(settings.me)
 
 
 def _issue_out(issue: LintIssue) -> LintIssueOut:
@@ -122,7 +115,6 @@ def create_template(
             channel=body.channel,
             subject=body.subject,
             body=body.body,
-            me_keys=_me(request).keys(),
         )
     return _template_out(row, current=True, in_use=False)
 
@@ -137,7 +129,7 @@ def lint_template(body: TemplateLintIn, request: Request, user: CurrentUser) -> 
     like every other.
     """
     with translate_errors():
-        issues = service.lint_draft(body.channel, body.subject, body.body, _me(request).keys())
+        issues = service.lint_draft(body.channel, body.subject, body.body)
     return [_issue_out(issue) for issue in issues]
 
 
@@ -157,15 +149,14 @@ def list_merge_fields(
     """Every merge field a template may name, with a description and an example value.
 
     The list is the one lint checks names against, so the editor's field list
-    follows any change to it. The ``me.<key>`` fields include any extra keys
-    under ``[me]`` in the config.
+    follows any change to it.
     """
     contact = None
     if contact_id is not None:
-        contact = get_scoped(session, user, Contact, contact_id)
+        contact = get_scoped_contact(session, user, contact_id)
         if contact is None:
             raise HTTPException(status_code=404, detail=f"no contact {contact_id}")
-    examples = service.field_examples(_me(request), contact, timezone=user.timezone)
+    examples = service.field_examples(contact, timezone=user.timezone)
     return MergeFieldsOut(
         contact_id=contact_id,
         fields=[
@@ -211,7 +202,6 @@ def update_template(
             session,
             user,
             template_id,
-            me_keys=_me(request).keys(),
             name=body.name,
             channel=body.channel,
             subject=subject,
@@ -249,10 +239,10 @@ def preview_template(
     ``422`` only for a template that does not compile or reaches past the sandbox."""
     with translate_errors():
         row = service.get_template(session, user, template_id)
-        contact = get_scoped(session, user, Contact, contact_id)
+        contact = get_scoped_contact(session, user, contact_id)
         if contact is None:
             raise HTTPException(status_code=404, detail=f"no contact {contact_id}")
-        rendered = service.render_preview(row, contact, me=_me(request), timezone=user.timezone)
+        rendered = service.render_preview(row, contact, timezone=user.timezone)
     return TemplatePreviewOut(
         subject=rendered.subject,
         body=rendered.body,

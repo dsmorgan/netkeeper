@@ -39,12 +39,12 @@ const FIELDS: MergeField[] = [
     example_source: 'contact',
   },
   {
-    name: 'me.name',
-    group: 'me',
-    description: 'Your name, from [me] in the config.',
-    insert: 'me.name',
+    name: 'title',
+    group: 'contact',
+    description: "The contact's current job title.",
+    insert: 'title',
     example: 'Dana Placeholder',
-    example_source: 'config',
+    example_source: 'contact',
   },
   {
     name: 'previous_send_date',
@@ -61,9 +61,16 @@ describe('buildPrompt', () => {
     const prompt = buildPrompt(REQUEST, 'email', FIELDS)
     expect(prompt).toContain("- {{ first_name }}: The contact's first name.")
     expect(prompt).toContain("- {{ company }}: The contact's current company.")
-    expect(prompt).toContain('- {{ me.name }}: Your name, from [me] in the config.')
+    expect(prompt).toContain("- {{ title }}: The contact's current job title.")
     expect(prompt).toContain('- {{ previous_send_date | ago }}: When the previous step went out.')
     expect(prompt).toContain('Never write a real name')
+  })
+
+  it('asks for no detail about me, since templates have no me.* fields (#342)', () => {
+    const prompt = buildPrompt(REQUEST, 'email', FIELDS)
+    expect(prompt).not.toContain('{{ me.')
+    expect(prompt).toContain('Leave out my own name and signature')
+    expect(prompt).not.toContain('detail about the recipient or me')
   })
 
   it('carries no example value, so a contact picked in the preview never reaches it', () => {

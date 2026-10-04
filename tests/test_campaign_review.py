@@ -132,6 +132,12 @@ def _build(
     return setup
 
 
+async def _set_self(client: httpx.AsyncClient, **details: str) -> None:
+    """Your own details, as Settings, About you saves them (#342)."""
+    response = await client.put("/api/v1/settings/self-contact", json=details, headers=CSRF)
+    assert response.status_code == 200, response.text
+
+
 async def _ok(response: httpx.Response, status: int = 200) -> Any:
     assert response.status_code == status, response.text
     return response.json()
@@ -988,10 +994,11 @@ async def test_a_test_send_goes_only_to_the_mailboxs_own_address(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
     s = _build(running_app, people=1)
+    await _set_self(client, first_name="Selfie")
     body = await _ok(
         await client.post(
             f"{s.base}/review/test-send",
-            json={"step_id": s.step_ids[0], "enrollment_id": s.enrollment_ids[0]},
+            json={"step_id": s.step_ids[0]},
             headers=CSRF,
         )
     )
@@ -1000,7 +1007,8 @@ async def test_a_test_send_goes_only_to_the_mailboxs_own_address(
     raw = s.gmail.raw(sent.id)
     assert raw["To"] == s.mailbox_email
     assert raw["Subject"] == "[Test] Hello"
-    assert "First" in raw.get_content()  # rendered for the enrollment's contact
+    assert "Hi Selfie" in raw.get_content()  # rendered with your own details (#342)
+    assert "First" not in raw.get_content()  # never a contact's
     headers = " ".join(f"{k}: {v}" for k, v in raw.items())
     assert s.contact_emails[0] not in headers
     assert [method for method, _ in s.gmail.calls] == ["messages.send"]
@@ -1012,10 +1020,11 @@ async def test_a_mailbox_armed_for_drafts_gets_a_test_draft_and_never_a_send(
     """#304: armed for drafts only, the test is a Gmail draft to the mailbox itself, in
     no thread, and ``messages.send`` is never called (#277)."""
     s = _build(running_app, people=1, arm=ARMED_FOR_DRAFTS)
+    await _set_self(client, first_name="Selfie")
     body = await _ok(
         await client.post(
             f"{s.base}/review/test-send",
-            json={"step_id": s.step_ids[0], "enrollment_id": s.enrollment_ids[0]},
+            json={"step_id": s.step_ids[0]},
             headers=CSRF,
         )
     )
@@ -1027,7 +1036,7 @@ async def test_a_mailbox_armed_for_drafts_gets_a_test_draft_and_never_a_send(
     raw = s.gmail.raw(ref.id)
     assert raw["To"] == s.mailbox_email
     assert raw["Subject"] == "[Test] Hello"
-    assert "First" in raw.get_content()
+    assert "Hi Selfie" in raw.get_content()
     assert s.contact_emails[0] not in " ".join(f"{k}: {v}" for k, v in raw.items())
     with session_scope(s.factory) as session:
         row = session.scalars(unscoped(select(TestSend))).one()
@@ -1293,20 +1302,39 @@ async def test_editing_a_contact_keeps_the_step_approval(
     assert (await client.post(f"{s.base}/activate", headers=CSRF)).status_code == 200
 
 
-async def test_a_test_send_renders_for_the_first_pending_enrollment(
+async def test_a_test_send_renders_with_the_self_contact_never_a_contact(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
+    """#342: a test send renders with your own details, from Settings, About you, and an
+    edit there is what the next test send renders. No contact's details ever go in it."""
     s = _build(running_app)
     review = await _step_review(client, s, s.step_ids[0])
+    url = f"{s.base}/review/test-send"
+    await _set_self(client, first_name="Selfie")
+    await _ok(await client.post(url, json={"step_id": s.step_ids[0]}, headers=CSRF))
+    await _set_self(client, first_name="Renamed")
+    await _ok(await client.post(url, json={"step_id": s.step_ids[0]}, headers=CSRF))
+    first, second = (s.gmail.raw(m.id).get_content() for m in s.gmail.sent())
+    assert "Hi Selfie" in first and "Hi Renamed" in second
+    for message in review["messages"]:  # what each contact's message would say
+        assert message["body"] not in first and message["body"] not in second
+
+
+async def test_a_test_send_before_the_self_contact_has_details_renders_them_empty(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """A self contact with no name renders the field empty, as a contact with none would,
+    and still goes only to the mailbox itself."""
+    s = _build(running_app, people=1)
     await _ok(
         await client.post(
             f"{s.base}/review/test-send", json={"step_id": s.step_ids[0]}, headers=CSRF
         )
     )
     [sent] = s.gmail.sent()
-    first = review["messages"][0]
-    assert first["enrollment_id"] == s.enrollment_ids[0]
-    assert first["body"] in s.gmail.raw(sent.id).get_content()
+    raw = s.gmail.raw(sent.id)
+    assert raw["To"] == s.mailbox_email
+    assert raw.get_content().strip() == "Hi"
 
 
 # --- a fresh mailbox, end to end (#304) --------------------------------------------------
@@ -1579,7 +1607,6 @@ def test_the_review_render_uses_the_users_local_date(session: Session) -> None:
             step,
             step.template,
             [enrollment],
-            {},
             now,
             step_approved=False,
             approved_messages={},

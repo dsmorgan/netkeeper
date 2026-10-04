@@ -133,7 +133,7 @@ export function buildPrompt(
     ...(channel === 'email'
       ? ['Each email has a short, specific subject line.']
       : ['A LinkedIn message has no subject line. Write only the body.']),
-    'Write a placeholder wherever a detail about the recipient or me goes, exactly as shown, like {{ first_name }}. Never write a real name, company, or other personal detail in its place.',
+    'Write a placeholder wherever a detail about the recipient goes, exactly as shown, like {{ first_name }}. Never write a real name, company, or other personal detail in its place.',
   ]
 
   const improve =

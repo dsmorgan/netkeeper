@@ -81,7 +81,7 @@ from netkeeper.models import (
     normalize_public_id,
 )
 from netkeeper.models.base import utcnow
-from netkeeper.scoping import get_scoped, scoped, scoped_update
+from netkeeper.scoping import get_scoped_contact, scoped, scoped_contacts, scoped_update
 
 log = logging.getLogger(__name__)
 
@@ -437,7 +437,7 @@ def resolve_survivor(session: Session, user: User, contact_id: int) -> Contact:
 
 
 def _owned(session: Session, user: User, contact_id: int) -> Contact:
-    contact = get_scoped(session, user, Contact, contact_id)
+    contact = get_scoped_contact(session, user, contact_id)
     if contact is None:
         raise ValueError(f"contact {contact_id} is not one of user {user.id}'s contacts")
     return contact
@@ -446,7 +446,7 @@ def _owned(session: Session, user: User, contact_id: int) -> Contact:
 def _survivor_of(session: Session, user: User, contact: Contact) -> Contact:
     seen = {contact.id}
     while contact.merged_into_id is not None:
-        survivor = get_scoped(session, user, Contact, contact.merged_into_id)
+        survivor = get_scoped_contact(session, user, contact.merged_into_id)
         if survivor is None:
             raise RuntimeError(
                 f"contact {contact.id} is merged into {contact.merged_into_id}, "
@@ -470,15 +470,15 @@ def _resolve_identity(session: Session, user: User, incoming: IncomingContact) -
         urns.update(urn for urn in (row.li_urn, survivor.li_urn) if urn is not None)
 
     if incoming.li_urn is not None:
-        by_urn = scoped(user, Contact).where(Contact.li_urn == incoming.li_urn)
+        by_urn = scoped_contacts(user).where(Contact.li_urn == incoming.li_urn)
         for row in session.scalars(by_urn):
             hit(row, "urn")
     if incoming.li_public_id is not None:
-        by_slug = scoped(user, Contact).where(Contact.li_public_id == incoming.li_public_id)
+        by_slug = scoped_contacts(user).where(Contact.li_public_id == incoming.li_public_id)
         for row in session.scalars(by_slug):
             hit(row, "public_id")
         by_alias = (
-            scoped(user, Contact)
+            scoped_contacts(user)
             .join(ContactAlias, ContactAlias.contact_id == Contact.id)
             .where(
                 ContactAlias.user_id == user.id,
@@ -509,7 +509,7 @@ def _resolve_email(session: Session, user: User, incoming: IncomingContact) -> R
         return None
     addresses = [email.email for email in incoming.emails]
     statement = (
-        scoped(user, Contact)
+        scoped_contacts(user)
         .join(ContactEmail, ContactEmail.contact_id == Contact.id)
         .where(ContactEmail.user_id == user.id, ContactEmail.email.in_(addresses))
         .order_by(Contact.id)
@@ -557,7 +557,7 @@ def _resolve_name(session: Session, user: User, incoming: IncomingContact) -> Re
         return New()
     first, last, company = key
     statement = (
-        scoped(user, Contact)
+        scoped_contacts(user)
         .where(
             func.lower(func.trim(Contact.first_name)) == first,
             func.lower(func.trim(Contact.last_name)) == last,
@@ -793,7 +793,7 @@ def _assert_identities_free(
         if value is None:
             continue
         column = Contact.li_urn if name == "li_urn" else Contact.li_public_id
-        statement = scoped(user, Contact).where(column == value)
+        statement = scoped_contacts(user).where(column == value)
         if contact_id is not None:
             statement = statement.where(Contact.id != contact_id)
         holder = session.scalars(statement.limit(1)).first()

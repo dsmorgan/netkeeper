@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.crm.contacts import merge_contacts
 from netkeeper.crm.interactions import add_interaction
+from netkeeper.crm.self_contact import ensure_self_contact
 from netkeeper.db import session_scope
 from netkeeper.models import (
     Campaign,
@@ -58,6 +59,7 @@ def facts(**changes: Any) -> ContactFacts:
         contact_id=1,
         merged=False,
         archived=False,
+        is_self=False,
         needs_review=False,
         do_not_contact=False,
         disconnected=False,
@@ -97,6 +99,7 @@ def test_the_guard_sets_are_pinned() -> None:
         "campaign_not_active",
         "enrollment_not_active",
         "unknown_contact",
+        "self",
         "merged",
         "archived",
         "needs_review",
@@ -117,6 +120,7 @@ def test_the_guard_sets_are_pinned() -> None:
 
 def test_every_guard_runs() -> None:
     assert [guard.__name__ for guard in GUARDS] == [
+        "not_self",
         "not_merged",
         "not_archived",
         "not_waiting_for_review",
@@ -144,6 +148,7 @@ def test_an_eligible_contact_passes_on_both_channels() -> None:
 @pytest.mark.parametrize(
     ("field", "reason"),
     [
+        ("is_self", Reason.SELF),
         ("merged", Reason.MERGED),
         ("archived", Reason.ARCHIVED),
         ("needs_review", Reason.NEEDS_REVIEW),
@@ -408,6 +413,7 @@ def test_every_reason_has_its_label() -> None:
         "campaign_not_active": "campaign not active",
         "enrollment_not_active": "enrollment not active",
         "unknown_contact": "not found",
+        "self": "you (your own details)",
         "merged": "merged into another contact",
         "archived": "archived",
         "needs_review": "waiting for review",
@@ -464,6 +470,7 @@ def test_facts_read_the_contact_as_it_is(writer: Session, user: User, campaign: 
         contact_id=contact.id,
         merged=False,
         archived=True,
+        is_self=False,
         needs_review=True,
         do_not_contact=True,
         disconnected=True,
@@ -487,6 +494,21 @@ def test_facts_see_a_merge_and_a_contact_with_no_linkedin(
     writer.flush()
     got = load_facts(writer, user, [loser.id], campaign_id=campaign.id)[loser.id]
     assert got.merged and not got.has_linkedin
+
+
+def test_the_self_contact_is_excluded_by_its_own_reason(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    """#342: the self contact holds your own details for test sends. Should its id ever
+    reach the guards, they exclude it, and say why, on every channel."""
+    you = ensure_self_contact(writer, user)
+    you.emails.append(ContactEmail(user_id=user.id, email="me@example.test", is_primary=True))
+    you.li_public_id = "self-fixture"
+    writer.flush()
+    got = load_facts(writer, user, [you.id], campaign_id=campaign.id)[you.id]
+    assert got.is_self
+    for channel in (EMAIL, LINKEDIN):
+        assert reasons(got, channel) == (Reason.SELF,)
 
 
 def test_another_users_contact_is_not_found_and_so_excluded(
