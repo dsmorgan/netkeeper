@@ -268,7 +268,11 @@ archive_db() {
     printf '  would: sqlite3 %s "VACUUM INTO %s", then verify it\n' "$db" "$target"
     return 0
   fi
-  tmp=$(mktemp -d "$archives/.partial.XXXXXX") || die "could not create a temporary directory under $archives"
+  # Install the traps before mktemp creates the directory, with tmp empty so
+  # the EXIT trap is a harmless no-op until then. A signal that lands in the
+  # gap between the directory appearing and the traps existing would
+  # otherwise kill the shell by default and leave the .partial.* copy behind (#371).
+  tmp=''
   # An interrupted reset (Ctrl-C, a killed session) must not leave a hidden
   # full copy of the database sitting in archives/ under a dot-prefixed name
   # (#183 re-review should-fix 2). The EXIT trap is the backstop for every
@@ -281,6 +285,7 @@ archive_db() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
   trap 'exit 129' HUP
+  tmp=$(mktemp -d "$archives/.partial.XXXXXX") || die "could not create a temporary directory under $archives"
   work="$tmp/db"
   quoted=$(printf '%s' "$work" | sed "s/'/''/g")
   if ! sqlite3 "$db" "VACUUM INTO '$quoted'"; then
