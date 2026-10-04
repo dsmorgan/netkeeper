@@ -10,7 +10,9 @@ What it watches
 Each armed mailbox's **watches** (:func:`reply_work`): enrollments of a campaign on
 that mailbox with at least one sent email, that are ``active`` or ``paused``, or
 ``completed`` with their latest send under :data:`WATCH_AFTER_COMPLETED` ago (a
-reply to the last step still belongs in the inbox). A disarmed mailbox gets no
+reply to the last step still belongs in the inbox). An ``active`` or ``paused``
+enrollment of an ended (``completed`` or ``archived``) campaign is watched like a
+completed one, for the same window after its latest send (#345). A disarmed mailbox gets no
 Gmail call, as in reconcile (#277).
 
 How it reads Gmail
@@ -81,6 +83,7 @@ from netkeeper.models import (
     MESSAGE_SNIPPET_MAX_LENGTH,
     MESSAGE_SUBJECT_MAX_LENGTH,
     Campaign,
+    CampaignStatus,
     Contact,
     ContactEmail,
     ContactSource,
@@ -132,6 +135,10 @@ thread for them before they go, so the poll is all that would see a reply."""
 
 AUTO_REPLY_PRECEDENCE: Final = frozenset({"auto_reply", "bulk", "junk"})
 """``Precedence`` values that mark a message as automatic."""
+
+CAMPAIGN_OVER: Final = frozenset({CampaignStatus.COMPLETED, CampaignStatus.ARCHIVED})
+"""An ended campaign (#345), archived or not: its live enrollments send nothing more, so
+they are watched only :data:`WATCH_AFTER_COMPLETED` after their latest send."""
 
 LIVE: Final = frozenset({EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED})
 """What detection moves to ``replied``, ``bounced`` or ``opted_out`` (spec 11.3)."""
@@ -289,10 +296,12 @@ def reply_work(session: Session, user: User, *, now: datetime) -> list[MailboxWa
         messages = sent.get(enrollment.id)
         if mailbox is None or not messages:
             continue
-        if (
-            enrollment.status is EnrollmentStatus.COMPLETED
-            and now - messages[-1].sent_at > WATCH_AFTER_COMPLETED
-        ):
+        # A live enrollment of an ended or archived campaign (#345) sends nothing more,
+        # so it is watched like a completed enrollment: for a while after its last send.
+        finished = enrollment.status is EnrollmentStatus.COMPLETED or (
+            campaign.status in CAMPAIGN_OVER
+        )
+        if finished and now - messages[-1].sent_at > WATCH_AFTER_COMPLETED:
             continue
         by_mailbox.setdefault(mailbox.id, []).append(
             Watch(

@@ -25,6 +25,7 @@ function plan(overrides: Partial<DeletePlan> = {}): DeletePlan {
     steps: 2,
     enrollments: 3,
     leftover_drafts: [],
+    unverifies: null,
     ...overrides,
   }
 }
@@ -33,7 +34,8 @@ describe('campaign lifecycle', () => {
   it('ends a running campaign after a confirm, then archives and unarchives it', async () => {
     const calls: Call[] = []
     const state = {
-      campaign: campaign({ status: 'active', enrollments: { active: 2 } }),
+      // Every enrollment finished: still End first, never Archive straight away (#345).
+      campaign: campaign({ status: 'active', enrollments: { replied: 2 }, concluded: true }),
       review: review({ status: 'active', missing: [] }),
     }
     const move = (changes: Partial<Campaign>) => () => {
@@ -53,6 +55,7 @@ describe('campaign lifecycle', () => {
     )
     await renderApp('/campaigns/5')
 
+    expect(await screen.findByText(/Every enrollment has finished. End it/)).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Archive' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Delete campaign' })).toBeNull()
 
@@ -120,6 +123,7 @@ describe('campaign lifecycle', () => {
                     gmail_draft_id: 'draft-1',
                   },
                 ],
+                unverifies: 'me@sender.example',
               }),
             ),
           'DELETE /api/v1/campaigns/5': () => jsonResponse(plan()),
@@ -136,6 +140,9 @@ describe('campaign lifecycle', () => {
     const drafts = within(dialog).getByRole('list', { name: 'Gmail drafts left behind' })
     expect(drafts).toHaveTextContent('Step 2 test to me@sender.example')
     expect(within(dialog).getByText(/never deletes a Gmail draft/)).toBeVisible()
+    expect(
+      within(dialog).getByText(/only test drafts that could verify me@sender.example/),
+    ).toBeVisible()
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete campaign' }))
     expect(await screen.findByText('No campaigns yet')).toBeVisible()

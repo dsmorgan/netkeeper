@@ -3497,6 +3497,17 @@
           "steps": {
             "title": "Steps",
             "type": "integer"
+          },
+          "unverifies": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unverifies"
           }
         },
         "required": [
@@ -12593,7 +12604,7 @@
     },
     "/api/v1/campaigns/{campaign_id}/archive": {
       "post": {
-        "description": "Hide a concluded campaign from the list and the dashboard (#345), keeping its\nmessages and results. ``409`` while an active or paused campaign still has an\nenrollment in progress (end it first), and for one never activated (delete it).",
+        "description": "Hide an ended (``completed``) campaign from the list and the dashboard (#345),\nkeeping its messages and results. ``409`` for an active or paused campaign, even one\nwhose every enrollment finished (end it first), and for one never activated (delete\nit).",
         "operationId": "archive_campaign",
         "parameters": [
           {

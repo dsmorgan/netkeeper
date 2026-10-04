@@ -515,9 +515,25 @@ def test_send(
         raise HTTPException(status_code=502, detail=f"Gmail: {exc}") from exc
     now = utcnow()
     with session_scope(factory, write=True) as session, translate_errors():
-        row = service.record_test_send(
-            session, user, plan, gmail_message_id=ref.id, gmail_draft_id=draft_id, now=now
-        )
+        try:
+            row = service.record_test_send(
+                session, user, plan, gmail_message_id=ref.id, gmail_draft_id=draft_id, now=now
+            )
+        except service.ReviewNotFound as exc:
+            if draft_id is None:
+                raise
+            # The campaign went (deleted, #345) while Gmail made the draft. netkeeper never
+            # deletes a Gmail draft (ADR 0003): name it, so the person can delete it by hand.
+            log.warning(
+                "%s: Gmail draft %s was made, but the campaign is gone; delete it by hand",
+                purpose,
+                draft_id,
+            )
+            raise HTTPException(
+                status_code=404,
+                detail=f"{exc}; the test draft was made in Gmail (draft {draft_id})"
+                " and is not recorded: delete it from Gmail's Drafts by hand",
+            ) from exc
         return TestSendOut(
             step_id=row.step_id,
             to_address=row.to_address,

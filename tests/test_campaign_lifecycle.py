@@ -12,11 +12,13 @@ in ``test_cli_campaigns.py``.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import factories
 import pytest
+from campaign_fakes import make_mailbox
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import InstrumentedAttribute, Session, sessionmaker
 
@@ -208,23 +210,29 @@ def test_archive_refuses_a_running_campaign_with_live_enrollments(
     user = _user(writer)
     campaign = _campaign(writer, user, status)
     _enroll(writer, user, campaign, EnrollmentStatus.PAUSED)
-    with pytest.raises(CampaignConflict, match="end it before archiving it"):
+    with pytest.raises(CampaignConflict, match="end it first"):
         service.archive(writer, user, campaign.id)
     assert campaign.status is status
 
 
-def test_archive_ends_a_running_campaign_whose_enrollments_all_finished(
-    writer: Session,
+@pytest.mark.parametrize("status", [CampaignStatus.ACTIVE, CampaignStatus.PAUSED])
+def test_archive_refuses_a_running_campaign_even_when_every_enrollment_finished(
+    writer: Session, status: CampaignStatus
 ) -> None:
-    """Concluded by its enrollments: it is ended, then archived, in one go."""
+    """The maintainer's decision: archiving requires the campaign to be ended first.
+    Concluded by its enrollments is not enough, and archive never ends it itself."""
     user = _user(writer)
-    campaign = _campaign(writer, user, CampaignStatus.ACTIVE)
+    campaign = _campaign(writer, user, status)
     _enroll(writer, user, campaign, EnrollmentStatus.COMPLETED)
     _enroll(writer, user, campaign, EnrollmentStatus.REPLIED)
+    assert service.concluded(writer, user, campaign)
+    with pytest.raises(CampaignConflict, match="end it first"):
+        service.archive(writer, user, campaign.id)
+    assert campaign.status is status
+
+    service.end(writer, user, campaign.id)
     service.archive(writer, user, campaign.id)
-    assert campaign.status is CampaignStatus.ARCHIVED
-    service.unarchive(writer, user, campaign.id)
-    assert _status(campaign) is CampaignStatus.COMPLETED
+    assert _status(campaign) is CampaignStatus.ARCHIVED
 
 
 @pytest.mark.parametrize("status", [CampaignStatus.DRAFT, CampaignStatus.REVIEWING])
@@ -318,14 +326,25 @@ def test_delete_removes_a_campaign_never_activated_and_lists_the_drafts_left(
         assert all(get_scoped(session, user, Template, t) is not None for t in template_ids)
 
 
-@pytest.mark.parametrize("status", list(MessageStatus))
-def test_delete_refuses_a_campaign_with_any_message(writer: Session, status: MessageStatus) -> None:
-    """Any message row, in any status and either direction, keeps the campaign."""
+@pytest.mark.parametrize(
+    ("status", "with_step"),
+    [(status, True) for status in MessageStatus] + [(MessageStatus.RECEIVED, False)],
+)
+def test_delete_refuses_a_campaign_with_any_message(
+    writer: Session, status: MessageStatus, with_step: bool
+) -> None:
+    """Any message row, in any status and either direction, keeps the campaign; so does a
+    reply whose step is not known (``step_id`` NULL), found by its enrollment alone."""
     user = _user(writer)
     campaign = _campaign(writer, user, CampaignStatus.DRAFT)
     enrollment = _enroll(writer, user, campaign, EnrollmentStatus.PENDING)
     direction = MessageDirection.IN if status is MessageStatus.RECEIVED else MessageDirection.OUT
-    factories.make_message(writer, enrollment, status=status, direction=direction, sent_at=None)
+    message = factories.make_message(
+        writer, enrollment, status=status, direction=direction, sent_at=None
+    )
+    if not with_step:
+        message.step_id = None
+        writer.flush()
 
     plan = service.delete_plan(writer, user, campaign.id)
     assert plan.refusal == f"campaign {campaign.id} has 1 message, so it is kept"
@@ -420,3 +439,59 @@ def test_every_move_answers_not_found_for_another_users_campaign(writer: Session
         CampaignStatus.ARCHIVED,
     )
     assert service.list_campaigns(writer, other, archived=True) == []
+
+
+def test_the_delete_is_conditional_on_the_state_it_checked(
+    writer: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delete statement repeats the checks: a campaign activated after the plan was
+    read (here, a plan forced to say yes) matches no row and is refused, not deleted."""
+    user = _user(writer)
+    campaign = _campaign(writer, user, CampaignStatus.ACTIVE)
+    real = service.delete_plan
+
+    def stale(session: Session, user: User, campaign_id: int) -> service.DeletePlan:
+        return dataclasses.replace(real(session, user, campaign_id), refusal=None)
+
+    monkeypatch.setattr(service, "delete_plan", stale)
+    with pytest.raises(CampaignConflict, match="changed while it was being deleted"):
+        service.delete_campaign(writer, user, campaign.id)
+    assert get_scoped(writer, user, Campaign, campaign.id) is not None
+
+
+def _test_draft(session: Session, user: User, campaign: Campaign, to: str) -> None:
+    session.add(
+        TestSend(
+            user_id=user.id,
+            campaign_id=campaign.id,
+            step_id=campaign.steps[0].id,
+            fingerprint="f" * 64,
+            to_address=to,
+            gmail_draft_id=f"draft-{campaign.id}",
+            rfc822_message_id=f"<test-{campaign.id}@netkeeper.test>",
+            sent_at=NOW,
+        )
+    )
+    session.flush()
+
+
+def test_the_plan_says_when_the_delete_takes_the_last_drafts_that_could_verify(
+    writer: Session,
+) -> None:
+    """#345 review: a still-unverified mailbox is verified by finding a test draft's
+    Message-ID (#304); deleting the only campaign holding one says so."""
+    user = _user(writer)
+    mailbox = make_mailbox(writer, user, message_id_verified_at=None)
+    draft = _campaign(writer, user, CampaignStatus.DRAFT, mailbox_id=mailbox.id)
+    _test_draft(writer, user, draft, mailbox.email.upper())
+    assert service.delete_plan(writer, user, draft.id).unverifies == mailbox.email
+
+    other = _campaign(writer, user, CampaignStatus.REVIEWING, mailbox_id=mailbox.id)
+    _test_draft(writer, user, other, mailbox.email)
+    assert service.delete_plan(writer, user, draft.id).unverifies is None
+
+    verified = make_mailbox(writer, user, email="verified@example.test")
+    verified.message_id_verified_at = NOW
+    lone = _campaign(writer, user, CampaignStatus.DRAFT, mailbox_id=verified.id)
+    _test_draft(writer, user, lone, verified.email)
+    assert service.delete_plan(writer, user, lone.id).unverifies is None

@@ -724,7 +724,7 @@ async def test_end_archive_and_unarchive(running_app: FastAPI, client: httpx.Asy
     assert (running["concluded"], running["deletable"]) == (False, False)
     refused = await client.post(f"{base}/archive", headers=CSRF)
     assert refused.status_code == 409
-    assert "end it before archiving it" in refused.json()["detail"]
+    assert "end it first" in refused.json()["detail"]
 
     ended = await client.post(f"{base}/end", headers=CSRF)
     assert ended.status_code == 200, ended.text
@@ -771,6 +771,7 @@ async def test_delete_a_draft_and_refuse_one_that_sent(
         "steps": 3,
         "enrollments": 2,
         "leftover_drafts": [],
+        "unverifies": None,
     }
     assert (await client.post(f"{base}/archive", headers=CSRF)).status_code == 409
 

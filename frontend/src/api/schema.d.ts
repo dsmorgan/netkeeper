@@ -221,9 +221,10 @@ export interface paths {
         put?: never;
         /**
          * Archive
-         * @description Hide a concluded campaign from the list and the dashboard (#345), keeping its
-         *     messages and results. ``409`` while an active or paused campaign still has an
-         *     enrollment in progress (end it first), and for one never activated (delete it).
+         * @description Hide an ended (``completed``) campaign from the list and the dashboard (#345),
+         *     keeping its messages and results. ``409`` for an active or paused campaign, even one
+         *     whose every enrollment finished (end it first), and for one never activated (delete
+         *     it).
          */
         post: operations["archive_campaign"];
         delete?: never;
@@ -4237,6 +4238,8 @@ export interface components {
             refusal: string | null;
             /** Steps */
             steps: number;
+            /** Unverifies */
+            unverifies?: string | null;
         };
         /** DoNotSendIn */
         DoNotSendIn: {

@@ -3300,11 +3300,11 @@ def campaigns_end(
 def campaigns_archive(
     campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
 ) -> None:
-    """Archive a concluded campaign (POST /campaigns/{id}/archive).
+    """Archive an ended campaign (POST /campaigns/{id}/archive).
 
     It leaves the campaign list and the dashboard; its messages, results and contact
-    timelines stay. Refused while an active or paused campaign still has enrollments
-    in progress: end it first. `unarchive` undoes it.
+    timelines stay. Only a completed (ended) campaign: an active or paused one is
+    refused, even when every enrollment finished; end it first. `unarchive` undoes it.
     """
     with (
         _campaign_db() as factory,
@@ -3344,6 +3344,13 @@ def _leftover_lines(drafts: Sequence[campaign_service.LeftoverDraft]) -> list[st
     ]
 
 
+def _unverifies_line(address: str) -> str:
+    return (
+        f"note: these are the only test drafts that could verify {address};"
+        " once deleted, it needs a new test draft from another campaign to be verified"
+    )
+
+
 @campaigns_app.command("delete")
 def campaigns_delete(
     campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
@@ -3368,6 +3375,8 @@ def campaigns_delete(
         )
         if lines := _leftover_lines(plan.leftover_drafts):
             typer.echo("\n".join(lines))
+        if plan.unverifies is not None:
+            typer.echo(_unverifies_line(plan.unverifies))
         if not yes and not typer.confirm(f"delete campaign {campaign_id}? this cannot be undone"):
             typer.echo(f"cancelled: campaign {campaign_id} is not deleted")
             raise typer.Exit(code=1)

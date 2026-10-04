@@ -43,6 +43,7 @@ from netkeeper.models import (
 )
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import campaign_replies as replies
+from netkeeper.services import campaigns as campaign_service
 from netkeeper.services.campaign_engine import (
     RECONCILE_SEARCH_EVERY,
     REVIEW_GATE,
@@ -148,6 +149,7 @@ def test_the_detection_constants_are_pinned() -> None:
     assert frozenset({"mailer-daemon", "postmaster"}) == replies.DAEMON_LOCAL_PARTS
     assert replies.SEARCH_MAX == 20
     assert {s.value for s in replies.LIVE} == {"active", "paused"}
+    assert {s.value for s in replies.CAMPAIGN_OVER} == {"completed", "archived"}
     assert replies.POLL_MAX_READS == 50
     assert replies.STALE_AFTER_POLLS == 2
     assert frozenset({"auto_reply", "bulk", "junk"}) == replies.AUTO_REPLY_PRECEDENCE
@@ -414,6 +416,55 @@ def test_a_completed_enrollment_is_watched_for_thirty_days(
     assert mail.enrollment(early).status is EnrollmentStatus.COMPLETED
     assert mail.enrollment(early).replied_at == NOW + timedelta(days=29)
     assert inbound(mail, late) == []  # past the window: not watched
+
+
+@pytest.mark.parametrize("archived", [False, True])
+def test_an_ended_campaigns_live_enrollments_are_watched_for_thirty_days(
+    session_factory: sessionmaker[Session], archived: bool
+) -> None:
+    """#345: an ended (or archived) campaign sends nothing more, so its enrollments still
+    ``active`` are watched like completed ones: a reply inside the window counts, one
+    after it is not read."""
+    mail = make_mail(session_factory, modes=(StepMode.SEND,) * 2, same_thread=(False, True))
+    mail.sender = poller(mail)
+    early, late = mail.enroll(ADA), mail.enroll("grace@example.test")
+    mail.tick(NOW)
+    mail.tick(NOW + timedelta(minutes=5))  # the spacing: the second goes out now
+    mail.tick(NOW + timedelta(minutes=6))  # baseline
+
+    def end(session: Session) -> None:
+        user = user_of(mail, session)
+        campaign_service.end(session, user, mail.campaign.id)
+        if archived:
+            campaign_service.archive(session, user, mail.campaign.id)
+
+    mail.write(end)
+    assert mail.enrollment(early).status is mail.enrollment(late).status is EnrollmentStatus.ACTIVE
+    to_early, to_late = (MessageRef(m.id, m.thread_id) for m in mail.gmail.sent())
+
+    in_window = NOW + timedelta(days=29)
+    assert {w.enrollment_id for w in watched(mail, in_window)} == {early, late}
+    mail.gmail.reply(to_early, sender=ADA, at=in_window)
+    mail.tick(in_window + timedelta(hours=1))
+    after = NOW + timedelta(days=31)
+    assert watched(mail, after) == []
+    mail.gmail.reply(to_late, sender="grace@example.test", at=after)
+    mail.tick(after + timedelta(hours=1))
+
+    assert len(inbound(mail, early)) == 1
+    assert mail.enrollment(early).replied_at == in_window
+    assert mail.enrollment(early).status is EnrollmentStatus.REPLIED
+    assert inbound(mail, late) == []  # past the window: not watched
+    assert mail.enrollment(late).status is EnrollmentStatus.ACTIVE
+    assert len(mail.gmail.sent()) == 2  # step 2 never went
+
+
+def watched(mail: Mail, now: datetime) -> list[replies.Watch]:
+    return mail.read(
+        lambda s: [
+            w for box in replies.reply_work(s, user_of(mail, s), now=now) for w in box.watches
+        ]
+    )
 
 
 # --- bounces ------------------------------------------------------------------------------

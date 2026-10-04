@@ -21,7 +21,7 @@ activates a campaign. ``netkeeper campaigns`` mirrors each route.
   local day, and replies, bounces and opt-outs per step, with the totals
   (:mod:`netkeeper.services.campaign_results` says what counts).
 - The lifecycle (#345): ``POST .../end`` ends an active or paused campaign for
-  good; ``POST .../archive`` and ``.../unarchive`` hide and show a concluded one;
+  good; ``POST .../archive`` and ``.../unarchive`` hide and show an ended one;
   ``GET .../delete-plan`` and ``DELETE /campaigns/{id}`` delete one that was never
   activated and has no messages, listing the Gmail drafts left behind.
   ``GET /campaigns`` leaves archived campaigns out unless ``archived=true``.
@@ -188,7 +188,8 @@ class CampaignOut(BaseModel):
     missing: list[MissingOut]
     """What the review gate still needs, for a ``draft`` or ``reviewing`` campaign."""
     concluded: bool = False
-    """Whether ``POST .../archive`` takes it (#345): ended, or every enrollment finished."""
+    """Whether it is over (#345): ended, or every enrollment finished. ``POST .../archive``
+    takes only a ``completed`` (ended) campaign."""
     deletable: bool = False
     """Whether ``DELETE /campaigns/{id}`` takes it (#345): never activated, no messages."""
 
@@ -214,6 +215,9 @@ class DeletePlanOut(BaseModel):
     enrollments: int
     leftover_drafts: list[LeftoverDraftOut]
     """Gmail drafts netkeeper never deletes (ADR 0003): delete them by hand."""
+    unverifies: str | None = None
+    """The mailbox address, when the delete removes the only test drafts that could still
+    verify it (#304); a new test draft from another campaign verifies it again."""
 
 
 class DaySendsOut(BaseModel):
@@ -685,6 +689,7 @@ def _plan_out(plan: service.DeletePlan) -> DeletePlanOut:
             )
             for d in plan.leftover_drafts
         ],
+        unverifies=plan.unverifies,
     )
 
 
@@ -709,9 +714,10 @@ def end(campaign_id: int, request: Request, session: SessionDep, user: CurrentUs
 def archive(
     campaign_id: int, request: Request, session: SessionDep, user: CurrentUser
 ) -> CampaignOut:
-    """Hide a concluded campaign from the list and the dashboard (#345), keeping its
-    messages and results. ``409`` while an active or paused campaign still has an
-    enrollment in progress (end it first), and for one never activated (delete it)."""
+    """Hide an ended (``completed``) campaign from the list and the dashboard (#345),
+    keeping its messages and results. ``409`` for an active or paused campaign, even one
+    whose every enrollment finished (end it first), and for one never activated (delete
+    it)."""
     with translate_errors():
         service.archive(session, user, campaign_id)
         return _detail(session, user, campaign_id, request)
