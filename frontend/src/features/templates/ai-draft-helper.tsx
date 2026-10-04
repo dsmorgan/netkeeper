@@ -10,12 +10,17 @@
  *
  * A template holds one step. A reply with several steps fills this template
  * from the first, and lists the others to use here or copy into another
- * template's helper.
+ * template's helper. A paste that would replace text you had offers to undo it.
+ *
+ * The helper sits inside the editor's form, so its fields belong to a form of
+ * their own (`formId`, rendered by the editor outside its form): Enter in one of
+ * them never saves the template.
  */
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useId, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input, Textarea } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
@@ -29,7 +34,9 @@ import {
   buildPrompt,
   formatStep,
   parseReply,
+  type CurrentText,
   type DraftRequest,
+  type ParsedReply,
   type ParsedStep,
   type Tone,
 } from './ai-prompt'
@@ -47,8 +54,15 @@ export interface AppliedStep {
 
 interface AiDraftHelperProps {
   channel: TemplateChannel
+  /** The template's text now, put in the prompt only when you tick the box. */
+  current: CurrentText
+  /** The id of the empty form the helper's fields belong to, outside the editor's form. */
+  formId: string
   disabled?: boolean
   onApply: (step: AppliedStep) => void
+  /** Whether the last paste replaced text and can still be undone. */
+  canUndo: boolean
+  onUndo: () => void
 }
 
 type CopyState =
@@ -58,9 +72,27 @@ type CopyState =
   | { kind: 'manual'; prompt: string }
 
 type PasteNote =
-  { kind: 'parsed'; count: number; droppedSubject: boolean } | { kind: 'raw' } | { kind: 'empty' }
+  | {
+      kind: 'parsed'
+      /** One-based: the step now in the editor. */
+      step: number
+      count: number
+      dropped: number
+      filledSubject: boolean
+      droppedSubject: boolean
+    }
+  | { kind: 'raw' }
+  | { kind: 'empty' }
 
-export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps) {
+export function AiDraftHelper({
+  channel,
+  current,
+  formId,
+  disabled,
+  onApply,
+  canUndo,
+  onUndo,
+}: AiDraftHelperProps) {
   const ids = {
     heading: useId(),
     panel: useId(),
@@ -69,6 +101,8 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
     tone: useId(),
     steps: useId(),
     mention: useId(),
+    include: useId(),
+    includeHint: useId(),
     manual: useId(),
     reply: useId(),
   }
@@ -80,10 +114,11 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
     steps: 1,
     mention: '',
   })
+  const [includeCurrent, setIncludeCurrent] = useState(false)
   const [copy, setCopy] = useState<CopyState>({ kind: 'idle' })
   const [reply, setReply] = useState('')
   const [note, setNote] = useState<PasteNote | null>(null)
-  const [others, setOthers] = useState<ParsedStep[]>([])
+  const [parsed, setParsed] = useState<ParsedReply | null>(null)
   const manualRef = useRef<HTMLTextAreaElement>(null)
   // Never with a contact: the prompt must not hold anyone's data.
   const fields = useQuery({ ...mergeFieldsQuery(null), enabled: open })
@@ -105,6 +140,7 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
       request,
       channel,
       fields.data.fields.map(({ insert, description }) => ({ insert, description })),
+      includeCurrent ? current : null,
     )
     try {
       if (typeof navigator.clipboard?.writeText !== 'function') throw new Error('no clipboard')
@@ -115,10 +151,21 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
     }
   }
 
-  const apply = (step: ParsedStep) => {
-    const keepsSubject = channel !== 'email'
-    onApply({ subject: keepsSubject ? null : (step.subject ?? ''), body: step.body })
-    return keepsSubject && step.subject !== null && step.subject !== ''
+  /** Put step `index` of `reply` into the editor, and say so. */
+  const fillFrom = (from: ParsedReply, index: number) => {
+    const step = from.steps[index]
+    if (step === undefined) return
+    const email = channel === 'email'
+    // An email step with no subject leaves the subject as it is; a LinkedIn message has none.
+    onApply({ subject: email ? step.subject : null, body: step.body })
+    setNote({
+      kind: 'parsed',
+      step: index + 1,
+      count: from.steps.length,
+      dropped: from.dropped,
+      filledSubject: email && step.subject !== null,
+      droppedSubject: !email && step.subject !== null && step.subject !== '',
+    })
   }
 
   const paste = () => {
@@ -126,18 +173,17 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
       setNote({ kind: 'empty' })
       return
     }
-    const steps = parseReply(reply)
-    const first = steps?.[0]
-    if (steps === null || first === undefined) {
+    const result = parseReply(reply)
+    setParsed(result)
+    if (result === null) {
       onApply({ subject: null, body: reply.trim() })
-      setOthers([])
       setNote({ kind: 'raw' })
       return
     }
-    const droppedSubject = apply(first)
-    setOthers(steps.slice(1))
-    setNote({ kind: 'parsed', count: steps.length, droppedSubject })
+    fillFrom(result, 0)
   }
+
+  const inUse = note?.kind === 'parsed' ? note.step - 1 : 0
 
   return (
     <section aria-labelledby={ids.heading} className="space-y-2 rounded-lg border p-3">
@@ -162,8 +208,9 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
           <p className="text-xs text-muted-foreground">
             Describe the campaign, copy the prompt into an AI chat assistant you already use, then
             paste its reply here. netkeeper sends nothing to any AI service; what you paste into one
-            goes to that provider under its terms. Never paste contacts' names or details into it:
-            the prompt uses placeholders like {'{{ first_name }}'} instead.{' '}
+            goes to that provider under its terms. What you type in this form goes into the prompt
+            word for word, so never type contacts' names or details: the prompt uses placeholders
+            like {'{{ first_name }}'} instead.{' '}
             <a
               href={AI_DRAFTING_GUIDE_URL}
               target="_blank"
@@ -180,6 +227,7 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
               <Label htmlFor={ids.goal}>What the campaign is for</Label>
               <Input
                 id={ids.goal}
+                form={formId}
                 value={request.goal}
                 placeholder="Reconnect and say I'm looking for a new role"
                 onChange={(event) => set({ goal: event.target.value })}
@@ -189,6 +237,7 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
               <Label htmlFor={ids.audience}>Who it's for</Label>
               <Input
                 id={ids.audience}
+                form={formId}
                 value={request.audience}
                 placeholder="Former colleagues in engineering"
                 onChange={(event) => set({ audience: event.target.value })}
@@ -198,6 +247,7 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
               <Label htmlFor={ids.tone}>Tone</Label>
               <Select
                 id={ids.tone}
+                form={formId}
                 value={request.tone}
                 onChange={(event) => set({ tone: event.target.value as Tone })}
               >
@@ -212,6 +262,7 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
               <Label htmlFor={ids.steps}>Steps</Label>
               <Select
                 id={ids.steps}
+                form={formId}
                 value={String(request.steps)}
                 onChange={(event) => set({ steps: Number(event.target.value) })}
               >
@@ -227,10 +278,31 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
             <Label htmlFor={ids.mention}>Anything to mention</Label>
             <Textarea
               id={ids.mention}
+              form={formId}
               value={request.mention}
               rows={2}
               onChange={(event) => set({ mention: event.target.value })}
             />
+          </div>
+
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id={ids.include}
+                checked={includeCurrent}
+                aria-describedby={ids.includeHint}
+                onCheckedChange={(checked) => {
+                  setIncludeCurrent(checked === true)
+                  setCopy({ kind: 'idle' })
+                }}
+              />
+              <Label htmlFor={ids.include}>Include the current text</Label>
+            </div>
+            <p id={ids.includeHint} className="text-xs text-muted-foreground">
+              Adds this template's subject and body to the prompt, to improve them. They hold only
+              merge-field placeholders unless you typed real names or details into them, so check
+              first.
+            </p>
           </div>
 
           {fields.isPending && <LoadingNote label="Loading merge fields…" />}
@@ -260,6 +332,7 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
               <Textarea
                 id={ids.manual}
                 ref={manualRef}
+                form={formId}
                 readOnly
                 rows={8}
                 value={copy.prompt}
@@ -273,12 +346,14 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
             <Label htmlFor={ids.reply}>Assistant's reply</Label>
             <Textarea
               id={ids.reply}
+              form={formId}
               value={reply}
               rows={6}
               className="font-mono text-xs"
               onChange={(event) => {
                 setReply(event.target.value)
                 setNote(null)
+                setParsed(null)
               }}
             />
           </div>
@@ -286,8 +361,13 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
             <Button type="button" variant="outline" disabled={disabled} onClick={paste}>
               Paste result
             </Button>
+            {canUndo && (
+              <Button type="button" variant="outline" disabled={disabled} onClick={onUndo}>
+                Undo paste
+              </Button>
+            )}
             <p role="status" className="text-xs text-muted-foreground">
-              {note === null ? '' : noteText(note, channel)}
+              {note === null ? '' : noteText(note)}
             </p>
           </div>
           {note?.kind === 'raw' && (
@@ -298,8 +378,13 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
               </p>
             </Callout>
           )}
-          {others.length > 0 && (
-            <OtherSteps steps={others} disabled={disabled} onUse={(step) => apply(step)} />
+          {parsed !== null && parsed.steps.length > 1 && (
+            <OtherSteps
+              steps={parsed.steps}
+              inUse={inUse}
+              disabled={disabled}
+              onUse={(index) => fillFrom(parsed, index)}
+            />
           )}
         </div>
       )}
@@ -307,26 +392,40 @@ export function AiDraftHelper({ channel, disabled, onApply }: AiDraftHelperProps
   )
 }
 
-function noteText(note: PasteNote, channel: TemplateChannel): string {
+function noteText(note: PasteNote): string {
   if (note.kind === 'empty') return 'Paste the reply above first.'
   if (note.kind === 'raw') return 'Pasted the reply into the body as it is.'
-  const filled = channel === 'email' ? 'the subject and body' : 'the body'
-  const steps =
-    note.count === 1 ? `Filled ${filled}.` : `Filled ${filled} from step 1 of ${note.count}.`
-  return note.droppedSubject
-    ? `${steps} A LinkedIn message has no subject, so the reply's subject was left out.`
-    : steps
+  const filled = note.filledSubject ? 'the subject and body' : 'the body'
+  const parts = [
+    note.count === 1
+      ? `Filled ${filled}.`
+      : `Filled ${filled} from step ${note.step} of ${note.count}.`,
+  ]
+  if (note.droppedSubject) {
+    parts.push("A LinkedIn message has no subject, so the reply's subject was left out.")
+  }
+  if (note.dropped > 0) {
+    parts.push(
+      note.dropped === 1
+        ? '1 line outside the labeled format was left out.'
+        : `${note.dropped} lines outside the labeled format were left out.`,
+    )
+  }
+  return parts.join(' ')
 }
 
-/** The steps after the first: one template each, so they are offered here to use or copy. */
+/** Every step but the one in the editor: one template each, to use here or copy. */
 function OtherSteps({
   steps,
+  inUse,
   disabled,
   onUse,
 }: {
   steps: readonly ParsedStep[]
+  /** The zero-based step now in the editor, left out of the list. */
+  inUse: number
   disabled?: boolean
-  onUse: (step: ParsedStep) => void
+  onUse: (index: number) => void
 }) {
   const headingId = useId()
   const [copied, setCopied] = useState<number | null>(null)
@@ -345,11 +444,12 @@ function OtherSteps({
       </h5>
       <p className="text-xs text-muted-foreground">
         A template holds one step. Save this one, then start a new template for each step below and
-        paste the step into its helper.
+        paste the step into its helper, or use a step here instead.
       </p>
       <ol className="space-y-2">
         {steps.map((step, index) => {
-          const number = index + 2
+          if (index === inUse) return null
+          const number = index + 1
           return (
             <li key={number} className="space-y-1 rounded-md border p-2">
               <p className="text-xs font-medium">Step {number}</p>
@@ -361,7 +461,7 @@ function OtherSteps({
                   size="xs"
                   variant="outline"
                   disabled={disabled}
-                  onClick={() => onUse(step)}
+                  onClick={() => onUse(index)}
                 >
                   Use step {number} here
                 </Button>
