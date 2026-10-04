@@ -122,6 +122,7 @@ API_PATHS = {
     "/api/v1/campaigns/{campaign_id}/enroll",
     "/api/v1/campaigns/{campaign_id}/enrollments",
     "/api/v1/campaigns/{campaign_id}/pause",
+    "/api/v1/campaigns/{campaign_id}/results",
     "/api/v1/campaigns/{campaign_id}/resume",
     "/api/v1/campaigns/{campaign_id}/start",
     "/api/v1/campaigns/{campaign_id}/start-options",
