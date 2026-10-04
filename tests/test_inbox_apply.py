@@ -16,7 +16,7 @@ from typing import Any
 
 import factories
 import pytest
-from inbox_fakes import a_thread_with, conversation, delta, message, profile_urn
+from inbox_fakes import OWNER_URN, a_thread_with, conversation, delta, message, profile_urn
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -339,6 +339,77 @@ def test_threads_to_open_are_the_newest_five_prefilled_stale_or_live(
         writer, user, delta(a_thread_with(ADA, NOW + timedelta(minutes=5))), polled_at=NOW
     )
     assert "urn:li:msg_conversation:INVENTEDONE" in inbox_apply.threads_to_open(writer, user)
+
+
+# --- the self contact (#342) -------------------------------------------------------------
+
+
+def test_a_thread_with_the_self_contacts_urn_is_never_attributed_to_it(
+    writer: Session, user: User
+) -> None:
+    """The self contact holds your own details; a thread naming your URN is not a contact's."""
+    me = _contact(writer, user, OWNER_URN, is_self=True)
+    # Written directly: add_interaction refuses the self contact.
+    writer.add(
+        Interaction(
+            user_id=user.id,
+            contact_id=me.id,
+            kind=InteractionKind.LI_IN,
+            at=THEN.replace(microsecond=0),
+            summary="Invented archive row.",
+            source=ContactSource.ARCHIVE,
+        )
+    )
+    # Not reachable through the app, but even enrolled it is never watched or matched.
+    factories.make_enrollment(
+        writer, factories.make_campaign(writer, user, channels=(TemplateChannel.LINKEDIN,)), me
+    )
+    writer.add(
+        LiConversation(
+            user_id=user.id,
+            contact_id=me.id,
+            conversation_urn="urn:li:msg_conversation:INVENTEDSELF",
+            last_activity_at=NOW,
+            polled_at=NOW,
+        )
+    )
+    writer.flush()
+
+    assert inbox_apply.watched_urns(writer, user) == frozenset()
+    assert not inbox_apply.has_anything_to_watch(writer, user)
+    assert inbox_apply.threads_to_open(writer, user) == frozenset()
+
+    counts = inbox_apply.apply_delta(
+        writer, user, delta(a_thread_with(OWNER_URN, THEN)), polled_at=NOW
+    )
+    assert (counts.matched, counts.ignored_unknown, counts.messages_new) == (0, 1, 0)
+    assert counts.new_inbound == []
+    rows = _interactions(writer, user)
+    assert [(r.source, r.external_id) for r in rows] == [(ContactSource.ARCHIVE, None)]
+    assert [c.conversation_urn for c in _conversations(writer, user)] == [
+        "urn:li:msg_conversation:INVENTEDSELF"
+    ]
+
+
+# --- an ended or archived campaign (#345) -----------------------------------------------
+
+
+@pytest.mark.parametrize("status", [CampaignStatus.COMPLETED, CampaignStatus.ARCHIVED])
+def test_an_ended_campaigns_live_enrollment_is_watched_like_a_completed_one(
+    writer: Session, user: User, status: CampaignStatus
+) -> None:
+    """As the Gmail reply poll reads it: the first poll's since covers its sends for the
+    window after the latest, and its contact is never a live watch."""
+    ended = factories.make_campaign(writer, user, status=status)
+    recent = factories.make_enrollment(writer, ended, _contact(writer, user, ADA))
+    old = factories.make_enrollment(writer, ended, _contact(writer, user, BEN))
+    factories.make_message(writer, recent, sent_at=NOW - timedelta(days=45))
+    factories.make_message(writer, recent, position=1, sent_at=NOW - timedelta(days=10))
+    factories.make_message(writer, old, sent_at=NOW - timedelta(days=60))
+
+    assert inbox_apply.first_live_outreach(writer, user, now=NOW) == NOW - timedelta(days=45)
+    assert inbox_apply.watched_urns(writer, user) == frozenset()
+    assert not inbox_apply.has_anything_to_watch(writer, user)
 
 
 # --- the archive and the poll never record one message twice ---------------------------
