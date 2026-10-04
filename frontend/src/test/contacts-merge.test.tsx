@@ -9,7 +9,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
 import type { components } from '@/api/schema'
-import { describeMoves } from '@/features/contacts/merge-text'
+import { describeMoves, labelPair } from '@/features/contacts/merge-text'
 
 import {
   contactDetail,
@@ -165,12 +165,8 @@ describe('merge from the contact page', () => {
     expect(where).toContain('"email_contains"')
 
     const table = await within(panel).findByRole('table')
-    expect(
-      within(table).getByRole('columnheader', { name: 'Stays: Ada Ventura (Tessellate Labs)' }),
-    ).toBeVisible()
-    expect(
-      within(table).getByRole('columnheader', { name: 'Merged away: Bo Marsh (bo@example.test)' }),
-    ).toBeVisible()
+    expect(within(table).getByRole('columnheader', { name: 'Stays: Ada Ventura' })).toBeVisible()
+    expect(within(table).getByRole('columnheader', { name: 'Merged away: Bo Marsh' })).toBeVisible()
     const headline = within(table).getByRole('row', { name: /Headline/ })
     expect(
       within(headline)
@@ -182,13 +178,11 @@ describe('merge from the contact page', () => {
     )
     expect(sent(seen, '/api/v1/contacts/1/merge/preview')[0]?.body).toEqual({ loser_id: 2 })
 
-    fireEvent.click(
-      within(panel).getByRole('button', { name: 'Keep Bo Marsh (bo@example.test) instead' }),
-    )
+    fireEvent.click(within(panel).getByRole('button', { name: 'Keep Bo Marsh instead' }))
     await waitFor(() => expect(sent(seen, '/api/v1/contacts/2/merge/preview')).toHaveLength(1))
     expect(sent(seen, '/api/v1/contacts/2/merge/preview')[0]?.body).toEqual({ loser_id: 1 })
     expect(
-      await within(panel).findByRole('columnheader', { name: 'Stays: Bo Marsh (bo@example.test)' }),
+      await within(panel).findByRole('columnheader', { name: 'Stays: Bo Marsh' }),
     ).toBeVisible()
     expect(sent(seen, '/api/v1/contacts/1/merge')).toHaveLength(0)
   })
@@ -197,16 +191,12 @@ describe('merge from the contact page', () => {
     const seen = serve()
     const { router } = await renderApp('/contacts/1')
     const panel = await openPanelAndPickBo()
-    fireEvent.click(
-      within(panel).getByRole('button', { name: 'Keep Bo Marsh (bo@example.test) instead' }),
-    )
-    await within(panel).findByRole('columnheader', { name: 'Stays: Bo Marsh (bo@example.test)' })
+    fireEvent.click(within(panel).getByRole('button', { name: 'Keep Bo Marsh instead' }))
+    await within(panel).findByRole('columnheader', { name: 'Stays: Bo Marsh' })
 
     fireEvent.click(within(panel).getByRole('button', { name: 'Merge…' }))
     const dialog = await screen.findByRole('alertdialog')
-    expect(dialog).toHaveTextContent(
-      'Merge Ada Ventura (Tessellate Labs) into Bo Marsh (bo@example.test)?',
-    )
+    expect(dialog).toHaveTextContent('Merge Ada Ventura into Bo Marsh?')
     expect(dialog).toHaveTextContent('1 email address moves')
     expect(dialog).toHaveTextContent('1 campaign enrollment moves')
     expect(dialog).toHaveTextContent('3 campaign messages move')
@@ -248,7 +238,7 @@ describe('merge from the contact page', () => {
     const merge = await within(panel).findByRole('button', { name: 'Merge…' })
     for (const control of [
       merge,
-      within(panel).getByRole('button', { name: 'Keep Bo Marsh (bo@example.test) instead' }),
+      within(panel).getByRole('button', { name: 'Keep Bo Marsh instead' }),
       within(panel).getByRole('button', { name: 'Choose another contact' }),
       within(panel).getByRole('button', { name: 'Close' }),
     ]) {
@@ -291,48 +281,30 @@ describe('merge from the contact page', () => {
 })
 
 describe('two records with one name', () => {
-  it('tells the two Ada Quills apart everywhere the merge names them', async () => {
-    const email = (id: number, address: string) => ({
-      id,
-      email: address,
-      kind: 'other' as const,
-      is_primary: true,
-      status: 'ok' as const,
-      source: 'manual' as const,
-      observed_at: '2026-01-02T09:00:00Z',
-    })
-    const first = contactDetail({
-      id: 1,
-      first_name: 'Ada',
-      last_name: 'Quill',
-      preferred_name: 'Ada',
-      emails: [email(10, 'ada@quill.test')],
-    })
-    const second = contactDetail({
-      id: 3,
-      first_name: 'Ada',
-      last_name: 'Quill',
-      preferred_name: 'Ada',
-      li_urn: null,
-      emails: [email(30, 'ada.q@quill.test')],
-    })
-    const contacts: Record<number, Detail> = { 1: first, 3: second }
+  const email = (id: number, address: string) => ({
+    id,
+    email: address,
+    kind: 'other' as const,
+    is_primary: true,
+    status: 'ok' as const,
+    source: 'manual' as const,
+    observed_at: '2026-01-02T09:00:00Z',
+  })
+
+  /** Two Ada Quills, 1 and 3, served with a picker that finds 3 and a preview of the pair. */
+  function serveTwins(first: Partial<Detail>, second: Partial<Detail>) {
+    const base = { first_name: 'Ada', last_name: 'Quill', preferred_name: 'Ada' }
+    const contacts: Record<number, Detail> = {
+      1: contactDetail({ id: 1, ...base, ...first }),
+      3: contactDetail({ id: 3, ...base, li_urn: null, ...second }),
+    }
     mockApi((request, body) => {
       const { pathname } = new URL(request.url)
       const one = /^\/api\/v1\/contacts\/(\d+)$/.exec(pathname)
       if (one && request.method === 'GET') return jsonResponse(contacts[Number(one[1])])
       if (/\/tags$/.test(pathname)) return jsonResponse([])
       if (pathname === '/api/v1/contacts/query') {
-        return jsonResponse(
-          contactPage([
-            contactRow(3, {
-              first_name: 'Ada',
-              last_name: 'Quill',
-              preferred_name: 'Ada',
-              primary_email: 'ada.q@quill.test',
-            }),
-          ]),
-        )
+        return jsonResponse(contactPage([contactRow(3, { ...base, primary_email: null })]))
       }
       const preview = /^\/api\/v1\/contacts\/(\d+)\/merge\/preview$/.exec(pathname)
       if (preview) {
@@ -343,38 +315,102 @@ describe('two records with one name', () => {
       }
       return undefined
     })
+  }
+
+  /** Opens the merge from contact 1, picks contact 3, and reads every place the pair is named. */
+  async function namesInTheMerge(): Promise<string[]> {
     await renderApp('/contacts/1')
     fireEvent.click(await screen.findByRole('button', { name: /Merge with…/ }))
     const panel = await screen.findByRole('region', { name: 'Merge contacts' })
-    expect(panel).toHaveTextContent('Merge Ada Quill (ada@quill.test) with another contact')
     fireEvent.change(within(panel).getByLabelText('Find the other contact'), {
       target: { value: 'ada' },
     })
     fireEvent.click(await within(panel).findByRole('button', { name: /Ada Quill/ }))
-
-    expect(
-      await within(panel).findByRole('columnheader', { name: 'Stays: Ada Quill (ada@quill.test)' }),
-    ).toBeVisible()
-    expect(
-      within(panel).getByRole('columnheader', {
-        name: 'Merged away: Ada Quill (ada.q@quill.test)',
-      }),
-    ).toBeVisible()
-    expect(panel).toHaveTextContent(
-      'Ada Quill (ada@quill.test) stays. Ada Quill (ada.q@quill.test) is merged into them',
-    )
-    expect(
-      within(panel).getByRole('button', { name: 'Keep Ada Quill (ada.q@quill.test) instead' }),
-    ).toBeVisible()
-
+    const stays = await within(panel).findByRole('columnheader', { name: /^Stays: / })
+    // Read the panel before the dialog opens: a modal hides everything behind it.
+    const names = [
+      within(panel).getByRole('heading', { level: 3 }).textContent ?? '',
+      stays.textContent ?? '',
+      within(panel).getByRole('columnheader', { name: /^Merged away: / }).textContent ?? '',
+      panel.querySelector('p')?.textContent ?? '',
+      within(panel).getByRole('button', { name: /^Keep / }).textContent ?? '',
+    ]
     fireEvent.click(within(panel).getByRole('button', { name: 'Merge…' }))
     const dialog = await screen.findByRole('alertdialog')
-    expect(dialog).toHaveTextContent(
-      'Merge Ada Quill (ada.q@quill.test) into Ada Quill (ada@quill.test)?',
-    )
-    expect(dialog).toHaveTextContent(
-      'Ada Quill (ada@quill.test) keeps its record. Everything below moves to it from Ada Quill (ada.q@quill.test)',
-    )
+    return [...names, dialog.textContent ?? '']
+  }
+
+  it.each([
+    {
+      case: 'different emails',
+      first: { emails: [email(10, 'ada@quill.test')] },
+      second: { emails: [email(30, 'ada.q@quill.test')] },
+      labels: ['Ada Quill (ada@quill.test)', 'Ada Quill (ada.q@quill.test)'],
+    },
+    {
+      case: 'the same email, different companies',
+      first: { emails: [email(10, 'ada@quill.test')], current_company: 'Quill Press' },
+      second: { emails: [email(30, 'ADA@quill.test')], current_company: 'Tessellate Labs' },
+      labels: ['Ada Quill (Quill Press)', 'Ada Quill (Tessellate Labs)'],
+    },
+    {
+      case: 'the same email and company, different LinkedIn ids',
+      first: { emails: [email(10, 'ada@quill.test')], li_public_id: 'ada-quill' },
+      second: { emails: [email(30, 'ada@quill.test')], li_public_id: 'ada-quill-2' },
+      labels: ['Ada Quill (ada-quill)', 'Ada Quill (ada-quill-2)'],
+    },
+  ])('labels the pair by the first detail that differs: $case', async (example) => {
+    serveTwins(example.first, example.second)
+    const [keep, fold] = example.labels as [string, string]
+    const [heading, stays, away, sentence, swap, dialog] = await namesInTheMerge()
+
+    expect(heading).toBe(`Merge ${keep} with ${fold}`)
+    expect(stays).toBe(`Stays: ${keep}`)
+    expect(away).toBe(`Merged away: ${fold}`)
+    expect(sentence).toContain(`${keep} stays. ${fold} is merged into them`)
+    expect(swap).toBe(`Keep ${fold} instead`)
+    expect(dialog).toContain(`Merge ${fold} into ${keep}?`)
+    expect(dialog).toContain(`${keep} keeps its record. Everything below moves to it from ${fold}`)
+  })
+})
+
+describe('labelPair', () => {
+  const ada = { first_name: 'Ada', last_name: 'Quill', preferred_name: 'Ada' }
+
+  it('needs no detail when the names differ', () => {
+    expect(labelPair({ id: 1, ...ada }, { id: 2, first_name: 'Bo', last_name: 'Marsh' })).toEqual([
+      'Ada Quill',
+      'Bo Marsh',
+    ])
+  })
+
+  it('falls back to the date added, then the id', () => {
+    const same = {
+      primary_email: 'ada@quill.test',
+      current_company: 'Quill Press',
+      li_public_id: null,
+    }
+    expect(
+      labelPair(
+        { id: 1, ...ada, ...same, created_at: '2025-03-01T09:00:00Z' },
+        { id: 2, ...ada, ...same, created_at: '2026-01-02T09:00:00Z' },
+      ),
+    ).toEqual(['Ada Quill (added 2025-03-01)', 'Ada Quill (added 2026-01-02)'])
+    expect(
+      labelPair(
+        { id: 1, ...ada, ...same, created_at: '2026-01-02T09:00:00Z' },
+        { id: 2, ...ada, ...same, created_at: '2026-01-02T10:00:00Z' },
+      ),
+    ).toEqual(['Ada Quill (contact 1)', 'Ada Quill (contact 2)'])
+  })
+
+  it('skips a detail one side has not loaded, and says so when one side has none', () => {
+    expect(
+      labelPair(
+        { id: 1, ...ada, primary_email: undefined, current_company: 'Quill Press' },
+        { id: 2, ...ada, primary_email: 'ada@quill.test', current_company: null },
+      ),
+    ).toEqual(['Ada Quill (Quill Press)', 'Ada Quill (no company)'])
   })
 })
 
@@ -412,7 +448,7 @@ describe('the possible-duplicate hint', () => {
     const panel = await screen.findByRole('region', { name: 'Merge contacts' })
     expect(
       await within(panel).findByRole('columnheader', {
-        name: 'Stays: Ada Ventura (Tessellate Labs)',
+        name: 'Stays: Ada Ventura',
       }),
     ).toBeVisible()
     expect(sent(seen, '/api/v1/contacts/1/merge/preview')[0]?.body).toEqual({ loser_id: 2 })

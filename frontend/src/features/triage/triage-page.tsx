@@ -38,8 +38,8 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
-import { MergePanel, type MergeTarget, type Survivor } from '@/features/contacts/merge-panel'
-import { labelled } from '@/features/contacts/merge-text'
+import { MergePanel, type Survivor } from '@/features/contacts/merge-panel'
+import type { Nameable } from '@/features/contacts/merge-text'
 import { NeedsReviewNotice } from '@/features/contacts/needs-review'
 import { PossibleDuplicates } from '@/features/contacts/possible-duplicates'
 
@@ -166,7 +166,7 @@ export function TriagePage() {
   /** The merge panel a possible-duplicate hint opened (#363), and for which contact. */
   const [merging, setMerging] = useState<{
     contactId: number
-    target: MergeTarget
+    target: Nameable
     survivor: Survivor
   } | null>(null)
   const queue = useTriageQueue(filter)
@@ -431,10 +431,7 @@ export function TriagePage() {
                             onMerge={(match) =>
                               setMerging({
                                 contactId: card.contact.id,
-                                target: {
-                                  id: match.contact_id,
-                                  name: labelled({ ...match, id: match.contact_id }),
-                                },
+                                target: { ...match, id: match.contact_id },
                                 survivor: match.needs_review ? 'this' : 'other',
                               })
                             }
@@ -450,7 +447,7 @@ export function TriagePage() {
                   <div className="lg:col-span-2">
                     <MergePanel
                       key={`${mergingHere.contactId}-${mergingHere.target.id}`}
-                      contact={{ id: card.contact.id, name: labelled(card.contact) }}
+                      contact={card.contact}
                       initialTarget={mergingHere.target}
                       initialSurvivor={mergingHere.survivor}
                       onClose={() => setMerging(null)}

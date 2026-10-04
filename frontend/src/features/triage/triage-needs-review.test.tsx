@@ -149,7 +149,13 @@ describe('a possible duplicate of a card contact (#363)', () => {
         }
         if (pathname === '/api/v1/contacts/2/merge/preview') {
           posted.push(pathname)
-          const loser = contactDetail({ id: 1, needs_review_at: '2026-09-24T12:00:00Z' })
+          const loser = contactDetail({
+            id: 1,
+            first_name: 'Bo',
+            last_name: 'Example',
+            preferred_name: 'Bo',
+            needs_review_at: '2026-09-24T12:00:00Z',
+          })
           return jsonResponse({ survivor: kept, loser, result: kept, moves, undoable: false })
         }
         if (pathname === '/api/v1/contacts/2/merge') {
@@ -178,7 +184,14 @@ describe('a possible duplicate of a card contact (#363)', () => {
 
     fireEvent.click(within(hint).getByRole('button', { name: 'Merge with Ada Ventura' }))
     const panel = await screen.findByRole('region', { name: 'Merge contacts' })
-    await within(panel).findByRole('columnheader', { name: 'Stays: Ada Ventura (Tessellate Labs)' })
+    await within(panel).findByRole('columnheader', { name: 'Stays: Ada Ventura' })
+    // The heading names the pair exactly as the table and the buttons do.
+    const away = within(panel).getByRole('columnheader', { name: /^Merged away: / })
+    const fold = (away.textContent ?? '').replace('Merged away: ', '')
+    expect(within(panel).getByRole('heading', { level: 3 })).toHaveTextContent(
+      `Merge ${fold} with Ada Ventura`,
+    )
+    expect(within(panel).getByRole('button', { name: `Keep ${fold} instead` })).toBeVisible()
 
     // While the panel is open, the keyboard map stands aside: no key decides the card.
     fireEvent.keyDown(window, { key: 'm' })

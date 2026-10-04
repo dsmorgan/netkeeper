@@ -36,18 +36,9 @@ import {
   type MergeCandidate,
 } from './api'
 import { displayName, formatDateTime } from './format'
-import { describeMoves, labelled, labelledDetail } from './merge-text'
+import { describeMoves, labelPair, nameableOf, type Nameable } from './merge-text'
 import type { ContactDetail, MergeMoves } from './types'
 import { MET_LABELS } from './types'
-
-/**
- * A contact in the merge, once picked: its id and its name with a distinguishing
- * detail ({@link labelled}), which names it before its preview arrives.
- */
-export interface MergeTarget {
-  id: number
-  name: string
-}
 
 /** Which of the two keeps its id: this page's contact, or the other one. */
 export type Survivor = 'this' | 'other'
@@ -60,15 +51,30 @@ export function MergePanel({
   onMerged,
 }: {
   /** The contact the panel was opened from. */
-  contact: MergeTarget
-  initialTarget?: MergeTarget | null
+  contact: Nameable
+  initialTarget?: Nameable | null
   initialSurvivor?: Survivor
   onClose: () => void
   /** The merge landed: the survivor as the server answered, and the id merged away. */
   onMerged: (survivor: ContactDetail, loserId: number) => void
 }) {
-  const [target, setTarget] = useState<MergeTarget | null>(initialTarget)
+  const [target, setTarget] = useState<Nameable | null>(initialTarget)
   const [survivor, setSurvivor] = useState<Survivor>(initialSurvivor)
+  const keep = target === null || survivor === 'this' ? contact : target
+  const fold = target === null ? null : survivor === 'this' ? target : contact
+  // One preview, shared through the cache with the review below. Once it is in,
+  // both contacts are known in full, so the pair is labeled from it.
+  const preview = useQuery({
+    ...mergePreviewQuery(keep.id, fold?.id ?? keep.id),
+    enabled: fold !== null,
+  })
+  const [keepLabel, foldLabel] =
+    fold === null
+      ? [displayName(keep), '']
+      : preview.data
+        ? labelPair(nameableOf(preview.data.survivor), nameableOf(preview.data.loser))
+        : labelPair(keep, fold)
+  const contactLabel = keep.id === contact.id ? keepLabel : foldLabel
 
   return (
     <section
@@ -78,13 +84,15 @@ export function MergePanel({
     >
       <div className="flex flex-wrap items-center gap-2">
         <h3 className="font-heading text-base font-medium">
-          Merge {contact.name} with another contact
+          {fold === null
+            ? `Merge ${contactLabel} with another contact`
+            : `Merge ${contactLabel} with ${keep.id === contact.id ? foldLabel : keepLabel}`}
         </h3>
         <Button size="sm" variant="ghost" className="ml-auto" onClick={onClose}>
           Close
         </Button>
       </div>
-      {target === null ? (
+      {fold === null ? (
         <MergePicker
           exclude={contact.id}
           onPick={(picked) => {
@@ -94,8 +102,10 @@ export function MergePanel({
         />
       ) : (
         <MergeReview
-          keep={survivor === 'this' ? contact : target}
-          fold={survivor === 'this' ? target : contact}
+          keepId={keep.id}
+          foldId={fold.id}
+          keepLabel={keepLabel}
+          foldLabel={foldLabel}
           onSwap={() => setSurvivor((side) => (side === 'this' ? 'other' : 'this'))}
           onPickAnother={() => setTarget(null)}
           onMerged={onMerged}
@@ -106,13 +116,7 @@ export function MergePanel({
 }
 
 /** Search by first, last or preferred name, or email, and pick one contact. */
-function MergePicker({
-  exclude,
-  onPick,
-}: {
-  exclude: number
-  onPick: (target: MergeTarget) => void
-}) {
+function MergePicker({ exclude, onPick }: { exclude: number; onPick: (target: Nameable) => void }) {
   const inputId = useId()
   const [text, setText] = useState('')
   const settled = useDebounced(text.trim(), 200)
@@ -151,7 +155,7 @@ function MergePicker({
               <button
                 type="button"
                 className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-muted focus-visible:bg-muted focus-visible:outline-none"
-                onClick={() => onPick({ id: row.id, name: labelled(row) })}
+                onClick={() => onPick(row)}
               >
                 <span className="font-medium">
                   {displayName(row)}
@@ -182,33 +186,35 @@ function CandidateDetail({ row }: { row: MergeCandidate }) {
 
 /** The side-by-side preview, the swap, and the confirmation. */
 function MergeReview({
-  keep,
-  fold,
+  keepId,
+  foldId,
+  keepLabel: keepName,
+  foldLabel: foldName,
   onSwap,
   onPickAnother,
   onMerged,
 }: {
-  keep: MergeTarget
-  fold: MergeTarget
+  keepId: number
+  foldId: number
+  /** The pair's labels ({@link labelPair}), the same ones the heading uses. */
+  keepLabel: string
+  foldLabel: string
   onSwap: () => void
   onPickAnother: () => void
   onMerged: (survivor: ContactDetail, loserId: number) => void
 }) {
   const queryClient = useQueryClient()
-  const preview = useQuery(mergePreviewQuery(keep.id, fold.id))
-  // Once the preview is in, both names carry the details it has in full.
-  const keepName = preview.data ? labelledDetail(preview.data.survivor) : keep.name
-  const foldName = preview.data ? labelledDetail(preview.data.loser) : fold.name
+  const preview = useQuery(mergePreviewQuery(keepId, foldId))
   const [confirming, setConfirming] = useState(false)
   const merge = useMutation({
-    mutationFn: () => mergeContacts(keep.id, fold.id),
+    mutationFn: () => mergeContacts(keepId, foldId),
     onSuccess: (survivor) => {
       // Drop every preview first: one of these two, refetched now, would only answer 409.
       queryClient.removeQueries({ queryKey: [...contactsKeys.all, 'merge-preview'] })
       queryClient.setQueryData(contactsKeys.detail(survivor.id), survivor)
       void queryClient.invalidateQueries({ queryKey: contactsKeys.all })
       setConfirming(false)
-      onMerged(survivor, fold.id)
+      onMerged(survivor, foldId)
     },
   })
 
@@ -241,6 +247,8 @@ function MergeReview({
             survivor={preview.data.survivor}
             loser={preview.data.loser}
             result={preview.data.result}
+            survivorLabel={keepName}
+            loserLabel={foldName}
           />
           <MovesList moves={preview.data.moves} />
           <div>
@@ -310,10 +318,14 @@ function PreviewTable({
   survivor,
   loser,
   result,
+  survivorLabel,
+  loserLabel,
 }: {
   survivor: ContactDetail
   loser: ContactDetail
   result: ContactDetail
+  survivorLabel: string
+  loserLabel: string
 }) {
   return (
     <div className="overflow-x-auto">
@@ -327,10 +339,10 @@ function PreviewTable({
               Field
             </th>
             <th scope="col" className="py-1 pr-3 font-medium">
-              Stays: {labelledDetail(survivor)}
+              Stays: {survivorLabel}
             </th>
             <th scope="col" className="py-1 pr-3 font-medium">
-              Merged away: {labelledDetail(loser)}
+              Merged away: {loserLabel}
             </th>
             <th scope="col" className="py-1 font-medium">
               After the merge
