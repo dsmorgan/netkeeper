@@ -32,7 +32,7 @@ The maintainer's decisions of 2026-10-03 (#375, and the phase 4 decisions in `do
 
 ## Decision
 
-netkeeper may give a LinkedIn page exactly two new inputs, both in `BrowserRun` (`netkeeper/linkedin/browser.py`), and one new way to end a run. Everything else in ADR 0006 stays: no script in the page, no request of netkeeper's own, and no interception.
+netkeeper may give a LinkedIn page exactly two new inputs, both in `BrowserRun` (`netkeeper/linkedin/browser.py`), and one new way to end a run. Everything else in ADR 0006 stays: no script in the page, no request of netkeeper's own, and no interception. It also brings its tab to the front once, at the start (see below).
 
 ### Who triggers it
 
@@ -130,7 +130,7 @@ Static pins:
 - A literal check that the only `press` argument anywhere is `"Shift+Enter"`, or that there is no `press` at all if newlines are refused.
 - No `keyboard.down`, no `keyboard.up`, and no `focus()` anywhere.
 - The Message control's role and name are module constants pinned to literals, and no role or name literal under `netkeeper/linkedin/` matches "send", ignoring case.
-- `bring_to_front` is called at one site only, once per run, before `click_message`.
+- `bring_to_front` is called at one site, inside the prefill's start, before `click_message`; a runtime pin checks that it's called once per run.
 - `netkeeper/linkedin/page_messaging.py` in `BROWSER_MODULES` and `BROWSER_CALLERS`.
 - `hand_over` reachable only from `page_messaging.py`.
 
@@ -140,19 +140,22 @@ Runtime pins, against a fake page:
 - Focus moving away after chunk k gives zero further keys.
 - Composer text that diverges from the typed prefix stops typing.
 - A second composer appearing mid-type stops typing.
+- A recipient label that changes mid-type stops typing.
+- A final composer text that differs from the body gives `partially_typed`, never `prefilled`.
 - After `hand_over()`, the provider's exit leaves the page open.
 
 ## Consequences
 
-- netkeeper can type a message into LinkedIn and still never send one. What the user sees in the handed-over tab is the rendered body, in the right conversation, waiting for their click.
+- netkeeper can type a message into LinkedIn, and no key or click of netkeeper's is meant to send one. What the user sees in the handed-over tab is the rendered body, in the right conversation, waiting for their click.
 - Every refusal before the first key leaves nothing typed (`not_typed`), so a refused prefill costs a budget unit, not a wrong message. A prefill interrupted after the first key (`partially_typed`, `unknown`) is never retried: retyping into a composer that may hold half the message is worse than a person finishing it. The person clears what's there.
 - Each prefill spends one `li_prefills` unit and one `profile_visits` unit before it navigates (P4-03, P4-09).
 - A prefill that can't get the browser lock at once doesn't start, and a claim that waits too long lapses. A person may have to click **Prefill** again.
+- Focus is checked before each chunk, not atomically with it. If focus moves in the moment between the check and the key, one chunk can land outside the composer. The per-chunk checks stop the prefill on the next chunk. This window is the remaining risk, and the reason the person watches and leaves Chrome alone.
 - Handed-over tabs accumulate in the user's Chrome until the user closes them. That's deliberate: netkeeper closing a tab is how a draft would be lost. P4-09 allows one open prefill at a time.
 - The person must leave Chrome alone while the prefill types. Touching it stops the prefill as `partially_typed`, which is the safe direction.
 - If LinkedIn changes the Message control, the composer, or the recipient it shows, the prefill refuses and types nothing. That is the intended failure.
 - If LinkedIn changes what Shift+Enter does, nothing in this ADR detects it at run time. The capture is the evidence, and a later capture that contradicts it means newlines are refused until a new amendment.
-- A future contributor keeps these true: the only clicks are Contact info and Message, each once, each bound to the profile it's on; the only typing goes into one verified, focused composer for the contact, checked again before every chunk; no code path presses Enter or clicks Send; and a handed-over tab is never touched again.
+- A future contributor keeps these true: the only clicks are Contact info and Message, each once, each bound to the profile it's on; the only typing is aimed at one verified composer for the contact, with focus and the composer checked again before every chunk; no code path presses Enter or clicks Send; and a handed-over tab is never touched again.
 
 ## Decisions the maintainer makes at acceptance
 
