@@ -417,13 +417,15 @@ def activation_errors(row: Template) -> list[LintIssue]:
 
 
 REMOVED_FIELD_BLOCK: Final = (
-    "blocked: template uses removed field me.*; publish a new template version"
+    "blocked: template uses removed field me.*; "
+    "end this campaign, fix the template, and start a new campaign from it"
 )
 """Why the engine parked an enrollment whose step template names a removed ``me.*``
 field (#342). Stored on the enrollment and shown on the campaign page."""
 
 TEMPLATE_ERRORS_BLOCK: Final = (
-    "blocked: the step's template has lint errors; publish a new template version"
+    "blocked: the step's template has lint errors; "
+    "end this campaign, fix the template, and start a new campaign from it"
 )
 """Why the engine parked an enrollment whose step template has any other lint error."""
 
@@ -431,7 +433,9 @@ TEMPLATE_ERRORS_BLOCK: Final = (
 def block_reason(row: Template | None) -> str | None:
     """Why a step with this template may not send, or None when it may. A template that
     names a removed ``me.*`` field says so (#342): the campaign was activated before the
-    fields were removed, and only a new template version makes it send again."""
+    fields were removed. Editing the template does not unblock it: the step keeps the
+    version it was activated with, so the way on is to end this campaign, fix the
+    template, and start a new campaign from it."""
     if row is None:
         return "blocked: the step's template is gone"
     errors = activation_errors(row)
@@ -458,7 +462,9 @@ SENDING_STATUSES: Final = frozenset({CampaignStatus.ACTIVE, CampaignStatus.PAUSE
 def removed_field_campaigns(session: Session, user: User) -> list[RemovedFieldCampaign]:
     """Every active or paused campaign whose step templates fail ``removed_field`` (#342).
 
-    Those steps send nothing until a new template version replaces the template:
+    Those steps send nothing: a step keeps the template version it was activated with,
+    so editing the template does not help. End the campaign, fix the template, and start
+    a new campaign from it:
     the startup log and the posture report name them. Reads only.
     """
     out: list[RemovedFieldCampaign] = []
@@ -494,7 +500,8 @@ def describe_removed_field_campaigns(found: Sequence[RemovedFieldCampaign]) -> s
     )
     return (
         f"{named}: a step template uses the removed me.* fields (#342), so those steps send"
-        " nothing. Publish a new template version without them"
+        " nothing. To send it, "
+        "end this campaign, fix the template, and start a new campaign from it"
     )
 
 
