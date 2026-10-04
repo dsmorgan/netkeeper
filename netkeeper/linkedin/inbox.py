@@ -14,8 +14,16 @@ one-to-one conversations with their loaded messages. It counts group threads
 (``skipped_group``) and InMail, sponsored, and system threads
 (``skipped_other``) and never returns them. It opens a thread only for the
 conversation URNs in ``spec.open_threads_for``, by navigation, and never more
-than :data:`MAX_THREADS_OPENED`. ``complete`` says the page proved it read back
-to ``since``; a source that stopped at ``max_conversations`` first says false.
+than :data:`MAX_THREADS_OPENED`.
+
+**Completeness.** ``complete`` is true when the page proved it read back to
+``since``: it reached a conversation whose last activity is at or before
+``since``, or the end of the list. With ``since`` set, a source that stopped at
+``max_conversations`` first says false. ``since`` is ``None`` only for a first
+poll with nothing to read back to (the core sends the start of the last complete
+poll, or before the first one the earliest sent outbound message of any live
+enrollment); then a poll that read ``max_conversations`` conversations, or the
+whole list, is complete.
 
 **When the page is not the inbox.** A source that lands on a wall (a
 checkpoint, a login page, a throttle, a page it cannot read) raises
@@ -52,10 +60,12 @@ def _require_aware(value: datetime, name: str) -> None:
 class InboxJobSpec:
     """What one poll may read.
 
-    ``since`` is the start of the last complete poll, or ``None`` for the first
-    poll. ``watched_urns`` are the ``urn:li:fsd_profile:<id>`` URNs of the
-    contacts the core cares about. ``open_threads_for`` are the conversation
-    URNs whose thread the poll may open, at most :data:`MAX_THREADS_OPENED`.
+    ``since`` is the start of the last complete poll; before the first complete
+    poll, the earliest sent outbound message of any live enrollment; ``None`` when
+    there is neither (see the module docstring on completeness). ``watched_urns`` are
+    the ``urn:li:fsd_profile:<id>`` URNs of the contacts the core cares about.
+    ``open_threads_for`` are the conversation URNs whose thread the poll may open, at
+    most :data:`MAX_THREADS_OPENED`.
     """
 
     since: datetime | None

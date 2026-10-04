@@ -21,9 +21,11 @@ message, with ``external_id`` set to the message URN, ``at`` truncated to whole
 seconds, ``source = sync``, and the summary ``LinkedIn message: <snippet>``.
 ``external_id`` is unique per user, so a repeat poll writes nothing twice. A
 message an archive import already recorded at the same contact, kind, and
-second is not written again either: the archive's rows have no message URN,
-so they are counted as a ledger, as the archive import counts polled rows the
-other way (``crm/archive.py``).
+second is not written again either: the archive's rows have no message URN, so
+the poll adopts the matching row instead, writing the URN into its
+``external_id``; an adopted inbound message still reaches the reply hook. The
+archive import counts polled rows the other way (``crm/archive.py``). Archive
+invitation rows are not messages and take part in neither.
 
 **Message text** goes into the interaction's summary and nowhere else: not a
 log line, not a count, not an exception message.
@@ -42,10 +44,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import Select
+from sqlalchemy import Select, func
 from sqlalchemy.orm import Session
 
-from netkeeper.crm.interactions import add_interaction
+from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction
 from netkeeper.db import is_writer
 from netkeeper.linkedin.inbox import (
     MAX_THREADS_OPENED,
@@ -62,6 +64,7 @@ from netkeeper.models import (
     InteractionKind,
     LiConversation,
     Message,
+    MessageDirection,
     MessageStatus,
     User,
 )
@@ -85,7 +88,7 @@ _POLLED_KINDS: Final = (InteractionKind.LI_IN, InteractionKind.LI_OUT)
 
 @dataclass(frozen=True, slots=True)
 class NewInbound:
-    """One inbound message this poll recorded for the first time. No text."""
+    """One inbound message new to the poll: written now, or an archive row it adopted. No text."""
 
     contact_id: int
     interaction_id: int
@@ -158,6 +161,35 @@ def has_anything_to_watch(session: Session, user: User) -> bool:
     """Whether any live enrollment has a contact with a LinkedIn URN. Read-only."""
     statement = _live_enrollment_contacts(user).with_only_columns(Contact.id).limit(1)
     return session.scalar(statement) is not None
+
+
+def first_live_outreach(session: Session, user: User) -> datetime | None:
+    """The earliest sent outbound campaign message of any live enrollment, any channel.
+
+    The first poll's ``since`` when no poll has completed yet (#388 review, S3): what
+    a reply could be answering starts there. ``None`` when no live enrollment has sent
+    anything. Read-only.
+    """
+    live = (
+        scoped(user, Enrollment)
+        .join(Campaign, Campaign.id == Enrollment.campaign_id)
+        .with_only_columns(Enrollment.id)
+        .where(
+            Campaign.user_id == user.id,
+            Enrollment.status.in_(LIVE_ENROLLMENT_STATUSES),
+            Campaign.status.in_(RUNNING_CAMPAIGN_STATUSES),
+        )
+    )
+    statement = (
+        scoped(user, Message)
+        .with_only_columns(func.min(Message.sent_at))
+        .where(
+            Message.enrollment_id.in_(live),
+            Message.direction == MessageDirection.OUT,
+            Message.sent_at.is_not(None),
+        )
+    )
+    return session.scalar(statement)
 
 
 def threads_to_open(session: Session, user: User) -> frozenset[str]:
@@ -234,7 +266,22 @@ def apply_delta(
             known_ids.add(message.message_urn)
             kind = InteractionKind.LI_OUT if message.outbound else InteractionKind.LI_IN
             at = message.at.replace(microsecond=0)
-            if archived.claim(contact_id, kind, at):
+            adopted = archived.claim(contact_id, kind, at)
+            if adopted is not None:
+                # An archive import recorded this message already: the row takes its
+                # URN, and an inbound one still reaches the reply hook (#388 review, S2).
+                adopted.external_id = message.message_urn
+                session.flush()
+                if not message.outbound:
+                    counts.new_inbound.append(
+                        NewInbound(
+                            contact_id=contact_id,
+                            interaction_id=adopted.id,
+                            conversation_urn=conversation.conversation_urn,
+                            message_urn=message.message_urn,
+                            at=at,
+                        )
+                    )
                 continue
             interaction = add_interaction(
                 session,
@@ -272,6 +319,11 @@ def summary(snippet: str) -> str:
     """A polled message's interaction summary: ``LinkedIn message: <snippet>``."""
     text = snippet.strip()[:SNIPPET_MAX]
     return f"{SUMMARY_PREFIX}: {text}" if text else SUMMARY_PREFIX
+
+
+def is_invitation(summary: str | None) -> bool:
+    """Whether an archive interaction is an invitation, not a message (its summary says so)."""
+    return summary is not None and summary.startswith(INVITATION_SUMMARY)
 
 
 def _is_group(conversation: InboxConversation) -> bool:
@@ -345,34 +397,40 @@ def _later[T: datetime | None](current: T, seen: T) -> T:
 
 
 class _ArchiveLedger:
-    """Archive-imported LinkedIn messages at ``(contact, kind, second)``, counted.
+    """Archive-imported LinkedIn messages at ``(contact, kind, second)``, by row.
 
     The archive import has no message URN, so a message it recorded is known here
-    only by its contact, kind, and second; each archive row stands for one polled
-    message. Built fresh for every apply, so a message that matched an archive row
-    once matches it again on the next poll and is never written.
+    only by its contact, kind, and second. A polled message that matches one adopts
+    that row (:meth:`claim`): the poll writes its URN into the row's ``external_id``,
+    so the next poll finds it by URN and the archive row stands for exactly one
+    message. Rows that already carry a URN are not in the ledger, and neither are
+    the archive's invitation rows, which are not messages.
     """
 
-    __slots__ = ("_seen",)
+    __slots__ = ("_rows",)
 
     def __init__(self, session: Session, user: User, contact_ids: set[int]) -> None:
-        self._seen: dict[tuple[int, InteractionKind, datetime], int] = {}
-        statement = scoped(user, Interaction).where(
-            Interaction.contact_id.in_(contact_ids),
-            Interaction.kind.in_(_POLLED_KINDS),
-            Interaction.source == ContactSource.ARCHIVE,
+        self._rows: dict[tuple[int, InteractionKind, datetime], list[Interaction]] = {}
+        statement = (
+            scoped(user, Interaction)
+            .where(
+                Interaction.contact_id.in_(contact_ids),
+                Interaction.kind.in_(_POLLED_KINDS),
+                Interaction.source == ContactSource.ARCHIVE,
+                Interaction.external_id.is_(None),
+            )
+            .order_by(Interaction.id)
         )
         for row in session.scalars(statement):
+            if is_invitation(row.summary):
+                continue
             key = (row.contact_id, row.kind, row.at.replace(microsecond=0))
-            self._seen[key] = self._seen.get(key, 0) + 1
+            self._rows.setdefault(key, []).append(row)
 
-    def claim(self, contact_id: int, kind: InteractionKind, at: datetime) -> bool:
-        key = (contact_id, kind, at)
-        left = self._seen.get(key, 0)
-        if left <= 0:
-            return False
-        self._seen[key] = left - 1
-        return True
+    def claim(self, contact_id: int, kind: InteractionKind, at: datetime) -> Interaction | None:
+        """The archive row this message adopts, removed from the ledger; ``None`` if none."""
+        rows = self._rows.get((contact_id, kind, at))
+        return rows.pop(0) if rows else None
 
 
 def _call_reply_handlers(session: Session, user: User, counts: InboxCounts) -> None:

@@ -1209,7 +1209,7 @@ def linkedin_inbox(ctx: typer.Context) -> None:
     the other runs. It works while scheduled runs are disarmed.
 
     The page source that reads the inbox is not built yet (P4-01), so today the run
-    attaches to Chrome and ends failed with that reason. It spends no budget and
+    is refused with that reason before it attaches to Chrome. It spends no budget and
     loads no page.
     """
     _run_by_hand(ctx, SyncRunKind.INBOX)

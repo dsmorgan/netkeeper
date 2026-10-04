@@ -20,7 +20,8 @@ no browser), modeled on :mod:`netkeeper.services.connections_sync`:
   read, with the run's ending in the same transaction. A poll whose page proved
   it read back to the last complete poll ends ``completed``, ``inbox_read``;
   one that did not ends ``aborted``, ``inbox_incomplete``, keeping what it
-  wrote. The next poll reads from the start of the last complete one.
+  wrote. The next poll reads from the start of the last complete one; before
+  the first, from the earliest sent outbound message of any live enrollment.
 * **Counts only.** ``counts_json`` holds numbers. No message text reaches a log
   line, the run row, an error, or the event stream: an exception from the
   source or the apply is recorded by its type alone.
@@ -110,9 +111,18 @@ def last_complete_poll_start(session: Session, user: User) -> datetime | None:
 
 def job_spec(session: Session, user: User) -> InboxJobSpec:
     """What the next poll may read: since the last complete poll, the watched contacts'
-    URNs, and the threads it may open. Read-only."""
+    URNs, and the threads it may open. Read-only.
+
+    Before any poll has completed, ``since`` is the earliest sent outbound message of
+    any live enrollment (:func:`~netkeeper.crm.inbox_apply.first_live_outreach`), so
+    the first poll has an end it can prove it read back to; with no such message it is
+    ``None``, and a poll that reads ``max_conversations`` counts as complete.
+    """
+    since = last_complete_poll_start(session, user)
+    if since is None:
+        since = inbox_apply.first_live_outreach(session, user)
     return InboxJobSpec(
-        since=last_complete_poll_start(session, user),
+        since=since,
         watched_urns=inbox_apply.watched_urns(session, user),
         max_conversations=MAX_CONVERSATIONS_PER_POLL,
         open_threads_for=inbox_apply.threads_to_open(session, user),

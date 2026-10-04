@@ -33,6 +33,7 @@ from netkeeper.linkedin.browser import BrowserRun, BrowserUnavailable
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.inbox import InboxReadStopped, InboxSource
 from netkeeper.models import (
+    EnrollmentStatus,
     Interaction,
     SyncRun,
     SyncRunKind,
@@ -51,7 +52,7 @@ from netkeeper.services.runs import HeatSkipped, SessionFlagged
 from netkeeper.services.scheduled_runs import serve_registry
 from netkeeper.services.scheduler import SERVED_SCHEDULES, JobKind
 from netkeeper.services.users import ensure_local_user
-from netkeeper.worker import NO_INBOX_SOURCE, BrowserWorker, inbox_source
+from netkeeper.worker import NO_INBOX_SOURCE, NO_SOURCE, BrowserWorker, inbox_source
 
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
 SETTINGS = LinkedInSettings()
@@ -127,7 +128,7 @@ async def test_a_poll_applies_what_it_read_and_completes(
     assert _spent(session_factory, user_id) == 1  # one poll, one unit
     assert _interactions(session_factory, user_id) == 2
     (spec,) = source.specs
-    assert spec.since is None  # the first poll
+    assert spec.since is None  # the first poll, and nothing sent to read back to
     assert spec.watched_urns == {ADA}
     assert spec.max_conversations == MAX_CONVERSATIONS_PER_POLL == 40
 
@@ -368,14 +369,16 @@ async def test_the_worker_routes_an_inbox_run_to_the_poll(
 async def test_with_no_page_source_yet_a_run_fails_saying_so_and_spends_nothing(
     session_factory: sessionmaker[Session], user_id: int
 ) -> None:
-    provider, _ = fake_provider()
+    provider, connector = fake_provider()
     worker = BrowserWorker(provider, session_factory, SETTINGS, clock=lambda: NOW, sleep=no_sleep)
     run_id = _manual_inbox_run(session_factory, user_id)
     await worker.execute(run_id, user_id)
 
+    assert connector.attaches == 0  # refused before the lock and the attach
     run = _run(session_factory, user_id, run_id)
-    assert (run.status, run.stop_reason) == (SyncRunStatus.FAILED, "error")
-    assert run.error == f"NotImplementedError: {NO_INBOX_SOURCE}"
+    assert (run.status, run.stop_reason) == (SyncRunStatus.FAILED, NO_SOURCE)
+    assert run.error == NO_INBOX_SOURCE
+    assert runs.describe_stop_reason(NO_SOURCE) != NO_SOURCE  # has words for a person
     assert _spent(session_factory, user_id) == 0
     with pytest.raises(NotImplementedError, match="P4-01"):
         inbox_source(object())  # type: ignore[arg-type]
@@ -667,5 +670,50 @@ async def test_the_api_starts_an_inbox_poll_and_answers_at_once(
         run = (await client.get(f"/api/v1/linkedin/runs/{response.json()['run_id']}")).json()
     assert run["kind"] == "inbox"
     # No page source yet: the run says so, and nothing was read.
-    assert (run["status"], run["stop_reason"]) == ("failed", "error")
+    assert (run["status"], run["stop_reason"]) == ("failed", "no_source")
     assert "P4-01" in run["error"]
+
+
+async def test_the_first_poll_reads_back_to_the_earliest_live_outreach(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """Before any poll completes, ``since`` is the earliest sent outbound message of a
+    live enrollment, so a first poll has an end it can prove (#388 review, S3)."""
+    first_sent = NOW - timedelta(days=9)
+    with session_scope(session_factory, write=True) as session:
+        user = _user(session, user_id)
+        campaign = factories.make_campaign(session, user)
+        for days in (9, 4):
+            contact = factories.make_contact(session, user, li_urn=profile_urn(f"d{days}"))
+            enrollment = factories.make_enrollment(session, campaign, contact)
+            factories.make_message(session, enrollment, sent_at=NOW - timedelta(days=days))
+        ended = factories.make_enrollment(
+            session,
+            campaign,
+            factories.make_contact(session, user, li_urn=profile_urn("ended")),
+            status=EnrollmentStatus.COMPLETED,
+        )
+        factories.make_message(session, ended, sent_at=NOW - timedelta(days=30))
+    source = FakeInboxSource()
+    report = await poll_inbox(
+        session_factory, user_id, source, settings=SETTINGS, clock=lambda: NOW
+    )
+
+    assert source.specs[0].since == first_sent
+    assert _run(session_factory, user_id, report.run_id).stop_reason == READ
+    later = FakeInboxSource()
+    await poll_inbox(
+        session_factory, user_id, later, settings=SETTINGS, clock=lambda: NOW + timedelta(hours=3)
+    )
+    assert later.specs[0].since == NOW  # from then on, the last complete poll
+
+
+async def test_a_first_poll_with_nothing_to_read_back_to_can_complete(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """With no outreach sent, ``since`` is ``None`` and a source that read
+    ``max_conversations`` reports complete; the run completes and moves ``since`` on."""
+    full = FakeInboxSource(delta(complete=True))
+    report = await poll_inbox(session_factory, user_id, full, settings=SETTINGS, clock=lambda: NOW)
+    assert full.specs[0].since is None
+    assert _run(session_factory, user_id, report.run_id).status is SyncRunStatus.COMPLETED
