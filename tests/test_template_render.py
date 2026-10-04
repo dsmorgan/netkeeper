@@ -973,17 +973,50 @@ def test_a_linkedin_body_over_the_warning_limit_is_a_warning() -> None:
     assert not has_errors(issues)
 
 
-def test_a_linkedin_body_too_slow_to_type_is_an_error() -> None:
-    # 1,275 characters of this shape are expected to take just over 240 seconds.
+# Plain prose, with words and sentences: it crosses 240 seconds at about 1,090 characters.
+PROSE = (
+    "It was great to meet you at the product meetup last week, and I enjoyed hearing how "
+    "your team ships so often. Would you be open to a short call next month? I would love "
+    "to compare notes on hiring, tooling, and the move to smaller releases. "
+) * 10
+
+
+def test_a_linkedin_body_too_slow_to_type_is_a_warning_at_save() -> None:
+    # 1,275 characters of this shape (one long word) are expected to take just over 240
+    # seconds. The template text is never typed as it stands, so it is only a warning.
     slow = _sized(1275)
     assert pacing.typing_expected_seconds(slow) > TYPING_LINT_SECONDS
     issues = lint(LINKEDIN, None, slow)
     assert _lines(issues) == [(LintRule.LINKEDIN_TYPING_TIME, None, 1)]
-    assert issues[0].severity is Severity.ERROR
+    assert issues[0].severity is Severity.WARNING
+    assert not has_errors(issues)
     assert "takes about 241 seconds to type, over 240" in issues[0].message
     just_under = _sized(1274)
     assert pacing.typing_expected_seconds(just_under) <= TYPING_LINT_SECONDS
     assert [i.rule for i in lint(LINKEDIN, None, just_under)] == [LintRule.LINKEDIN_LONG]
+
+
+@pytest.mark.parametrize(
+    ("chars", "rule"),
+    [(1050, LintRule.LINKEDIN_LONG), (1200, LintRule.LINKEDIN_TYPING_TIME)],
+    ids=["1050_only_long", "1200_too_slow"],
+)
+def test_the_typing_time_threshold_for_real_prose(chars: int, rule: LintRule) -> None:
+    text = PROSE[:chars]
+    at_save = lint(LINKEDIN, None, "{{ first_name }} " + text)
+    assert [(i.rule, i.severity) for i in at_save] == [(rule, Severity.WARNING)]
+    rendered = render(
+        LINKEDIN, None, "{{ personal_line }}",
+        MergeValues(contact={}, personal_line=text), today=TODAY,
+    )  # fmt: skip
+    expected = Severity.WARNING if rule is LintRule.LINKEDIN_LONG else Severity.ERROR
+    assert [(i.rule, i.severity) for i in rendered.issues] == [(rule, expected)]
+
+
+def test_the_typing_time_line_is_where_the_body_passes_the_threshold() -> None:
+    body = "Hi {{ first_name }}\n" + PROSE[:600] + "\n" + PROSE[600:1200]
+    issues = lint(LINKEDIN, None, body)
+    assert (LintRule.LINKEDIN_TYPING_TIME, None, 3) in _lines(issues)
 
 
 def test_a_short_body_can_still_be_too_slow_to_type() -> None:
@@ -994,7 +1027,7 @@ def test_a_short_body_can_still_be_too_slow_to_type() -> None:
     assert [issue.rule for issue in issues] == [LintRule.LINKEDIN_TYPING_TIME]
 
 
-def test_a_linkedin_body_at_the_hard_limit_is_too_slow_to_type() -> None:
+def test_a_linkedin_body_at_the_hard_limit_is_only_slow_to_type() -> None:
     body = _sized(LINKEDIN_MESSAGE_MAX_CHARS)
     assert len(body) == 8000
     issues = lint(LINKEDIN, None, body)
@@ -1158,9 +1191,68 @@ def test_a_too_long_template_gets_no_second_length_finding_for_the_render(paddin
 
 
 def test_a_slow_template_that_renders_long_gets_no_extra_long_warning() -> None:
-    body = "Hi {{ first_name }}. " + "A. " * 320
+    # The comment makes the template text slow (a warning); the render is long, but
+    # quick enough, and its long warning gives way to the template's typing-time one.
+    body = "Hi {{ first_name }}, " + PROSE[:1030] + "{# " + PROSE[:600] + " #}"
+    assert pacing.typing_expected_seconds(body) > TYPING_LINT_SECONDS
     rendered = render(LINKEDIN, None, body, _values(first_name="Bo"), today=TODAY)
-    assert [issue.rule for issue in rendered.issues] == [LintRule.LINKEDIN_TYPING_TIME]
+    assert TYPING_WARN_CHARS < len(rendered.body) < 1090
+    assert pacing.typing_expected_seconds(rendered.body) <= TYPING_LINT_SECONDS
+    assert [(i.rule, i.severity) for i in rendered.issues] == [
+        (LintRule.LINKEDIN_TYPING_TIME, Severity.WARNING)
+    ]
+
+
+def test_a_slow_template_with_short_branches_renders_without_an_error() -> None:
+    # 1,190 characters of source, but each render types only one 550-character branch.
+    body = (
+        "Hi {{ first_name }}, {% if company %}" + PROSE[:550] + "{% else %}"
+        + PROSE[550:1100] + "{% endif %}"
+    )  # fmt: skip
+    at_save = lint(LINKEDIN, None, body)
+    assert [(i.rule, i.severity) for i in at_save] == [
+        (LintRule.LINKEDIN_TYPING_TIME, Severity.WARNING)
+    ]
+    for values in (_values(first_name="Bo", company="Acme"), _values(first_name="Bo")):
+        rendered = render(LINKEDIN, None, body, values, today=TODAY)
+        assert len(rendered.body) < 600
+        assert not has_errors(rendered.issues)
+
+
+def test_a_slow_template_warning_never_hides_a_rendered_message_too_slow_to_type() -> None:
+    body = "Hi {{ first_name }}, {{ personal_line }}{# " + PROSE[:1200] + " #}"
+    assert [i.rule for i in lint(LINKEDIN, None, body)] == [LintRule.LINKEDIN_TYPING_TIME]
+    short = render(
+        LINKEDIN, None, body,
+        MergeValues(contact={"first_name": "Bo"}, personal_line="Congrats."),
+        today=TODAY,
+    )  # fmt: skip
+    assert not has_errors(short.issues)
+    slow = render(
+        LINKEDIN, None, body,
+        MergeValues(contact={"first_name": "Bo"}, personal_line=PROSE[:1200]),
+        today=TODAY,
+    )  # fmt: skip
+    assert [(i.rule, i.severity) for i in slow.issues] == [
+        (LintRule.LINKEDIN_TYPING_TIME, Severity.WARNING),
+        (LintRule.LINKEDIN_TYPING_TIME, Severity.ERROR),
+    ]
+    assert slow.issues[1].line is None
+
+
+@pytest.mark.parametrize("newline", ["\r", "\r\n", "\n"], ids=["cr", "crlf", "lf"])
+def test_an_untypable_character_is_reported_on_its_own_line(newline: str) -> None:
+    body = "{{ first_name }} a" + newline + "b" + newline + "c\td"
+    issues = lint(LINKEDIN, None, body)
+    assert _lines(issues) == [
+        (LintRule.LINKEDIN_NEWLINE, None, 1),
+        (LintRule.LINKEDIN_UNTYPABLE, None, 3),
+    ]
+
+
+def test_the_lf_of_a_crlf_is_on_the_line_the_crlf_ends() -> None:
+    source = "a\r\nb"
+    assert [render_module._line_of(source, offset) for offset in range(5)] == [1, 1, 1, 2, 2]
 
 
 def test_a_linkedin_finding_in_the_template_is_not_repeated_for_the_render() -> None:

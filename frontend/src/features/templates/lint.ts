@@ -84,8 +84,9 @@ export const PROMPT_RULES: Readonly<Record<LintRule, string | null>> = {
   linkedin_subject: 'LinkedIn messages have no subject line: write only the body.',
   linkedin_too_long: 'Keep each LinkedIn message under 8,000 characters.',
   linkedin_typing_time:
-    'Keep each LinkedIn message short enough to type in four minutes, about 1,200 characters of plain text.',
-  linkedin_long: 'Keep each LinkedIn message under 1,000 characters, so it can be typed in time.',
+    'Keep each LinkedIn message short enough to type in four minutes, about 1,100 characters of plain text.',
+  linkedin_long:
+    'Keep each LinkedIn message to 1,000 characters or fewer, so it can be typed in time.',
   linkedin_newline:
     'Write each LinkedIn message as one paragraph on one line, with no line breaks.',
   linkedin_untypable:
