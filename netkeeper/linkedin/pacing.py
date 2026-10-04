@@ -672,10 +672,12 @@ def plan_enrichment(
 # send a message nobody meant to send:
 #
 # * No step ever carries a line break in its ``chunk``. A plain Enter sends the
-#   message, so a line break is its own step with ``newline=True`` and an empty
-#   chunk, for the replay to press as Shift+Enter. Even that step is refused unless
-#   ``allow_newlines`` is set, and its default, :data:`SHIFT_ENTER_NEWLINES_ALLOWED`,
-#   stays ``False`` until P4-06 (#374) shows that Shift+Enter never sends.
+#   message, so a newline (CR, LF, or CRLF: :data:`NEWLINE_CHARS`) is its own step
+#   with ``newline=True`` and an empty chunk, for the replay to press as
+#   Shift+Enter. Even that step is refused unless ``allow_newlines`` is set, and its
+#   default, :data:`SHIFT_ENTER_NEWLINES_ALLOWED`, stays ``False`` until P4-06
+#   (#374) shows that Shift+Enter never sends. Every other line break (VT, FF, FS,
+#   GS, RS, NEL, U+2028, U+2029) is refused whatever the flag says.
 # * No step carries a code point :func:`is_untypable` refuses: a control character
 #   (a tab moves focus), a line or paragraph separator, a lone surrogate, a
 #   private-use or unassigned code point, or a format character other than the
@@ -704,8 +706,12 @@ TYPING_LINT_SECONDS: Final = 240.0
 SHIFT_ENTER_NEWLINES_ALLOWED: Final = False
 
 #: Every code point treated as a line break, the same set
-#: ``netkeeper.campaigns.render`` splits a header on. ``\r\n`` is one line break.
+#: ``netkeeper.campaigns.render`` splits a header on. For reference: only
+#: :data:`NEWLINE_CHARS` may ever become a newline step; the rest are always refused.
 LINE_BREAK_CHARS: Final = frozenset("\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
+#: The only line breaks :data:`SHIFT_ENTER_NEWLINES_ALLOWED` governs: CR and LF,
+#: with CRLF as one newline. With the flag on, each becomes a Shift+Enter step.
+NEWLINE_CHARS: Final = frozenset("\r\n")
 
 # The format characters (category Cf) an emoji sequence needs: zero-width joiner and
 # non-joiner, and the tag characters of a subdivision flag.
@@ -716,9 +722,7 @@ _UNTYPABLE_CATEGORIES: Final = frozenset({"Cc", "Zl", "Zp", "Cs", "Co", "Cn"})
 # The characters after which, followed by whitespace, the next character gets the
 # sentence-end pause instead of the word-boundary pause.
 _SENTENCE_ENDS: Final = frozenset(".!?")
-_LINE_BREAK_RE: Final = regex.compile(
-    "(\r\n|[" + regex.escape("".join(sorted(LINE_BREAK_CHARS))) + "])"
-)
+_NEWLINE_RE: Final = regex.compile("(\r\n|\r|\n)")
 _GRAPHEME_RE: Final = regex.compile(r"\X")
 
 
@@ -754,11 +758,14 @@ class TypingTooLong(TypingPlanError):
 
 
 class MultilineRefused(TypingPlanError):
-    """The body has a line break and newlines are not allowed (P4-06, #374)."""
+    """The body has a newline (CR or LF) and newlines are not allowed (P4-06, #374)."""
 
 
 class UnsupportedCharacter(TypingPlanError):
-    """The body has a code point :func:`is_untypable` refuses, other than a line break."""
+    """The body has a code point :func:`is_untypable` refuses, other than CR or LF.
+
+    Includes every line break outside :data:`NEWLINE_CHARS`, with or without the
+    newline flag."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -840,10 +847,11 @@ def typing_length_warning(text: str) -> bool:
 
 
 def _units(text: str) -> list[str]:
-    """``text`` as typing units: one grapheme cluster each, and ``"\\n"`` for each line
-    break (``\\r\\n`` is one). No validation: :func:`typing_plan` checks the units."""
+    """``text`` as typing units: one grapheme cluster each, and ``"\\n"`` for each
+    newline (CR, LF, or CRLF as one). Any other line break stays a unit of its own, for
+    :func:`typing_plan` to refuse. No validation here."""
     units: list[str] = []
-    for index, piece in enumerate(_LINE_BREAK_RE.split(text)):
+    for index, piece in enumerate(_NEWLINE_RE.split(text)):
         if index % 2:
             units.append("\n")
         elif piece:
@@ -918,11 +926,12 @@ def typing_plan(
     ``profile.floor_s``. Draws come from ``rng`` in one fixed order, so the same
     seed and the same text always give the same plan.
 
-    A line break (any of :data:`LINE_BREAK_CHARS`, with ``\\r\\n`` as one) is its
-    own step with ``newline=True`` and an empty chunk, and only when
-    ``allow_newlines`` is set; otherwise the body raises :class:`MultilineRefused`.
-    Any other code point :func:`is_untypable` refuses raises
-    :class:`UnsupportedCharacter`.
+    A newline (:data:`NEWLINE_CHARS`: CR, LF, or CRLF as one) is its own step with
+    ``newline=True`` and an empty chunk, and only when ``allow_newlines`` is set;
+    otherwise the body raises :class:`MultilineRefused`. Every other line break in
+    :data:`LINE_BREAK_CHARS` (VT, FF, FS, GS, RS, NEL, U+2028, U+2029), and any other
+    code point :func:`is_untypable` refuses, raises :class:`UnsupportedCharacter`,
+    whatever ``allow_newlines`` says.
 
     A plan whose delays add up to more than ``max_seconds``, or to a total that
     isn't finite, raises :class:`TypingTooLong`. The ceiling counts only the planned
