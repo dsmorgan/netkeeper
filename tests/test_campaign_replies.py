@@ -522,9 +522,12 @@ def _notice(sender: str, subject: str, *, failed: str | None) -> Message:
         ("Delivery Status Notification (Failure)", "ada@example.com", True),
         # Without the header, a failure subject alone still is.
         ("Undeliverable: hello", None, True),
-        # Delay and failure words together: delay wins, with or without the header.
+        # Delay and failure words together: a bounce only with the header.
         ("Delivery delayed: failure is not final", None, False),
-        ("Delivery delayed: failure is not final", "ada@example.com", False),
+        ("Delivery delayed: failure is not final", "ada@example.com", True),
+        # A failure notice quoting an original subject that has a delay word.
+        ("Undeliverable: Quick warning about the delay", "ada@example.com", True),
+        ("Undeliverable: Quick warning about the delay", None, False),
         # A blank header names no recipient.
         ("Hello", "  ", False),
     ],
