@@ -797,6 +797,72 @@ class MergedConflict(BaseModel):
     merged_into_id: int
 
 
+class MovedOut(BaseModel):
+    """The loser's rows of one kind: how many move, how many the survivor already holds."""
+
+    moved: int
+    dropped: int
+
+
+class MergeMovesOut(BaseModel):
+    """What a merge moves from the loser to the survivor (#363), read off the merge itself."""
+
+    emails: MovedOut
+    phones: MovedOut
+    links: MovedOut
+    positions: MovedOut
+    snapshots: int
+    interactions: int
+    tags_added: list[str]
+    """Tags the survivor gains."""
+    tags_removed: list[str]
+    """Automatic tags the survivor loses to a suppression on the loser."""
+    lists_added: list[str]
+    """Static lists the survivor joins."""
+    enrollments_moved: int
+    enrollments_combined: int
+    """Enrollments folded into the survivor's in the same campaign (#242)."""
+    messages_moved: int
+    messages_discarded: int
+    """Unsent messages a combined enrollment discards (#242)."""
+    history_rows: int
+    """Old-campaign history rows (#65)."""
+
+
+class MergePreviewOut(BaseModel):
+    """A merge, done and taken back (#363): both contacts before, the survivor after.
+
+    ``result`` is what ``POST /contacts/{id}/merge`` would answer with right now:
+    the preview runs that merge in a savepoint and rolls it back. ``undoable``
+    is false: nothing takes a merge back.
+    """
+
+    survivor: ContactDetail
+    loser: ContactDetail
+    result: ContactDetail
+    moves: MergeMovesOut
+    undoable: Literal[False] = False
+
+
+class PossibleDuplicateOut(BaseModel):
+    """Another contact that may be the same person (#363). A hint; nothing merges on its own.
+
+    ``matched_by``, strongest first: ``email`` (an address on both), ``phone`` (a
+    number on both), ``slug`` (the same name under a LinkedIn slug changed before
+    any sync), ``name`` (the same first or preferred name and last name).
+    """
+
+    contact_id: int
+    first_name: str
+    last_name: str
+    preferred_name: str
+    current_title: str | None
+    current_company: str | None
+    li_public_id: str | None
+    needs_review: bool
+    matched_by: list[Literal["name", "email", "phone", "slug"]]
+
+
 BulkAction = Literal["set_met", "archive", "unarchive", "set_do_not_contact"]
 
 

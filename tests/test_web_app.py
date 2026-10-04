@@ -49,6 +49,8 @@ API_PATHS = {
     "/api/v1/contacts/{contact_id}/confirm",
     "/api/v1/contacts/{contact_id}/reject",
     "/api/v1/contacts/{contact_id}/merge",
+    "/api/v1/contacts/{contact_id}/merge/preview",
+    "/api/v1/contacts/{contact_id}/duplicates",
     "/api/v1/contacts/{contact_id}/emails",
     "/api/v1/contacts/{contact_id}/emails/{email_id}",
     "/api/v1/contacts/{contact_id}/phones",

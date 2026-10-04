@@ -121,6 +121,25 @@ def seed_contacts(session: Session, user: User) -> int:
     return 2
 
 
+def _seed_duplicates(session: Session, user: User) -> int:
+    """Two contacts of ``user`` with one name and one address: each the other's duplicate (#363).
+
+    Every user gets the same name and address, so an unscoped match would list
+    the other users' copies too.
+    """
+    for _ in range(2):
+        factories.make_contact(
+            session,
+            user,
+            first_name="Twin",
+            last_name="Seed",
+            li_urn=None,
+            li_public_id=None,
+            emails=["twin.seed@example.test"],
+        )
+    return 1
+
+
 def _seed_interactions(session: Session, user: User) -> int:
     contact = factories.make_contact(session, user)
     add_interaction(session, user, contact.id, InteractionKind.NOTE, SEED_AT, "met at a meetup")
@@ -535,6 +554,12 @@ REGISTRY: list[ListEndpoint] = [
         f"{API_PREFIX}/contacts/{{contact_id}}/timeline",
         _seed_timeline,
         paged_count,
+        path_params=own_contact,
+    ),
+    ListEndpoint(
+        f"{API_PREFIX}/contacts/{{contact_id}}/duplicates",
+        _seed_duplicates,
+        array_count,
         path_params=own_contact,
     ),
     ListEndpoint(
