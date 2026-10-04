@@ -131,11 +131,11 @@ from typing import Any, Final, Literal
 from sqlalchemy import ColumnElement, Select, and_, exists
 from sqlalchemy.orm import Session, selectinload
 
-from netkeeper.campaigns.schedule import local_today
 from netkeeper.crm import do_not_send
 from netkeeper.crm.filters import FilterTree, SortKey, apply_sort, compile_filter, paginate
 from netkeeper.crm.identity import phone_key
 from netkeeper.crm.positions import last_position_change
+from netkeeper.localtime import local_today
 from netkeeper.models import (
     Contact,
     ContactEmail,

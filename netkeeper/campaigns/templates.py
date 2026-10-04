@@ -52,9 +52,9 @@ from netkeeper.campaigns.render import (
     placeholder_example,
     render,
 )
-from netkeeper.campaigns.schedule import local_today
 from netkeeper.crm.positions import last_position_change
 from netkeeper.db import is_writer
+from netkeeper.localtime import local_today
 from netkeeper.models import (
     TEMPLATE_NAME_MAX_LENGTH,
     TEMPLATE_SUBJECT_MAX_LENGTH,

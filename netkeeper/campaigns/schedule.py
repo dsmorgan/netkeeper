@@ -42,12 +42,13 @@ import math
 import random
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta, tzinfo
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Final
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 from netkeeper.config import CampaignSettings
 from netkeeper.linkedin.pacing import human_delay
+from netkeeper.localtime import find_zone
 
 DAY_NAMES: Final[tuple[str, ...]] = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 """Weekday names, Monday first (``date.weekday()`` order)."""
@@ -166,25 +167,10 @@ def parse_holidays(values: Iterable[str]) -> frozenset[date]:
 
 
 def zone(name: str) -> ZoneInfo:
-    try:
-        return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError) as exc:
-        raise ScheduleError(f"{name!r} is not a time zone") from exc
-
-
-def local_today(timezone: str, now: datetime) -> date:
-    """``now`` as a calendar day in ``timezone``: the user's "today".
-
-    The one helper for a day that is not about to send (a preview, a review render,
-    an export), so it agrees with the engine's ``Suggested.local_date``. A zone it
-    cannot read falls back to UTC rather than raising: those paths should still
-    answer, and nothing is sent from them. ``now`` must be timezone-aware.
-    """
-    try:
-        tz: tzinfo = zone(timezone)
-    except ScheduleError:
-        tz = UTC
-    return _aware(now).astimezone(tz).date()
+    found = find_zone(name)
+    if found is None:
+        raise ScheduleError(f"{name!r} is not a time zone")
+    return found
 
 
 def suggested(settings: CampaignSettings, timezone: str) -> Suggested:

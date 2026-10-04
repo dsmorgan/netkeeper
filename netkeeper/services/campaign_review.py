@@ -81,13 +81,13 @@ from netkeeper.campaigns.render import (
     render,
     uses_personal_line,
 )
-from netkeeper.campaigns.schedule import local_today
 from netkeeper.campaigns.templates import activation_errors, contact_fields
 from netkeeper.config import Settings
 from netkeeper.crm import lists as crm_lists
 from netkeeper.crm.contacts import sendable_email
 from netkeeper.crm.filters import compile_filter, parse_filter
 from netkeeper.db import is_writer
+from netkeeper.localtime import local_today
 from netkeeper.models import (
     Campaign,
     CampaignStatus,
