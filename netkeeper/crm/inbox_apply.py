@@ -8,7 +8,9 @@ messages the core cares about (:func:`watched_urns`) and which threads the poll
 may open (:func:`threads_to_open`).
 
 **Matching is by URN only.** A conversation's ``counterpart_urn`` is matched
-against ``contacts.li_urn``, never against a name. A conversation with nobody
+against ``contacts.li_urn``, never against a name, and only for contacts in your
+network: the self contact (#342) is never matched, so a thread whose counterpart
+carries your own URN is ignored like an unknown one. A conversation with nobody
 known is ignored and counted (``ignored_unknown``); the inbox never creates a
 contact. A conversation that holds an inbound message from anyone but its
 counterpart is a group thread the page did not catch, and is skipped and
@@ -69,7 +71,7 @@ from netkeeper.models import (
     MessageStatus,
     User,
 )
-from netkeeper.scoping import scoped
+from netkeeper.scoping import scoped, scoped_contacts
 from netkeeper.services.campaign_guards import (
     LIVE_ENROLLMENT_STATUSES,
     RUNNING_CAMPAIGN_STATUSES,
@@ -133,9 +135,12 @@ REPLY_HANDLERS: Final[list[ReplyHandler]] = []
 
 
 def _live_enrollment_contacts(user: User) -> Select[tuple[Contact]]:
-    """Contacts with a LinkedIn URN in a live enrollment of a running campaign."""
+    """Contacts with a LinkedIn URN in a live enrollment of a running campaign.
+
+    Never the self contact (#342): :func:`~netkeeper.scoping.scoped_contacts` leaves it out.
+    """
     return (
-        scoped(user, Contact)
+        scoped_contacts(user)
         .join(Enrollment, Enrollment.contact_id == Contact.id)
         .join(Campaign, Campaign.id == Enrollment.campaign_id)
         .where(
@@ -170,13 +175,15 @@ def first_live_outreach(session: Session, user: User, *, now: datetime) -> datet
 
     The first poll's ``since`` when no poll has completed yet (#388 review, S3): what a
     reply could be answering starts there. It counts every sent outbound message, any
-    channel, of a live enrollment, and of a ``completed`` one whose latest send is
-    within ``WATCH_AFTER_COMPLETED`` of ``now``, the set the Gmail reply poll watches
-    (``services.campaign_replies``). ``None`` when none has sent anything. Read-only.
+    channel, of a live enrollment of a running campaign, and of a finished one whose
+    latest send is within ``WATCH_AFTER_COMPLETED`` of ``now``: a ``completed``
+    enrollment, or a live enrollment of an ended or archived campaign (#345). That is
+    the set the Gmail reply poll watches (``services.campaign_replies``). ``None`` when
+    none has sent anything. Read-only.
     """
     # Imported here: campaign_replies reaches the campaign engine, which this module
     # must not load just to be imported.
-    from netkeeper.services.campaign_replies import WATCH_AFTER_COMPLETED
+    from netkeeper.services.campaign_replies import CAMPAIGN_OVER, WATCH_AFTER_COMPLETED
 
     live = (
         scoped(user, Enrollment)
@@ -188,16 +195,24 @@ def first_live_outreach(session: Session, user: User, *, now: datetime) -> datet
             Campaign.status.in_(RUNNING_CAMPAIGN_STATUSES),
         )
     )
-    completed = (
+    finished = (
         scoped(user, Enrollment)
+        .join(Campaign, Campaign.id == Enrollment.campaign_id)
         .with_only_columns(Enrollment.id)
-        .where(Enrollment.status == EnrollmentStatus.COMPLETED)
+        .where(
+            Campaign.user_id == user.id,
+            or_(
+                Enrollment.status == EnrollmentStatus.COMPLETED,
+                Enrollment.status.in_(LIVE_ENROLLMENT_STATUSES)
+                & Campaign.status.in_(CAMPAIGN_OVER),
+            ),
+        )
     )
     sent = session.execute(
         scoped(user, Message)
         .with_only_columns(Message.enrollment_id, Message.sent_at)
         .where(
-            or_(Message.enrollment_id.in_(live), Message.enrollment_id.in_(completed)),
+            or_(Message.enrollment_id.in_(live), Message.enrollment_id.in_(finished)),
             Message.direction == MessageDirection.OUT,
             Message.sent_at.is_not(None),
         )
@@ -382,8 +397,9 @@ def _is_group(conversation: InboxConversation) -> bool:
 def _contacts_by_urn(session: Session, user: User, urns: set[str]) -> dict[str, int]:
     if not urns:
         return {}
+    # scoped_contacts: the self contact's own URN never matches a conversation (#342).
     statement = (
-        scoped(user, Contact)
+        scoped_contacts(user)
         .with_only_columns(Contact.li_urn, Contact.id)
         .where(Contact.li_urn.in_(urns), Contact.merged_into_id.is_(None))
     )
