@@ -32,7 +32,7 @@ The helper in the template editor builds its prompt from the form you fill in, t
 5. Paste the prompt into your AI chat assistant and send it.
 6. Copy the assistant's whole reply, paste it into **Assistant's reply**, and choose **Paste result**.
 
-netkeeper reads the reply's `Subject:` and `Body:` labels and fills in the subject and body. Then it lints the text at once. If an email step has no `Subject:`, the subject you had stays. If the reply doesn't have the labels, all of it goes into the body for you to edit. Lines outside the labeled format, like the assistant's "Here's a draft", are left out, and the helper says how many.
+netkeeper reads the reply's `Subject:` and `Body:` labels and fills in the subject and body. Then it lints the text at once. If an email step has no `Subject:`, the subject you had stays. If the reply doesn't have the labels, all of it goes into the body for you to edit. Lines outside the labeled format, like the assistant's "Here's a draft", are left out, and the helper says how many. One exception: chatter after the last body, such as "Let me know if you want changes", stays at the end of that body when the reply has no `End of step` line, because nothing marks where the body stops. Delete it from the body before you save.
 
 If the paste replaced a subject or body you had, **Undo paste** puts your text back. It stays available until you edit the template or paste again.
 

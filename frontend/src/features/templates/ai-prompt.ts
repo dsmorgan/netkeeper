@@ -184,12 +184,16 @@ const STEP_MARK = /^[\s#>*_]*step\s+(\d+)[\s*_:.)-]*$/i
 const END_MARK = /^[\s*_]*end\s+of\s+step\s+\d+[\s*_.]*$/i
 const LABEL = /^[\s>*_]*(subject|body)[\s*_]*:[\s*_]*(.*)$/i
 const FENCE = /^\s*```/
+// A short header an assistant puts above a block in place of `Step N`: "Email 2",
+// "**Message 2:**", "Follow-up 1 (a week later)".
+const HEADER = /^[\s#>*_]*(?:email|message|follow[- ]?up|step)[\s#]*\d+\b.{0,60}$/i
 
 /** The longest line tested as a `Step N` or `End of step N` marker. */
 export const MARKER_MAX_CHARS = 200
 
 const isStepMark = (text: string) => text.length <= MARKER_MAX_CHARS && STEP_MARK.test(text)
 const isEndMark = (text: string) => text.length <= MARKER_MAX_CHARS && END_MARK.test(text)
+const isHeader = (text: string) => text.length <= MARKER_MAX_CHARS && HEADER.test(text)
 
 /** A parsed reply: its steps, and how many non-blank lines outside the format were left out. */
 export interface ParsedReply {
@@ -202,9 +206,11 @@ export interface ParsedReply {
  * asks for. Tolerates chatter around the format, Markdown fences and bold
  * labels, and a missing "End of step" line.
  *
- * Inside a body, a `Subject:` line or a bare `Step N` line starts the next step
- * only after a blank line, or when the reply uses "End of step" markers, so a
- * body that mentions one of them keeps it. Every non-blank line outside a step's
+ * When the reply uses "End of step" markers, only such a marker ends a body, so a
+ * `Subject:` or `Step N` line inside one stays in it. Without them, a `Subject:`
+ * or bare `Step N` line starts the next step only after a blank line, or a
+ * `Subject:` line right after a header like "Email 2" (the header is dropped);
+ * so a body that mentions one of them keeps it. Every non-blank line outside a step's
  * labels is counted in `dropped`, so the caller can say what it left out. A reply
  * with no `Body:` label is not the format, and gives null: the caller pastes it
  * into the body as it is.
@@ -239,9 +245,14 @@ export function parseReply(reply: string): ParsedReply | null {
       } else if (label === 'body') body = rest.trim() === '' ? [] : [rest]
       else if (!blank) dropped++
     } else {
-      const boundary = afterBlank || ended
+      const boundary = afterBlank && !ended
+      const afterHeader = !ended && body.length > 0 && isHeader(body[body.length - 1] ?? '')
       if (isEndMark(text) || (boundary && isStepMark(text))) finish()
-      else if (boundary && label === 'subject') {
+      else if (label === 'subject' && (boundary || afterHeader)) {
+        if (afterHeader) {
+          body.pop()
+          dropped++
+        }
         finish()
         subject = rest.trim()
       } else body.push(text)

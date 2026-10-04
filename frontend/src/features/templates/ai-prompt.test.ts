@@ -208,13 +208,13 @@ describe('parseReply', () => {
     })
   })
 
-  it('reads several steps, with or without the end markers', () => {
+  it('reads several steps without end markers, split on blank lines', () => {
     const reply = [
       'Step 1',
       'Subject: First',
       'Body:',
       'Hi {{ first_name }}.',
-      'End of step 1',
+
       '',
       'Step 2',
       'Subject: Second',
@@ -267,22 +267,60 @@ describe('parseReply', () => {
     ])
   })
 
-  it('B: but splits on Step N or Subject: inside a body when the reply uses end markers', () => {
+  it('A and B with end markers: only End of step ends a body', () => {
     const reply = [
       'Step 1',
       'Subject: One',
       'Body:',
-      'A {{ first_name }}',
+      'Hi {{ first_name }},',
+      '',
+      'Subject: the offsite photos are up.',
+      '',
+      'Step 2',
+      'is lunch.',
+      'End of step 1',
       'Step 2',
       'Subject: Two',
       'Body:',
       'B {{ first_name }}',
       'End of step 2',
     ].join('\n')
-    expect(parseReply(reply)?.steps).toEqual([
-      { subject: 'One', body: 'A {{ first_name }}' },
-      { subject: 'Two', body: 'B {{ first_name }}' },
-    ])
+    expect(parseReply(reply)).toEqual({
+      steps: [
+        {
+          subject: 'One',
+          body: 'Hi {{ first_name }},\n\nSubject: the offsite photos are up.\n\nStep 2\nis lunch.',
+        },
+        { subject: 'Two', body: 'B {{ first_name }}' },
+      ],
+      dropped: 0,
+    })
+  })
+
+  it('splits blocks under headers like Email 1 and Email 2, and drops the headers', () => {
+    const reply = [
+      'Email 1',
+      'Subject: One',
+      'Body:',
+      'A {{ first_name }}',
+      'Email 2',
+      'Subject: Two',
+      'Body:',
+      'B {{ first_name }}',
+      '',
+      '**Email 3:**',
+      'Subject: Three',
+      'Body:',
+      'C {{ first_name }}',
+    ].join('\n')
+    expect(parseReply(reply)).toEqual({
+      steps: [
+        { subject: 'One', body: 'A {{ first_name }}' },
+        { subject: 'Two', body: 'B {{ first_name }}' },
+        { subject: 'Three', body: 'C {{ first_name }}' },
+      ],
+      dropped: 3,
+    })
   })
 
   it('C: counts the lines it leaves out, around and between the steps', () => {
