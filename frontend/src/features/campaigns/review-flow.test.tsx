@@ -265,6 +265,10 @@ describe('review flow', () => {
       'Test send of each email step: email steps with no current test send: steps 1, 2',
       'Guard summary acknowledged: the guard summary for the current audience is not acknowledged',
     ])
+
+    // The same refusal again: the confirm button is not left dead (#181).
+    fireEvent.click(dialog.getByRole('button', { name: 'Activate campaign' }))
+    await waitFor(() => expect(calls.filter((c) => c.path.endsWith('/activate'))).toHaveLength(2))
   })
 
   it('activates once confirmed', async () => {

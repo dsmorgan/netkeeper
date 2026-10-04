@@ -12,7 +12,7 @@ The downgrade drops the table. Code before this revision asks for the sample
 again, so nothing it relies on is lost.
 
 Revision ID: 0032
-Revises: 0030
+Revises: 0031
 Create Date: 2026-10-03 00:00:00 UTC
 """
 
@@ -24,8 +24,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0032"
-# Provisional: repointed to "0031" when rebased after #338.
-down_revision: str | None = "0030"
+down_revision: str | None = "0031"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
