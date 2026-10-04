@@ -19,12 +19,14 @@ import pytest
 
 from netkeeper.linkedin import pacing
 from netkeeper.linkedin.pacing import (
+    InvalidTypingProfile,
     MultilineRefused,
     TypeStep,
     TypingPlanError,
     TypingTooLong,
     UnsupportedCharacter,
     is_untypable,
+    is_untypable_cluster,
     plan_duration,
     typing_expected_seconds,
     typing_length_warning,
@@ -39,6 +41,7 @@ _DENSE_999 = ("I am so ok. We go. Hi! " * 50)[:999]
 _FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467"  # man, ZWJ, woman, ZWJ, girl
 _THUMB_TONE = "\U0001f44d\U0001f3fd"  # thumbs up, medium skin tone
 _FLAG_US = "\U0001f1fa\U0001f1f8"  # regional indicators U, S
+_FLAG_ENGLAND = "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f"
 _FLAG_SCOTLAND = "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"
 _E_ACUTE = "e\u0301"  # e, combining acute accent
 _WORDS = (
@@ -85,6 +88,19 @@ _WORDS = (
     "my",
     "side.",
 )
+
+
+def _unclamped(
+    text: str, seed: int, *, max_seconds: float, allow_newlines: bool = False
+) -> pacing.TypingPlan:
+    """A plan past the 300 s ceiling, for statistics only, through the private path."""
+    return pacing._typing_plan_unclamped(
+        text,
+        random.Random(seed),
+        pacing.DEFAULT_TYPING,
+        allow_newlines=allow_newlines,
+        max_seconds=max_seconds,
+    )
 
 
 def _body(length: int, seed: int) -> str:
@@ -268,6 +284,66 @@ def test_format_private_surrogate_and_unassigned_are_refused(char: str) -> None:
     assert "secret" not in str(raised.value)
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "\U000e0068\U000e0069",  # a lone tag run: "hi" in tags
+        "a\U000e0068\U000e0069",  # tags after a letter
+        " \U000e0068\U000e0069",  # tags after a space
+        "\U0001f600\U000e0068\U000e0069\U000e007f",  # tags on an emoji that isn't a flag
+        "\U0001f3f4\U000e0068\U000e0069",  # a black flag without the cancel tag
+        "\U0001f3f4\U000e007f",  # a black flag with no tag letters
+        "\U0001f3f4\U000e0048\U000e0049\U000e007f",  # uppercase tag letters
+        "\U000e007f",  # a lone cancel tag
+    ],
+)
+def test_tag_characters_outside_a_subdivision_flag_are_refused(text: str) -> None:
+    for allow_newlines in (False, True):
+        with pytest.raises(UnsupportedCharacter):
+            typing_plan(f"ok {text} ok", random.Random(0), allow_newlines=allow_newlines)
+    with pytest.raises(ValueError):
+        TypeStep(chunk=text, delay_before_s=0.1, newline=False)
+
+
+@pytest.mark.parametrize("flag", [_FLAG_ENGLAND, _FLAG_SCOTLAND])
+def test_subdivision_flags_are_typable(flag: str) -> None:
+    assert not is_untypable_cluster(flag)
+    plan = typing_plan(f"go {flag}", random.Random(0))
+    assert plan[-1].chunk == flag
+    assert plan[-1].needs_insert_text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "\u2764\ufe0f\ufe0f",  # two variation selectors on one heart
+        "a\ufe0e\ufe0f",
+        "\u8fbb\U000e0100\U000e0101",  # two ideographic variation selectors
+        "a\u034fb",  # combining grapheme joiner
+        "\u115f",  # Hangul choseong filler
+        "\u1160",  # Hangul jungseong filler
+        "\u3164",  # Hangul filler
+    ],
+)
+def test_invisible_fillers_and_stacked_variation_selectors_are_refused(text: str) -> None:
+    with pytest.raises(UnsupportedCharacter):
+        typing_plan(text, random.Random(0), allow_newlines=True)
+
+
+def test_one_variation_selector_is_typable() -> None:
+    heart = "\u2764\ufe0f"
+    assert not is_untypable_cluster(heart)
+    assert typing_plan(heart, random.Random(0))[0].chunk == heart
+
+
+def test_newline_pairs_other_than_crlf_are_two_steps() -> None:
+    for text in ["a\n\rb", "a\r\rb", "a\n\nb"]:
+        plan = typing_plan(text, random.Random(0), allow_newlines=True)
+        assert [step.newline for step in plan] == [False, True, True, False]
+    plan = typing_plan("a\r\nb", random.Random(0), allow_newlines=True)
+    assert [step.newline for step in plan] == [False, True, False]
+
+
 def test_the_joiners_and_tag_characters_are_typable() -> None:
     for char in ["\u200d", "\u200c", *(chr(cp) for cp in range(0xE0020, 0xE0080))]:
         assert not is_untypable(char)
@@ -337,7 +413,7 @@ def test_the_median_per_character_delay_is_near_140_ms() -> None:
     # moves it by about 2% at most); 0.125 to 0.155 never flakes across 200 seeds,
     # and a median of 0.12 or 0.16 fails it.
     for seed in range(20):
-        plan = typing_plan("x" * 5000, random.Random(seed), max_seconds=10_000)
+        plan = _unclamped("x" * 5000, seed, max_seconds=10_000)
         median = statistics.median(step.delay_before_s for step in plan)
         assert 0.125 <= median <= 0.155
 
@@ -346,7 +422,7 @@ def test_the_delay_distribution_has_a_lognormal_spread() -> None:
     # A lognormal with sigma 0.45 puts its quartiles at 0.14 * exp(+-0.674 * 0.45),
     # about 0.103 and 0.190 s. The bounds allow sampling noise; a uniform delay (zero
     # spread) or a sigma of 0.2 or 0.8 fails them.
-    plan = typing_plan("x" * 5000, random.Random(11), max_seconds=10_000)
+    plan = _unclamped("x" * 5000, 11, max_seconds=10_000)
     q1, _, q3 = statistics.quantiles((step.delay_before_s for step in plan), n=4)
     assert 0.093 <= q1 <= 0.113
     assert 0.175 <= q3 <= 0.210
@@ -357,7 +433,7 @@ def test_thinking_pauses_happen_about_two_percent_of_the_time() -> None:
     # per-character lognormal goes that high with probability about 1e-4. Over
     # 20,000 characters the expected count is 400 (sd about 20); 320 to 480 is four
     # standard deviations each way, and a probability of 0.01 or 0.03 fails it.
-    plan = typing_plan("x" * 20_000, random.Random(5), max_seconds=100_000)
+    plan = _unclamped("x" * 20_000, 5, max_seconds=100_000)
     long = sum(step.delay_before_s >= 0.8 for step in plan)
     assert 320 <= long <= 480
     assert max(step.delay_before_s for step in plan) < 2.5 + 2.0
@@ -462,9 +538,7 @@ def test_the_estimate_matches_the_sampled_mean() -> None:
     for text in [_DENSE_999, _body(500, 4), "x" * 1500, _body(800, 9).replace(" ", "\n")]:
         expected = typing_expected_seconds(text)
         sampled = statistics.mean(
-            plan_duration(
-                typing_plan(text, random.Random(seed), allow_newlines=True, max_seconds=1e9)
-            )
+            plan_duration(_unclamped(text, seed, allow_newlines=True, max_seconds=1e9))
             for seed in range(60)
         )
         assert abs(sampled - expected) <= 0.03 * expected
@@ -497,13 +571,51 @@ def test_a_total_that_is_not_finite_never_passes_the_ceiling() -> None:
     # infinite ceiling, which ``inf <= inf`` would pass, the plan is refused.
     huge = pacing.TypingProfile(char_median_s=1e308, char_sigma=0.0, thinking_p=0.0)
     with pytest.raises(TypingTooLong):
-        typing_plan("ab", random.Random(0), huge, max_seconds=math.inf)
+        pacing._typing_plan_unclamped(
+            "ab", random.Random(0), huge, allow_newlines=False, max_seconds=math.inf
+        )
 
 
-def test_a_nan_delay_never_reaches_a_plan() -> None:
-    nan_profile = pacing.TypingProfile(char_median_s=math.nan)
-    with pytest.raises(ValueError):
-        typing_plan("ab", random.Random(0), nan_profile, max_seconds=math.inf)
+@pytest.mark.parametrize("max_seconds", [300.001, 1e9, math.inf])
+def test_max_seconds_never_raises_the_ceiling(max_seconds: float) -> None:
+    with pytest.raises(TypingTooLong) as raised:
+        typing_plan(_body(3000, 0), random.Random(0), max_seconds=max_seconds)
+    assert raised.value.ceiling_s == 300
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        {"char_median_s": math.nan},
+        {"char_median_s": 0.0},
+        {"char_median_s": -0.1},
+        {"char_median_s": math.inf},
+        {"word_extra_median_s": 0.0},
+        {"sentence_extra_median_s": math.nan},
+        {"floor_s": 0.0},
+        {"floor_s": math.inf},
+        {"char_sigma": -0.1},
+        {"char_sigma": 2.5},
+        {"extra_sigma": math.nan},
+        {"thinking_p": -0.01},
+        {"thinking_p": 1.01},
+        {"thinking_p": math.nan},
+        {"thinking_range_s": (2.5, 0.8)},
+        {"thinking_range_s": (-1.0, 1.0)},
+        {"thinking_range_s": (0.8, math.inf)},
+        {"thinking_range_s": (math.nan, 1.0)},
+    ],
+    ids=lambda field: next(iter(field)),
+)
+def test_a_profile_out_of_range_is_refused(field: dict[str, object]) -> None:
+    with pytest.raises(InvalidTypingProfile) as raised:
+        pacing.TypingProfile(**field)  # type: ignore[arg-type]
+    assert isinstance(raised.value, TypingPlanError)
+
+
+def test_profile_edges_that_are_allowed() -> None:
+    pacing.TypingProfile(char_sigma=0.0, extra_sigma=2.0, thinking_p=0.0)
+    pacing.TypingProfile(thinking_p=1.0, thinking_range_s=(1.0, 1.0))
 
 
 def test_an_empty_body_is_an_empty_plan() -> None:
