@@ -13,7 +13,7 @@ Each work item has an ID `P<phase>-<nn>`, a goal, what it depends on, which lane
 
 | Label | Values |
 |---|---|
-| `phase:` | `0` to `6` |
+| `phase:` | `0` to `7` |
 | `area:` | `core`, `extractor`, `crm`, `campaigns`, `llm`, `frontend`, `infra`, `docs` |
 | `lane:` | `core`, `extractor`, `campaigns`, `frontend`, `infra` (section 2) |
 | `size:` | `S` (up to half a day), `M` (one to two days), `L` (three to five days). Sizes assume AI-assisted development |
@@ -40,16 +40,30 @@ Five lanes can run concurrently, each in its own worktree and branch, merging to
 | `frontend` | `frontend/` | Backend, except regenerating the client |
 | `infra` | CI, Dockerfile, launchd, backups, docs | Application code |
 
+### Phase order
+
+The maintainer set this order on 2026-10-03. Phase numbers are stable labels, not the order of work.
+
+| Order | Phase | Gate |
+|---|---|---|
+| 1 | Phase 3, email campaigns | CP7 |
+| 2 | Phase 4, LinkedIn messaging | CP8 |
+| 3 | Phase 6, polish and reach | CP10a (the re-test, #348), then CP10 (release readiness, #37), which is the 1.0 gate |
+| After 1.0 | Phase 5, LLM module | CP9 (#36) |
+| After 1.0 | Phase 7, backlog after 1.0 | None |
+
+Before 1.0, you draft templates with your own AI subscription. Issue #368 (phase 6) delivers a guide and a copy-prompt and paste-result helper that never touches the network. Any integration with an AI provider waits until after 1.0, so phase 5 is deferred. Phase 7 collects work that does not belong to a pre-release phase.
+
 ### Waves
 
-The dependency graph collapses into five waves. Inside a wave, items run in parallel; a wave starts when the items it depends on have merged.
+The dependency graph collapses into five waves for the work before 1.0. Phase 5 and phase 7 sit outside them, because both come after 1.0. Inside a wave, items run in parallel; a wave starts when the items it depends on have merged.
 
 ```mermaid
 flowchart LR
   W1["Wave 1<br/>P0 scaffold<br/>core ‖ frontend ‖ infra"]
   W2["Wave 2<br/>P1 models + importers<br/>‖ P2 pure modules<br/>‖ P3 OAuth + Gmail client + templates<br/>‖ P1 frontend on a stubbed client"]
   W3["Wave 3<br/>P1 services + API + UI<br/>‖ P2 browser lane<br/>‖ P3 engine + replies"]
-  W4["Wave 4<br/>P3 UI + review gate<br/>‖ P2 live runs (wall clock)<br/>‖ P5 LLM<br/>‖ P6 infra"]
+  W4["Wave 4<br/>P3 UI + review gate<br/>‖ P2 live runs (wall clock)<br/>‖ P6 infra"]
   W5["Wave 5<br/>P4 LinkedIn messaging<br/>‖ P6 contacts push, hosted-mode spike"]
   W1 --> W2 --> W3 --> W4 --> W5
 ```
@@ -67,7 +81,7 @@ When two lanes touch the same model, `core` merges first. Migrations are linear;
 
 ### Critical path
 
-P0-03 → P0-09 → P1-01 → P1-02 → P1-06 → P3-04 → P3-06 → P3-07 → P3-08 → P3-09 → CP6 → CP7 (two weeks of calendar) → P4-03 → CP8. Everything else has slack. If only one lane can run, run this one and pull P2 items into gaps.
+P0-03 → P0-09 → P1-01 → P1-02 → P1-06 → P3-04 → P3-06 → P3-07 → P3-08 → P3-09 → CP6 → CP7 (two weeks of calendar) → P4-03 → CP8 → CP10a (#348) → CP10 (#37, the 1.0 gate). Everything else has slack. Phase 5 and phase 7 are not on the path, because both come after 1.0. If only one lane can run, run this one and pull P2 items into gaps.
 
 ## 3. Human checkpoints
 
@@ -94,8 +108,9 @@ Drift signals to watch for at every checkpoint:
 | CP6 | Mid phase 3 | A ten-contact campaign in draft mode |
 | CP7 | Phase 3 | The first real batch, reviewed after the follow-up step fires |
 | CP8 | Phase 4 | A supervised LinkedIn prefill and inbox detection |
-| CP9 | Phase 5 | Quality of twenty LLM personal lines |
-| CP10 | Phase 6 | Release readiness and the multi-user decision |
+| CP9 | Phase 5 | Quality of twenty LLM personal lines. Deferred until after 1.0 |
+| CP10a | Phase 6 | The re-test (#348), before CP10 |
+| CP10 | Phase 6 | Release readiness and the multi-user decision. The 1.0 release gate |
 
 ### CP0: scaffold review
 
@@ -167,14 +182,22 @@ Drift signals to watch for at every checkpoint:
 
 ### CP9: LLM output quality
 
+- **Status:** Deferred until after 1.0 (maintainer, 2026-10-03). It no longer gates CP10 or the release. It runs after 1.0, with phase 5.
+
 - **Demo:** Twenty generated personal lines across a mix of contacts, shown next to what you would have written.
 - **Questions:** How many would you send unchanged? Did any invent a fact? Is the cost estimate before a bulk run accurate?
 - **Re-read:** spec section 12.
 
+### CP10a: re-test
+
+- **Scope:** The re-test in #348. It runs before CP10 and feeds it.
+
 ### CP10: release readiness and the multi-user decision
 
+- **Status:** The 1.0 release gate (maintainer, 2026-10-03). Releasing after CP10 is releasing 1.0. The earlier text of this guide called the release v0.1.0 and did not distinguish it from 1.0, so this guide treats them as one release. CP10 does not wait for CP9.
+
 - **Demo:** Clean install from the README on a second Mac; container build on Linux; backup and restore; the hosted-mode spike (P6-06) as a short written result.
-- **Questions:** Is v0.1.0 the local single-user product the spec describes, with nothing half-built? What does the spike say about self-hosted versus hosted, and does it change any readiness constraint? What is the next ADR?
+- **Questions:** Is the 1.0 release the local single-user product the spec describes, with nothing half-built? What does the spike say about self-hosted versus hosted, and does it change any readiness constraint? What is the next ADR?
 - **Re-read:** the whole spec, one more time, against the shipped behavior.
 
 ## 4. Work items
@@ -455,7 +478,7 @@ Depends on: P1-03, P1-04, P1-10. Decide the opens and clicks shape with P3-05.
 Done when: the import is idempotent, unmatched addresses are reported rather than dropped, bounces show on the contact, and the fixtures are hand-built and sanitized. Real exports stay in `~/code/netkeeper-private`, never in the repo.
 
 **P2-16 Request the archive for the user** · lane extractor · M · `safety`
-Deferred (maintainer, 2026-09-23): manual archive import already works, and automating a LinkedIn settings flow waits until scheduled runs have a clean record. It no longer gates CP4 and has no milestone. Issue #120.
+Deferred (maintainer, 2026-09-23): manual archive import already works, and automating a LinkedIn settings flow waits until scheduled runs have a clean record. It no longer gates CP4. Moved to phase 7 (maintainer, 2026-10-03). Issue #120.
 Goal: netkeeper asks LinkedIn for the data export in the attached session, then waits — the export takes 1 to 24 hours and arrives as a notification. The run records which step it is on, the dashboard shows it, and when the file is ready netkeeper downloads and imports it. Manual mode stays first-class — request it yourself, download it yourself, drop the zip in — and one status list covers both.
 Depends on: P2-01, P1-20.
 Done when: both modes reach an imported archive from the same screen, the automated one survives a restart mid-wait, and a changed LinkedIn page stops the run with `RouteChanged` rather than a guess.
@@ -472,7 +495,7 @@ Depends on: P2-17.
 Done when: a fixture-driven harvest produces a `ProfileHarvest` with the URN, headline, location, positions, and contact info and never downgrades a known value to null; the click happens at most once per visit, only on the Contact info control, paced and budgeted; a changed shape gives `RouteChanged` or an unreadable profile, never wrong-person data, and the page's URN must match the contact's; the smoke suite drives the click and the observation against a loopback replica; `fetch.py` is removed.
 
 **CP3** · checkpoint · after P2-01 to P2-05, P2-11.
-**CP4** · checkpoint · closes phase 2, after one week of scheduled runs. P2-15 and P2-16 are deferred and are not part of it.
+**CP4** · checkpoint · closes phase 2, after one week of scheduled runs. P2-15 and P2-16 are deferred and are not part of it. #149, #180 and #169 moved to phase 4 and #177 moved to phase 6.
 
 ### Phase 3: email campaigns
 
@@ -572,9 +595,13 @@ Goal: step builder supports the LinkedIn channel; the waiting-for-you list; post
 Depends on: P4-03.
 Done when: CP8's demo runs in the UI.
 
+**Carried over from phase 2 (maintainer, 2026-10-03).** #149, #180 and #169, the verification that only a live run can do, ride with the supervised capture of CP8's prefill and inbox demo. Each issue holds its own checks.
+
 **CP8** · checkpoint · closes phase 4.
 
 ### Phase 5: LLM module
+
+**Deferred until after 1.0 (maintainer, 2026-10-03).** Before 1.0, you draft templates with your own AI subscription, helped by #368 (phase 6). Any integration with an AI provider comes after 1.0, so the in-app module waits and CP9 (#36) no longer gates the release. The tasks below are unchanged and ready to start once 1.0 ships.
 
 **P5-01 Client, key storage, cost controls** · lane campaigns · M
 Goal: Anthropic client with the configured models, key in Keychain, per-day call cap, token estimate before bulk runs, prompt caching for system prompts.
@@ -601,7 +628,7 @@ Goal: key entry, model choice, cap, cost estimate dialog, the surfaces above.
 Depends on: P5-02 to P5-04.
 Done when: CP9's demo runs in the UI.
 
-**CP9** · checkpoint · closes phase 5.
+**CP9** · checkpoint · closes phase 5. Deferred until after 1.0.
 
 ### Phase 6: polish and reach
 
@@ -635,16 +662,30 @@ Goal: a written spike answering open question 6: what a `netkeeper agent` split,
 Depends on: P2-14, P0-09, P1-17.
 Done when: the ADR is proposed with an estimate for each path and a recommendation.
 
-**P6-07 Release v0.1.0** · lane infra · S
-Goal: version, changelog, tag, GitHub release with the install steps.
+**P6-07 Release 1.0** · lane infra · S
+Goal: the CP10 release is the 1.0 release (this item was titled "Release v0.1.0" before the 2026-10-03 decision). Version, changelog, tag, GitHub release with the install steps.
 Depends on: CP10.
 Done when: the release page is the README's install path.
 
-**CP10** · checkpoint · closes phase 6.
+**#368 Template drafting guide and helper** · phase 6
+Goal: before 1.0, you draft templates with your own AI subscription. This item delivers a guide and a copy-prompt and paste-result helper. The helper makes no network request and holds no key. It replaces the in-app LLM module (phase 5) for the 1.0 release.
+
+**#177 Drop the legacy lock** · phase 6
+Moved from phase 2 (maintainer, 2026-10-03). Its issue holds the scope.
+
+**CP10a** · checkpoint · the re-test (#348). Runs before CP10.
+**CP10** · checkpoint · closes phase 6. The 1.0 release gate (#37).
+
+### Phase 7: backlog after 1.0
+
+Work that does not belong to a pre-release phase. Nothing here gates 1.0, and the phase has no checkpoint. Phase 5 also comes after 1.0; phase 7 follows it.
+
+- **P2-16 Request the archive for the user** (#120). Moved from phase 2. The task ID is unchanged; the item's text stays under phase 2.
+- **#84 Shared companies signal.** Issue #84 holds the scope.
 
 ## 5. Seeding the backlog
 
-Create the milestones first (`Phase 0` to `Phase 6`), then the labels, then one issue per item, with checkpoints last so they can reference the item numbers. A script that reads this file and calls `gh issue create` is a reasonable P0 side task; until then, the pattern is:
+Create the milestones first (`Phase 0` to `Phase 7`), then the labels, then one issue per item, with checkpoints last so they can reference the item numbers. A script that reads this file and calls `gh issue create` is a reasonable P0 side task; until then, the pattern is:
 
 ```sh
 gh issue create --title "[P1-04] Generic CSV importer with mapping and review" \

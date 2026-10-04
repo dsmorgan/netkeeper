@@ -101,7 +101,7 @@ The table shows each manual step in [networking-workflow.md](networking-workflow
 
 **Optional modules**
 
-- F25. LLM assistance (off unless a key is configured): personalized opening line, title classification, profile summary for call prep, triage suggestions.
+- F25. LLM assistance (deferred until after 1.0; off unless a key is configured): personalized opening line, title classification, profile summary for call prep, triage suggestions.
 - F26. Push enriched contacts to Google Contacts (People API) and export vCards for macOS Contacts.
 
 ### 4.2 Non-functional
@@ -128,7 +128,7 @@ flowchart LR
       LI["linkedin/<br/>attach, voyager, pacing, budget, heat"]
       CRM["crm/<br/>contacts, triage, tags, lists, import, export"]
       CAMP["campaigns/<br/>engine, render, gmail, li_message, replies"]
-      LLM["llm/ (optional)"]
+      LLM["llm/ (optional, after 1.0)"]
     end
     UI["React SPA<br/>served as static build"]
     DB[("SQLite<br/>~/Library/Application Support/netkeeper")]
@@ -731,7 +731,7 @@ Jinja2 in a sandboxed environment with autoescape off for plain-text email and o
 - Contact: `first_name` (resolves to `preferred_name`), `last_name`, `company`, `title`, `location`, `connected_year`, `years_since_connected`, `last_position_change`.
 - You: `me.name`, `me.website`, `me.scheduling_link`, `me.signature`, `me.city`, plus any keys you add under `[me]` in config.
 - Campaign: `campaign.name`, `step.number`, `previous_send_date` ("last week" phrasing is a filter: `{{ previous_send_date | ago }}`).
-- Optional LLM: `{{ personal_line }}` (section 12), rendered at preview time and stored with the message.
+- Optional LLM: `{{ personal_line }}` (section 12), rendered at preview time and stored with the message. The in-app LLM module is deferred until after 1.0. Before then, you draft templates with your own AI subscription and the helper in #368.
 
 Template lint at save time: undefined variables, a body with no per-contact merge field (identical bulk mail is a spam signal), missing subject on email, links that do not parse. Lint results are shown in the editor and block activation for errors.
 
@@ -941,6 +941,8 @@ Checked at enrollment and again at every step fire, because state changes betwee
 
 ## 12. LLM module (optional)
 
+> **Deferred until after 1.0 (maintainer, 2026-10-03).** The in-app LLM module, including `personal_line` generation, ships after the 1.0 release. Before then, you draft templates with your own AI subscription, and the helper in #368 (a guide plus a copy-prompt and paste-result helper that makes no network request) covers drafting. This section describes the post-1.0 design.
+
 Disabled until `[llm] api_key` is in Keychain. Uses the `anthropic` SDK, `claude-sonnet-5` by default, `claude-haiku-4-5-20251001` for bulk classification. The system prompt is cached.
 
 | Feature | Input | Output | Where it shows up |
@@ -1073,7 +1075,8 @@ Each phase ends with a usable tool. Estimates assume evenings and weekends with 
 | 2. LinkedIn extractor | Attach, preflight, connections full and incremental sync, enrichment with pacing, budgets, heat, classification, snapshots, pins, runs page with live progress, `rehearse` and `simulate`, job contracts with no database access | A week of scheduled runs completes without a throttle; contacts have emails |
 | 3. Email campaigns | Gmail OAuth, templates and lint, sequences, enrollment guards, review gate, test send, scheduler and windows, draft and send modes, threading, labels, reply and bounce detection, inbox page | First "First 100" campaign runs start to finish with automatic follow-up suppression |
 | 4. LinkedIn messaging | Prefill step, inbox poll and reply detection, waiting-for-you list, opt-in auto-send with its own budget | Step 3 of the default sequence works |
-| 5. LLM module | Personal line, classification, call prep, triage suggestions, cost controls | Optional and off by default |
+| 5. LLM module | Personal line, classification, call prep, triage suggestions, cost controls. Deferred until after 1.0 | Optional and off by default |
+| 7. Backlog after 1.0 | Work that belongs to no pre-release phase: request the archive for the user (#120), shared companies signal (#84) | None |
 | 6. Polish and reach | Google Contacts push, vCard export, container image, backups UI, posture page, docs, hosted-mode ADR and spike | Public-ready; the multi-user path is decided, not built |
 
 ## 20. Risks
