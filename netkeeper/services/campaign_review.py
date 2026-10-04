@@ -346,18 +346,26 @@ def guard_summary(session: Session, user: User, campaign: Campaign, *, now: date
     From :func:`~netkeeper.services.campaign_guards.check_audience` and
     :func:`~netkeeper.services.campaign_guards.skip_summary`, never restated.
     """
-    return guard_summary_and_note(session, user, campaign, now=now)[0]
+    return guard_summary_and_note(session, user, campaign, now=now, include_note=False)[0]
 
 
 def guard_summary_and_note(
-    session: Session, user: User, campaign: Campaign, *, now: datetime
+    session: Session,
+    user: User,
+    campaign: Campaign,
+    *,
+    now: datetime,
+    include_note: bool = True,
 ) -> tuple[str, str | None]:
     """:func:`guard_summary` and the old tool's note over the contacts that will start
-    (#65), from one pass of the guards, without the per-contact details."""
+    (#65), from one pass of the guards, without the per-contact details. With
+    ``include_note`` false the note is not read, and is ``None``."""
     verdicts, enrolled = _guard_verdicts(session, user, campaign, now=now)
     summary = skip_summary(
         verdicts, contacted_within_days=campaign.contacted_within_days_guard, enrolled=enrolled
     )
+    if not include_note:
+        return summary, None
     return summary, prior_contact(session, user, _starting(verdicts, enrolled)).note()
 
 

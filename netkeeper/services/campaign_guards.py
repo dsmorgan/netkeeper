@@ -602,9 +602,11 @@ def load_pending_facts(
     would count every enrollment, so two pending enrollments sharing an address would
     both look excluded while the engine sends to the older one.
 
-    The other facts are the same either way: a pending enrollment has sent nothing,
-    so there are no messages of its own for recent contact to ignore. Read in a few
-    queries for every enrollment, not one :func:`load_facts` each. Reads only.
+    It assumes each enrollment is pending and so has sent nothing: then the other
+    facts are the same either way, since there are no messages of its own for recent
+    contact to ignore. An enrollment that has sent must go through :func:`check_step`,
+    whose :func:`load_facts` call passes its ``enrollment_id``. Read in a few queries
+    for every enrollment, not one :func:`load_facts` each. Reads only.
     """
     facts = load_facts(session, user, [c for _, c in pending], campaign_id=campaign_id)
     sendable = {c: f.sendable_email for c, f in facts.items() if f.sendable_email is not None}
