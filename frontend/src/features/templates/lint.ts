@@ -79,6 +79,12 @@ export const PROMPT_RULES: Readonly<Record<LintRule, string | null>> = {
   missing_value: null,
   removed_field:
     'Use no placeholder for a detail about me. Leave out my own name and signature: I add them myself.',
+  linkedin_subject: 'LinkedIn messages have no subject line: write only the body.',
+  linkedin_too_long: 'Keep each LinkedIn message under 8,000 characters.',
+  linkedin_long: 'Keep each LinkedIn message under 1,000 characters, so it can be typed in time.',
+  linkedin_newline:
+    'Write each LinkedIn message as one paragraph on one line, with no line breaks.',
+  linkedin_untypable: 'Use no tabs or other control characters in a LinkedIn message.',
 }
 
 const LINE_PREFIX = /^line (\d+): /

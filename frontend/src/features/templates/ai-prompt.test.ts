@@ -168,9 +168,19 @@ describe('ruleApplies', () => {
   })
 
   it('takes every other rule from the lint metadata', () => {
-    const shared = Object.keys(PROMPT_RULES).length - 2 // missing_subject, missing_value
-    expect(lintRulesFor('linkedin')).toHaveLength(shared)
+    const rules = Object.keys(PROMPT_RULES)
+    const linkedinOnly = rules.filter((rule) => rule.startsWith('linkedin_')).length
+    expect(linkedinOnly).toBe(5)
+    const shared = rules.length - 2 - linkedinOnly // missing_subject, missing_value
+    expect(lintRulesFor('linkedin')).toHaveLength(shared + linkedinOnly)
     expect(lintRulesFor('email')).toHaveLength(shared + 1)
+  })
+
+  it('gives a LinkedIn prompt the LinkedIn rules and an email prompt none of them', () => {
+    expect(lintRulesFor('linkedin')).toContain(PROMPT_RULES.linkedin_newline)
+    expect(lintRulesFor('linkedin')).toContain(PROMPT_RULES.linkedin_untypable)
+    expect(lintRulesFor('email')).not.toContain(PROMPT_RULES.linkedin_subject)
+    expect(answerFormat('linkedin', 1)).toContain('<the message, as one paragraph on one line>')
   })
 })
 
