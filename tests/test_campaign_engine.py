@@ -1327,6 +1327,30 @@ def test_a_template_with_lint_errors_is_parked(world: World) -> None:
     result = world.tick()
     assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.TEMPLATE_ERRORS,)
     assert world.messages() == []
+    blocked = world.enrollment(enrollment_id)
+    assert blocked.next_action_at is None
+    assert blocked.not_sent_error == (
+        "blocked: the step's template has lint errors; publish a new template version"
+    )
+
+
+def test_an_active_campaign_using_a_removed_me_field_says_why_it_stopped(world: World) -> None:
+    """#342: a campaign activated before the ``me.*`` fields were removed sends nothing
+    for that step, and the enrollment says why, for the campaign page to show."""
+    enrollment_id = world.enroll_new()
+
+    def use_me(session: Session) -> None:
+        campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
+        assert campaign is not None
+        campaign.steps[0].template.body = "Hi {{ first_name }}, {{ me.signature }}"
+
+    world.write(use_me)
+    result = world.tick()
+    assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.TEMPLATE_ERRORS,)
+    assert world.messages() == []
+    assert world.enrollment(enrollment_id).not_sent_error == (
+        "blocked: template uses removed field me.*; publish a new template version"
+    )
 
 
 # --- LinkedIn steps are P4 ----------------------------------------------------------------

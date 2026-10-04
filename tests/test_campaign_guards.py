@@ -413,7 +413,7 @@ def test_every_reason_has_its_label() -> None:
         "campaign_not_active": "campaign not active",
         "enrollment_not_active": "enrollment not active",
         "unknown_contact": "not found",
-        "self": "you (your own details)",
+        "self": "yourself",
         "merged": "merged into another contact",
         "archived": "archived",
         "needs_review": "waiting for review",

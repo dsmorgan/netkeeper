@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.campaigns.gmail import GmailRateLimited
 from netkeeper.campaigns.gmail_fake import FakeGmail
 from netkeeper.crm import lists as list_service
+from netkeeper.crm.self_contact import get_self_contact
 from netkeeper.db import session_scope
 from netkeeper.models import (
     Campaign,
@@ -46,7 +47,7 @@ from netkeeper.models import (
     UserKind,
 )
 from netkeeper.models.base import utcnow
-from netkeeper.scoping import get_scoped, unscoped
+from netkeeper.scoping import get_scoped, scoped_delete, unscoped
 from netkeeper.services import campaign_engine, campaign_review
 from netkeeper.services import campaigns as campaign_service
 from netkeeper.services import mailboxes as mailbox_service
@@ -1335,6 +1336,29 @@ async def test_a_test_send_before_the_self_contact_has_details_renders_them_empt
     raw = s.gmail.raw(sent.id)
     assert raw["To"] == s.mailbox_email
     assert raw.get_content().strip() == "Hi"
+
+
+async def test_a_test_send_with_no_self_contact_renders_the_fields_empty(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """Before the self contact exists (it is created at startup, so only if it was
+    deleted), ``prepare_test_send`` renders with an empty stand-in that is never
+    saved, and the test still goes only to the mailbox itself."""
+    s = _build(running_app, people=1)
+    with session_scope(s.factory, write=True) as session:
+        user = _local(session)
+        session.execute(scoped_delete(user, Contact).where(Contact.is_self.is_(True)))
+    await _ok(
+        await client.post(
+            f"{s.base}/review/test-send", json={"step_id": s.step_ids[0]}, headers=CSRF
+        )
+    )
+    [sent] = s.gmail.sent()
+    raw = s.gmail.raw(sent.id)
+    assert raw["To"] == s.mailbox_email
+    assert raw.get_content().strip() == "Hi"
+    with session_scope(s.factory) as session:
+        assert get_self_contact(session, _local(session)) is None  # nothing was created
 
 
 # --- a fresh mailbox, end to end (#304) --------------------------------------------------

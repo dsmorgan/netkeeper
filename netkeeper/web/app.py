@@ -32,6 +32,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper import __version__, migrations
 from netkeeper.campaigns.gmail_oauth import GoogleEndpoints
+from netkeeper.campaigns.templates import (
+    describe_removed_field_campaigns,
+    removed_field_campaigns,
+)
 from netkeeper.config import Settings, load_settings
 from netkeeper.crm.confirmation import Signer
 from netkeeper.crm.lists import ensure_validated_list
@@ -168,6 +172,8 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
         ensure_account(session, user)  # the account budgets, heat, and runs belong to
         # Your own details, for test sends (#342); seeded from a deprecated [me] the first time.
         ensure_self_contact(session, user, legacy=settings.legacy_me)
+        if blocked := removed_field_campaigns(session, user):  # #342: they send nothing
+            log.warning("%s", describe_removed_field_campaigns(blocked))
         # Runs a stopped process left "running" are over; none is resumed on its own.
         # One whose account's browser lock is held right now belongs to a live
         # process (a `netkeeper linkedin sync` in a terminal) and is left alone.

@@ -161,6 +161,7 @@ async def test_enroll_list_and_status(running_app: FastAPI, client: httpx.AsyncC
         "removed": 0,
         "pending": 2,
         "summary": "2 will start, 1 skipped (1 do-not-contact)",
+        "excluded_summary": "2 will start, 1 skipped (1 do-not-contact)",
     }
     listed = (await client.get("/api/v1/campaigns")).json()
     assert [(c["id"], c["status"], c["steps"], c["enrollments"]) for c in listed] == [

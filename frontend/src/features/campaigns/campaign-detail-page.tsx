@@ -698,6 +698,9 @@ function AudienceCard({ campaign }: { campaign: Campaign }) {
               {outcome.pending} pending in all.
             </p>
             <p className="font-medium">{outcome.summary}</p>
+            {outcome.excluded > 0 && (
+              <p className="text-muted-foreground">This time: {outcome.excluded_summary}</p>
+            )}
           </div>
         )}
         {hasSource && !changing && (
@@ -861,6 +864,11 @@ function EnrollmentsCard({
                     </td>
                     <td className="py-2 text-muted-foreground">
                       {row.exit_reason ?? ''}
+                      {row.not_sent_error != null && (
+                        <span role="note" className="block text-destructive">
+                          {row.not_sent_error}
+                        </span>
+                      )}
                       {(row.replied_at !== null || row.status === 'bounced') && (
                         <Link
                           to="/inbox"

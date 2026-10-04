@@ -4388,6 +4388,8 @@ export interface components {
             enrolled: number;
             /** Excluded */
             excluded: number;
+            /** Excluded Summary */
+            excluded_summary: string;
             /** Pending */
             pending: number;
             /** Removed */
@@ -4421,6 +4423,8 @@ export interface components {
             id: number;
             /** Next Action At */
             next_action_at: string | null;
+            /** Not Sent Error */
+            not_sent_error?: string | null;
             /** Replied At */
             replied_at: string | null;
             status: components["schemas"]["EnrollmentStatus"];

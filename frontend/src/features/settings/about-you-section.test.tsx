@@ -48,6 +48,12 @@ describe('AboutYouSection', () => {
       'Fills {{ first_name }} in a test send',
     )
     expect(screen.getByText(/never in your contacts or a campaign/)).toBeVisible()
+    // The server's limits, so a save never fails on length.
+    expect(form.getByLabelText('First name')).toHaveAttribute('maxLength', '200')
+    expect(form.getByLabelText('Last name')).toHaveAttribute('maxLength', '200')
+    expect(form.getByLabelText('Company')).toHaveAttribute('maxLength', '300')
+    expect(form.getByLabelText('Title')).toHaveAttribute('maxLength', '300')
+    expect(form.getByLabelText('Location')).toHaveAttribute('maxLength', '300')
   })
 
   it('saves every field', async () => {

@@ -44,6 +44,7 @@ from sqlalchemy.orm import Session, aliased
 from netkeeper.campaigns.render import (
     FieldGroup,
     LintIssue,
+    LintRule,
     MergeField,
     MergeValues,
     Rendered,
@@ -413,6 +414,88 @@ def activation_errors(row: Template) -> list[LintIssue]:
     """
     issues = lint(row.channel, row.subject, row.body)
     return issues if has_errors(issues) else []
+
+
+REMOVED_FIELD_BLOCK: Final = (
+    "blocked: template uses removed field me.*; publish a new template version"
+)
+"""Why the engine parked an enrollment whose step template names a removed ``me.*``
+field (#342). Stored on the enrollment and shown on the campaign page."""
+
+TEMPLATE_ERRORS_BLOCK: Final = (
+    "blocked: the step's template has lint errors; publish a new template version"
+)
+"""Why the engine parked an enrollment whose step template has any other lint error."""
+
+
+def block_reason(row: Template | None) -> str | None:
+    """Why a step with this template may not send, or None when it may. A template that
+    names a removed ``me.*`` field says so (#342): the campaign was activated before the
+    fields were removed, and only a new template version makes it send again."""
+    if row is None:
+        return "blocked: the step's template is gone"
+    errors = activation_errors(row)
+    if not errors:
+        return None
+    if any(issue.rule is LintRule.REMOVED_FIELD for issue in errors):
+        return REMOVED_FIELD_BLOCK
+    return TEMPLATE_ERRORS_BLOCK
+
+
+@dataclass(frozen=True, slots=True)
+class RemovedFieldCampaign:
+    """An active or paused campaign with a step whose template names a removed field."""
+
+    campaign_id: int
+    name: str
+    status: CampaignStatus
+    step_positions: tuple[int, ...]
+
+
+SENDING_STATUSES: Final = frozenset({CampaignStatus.ACTIVE, CampaignStatus.PAUSED})
+
+
+def removed_field_campaigns(session: Session, user: User) -> list[RemovedFieldCampaign]:
+    """Every active or paused campaign whose step templates fail ``removed_field`` (#342).
+
+    Those steps send nothing until a new template version replaces the template:
+    the startup log and the posture report name them. Reads only.
+    """
+    out: list[RemovedFieldCampaign] = []
+    campaigns = session.scalars(
+        scoped(user, Campaign)
+        .where(Campaign.status.in_(sorted(SENDING_STATUSES)))
+        .order_by(Campaign.id)
+    )
+    for campaign in list(campaigns):
+        steps = session.scalars(
+            scoped(user, CampaignStep)
+            .where(CampaignStep.campaign_id == campaign.id)
+            .order_by(CampaignStep.position)
+        )
+        positions = tuple(
+            step.position
+            for step in steps
+            if block_reason(get_scoped(session, user, Template, step.template_id))
+            == REMOVED_FIELD_BLOCK
+        )
+        if positions:
+            out.append(RemovedFieldCampaign(campaign.id, campaign.name, campaign.status, positions))
+    return out
+
+
+def describe_removed_field_campaigns(found: Sequence[RemovedFieldCampaign]) -> str:
+    """One sentence naming each campaign and its blocked steps."""
+    named = "; ".join(
+        f"{c.name!r} (campaign {c.campaign_id}, {c.status.value}, step"
+        f"{'s' if len(c.step_positions) > 1 else ''} "
+        f"{', '.join(str(p) for p in c.step_positions)})"
+        for c in found
+    )
+    return (
+        f"{named}: a step template uses the removed me.* fields (#342), so those steps send"
+        " nothing. Publish a new template version without them"
+    )
 
 
 def _whole_years(since: date, today: date) -> int:
