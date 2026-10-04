@@ -19,7 +19,11 @@ from sqlalchemy import Engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.campaigns.templates import REMOVED_FIELD_BLOCK, removed_field_campaigns
+from netkeeper.campaigns.templates import (
+    REMOVED_FIELD_BLOCK,
+    describe_removed_field_campaigns,
+    removed_field_campaigns,
+)
 from netkeeper.config import LegacyMe, Settings
 from netkeeper.crm import contacts as crm_contacts
 from netkeeper.crm import identity, triage
@@ -507,7 +511,8 @@ async def test_the_app_start_warns_about_them(
         if r.name == "netkeeper.web.app" and "removed me.* fields" in r.getMessage()
     ]
     assert "'First 100'" in warning and "removed me.* fields" in warning
-    assert "Publish a new template version" in warning
+    assert "end this campaign, fix the template, and start a new campaign from it" in warning
+    assert "new template version" not in warning
 
 
 async def test_the_campaign_page_shows_why_an_enrollment_is_blocked(
@@ -522,3 +527,13 @@ async def test_the_campaign_page_shows_why_an_enrollment_is_blocked(
         campaign_id = campaign.id
     page = (await client.get(f"/api/v1/campaigns/{campaign_id}/enrollments")).json()
     assert [row["not_sent_error"] for row in page["items"]] == [REMOVED_FIELD_BLOCK]
+
+
+def test_the_guidance_is_the_path_that_unblocks_a_campaign(writer: Session, user: User) -> None:
+    """A step keeps the template version it was activated with, so editing the template
+    never unblocks it (#396 review): the stored reason and the warning say to start over."""
+    fix = "end this campaign, fix the template, and start a new campaign from it"
+    assert f"blocked: template uses removed field me.*; {fix}" == REMOVED_FIELD_BLOCK
+    _use_me(writer, user, "First 100")
+    warning = describe_removed_field_campaigns(removed_field_campaigns(writer, user))
+    assert fix in warning and "new template version" not in warning

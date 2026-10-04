@@ -2111,7 +2111,8 @@ def test_the_sending_hours_row_says_them_or_any_time(writer: Session, user: User
 
 
 def test_an_active_campaign_using_a_removed_me_field_warns(writer: Session, user: User) -> None:
-    """#342: its step sends nothing until a new template version replaces the template."""
+    """#342: its step sends nothing. A step keeps its template version, so the way on is a
+    new campaign, and the warning says that, not "publish a new template version"."""
     assert _row(_report(writer, user), "campaign templates").warnings == ()
     campaign = factories.make_campaign(writer, user, name="First 100")
     template = campaign.steps[0].template
@@ -2121,7 +2122,8 @@ def test_an_active_campaign_using_a_removed_me_field_warns(writer: Session, user
     report = _report(writer, user)
     [warning] = _row(report, "campaign templates").warnings
     assert "'First 100'" in warning and "step 1" in warning
-    assert "Publish a new template version" in warning
+    assert "end this campaign, fix the template, and start a new campaign from it" in warning
+    assert "new template version" not in warning
     assert "campaign templates" in _warned(report)
 
 

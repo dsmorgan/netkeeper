@@ -1330,7 +1330,8 @@ def test_a_template_with_lint_errors_is_parked(world: World) -> None:
     blocked = world.enrollment(enrollment_id)
     assert blocked.next_action_at is None
     assert blocked.not_sent_error == (
-        "blocked: the step's template has lint errors; publish a new template version"
+        "blocked: the step's template has lint errors; "
+        "end this campaign, fix the template, and start a new campaign from it"
     )
 
 
@@ -1349,7 +1350,8 @@ def test_an_active_campaign_using_a_removed_me_field_says_why_it_stopped(world: 
     assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.TEMPLATE_ERRORS,)
     assert world.messages() == []
     assert world.enrollment(enrollment_id).not_sent_error == (
-        "blocked: template uses removed field me.*; publish a new template version"
+        "blocked: template uses removed field me.*; "
+        "end this campaign, fix the template, and start a new campaign from it"
     )
 
 
