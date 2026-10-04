@@ -28,6 +28,8 @@ from typing import Any
 import factories
 import pytest
 from db_loop_guard import BUSY_TIMEOUT_MS, OnTheLoop, request_holding_the_write_lock
+from inbox_fakes import FakeInboxSource, a_thread_with, profile_urn
+from inbox_fakes import delta as inbox_delta
 from profile_fakes import FakeBrowser
 from run_fakes import Clock, ConnectionsContext, fake_provider, fast_profiles, no_sleep
 from sqlalchemy import Engine
@@ -41,6 +43,7 @@ from netkeeper.config import Settings
 from netkeeper.db import CancelledWhileFailing, off_loop, session_scope
 from netkeeper.linkedin.browser import BrowserUnavailable
 from netkeeper.linkedin.classify import Outcome
+from netkeeper.linkedin.inbox import InboxReadStopped
 from netkeeper.models import SyncRun, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.scoping import scoped
 from netkeeper.services import enrich_plan, runs, scheduler
@@ -48,6 +51,7 @@ from netkeeper.services import heat as heat_service
 from netkeeper.services.connections_sync import SessionFlagged
 from netkeeper.services.enrichment import enrich_contacts
 from netkeeper.services.events import EventBus
+from netkeeper.services.inbox_poll import poll_inbox
 from netkeeper.services.linkedin_accounts import arm_scheduled_runs, ensure_account
 from netkeeper.services.linkedin_session import flag_session
 from netkeeper.services.scheduled_runs import serve_registry
@@ -304,7 +308,7 @@ async def test_worker_finish_for_a_kind_with_no_runner_stays_off_the_loop(
         run = SyncRun(
             user_id=user.id,
             linkedin_account_id=ensure_account(session, user).id,
-            kind=SyncRunKind.INBOX,
+            kind=SyncRunKind.MESSAGE_SEND,
             status=SyncRunStatus.RUNNING,
             trigger=SyncRunTrigger.MANUAL,
             started_at=INSIDE,
@@ -658,6 +662,78 @@ async def test_a_served_job_records_its_run_and_reads_its_losses_off_the_loop(
         outcome = await registry[scheduler.JobKind.CONNECTIONS_FULL](context)
 
     assert outcome is scheduler.JobOutcome.NOT_DONE
+
+
+# --- the inbox poll (P4-08): start, prepare, spend, the wall, apply and finish ------------
+
+
+def _inbox_user(factory: sessionmaker[Session], *, armed: bool = False) -> tuple[int, int]:
+    """A user with a contact in a live enrollment, so the poll has someone to watch."""
+    with session_scope(factory, write=True) as session:
+        owner = factories.make_user(session)
+        account = ensure_account(session, owner).id
+        contact = factories.make_contact(session, owner, li_urn=profile_urn("ada"))
+        factories.make_enrollment(session, factories.make_campaign(session, owner), contact)
+        if armed:
+            arm_scheduled_runs(session, owner, now=INSIDE)
+        return owner.id, account
+
+
+async def test_an_inbox_poll_stays_off_the_loop(
+    engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    user_id, _ = _inbox_user(session_factory)
+    source = FakeInboxSource(inbox_delta(a_thread_with(profile_urn("ada"), INSIDE)))
+
+    async with watched(engine):
+        report = await poll_inbox(
+            session_factory, user_id, source, settings=SETTINGS.linkedin, clock=Clock(INSIDE)
+        )
+
+    assert report.counts is not None and report.counts.messages_new == 2
+    assert _run(session_factory, report.run_id, user_id).status is SyncRunStatus.COMPLETED
+
+
+async def test_an_inbox_poll_stopped_by_a_wall_stays_off_the_loop(
+    engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    user_id, _ = _inbox_user(session_factory)
+    source = FakeInboxSource(InboxReadStopped(Outcome.CHECKPOINT, final_url=CHECKPOINT_URL))
+
+    async with watched(engine):
+        report = await poll_inbox(
+            session_factory, user_id, source, settings=SETTINGS.linkedin, clock=Clock(INSIDE)
+        )
+
+    assert report.session_flagged and report.heat_raised
+    assert _run(session_factory, report.run_id, user_id).stop_reason == "checkpoint"
+
+
+async def test_the_inbox_handler_checks_who_to_watch_off_the_loop(
+    engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session)
+        account = ensure_account(session, owner).id
+        owner_id = owner.id
+    registry = serve_registry(
+        session_factory,
+        _FinishesOffTheLoop(session_factory),
+        TaskRunner(EventBus()),
+        clock=lambda: INSIDE,
+    )
+    context = scheduler.JobContext(
+        user_id=owner_id,
+        account_id=account,
+        kind=scheduler.JobKind.INBOX,
+        due=INSIDE,
+        catch_up=False,
+    )
+
+    async with watched(engine):
+        outcome = await registry[scheduler.JobKind.INBOX](context)
+
+    assert outcome is scheduler.JobOutcome.NOTHING_TO_WATCH
 
 
 # --- the shutdown race: a write that fails after a cancel is a failure ---------------------

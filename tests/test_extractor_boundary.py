@@ -27,7 +27,7 @@ import boundary
 import call_targets
 import test_browser_safety as browser_safety
 
-from netkeeper.linkedin import connections, enrich
+from netkeeper.linkedin import connections, enrich, inbox
 from netkeeper.models import Base
 
 # --- the interface is plain data ---------------------------------------------------
@@ -43,6 +43,8 @@ INTERFACE = (
     enrich.ProfileHarvest,
     enrich.ProgressEvent,
     enrich.EnrichResult,
+    inbox.InboxJobSpec,
+    inbox.InboxDelta,
 )
 
 #: The leaf types an interface field may hold. ``date`` joined for the flagship-web
@@ -161,6 +163,12 @@ def _mapping_modules() -> set[str]:
         if boundary.maps_results(_names_in(path.read_text(encoding="utf-8"), path), models):
             found.add(path.resolve().relative_to(browser_safety.REPO_ROOT).as_posix())
     return found
+
+
+def test_the_inbox_source_takes_a_spec_and_returns_a_delta() -> None:
+    hints = typing.get_type_hints(inbox.InboxSource.read)
+    assert hints["spec"] is inbox.InboxJobSpec
+    assert hints["return"] is inbox.InboxDelta
 
 
 def test_crm_apply_is_the_only_module_that_maps_extractor_results_onto_rows() -> None:

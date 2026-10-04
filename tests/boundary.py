@@ -91,11 +91,16 @@ def imports_pulled_in_by(module: str) -> list[str]:
 
 #: Spec 9.10's "Out" column as it exists so far: what the extractor hands the core.
 #: A module that imports one of these modules, or one of these names, handles
-#: extractor results. ``InboxDelta`` and ``MessageOutcome`` join with the jobs that
-#: return them (P4). The ``voyager`` types are named alone because the rest of
-#: ``voyager`` is request plumbing, not results; the three profile types are what a
-#: ``ProfileHarvest`` carries (P2-07).
-RESULT_MODULES = ("netkeeper.linkedin.connections", "netkeeper.linkedin.enrich")
+#: extractor results. ``netkeeper.linkedin.inbox`` joined with the inbox poll's
+#: contract (P4-08); ``MessageOutcome`` joins with the job that returns it (P4). The
+#: ``voyager`` types are named alone because the rest of ``voyager`` is request
+#: plumbing, not results; the three profile types are what a ``ProfileHarvest``
+#: carries (P2-07).
+RESULT_MODULES = (
+    "netkeeper.linkedin.connections",
+    "netkeeper.linkedin.enrich",
+    "netkeeper.linkedin.inbox",
+)
 RESULT_TYPES = (
     "netkeeper.linkedin.voyager.ConnectionSummary",
     "netkeeper.linkedin.voyager.ProfileDetails",
@@ -105,8 +110,8 @@ RESULT_TYPES = (
 )
 
 #: The modules allowed to turn an extractor result into rows: spec 9.10's
-#: ``crm/apply.py``, and nothing else.
-MAPPING_MODULES = ("netkeeper/crm/apply.py",)
+#: ``crm/apply.py``, and the inbox poll's ``crm/inbox_apply.py`` (P4-08, #378).
+MAPPING_MODULES = ("netkeeper/crm/apply.py", "netkeeper/crm/inbox_apply.py")
 
 #: Models a module may name alongside a result without mapping it onto a table.
 #: ``User`` is the owner handle every core function takes, not a place results land.

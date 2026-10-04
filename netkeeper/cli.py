@@ -1197,6 +1197,24 @@ def linkedin_enrich(
     _run_by_hand(ctx, SyncRunKind.ENRICH, max_visits=max_visits, resume=resume)
 
 
+@linkedin_app.command("inbox")
+def linkedin_inbox(ctx: typer.Context) -> None:
+    """Poll your LinkedIn inbox once now, in this terminal, and wait for it.
+
+    The poll reads the conversations active since the last complete poll and records
+    each message with a contact you already have as a timeline entry, with a snippet
+    of at most 200 characters. It never creates a contact, skips group threads, and
+    matches people by their LinkedIn URN only. It spends one unit of today's inbox
+    poll budget and follows the same heat, session-flag, and active-hours rules as
+    the other runs. It works while scheduled runs are disarmed.
+
+    The page source that reads the inbox is not built yet (P4-01), so today the run
+    attaches to Chrome and ends failed with that reason. It spends no budget and
+    loads no page.
+    """
+    _run_by_hand(ctx, SyncRunKind.INBOX)
+
+
 def _run_by_hand(
     ctx: typer.Context,
     kind: SyncRunKind,

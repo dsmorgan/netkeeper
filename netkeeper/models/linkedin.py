@@ -34,12 +34,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import String, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from netkeeper.models.base import Base, TimestampMixin, UserOwned, UTCDateTime
 
 DEFAULT_ACCOUNT_LABEL: Final = "default"
+
+#: The longest LinkedIn conversation or message URN stored (migration 0035).
+LI_URN_MAX_LENGTH: Final = 300
 
 
 class LinkedInAccount(UserOwned, TimestampMixin, Base):
@@ -49,3 +52,32 @@ class LinkedInAccount(UserOwned, TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True, sort_order=-100)
     label: Mapped[str] = mapped_column(String(100), nullable=False, default=DEFAULT_ACCOUNT_LABEL)
     scheduled_runs_armed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+
+class LiConversation(UserOwned, TimestampMixin, Base):
+    """One LinkedIn one-to-one conversation with a known contact, as the inbox poll saw it.
+
+    Written by :mod:`netkeeper.crm.inbox_apply` (P4-08, migration 0035), one row per
+    conversation URN per user. ``contact_id`` is the contact whose ``li_urn`` is the
+    conversation's other participant; a merge moves the row to the survivor. The
+    poll never creates a contact, so a conversation with nobody known has no row.
+    ``last_inbound_at`` and ``last_outbound_at`` are the newest message each way the
+    poll has seen, ``polled_at`` when a poll last read the conversation. No message
+    text is stored here: the timeline's interactions carry the snippet.
+    """
+
+    __tablename__ = "li_conversations"
+    __table_args__ = (
+        UniqueConstraint("user_id", "conversation_urn"),
+        Index("ix_li_conversations_user_id_contact_id", "user_id", "contact_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, sort_order=-100)
+    contact_id: Mapped[int] = mapped_column(
+        ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_urn: Mapped[str] = mapped_column(String(LI_URN_MAX_LENGTH), nullable=False)
+    last_activity_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    last_inbound_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_outbound_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    polled_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)

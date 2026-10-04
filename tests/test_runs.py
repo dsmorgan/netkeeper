@@ -70,6 +70,7 @@ def test_the_safety_constants_are_the_specs() -> None:
         SyncRunKind.CONNECTIONS_FULL,
         SyncRunKind.CONNECTIONS_INCREMENTAL,
         SyncRunKind.ENRICH,
+        SyncRunKind.INBOX,
     } == runs.RUNNABLE_KINDS
 
 
@@ -150,7 +151,7 @@ def test_one_run_per_account_at_a_time(writer: Session, user: User) -> None:
     )
 
 
-@pytest.mark.parametrize("kind", [SyncRunKind.INBOX, SyncRunKind.MESSAGE_SEND])
+@pytest.mark.parametrize("kind", [SyncRunKind.MESSAGE_SEND])
 def test_a_kind_with_no_runner_is_refused(writer: Session, user: User, kind: SyncRunKind) -> None:
     with pytest.raises(runs.RunError, match="no runner"):
         runs.create_run(writer, user, kind, trigger=SyncRunTrigger.MANUAL, now=NOW)

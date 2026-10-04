@@ -40,7 +40,11 @@ instant — and counts how many of each it already wrote under source
 ``archive``, adding only the surplus. Two identical rows in one file therefore
 still produce two interactions, and importing that file twice still produces
 two. Interactions a person entered by hand are never matched against, so an
-import cannot swallow one, and cannot be blocked by one either.
+import cannot swallow one, and cannot be blocked by one either. The
+``li_in`` and ``li_out`` rows the LinkedIn inbox poll recorded (source
+``sync``, P4-08) are counted with the archive's own, at the same contact, kind,
+and second, so an archive imported after a poll does not record a polled
+message twice.
 
 The auto-tag rules run at the end of the import, over the contacts it created
 or enriched and no others, in the same transaction (spec 10.3, #64), and the
@@ -79,6 +83,7 @@ from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any, Final
 
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from netkeeper.crm import positions as positions_service
@@ -760,9 +765,13 @@ class _Interactions:
     cache holds the contact a profile slug resolves to, or ``None`` for one that
     is nobody, for as long as the import runs; nothing here creates a contact,
     so an entry cannot go stale underneath it. The interaction ledger is every
-    ``(contact, kind, instant)`` this user already has from an earlier archive
+    ``(contact, kind, second)`` this user already has from an earlier archive
     import, counted, so a re-import recognizes its own work and adds only what
-    is new. See the module docstring on why that triple is the key.
+    is new. See the module docstring on why that triple is the key. It also
+    counts the ``li_in`` and ``li_out`` rows the LinkedIn inbox poll recorded
+    (``source = sync``, P4-08), so an archive imported after a poll does not
+    record a polled message a second time. The poll truncates its times to whole
+    seconds, so the ledger keys on the second.
     """
 
     __slots__ = ("_contacts", "_seen", "_session", "_user", "created")
@@ -774,9 +783,17 @@ class _Interactions:
         self.created: list[int] = []
         """The ids of the interactions this import wrote, for its run (#132)."""
         self._seen: dict[tuple[int, InteractionKind, datetime], int] = {}
-        statement = scoped(user, Interaction).where(Interaction.source == ContactSource.ARCHIVE)
+        statement = scoped(user, Interaction).where(
+            or_(
+                Interaction.source == ContactSource.ARCHIVE,
+                and_(
+                    Interaction.source == ContactSource.SYNC,
+                    Interaction.kind.in_(_POLLED_KINDS),
+                ),
+            )
+        )
         for row in session.scalars(statement):
-            key = (row.contact_id, row.kind, row.at)
+            key = (row.contact_id, row.kind, _second(row.at))
             self._seen[key] = self._seen.get(key, 0) + 1
 
     def contact_for(self, public_id: str) -> int | None:
@@ -813,7 +830,7 @@ class _Interactions:
         that really does hold two identical rows yields two interactions the
         first time and none the second.
         """
-        key = (contact_id, kind, at)
+        key = (contact_id, kind, _second(at))
         planned = self._seen.get(key, 0)
         if planned > 0:
             self._seen[key] = planned - 1
@@ -829,6 +846,15 @@ class _Interactions:
         )
         self.created.append(interaction.id)
         return True
+
+
+#: The kinds the LinkedIn inbox poll records (P4-08), which the ledger also counts.
+_POLLED_KINDS: Final = (InteractionKind.LI_IN, InteractionKind.LI_OUT)
+
+
+def _second(at: datetime) -> datetime:
+    """``at`` truncated to the whole second, the ledger's resolution."""
+    return at.replace(microsecond=0)
 
 
 def _trim(text: str) -> str | None:

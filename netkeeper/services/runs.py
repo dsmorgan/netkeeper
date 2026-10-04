@@ -3,12 +3,12 @@
 A ``sync_runs`` row is what a person sees of a run: which kind, who asked for
 it, how far it got, and how it ended. This module owns the row. It does not
 run anything: the browser worker (``netkeeper.worker``) holds the activity
-lock, attaches, and calls the connections sync or enrichment runner, and it
-reports back through :func:`record_progress` and :func:`finish_run`.
+lock, attaches, and calls the connections sync, enrichment, or inbox poll runner,
+and it reports back through :func:`record_progress` and :func:`finish_run`.
 
 **Who may start a run.** :func:`create_run` is the one door, and it refuses:
 
-* a kind with no runner (``inbox``, ``message_send``);
+* a kind with no runner (``message_send``);
 * a second run while one of the same account's runs is still ``running`` --
   the browser takes one client per account anyway (spec 9.9), and a second row
   that could only fail ``busy`` tells a person nothing;
@@ -92,13 +92,16 @@ from netkeeper.services.settings_kv import delete_setting, get_setting, set_sett
 
 log = logging.getLogger(__name__)
 
-#: The kinds a run can be started for today: the two connections syncs (P2-06)
-#: and enrichment (P2-07). ``inbox`` and ``message_send`` have no runner yet.
+#: The kinds a run can be started for today: the two connections syncs (P2-06),
+#: enrichment (P2-07), and the inbox poll (P4-08). ``message_send`` has no runner yet.
+#: The inbox poll's page source arrives with P4-01 (#380); until then its run fails
+#: in the worker with the reason, and ``netkeeper serve`` does not schedule it.
 RUNNABLE_KINDS: Final = frozenset(
     {
         SyncRunKind.CONNECTIONS_FULL,
         SyncRunKind.CONNECTIONS_INCREMENTAL,
         SyncRunKind.ENRICH,
+        SyncRunKind.INBOX,
     }
 )
 
@@ -620,6 +623,8 @@ STOP_REASON_TEXT: Final[Mapping[str, str]] = {
     "cancelled": "cancelled",
     "paused": "paused; resume it to continue its plan",
     "answer_lost": "lost some of the page's answers",
+    "inbox_read": "read the inbox back to the last complete poll",
+    "inbox_incomplete": "read part of the inbox; the next poll reads it again",
     # what LinkedIn answered
     "throttled": "LinkedIn throttled it",
     "checkpoint": "LinkedIn showed a checkpoint",

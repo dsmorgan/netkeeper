@@ -68,6 +68,7 @@ from netkeeper.models import (
     Enrollment,
     EnrollmentStatus,
     HistoryRecipient,
+    LiConversation,
     LinkKind,
     ListMember,
     Message,
@@ -976,7 +977,8 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
     Campaign messages all move, and so do enrollments, one per campaign; see
     :func:`_merge_campaign_rows`. Old-campaign history rows move too, and a contact
     waiting for a person to read a reply to an old campaign stays waiting; see
-    :func:`_merge_history_rows`.
+    :func:`_merge_history_rows`. LinkedIn conversation rows the inbox poll wrote
+    move too, the survivor's kept on a clash; see :func:`_merge_li_conversations`.
     The loser's URN and slug move to the survivor when it lacks
     them; otherwise the slug becomes an alias of the survivor and the URN is
     dropped. Both are cleared on the loser, whose ``merged_into_id`` points at
@@ -1023,6 +1025,7 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
     _merge_list_members(session, user, survivor, loser)
     _merge_campaign_rows(session, user, survivor, loser)
     keep_review, repliers = _merge_history_rows(session, user, survivor, loser)
+    _merge_li_conversations(session, user, survivor, loser)
     # A replier's mark is not a card's (#184): hide it while the fields merge, so their
     # provenance is merged as for any confirmed contact, then put the marks back.
     marks = {contact.id: contact.needs_review_at for contact in repliers}
@@ -1068,6 +1071,32 @@ def _merge_history_rows(
         return None, []
     marks = [m for m in (survivor.needs_review_at, loser.needs_review_at) if m is not None]
     return min(marks), repliers
+
+
+def _merge_li_conversations(
+    session: Session, user: User, survivor: Contact, loser: Contact
+) -> None:
+    """Move the loser's LinkedIn conversation rows to the survivor (P4-08).
+
+    A conversation URN is unique per user, so the two contacts cannot both hold
+    the same one today; should they ever, the survivor's row is kept and the
+    loser's dropped, as for the other keyed children.
+    """
+    kept = set(
+        session.scalars(
+            scoped(user, LiConversation)
+            .with_only_columns(LiConversation.conversation_urn)
+            .where(LiConversation.contact_id == survivor.id)
+        )
+    )
+    for row in session.scalars(
+        scoped(user, LiConversation).where(LiConversation.contact_id == loser.id)
+    ).all():
+        if row.conversation_urn in kept:
+            session.delete(row)
+        else:
+            row.contact_id = survivor.id
+    session.flush()
 
 
 def _merge_identity(session: Session, user: User, survivor: Contact, loser: Contact) -> None:

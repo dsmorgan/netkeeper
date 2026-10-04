@@ -48,7 +48,7 @@ BROWSER_MODE_MAX_LENGTH: Final = 16
 
 
 class SyncRunKind(enum.StrEnum):
-    """Spec 8.4's run kinds. ``inbox`` and ``message_send`` have no runner yet."""
+    """Spec 8.4's run kinds. ``message_send`` has no runner yet."""
 
     CONNECTIONS_FULL = "connections_full"
     CONNECTIONS_INCREMENTAL = "connections_incremental"
