@@ -7318,7 +7318,7 @@
         "type": "object"
       },
       "MergeFieldOut": {
-        "description": "One merge field for the editor's field list (#344).\n\n``insert`` goes between the braces. ``example`` is ``None`` when the contact,\nor ``[me]``, has no value for the field, so it would render empty.\n``example_source`` says where the example came from: the contact, ``[me]``,\nor an invented ``placeholder``.",
+        "description": "One merge field for the editor's field list (#344).\n\n``insert`` goes between the braces. ``example`` is ``None`` when the contact\nhas no value for the field, so it would render empty.\n``example_source`` says where the example came from: the contact, or an\ninvented ``placeholder``.",
         "properties": {
           "description": {
             "title": "Description",

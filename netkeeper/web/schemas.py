@@ -2179,10 +2179,10 @@ class LintIssueOut(BaseModel):
 class MergeFieldOut(BaseModel):
     """One merge field for the editor's field list (#344).
 
-    ``insert`` goes between the braces. ``example`` is ``None`` when the contact,
-    or ``[me]``, has no value for the field, so it would render empty.
-    ``example_source`` says where the example came from: the contact, ``[me]``,
-    or an invented ``placeholder``.
+    ``insert`` goes between the braces. ``example`` is ``None`` when the contact
+    has no value for the field, so it would render empty.
+    ``example_source`` says where the example came from: the contact, or an
+    invented ``placeholder``.
     """
 
     name: str

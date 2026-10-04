@@ -188,7 +188,7 @@ describe('campaign builder', () => {
 })
 
 describe('campaign detail', () => {
-  it('enrolls the audience and shows the excluded summary with its reasons', async () => {
+  it('enrolls the audience and shows the skip summary with its reasons', async () => {
     const calls: Call[] = []
     const state = { campaign: campaign(), review: review({ status: 'draft' }) }
     mockFetch(
@@ -218,7 +218,7 @@ describe('campaign detail', () => {
       selector: 'p',
     })
     expect(outcome).toBeVisible()
-    expect(screen.getByText(/2 enrolled, 0 already in, 1 excluded/)).toBeVisible()
+    expect(screen.getByText(/2 enrolled, 0 already in, 1 skipped/)).toBeVisible()
     const post = calls.find((call) => call.path === '/api/v1/campaigns/5/enroll')
     expect(post?.body).toEqual({})
   })
