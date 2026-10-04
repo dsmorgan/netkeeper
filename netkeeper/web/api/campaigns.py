@@ -41,7 +41,6 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import AwareDatetime, BaseModel, Field
 from sqlalchemy.orm import Session
 
-from netkeeper.campaigns.render import me_fields
 from netkeeper.config import Settings
 from netkeeper.crm.filters import FilterTree
 from netkeeper.models import (
@@ -414,9 +413,7 @@ def _campaign_out(detail: service.CampaignDetail) -> CampaignOut:
 
 
 def _detail(session: Session, user: User, campaign_id: int, request: Request) -> CampaignOut:
-    detail = service.campaign_status(
-        session, user, campaign_id, me=me_fields(_settings(request).me), now=utcnow()
-    )
+    detail = service.campaign_status(session, user, campaign_id, now=utcnow())
     return _campaign_out(detail)
 
 

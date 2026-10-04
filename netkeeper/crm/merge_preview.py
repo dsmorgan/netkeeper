@@ -48,7 +48,7 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.models.base import UserOwned
-from netkeeper.scoping import get_scoped, scoped
+from netkeeper.scoping import get_scoped_contact, scoped
 
 log = logging.getLogger(__name__)
 
@@ -139,7 +139,7 @@ def preview_merge[T](
         # merge_contacts checks these too; checking first keeps a refused merge
         # from rendering a "before" for a row it would never touch.
         survivor = live_contact(session, user, survivor_id)
-        loser = get_scoped(session, user, Contact, loser_id)
+        loser = get_scoped_contact(session, user, loser_id)
         if loser is None:
             raise NotFound("no such contact")
         before_survivor = render(survivor)

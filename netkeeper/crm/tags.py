@@ -90,7 +90,14 @@ from netkeeper.models import (
     User,
     tag_name_key,
 )
-from netkeeper.scoping import get_scoped, scoped, scoped_delete
+from netkeeper.scoping import (
+    get_scoped,
+    get_scoped_contact,
+    not_self,
+    scoped,
+    scoped_contacts,
+    scoped_delete,
+)
 from netkeeper.services.settings_kv import get_setting, set_setting
 
 log = logging.getLogger(__name__)
@@ -843,7 +850,7 @@ def contact_counts(session: Session, user: User, tag_ids: Iterable[int]) -> dict
         scoped(user, ContactTag)
         .with_only_columns(ContactTag.tag_id, func.count())
         .join(Contact, Contact.id == ContactTag.contact_id)
-        .where(ContactTag.tag_id.in_(ids), Contact.user_id == user.id, _live())
+        .where(ContactTag.tag_id.in_(ids), Contact.user_id == user.id, not_self(), _live())
         .group_by(ContactTag.tag_id)
     )
     return {int(tag_id): int(count) for tag_id, count in session.execute(statement).all()}
@@ -1013,7 +1020,7 @@ def _is_suppressed(session: Session, user: User, contact_id: int, tag_id: int) -
 
 
 def _contact(session: Session, user: User, contact_id: int) -> Contact:
-    contact = get_scoped(session, user, Contact, contact_id)
+    contact = get_scoped_contact(session, user, contact_id)
     if contact is None:
         raise ContactNotFound(f"no contact {contact_id}")
     return contact
@@ -1150,7 +1157,7 @@ def _candidates(
 ) -> list[_Candidate]:
     """The live contacts a run or preview looks at, by id, with the three searchable fields."""
     statement = (
-        scoped(user, Contact)
+        scoped_contacts(user)
         .with_only_columns(
             Contact.id, Contact.current_title, Contact.headline, Contact.current_company
         )

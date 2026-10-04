@@ -42,7 +42,6 @@ from netkeeper.scoping import scoped
 
 EMAIL = TemplateChannel.EMAIL
 LINKEDIN = TemplateChannel.LINKEDIN
-ME_KEYS = ("name", "website", "scheduling_link", "signature", "city")
 BODY = "Hi {{ first_name }}"
 
 
@@ -74,7 +73,7 @@ def in_use(monkeypatch: pytest.MonkeyPatch) -> set[int]:
 def _create(session: Session, user: User, name: str = "reconnect", **fields: Any) -> Template:
     values: dict[str, Any] = {"channel": EMAIL, "subject": "Hello", "body": BODY}
     values.update(fields)
-    return create_template(session, user, name=name, me_keys=ME_KEYS, **values)
+    return create_template(session, user, name=name, **values)
 
 
 # --- create, read ---------------------------------------------------------------
@@ -137,7 +136,7 @@ def test_get_is_scoped_to_the_user(writer: Session, user: User, other: User) -> 
     with pytest.raises(TemplateNotFound):
         get_template(writer, other, row.id)
     with pytest.raises(TemplateNotFound):
-        update_template(writer, other, row.id, me_keys=ME_KEYS, body="x")
+        update_template(writer, other, row.id, body="x")
     with pytest.raises(TemplateNotFound):
         delete_template(writer, other, row.id)
 
@@ -156,7 +155,7 @@ def test_list_is_by_name_and_only_the_users_own(writer: Session, user: User, oth
 def test_an_edit_of_a_template_not_in_use_changes_it_in_place(writer: Session, user: User) -> None:
     row = _create(writer, user)
     edited = update_template(
-        writer, user, row.id, me_keys=ME_KEYS, name="renamed", body="Yo {{ nickname }}"
+        writer, user, row.id, name="renamed", body="Yo {{ nickname }}"
     )
     assert edited is row
     assert (row.name, row.body, row.subject, row.version) == ("renamed", "Yo {{ nickname }}",
@@ -167,9 +166,9 @@ def test_an_edit_of_a_template_not_in_use_changes_it_in_place(writer: Session, u
 
 def test_subject_unset_is_left_alone_and_none_clears_it(writer: Session, user: User) -> None:
     row = _create(writer, user)
-    update_template(writer, user, row.id, me_keys=ME_KEYS, subject=UNSET, body="Hey {{ title }}")
+    update_template(writer, user, row.id, subject=UNSET, body="Hey {{ title }}")
     assert row.subject == "Hello"
-    cleared = update_template(writer, user, row.id, me_keys=ME_KEYS, subject=None)
+    cleared = update_template(writer, user, row.id, subject=None)
     assert cleared is row and cleared.subject is None
     assert [LintIssue.from_json(i).rule for i in cleared.lint_json] == [LintRule.MISSING_SUBJECT]
 
@@ -177,7 +176,7 @@ def test_subject_unset_is_left_alone_and_none_clears_it(writer: Session, user: U
 def test_changing_the_channel_relints(writer: Session, user: User) -> None:
     row = _create(writer, user, channel=LINKEDIN, subject=None)
     assert row.lint_json == []
-    update_template(writer, user, row.id, me_keys=ME_KEYS, channel=EMAIL)
+    update_template(writer, user, row.id, channel=EMAIL)
     assert [LintIssue.from_json(i).rule for i in row.lint_json] == [LintRule.MISSING_SUBJECT]
 
 
@@ -186,7 +185,7 @@ def test_an_edit_that_changes_nothing_is_a_no_op(
 ) -> None:
     row = _create(writer, user)
     in_use.add(row.id)
-    assert update_template(writer, user, row.id, me_keys=ME_KEYS, name="reconnect") is row
+    assert update_template(writer, user, row.id, name="reconnect") is row
     assert list(writer.scalars(scoped(user, Template))) == [row]
 
 
@@ -194,7 +193,7 @@ def test_a_rename_onto_another_template_is_refused(writer: Session, user: User) 
     _create(writer, user, "taken")
     row = _create(writer, user, "mine")
     with pytest.raises(DuplicateTemplateName):
-        update_template(writer, user, row.id, me_keys=ME_KEYS, name="taken")
+        update_template(writer, user, row.id, name="taken")
 
 
 def test_an_edit_of_a_template_in_use_makes_a_new_version(
@@ -203,7 +202,7 @@ def test_an_edit_of_a_template_in_use_makes_a_new_version(
     """Spec 8.5: the campaign keeps pointing at the old row until someone upgrades it."""
     old = _create(writer, user)
     in_use.add(old.id)
-    new = update_template(writer, user, old.id, me_keys=ME_KEYS, body="Hey {{ first_name }}")
+    new = update_template(writer, user, old.id, body="Hey {{ first_name }}")
 
     assert new is not old
     assert (new.version, new.previous_id, new.name) == (2, old.id, "reconnect")
@@ -215,7 +214,7 @@ def test_an_edit_of_a_template_in_use_makes_a_new_version(
 
     # The name is the template's, not a clash with its own older version.
     in_use.add(new.id)
-    third = update_template(writer, user, new.id, me_keys=ME_KEYS, name="renamed")
+    third = update_template(writer, user, new.id, name="renamed")
     assert (third.version, third.previous_id, third.name) == (3, new.id, "renamed")
     assert versions(writer, user, third) == [third, new, old]
 
@@ -223,10 +222,10 @@ def test_an_edit_of_a_template_in_use_makes_a_new_version(
 def test_an_older_version_is_read_only(writer: Session, user: User, in_use: set[int]) -> None:
     old = _create(writer, user)
     in_use.add(old.id)
-    new = update_template(writer, user, old.id, me_keys=ME_KEYS, body="Hey {{ first_name }}")
+    new = update_template(writer, user, old.id, body="Hey {{ first_name }}")
     assert get_template(writer, user, old.id) is old  # still readable
     with pytest.raises(TemplateSuperseded, match="edit the newest"):
-        update_template(writer, user, old.id, me_keys=ME_KEYS, body="Yo {{ first_name }}")
+        update_template(writer, user, old.id, body="Yo {{ first_name }}")
     with pytest.raises(TemplateSuperseded, match="delete the newest"):
         delete_template(writer, user, old.id)
     assert list_templates(writer, user) == [new]
@@ -237,7 +236,7 @@ def test_a_new_template_cannot_take_the_name_of_a_versioned_one(
 ) -> None:
     old = _create(writer, user)
     in_use.add(old.id)
-    update_template(writer, user, old.id, me_keys=ME_KEYS, body="Hey {{ first_name }}")
+    update_template(writer, user, old.id, body="Hey {{ first_name }}")
     with pytest.raises(DuplicateTemplateName):
         _create(writer, user)
 
@@ -248,7 +247,7 @@ def test_a_renamed_versioned_template_frees_its_old_name(
     """The old name stays on the superseded row, which lists nowhere, so it is free again."""
     old = _create(writer, user, "reconnect")
     in_use.add(old.id)
-    renamed = update_template(writer, user, old.id, me_keys=ME_KEYS, name="catch up")
+    renamed = update_template(writer, user, old.id, name="catch up")
     assert (renamed.name, old.name) == ("catch up", "reconnect")
 
     reused = _create(writer, user, "reconnect")
@@ -265,11 +264,11 @@ def test_two_edits_of_one_version_in_use_the_second_is_superseded(
     writers). UNIQUE(user_id, previous_id) lets one win; the other is a 409, not a 500."""
     old = _create(writer, user)
     in_use.add(old.id)
-    first = update_template(writer, user, old.id, me_keys=ME_KEYS, body="Hey {{ first_name }}")
+    first = update_template(writer, user, old.id, body="Hey {{ first_name }}")
     # The second edit read the row before the first one's insert, so it saw no successor.
     monkeypatch.setattr(service, "is_superseded", lambda _session, _user, _row: False)
     with pytest.raises(TemplateSuperseded, match="replaced by another edit just now"):
-        update_template(writer, user, old.id, me_keys=ME_KEYS, body="Yo {{ first_name }}")
+        update_template(writer, user, old.id, body="Yo {{ first_name }}")
 
     # The savepoint kept the session usable, and the first edit stands.
     monkeypatch.undo()
@@ -284,7 +283,7 @@ def test_two_edits_of_one_version_in_use_the_second_is_superseded(
 def test_delete_removes_the_whole_chain(writer: Session, user: User, in_use: set[int]) -> None:
     old = _create(writer, user)
     in_use.add(old.id)
-    new = update_template(writer, user, old.id, me_keys=ME_KEYS, body="Hey {{ first_name }}")
+    new = update_template(writer, user, old.id, body="Hey {{ first_name }}")
     in_use.clear()
     keep = _create(writer, user, "keep")
     delete_template(writer, user, new.id)
@@ -296,7 +295,7 @@ def test_delete_is_refused_while_any_version_is_in_use(
 ) -> None:
     old = _create(writer, user)
     in_use.add(old.id)
-    new = update_template(writer, user, old.id, me_keys=ME_KEYS, body="Hey {{ first_name }}")
+    new = update_template(writer, user, old.id, body="Hey {{ first_name }}")
     with pytest.raises(TemplateInUse):
         delete_template(writer, user, new.id)
     assert versions(writer, user, new) == [new, old]
@@ -344,12 +343,12 @@ def test_an_edit_while_only_a_draft_campaign_names_it_is_in_place(
 ) -> None:
     row = _create(writer, user)
     draft = _use(writer, user, row, CampaignStatus.DRAFT)
-    same = update_template(writer, user, row.id, me_keys=ME_KEYS, body="Hey {{ first_name }}")
+    same = update_template(writer, user, row.id, body="Hey {{ first_name }}")
     assert same is row and draft.steps[0].template_id == row.id
 
     draft.status = CampaignStatus.REVIEWING
     writer.flush()
-    new = update_template(writer, user, row.id, me_keys=ME_KEYS, body="Yo {{ first_name }}")
+    new = update_template(writer, user, row.id, body="Yo {{ first_name }}")
     assert new.id != row.id and new.previous_id == row.id
     assert row.body == "Hey {{ first_name }}"  # what the campaign under review sends
 
@@ -379,12 +378,12 @@ def test_another_users_campaign_never_puts_a_template_in_use(writer: Session, us
 
 
 def test_activation_errors_are_empty_for_a_clean_template(writer: Session, user: User) -> None:
-    assert activation_errors(_create(writer, user), ME_KEYS) == []
+    assert activation_errors(_create(writer, user)) == []
 
 
 def test_activation_errors_list_every_lint_error(writer: Session, user: User) -> None:
-    row = _create(writer, user, subject=None, body="{{ me.podcast }} http:/x.example")
-    errors = activation_errors(row, ME_KEYS)
+    row = _create(writer, user, subject=None, body="{{ nickname }} http:/x.example")
+    errors = activation_errors(row)
     assert [e.rule for e in errors] == [
         LintRule.MISSING_SUBJECT,
         LintRule.UNDEFINED_VARIABLE,
@@ -394,16 +393,16 @@ def test_activation_errors_list_every_lint_error(writer: Session, user: User) ->
     assert all(e.severity is Severity.ERROR for e in errors)
 
 
-def test_activation_lints_again_against_the_config_of_the_moment(
+def test_a_template_saved_with_a_me_field_before_342_is_blocked_by_activation(
     writer: Session, user: User
 ) -> None:
-    """A ``me`` key removed from the config after the save must block activation."""
-    row = _create(writer, user, body="{{ first_name }} {{ me.podcast }}")
-    # Saved while [me] had a podcast key:
-    update_template(writer, user, row.id, me_keys=(*ME_KEYS, "podcast"), body=row.body + " ")
-    assert row.lint_json == []
-    assert [e.field for e in activation_errors(row, ME_KEYS)] == ["me.podcast"]
-    assert activation_errors(row, (*ME_KEYS, "podcast")) == []
+    """Stored lint from before #342 is clean; activation lints again and finds the removed
+    field, so the template stays out of an active campaign until it is edited."""
+    row = _create(writer, user, body="{{ first_name }} {{ me.signature }}")
+    row.lint_json = []  # as a save before #342 stored it
+    writer.flush()
+    errors = activation_errors(row)
+    assert [(e.rule, e.field) for e in errors] == [(LintRule.REMOVED_FIELD, "me.signature")]
 
 
 # --- contact fields and the preview ---------------------------------------------------
@@ -578,9 +577,9 @@ def test_first_name_falls_back_when_there_is_no_preferred_name(writer: Session, 
 
 
 def test_preview_renders_for_one_contact(writer: Session, user: User) -> None:
-    row = _create(writer, user, subject="Hi {{ first_name }}", body="{{ company }} / {{ me.name }}")
+    row = _create(writer, user, subject="Hi {{ first_name }}", body="{{ company }} / Ada")
     contact = factories.make_contact(writer, user, preferred_name="Bo", current_company="Co")
-    rendered = render_preview(row, contact, me={"name": "Ada"}, today=date(2026, 9, 26))
+    rendered = render_preview(row, contact, today=date(2026, 9, 26))
     assert (rendered.subject, rendered.body, rendered.issues) == ("Hi Bo", "Co / Ada", ())
 
 
@@ -597,7 +596,7 @@ def test_preview_of_a_contact_with_missing_fields_warns_and_does_not_raise(
     contact = factories.make_contact(
         writer, user, first_name="", preferred_name="", current_company=None
     )
-    rendered = render_preview(row, contact, me={}, today=date(2026, 9, 26))
+    rendered = render_preview(row, contact, today=date(2026, 9, 26))
     assert rendered.body == "Hi  from , since .   "
     assert [(i.rule, i.severity, i.field) for i in rendered.issues] == [
         (LintRule.MISSING_VALUE, Severity.WARNING, name)
@@ -615,7 +614,7 @@ def test_preview_of_a_contact_with_missing_fields_warns_and_does_not_raise(
 def test_preview_fills_a_personal_line_when_given(writer: Session, user: User) -> None:
     row = _create(writer, user, body="{{ personal_line }}")
     contact = factories.make_contact(writer, user)
-    rendered = render_preview(row, contact, me={}, personal_line="Loved your talk.")
+    rendered = render_preview(row, contact, personal_line="Loved your talk.")
     assert rendered.body == "Loved your talk." and rendered.issues == ()
 
 
@@ -623,14 +622,14 @@ def test_preview_refuses_a_sandbox_escape(writer: Session, user: User) -> None:
     row = _create(writer, user, body="{{ first_name.__class__ }}")
     contact = factories.make_contact(writer, user)
     with pytest.raises(TemplateRenderError):
-        render_preview(row, contact, me={})
+        render_preview(row, contact)
 
 
 def test_preview_refuses_another_users_contact(writer: Session, user: User, other: User) -> None:
     row = _create(writer, user)
     contact = factories.make_contact(writer, other)
     with pytest.raises(ValueError, match="its own user's contact"):
-        render_preview(row, contact, me={})
+        render_preview(row, contact)
 
 
 def test_preview_uses_the_users_local_date(
@@ -648,13 +647,13 @@ def test_preview_uses_the_users_local_date(
             {"title": "Engineer", "started_on": date(2021, 6, 1), "ended_on": date(2026, 9, 1)},
         ],
     )
-    local = render_preview(row, contact, me={}, timezone="America/Los_Angeles")
+    local = render_preview(row, contact, timezone="America/Los_Angeles")
     assert local.body == "Changed 2026-09-01"
-    assert render_preview(row, contact, me={}, timezone="UTC").body == "Changed 2026-09-21"
+    assert render_preview(row, contact, timezone="UTC").body == "Changed 2026-09-21"
     # An unreadable zone falls back to UTC rather than failing the preview.
-    assert render_preview(row, contact, me={}, timezone="Nowhere/Land").body == "Changed 2026-09-21"
+    assert render_preview(row, contact, timezone="Nowhere/Land").body == "Changed 2026-09-21"
     examples = {
         e.field.name: e.example
-        for e in service.field_examples({}, contact, timezone="America/Los_Angeles")
+        for e in service.field_examples(contact, timezone="America/Los_Angeles")
     }
     assert examples["last_position_change"] == "2026-09-01"

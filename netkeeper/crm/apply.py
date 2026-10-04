@@ -117,7 +117,7 @@ from netkeeper.models import (
     User,
     normalize_public_id,
 )
-from netkeeper.scoping import scoped
+from netkeeper.scoping import scoped, scoped_contacts
 
 log = logging.getLogger(__name__)
 
@@ -237,7 +237,7 @@ class AgingCounts:
 def known_urns(session: Session, user: User) -> frozenset[str]:
     """Every URN ``user``'s contacts carry: what an incremental sync may stop on. Read-only."""
     statement = (
-        scoped(user, Contact).with_only_columns(Contact.li_urn).where(Contact.li_urn.is_not(None))
+        scoped_contacts(user).with_only_columns(Contact.li_urn).where(Contact.li_urn.is_not(None))
     )
     return frozenset(urn for urn in session.scalars(statement) if urn is not None)
 
@@ -397,7 +397,7 @@ def _slug_known(session: Session, user: User, slug: str) -> bool:
     Any contact counts, archived or not: a person who rejected a card's contact
     (which archives it) is not asked about the same card again on the next run.
     """
-    held = scoped(user, Contact).with_only_columns(Contact.id).where(Contact.li_public_id == slug)
+    held = scoped_contacts(user).with_only_columns(Contact.id).where(Contact.li_public_id == slug)
     if session.scalars(held.limit(1)).first() is not None:
         return True
     alias = (
@@ -595,7 +595,7 @@ def age_unseen(
     # confirmed, so it neither ages nor counts toward the shares below. One can
     # only hold a URN here by a path other than a sync (a merge, an edit): a
     # sync that sees its URN confirms it before this runs.
-    statement = scoped(user, Contact).where(
+    statement = scoped_contacts(user).where(
         Contact.li_urn.is_not(None),
         Contact.merged_into_id.is_(None),
         Contact.needs_review_at.is_(None),
@@ -1076,7 +1076,7 @@ def _mark_seen(session: Session, user: User, *, urns: set[str], public_ids: set[
     reconnected = 0
     matched_by_urn: set[int] = set()
     if urns:
-        statement = scoped(user, Contact).where(Contact.li_urn.in_(sorted(urns)))
+        statement = scoped_contacts(user).where(Contact.li_urn.in_(sorted(urns)))
         for contact in session.scalars(statement):
             matched_by_urn.add(contact.id)
             if contact.li_disconnected_at is not None:
@@ -1088,7 +1088,7 @@ def _mark_seen(session: Session, user: User, *, urns: set[str], public_ids: set[
                 contact.li_not_found_count = 0
                 contact.li_not_found_since = None
     if public_ids:
-        statement = scoped(user, Contact).where(Contact.li_public_id.in_(sorted(public_ids)))
+        statement = scoped_contacts(user).where(Contact.li_public_id.in_(sorted(public_ids)))
         for contact in session.scalars(statement):
             if contact.id in matched_by_urn:
                 continue  # already given the fuller urns-branch treatment above

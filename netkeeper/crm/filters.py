@@ -168,7 +168,12 @@ from netkeeper.models import (
 # ``ListMember`` below is the predicate; the table it reads needs the other name.
 from netkeeper.models import ListMember as ListMemberRow
 from netkeeper.models.base import utcnow
-from netkeeper.scoping import get_scoped, scoped, scoped_count, scoped_update
+from netkeeper.scoping import (
+    get_scoped,
+    scoped_contacts,
+    scoped_contacts_count,
+    scoped_contacts_update,
+)
 
 log = logging.getLogger(__name__)
 
@@ -940,9 +945,9 @@ def compile_filter(
     now: datetime | None = None,
     all_lists: Mapping[int, ContactList] | None = None,
 ) -> Select[tuple[Contact]]:
-    """``scoped(user, Contact)`` filtered by ``tree``. Sort and page it with the helpers below."""
+    """``scoped_contacts(user)`` filtered by ``tree``. Sort and page it with the helpers below."""
     where = compile_where(user, tree, session=session, now=now, all_lists=all_lists)
-    return scoped(user, Contact).where(where)
+    return scoped_contacts(user).where(where)
 
 
 def compile_count(
@@ -953,15 +958,15 @@ def compile_count(
     now: datetime | None = None,
     all_lists: Mapping[int, ContactList] | None = None,
 ) -> Select[tuple[int]]:
-    """``scoped_count(user, Contact)`` filtered by ``tree``."""
+    """``scoped_contacts_count(user)`` filtered by ``tree``."""
     where = compile_where(user, tree, session=session, now=now, all_lists=all_lists)
-    return scoped_count(user, Contact).where(where)
+    return scoped_contacts_count(user).where(where)
 
 
 def compile_update(
     user: User, tree: FilterTree, *, session: Session, now: datetime | None = None
 ) -> Update:
-    """``scoped_update(user, Contact)`` filtered by ``tree``, for a bulk action; add ``.values()``.
+    """``scoped_contacts_update(user)`` filtered by ``tree``, for a bulk action; add ``.values()``.
 
     The statement carries ``synchronize_session=False``. The ORM's default,
     ``"auto"``, first tries to evaluate the WHERE in Python against the session,
@@ -973,7 +978,7 @@ def compile_update(
     write, or a fresh session, is the pattern.
     """
     return (
-        scoped_update(user, Contact)
+        scoped_contacts_update(user)
         .where(compile_where(user, tree, session=session, now=now))
         .execution_options(synchronize_session=False)
     )

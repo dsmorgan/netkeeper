@@ -489,7 +489,7 @@ REVIEWABLE: Final = frozenset({CampaignStatus.DRAFT, CampaignStatus.REVIEWING})
 
 
 def campaign_status(
-    session: Session, user: User, campaign_id: int, *, me: Mapping[str, str], now: datetime
+    session: Session, user: User, campaign_id: int, *, now: datetime
 ) -> CampaignDetail:
     """One campaign: its steps and their progress, its enrollments, its next fire, and
     what its review still misses."""
@@ -544,7 +544,7 @@ def campaign_status(
     )
     gaps: tuple[campaign_review.Missing, ...] = ()
     if campaign.status in REVIEWABLE:
-        gaps = tuple(campaign_review.missing(session, user, campaign, me=me, now=now))
+        gaps = tuple(campaign_review.missing(session, user, campaign, now=now))
     start_editable = campaign.status in campaign_engine.START_EDITABLE and not (
         campaign_engine.has_fired(session, user, campaign_id)
     )

@@ -24,7 +24,6 @@ export type InsertTarget = 'subject' | 'body'
 const GROUPS: ReadonlyArray<{ group: MergeField['group']; label: string }> = [
   { group: 'contact', label: 'Contact' },
   { group: 'personal', label: 'Personal line' },
-  { group: 'me', label: 'You' },
   { group: 'campaign', label: 'Campaign' },
 ]
 
@@ -120,11 +119,7 @@ function FieldRow({
 
 function Example({ field }: { field: MergeField }) {
   if (field.example === null) {
-    return field.example_source === 'config' ? (
-      <>Not set under [me] in the config, so it renders empty.</>
-    ) : (
-      <>No value for this contact, so it renders empty.</>
-    )
+    return <>No value for this contact, so it renders empty.</>
   }
   if (field.example_source === 'placeholder') {
     return (
@@ -135,8 +130,7 @@ function Example({ field }: { field: MergeField }) {
   }
   return (
     <>
-      {field.example_source === 'contact' ? 'This contact: ' : 'From the config: '}
-      <span className="font-medium text-foreground">{field.example}</span>
+      This contact: <span className="font-medium text-foreground">{field.example}</span>
     </>
   )
 }

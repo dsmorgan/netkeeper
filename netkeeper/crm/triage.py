@@ -128,7 +128,14 @@ from netkeeper.models import (
     UserPosition,
 )
 from netkeeper.models.base import utcnow
-from netkeeper.scoping import get_scoped, scoped, scoped_count, scoped_update
+from netkeeper.scoping import (
+    get_scoped,
+    scoped,
+    scoped_contacts,
+    scoped_contacts_count,
+    scoped_count,
+    scoped_update,
+)
 
 log = logging.getLogger(__name__)
 
@@ -610,7 +617,7 @@ def progress(
     so the counter and :func:`next_contact` never disagree about what is left.
     """
     statement = (
-        scoped(user, Contact)
+        scoped_contacts(user)
         .with_only_columns(Contact.met, Contact.met_source, func.count())
         .where(Contact.archived_at.is_(None), Contact.merged_into_id.is_(None))
         .group_by(Contact.met, Contact.met_source)
@@ -1153,7 +1160,7 @@ def _shared_companies(session: Session, user: User, contact: Contact) -> list[Sh
         return []
     company = func.lower(func.trim(Contact.current_company))
     statement = (
-        scoped(user, Contact)
+        scoped_contacts(user)
         .with_only_columns(
             company,
             func.count(),
@@ -1590,7 +1597,7 @@ def _contacts_by_id(session: Session, user: User, ids: Sequence[int]) -> dict[in
     for start in range(0, len(unique), _CHUNK):
         chunk = unique[start : start + _CHUNK]
         for contact in session.scalars(
-            _locked(scoped(user, Contact).where(Contact.id.in_(chunk)).order_by(Contact.id))
+            _locked(scoped_contacts(user).where(Contact.id.in_(chunk)).order_by(Contact.id))
         ):
             found[contact.id] = contact
     return found
@@ -1612,14 +1619,14 @@ def _locked(statement: Select[tuple[Contact]]) -> Select[tuple[Contact]]:
 def _queue(
     user: User, states: Sequence[ContactMet], *, decided_by: MetSource | None = None
 ) -> Select[tuple[Contact]]:
-    """``scoped(user, Contact)`` narrowed to the live contacts in ``states``."""
-    return scoped(user, Contact).where(*_queue_where(states, decided_by))
+    """``scoped_contacts(user)`` narrowed to the live contacts in ``states``."""
+    return scoped_contacts(user).where(*_queue_where(states, decided_by))
 
 
 def _queue_count(
     user: User, states: Sequence[ContactMet], *, decided_by: MetSource | None = None
 ) -> Select[tuple[int]]:
-    return scoped_count(user, Contact).where(*_queue_where(states, decided_by))
+    return scoped_contacts_count(user).where(*_queue_where(states, decided_by))
 
 
 def _queue_where(
@@ -1722,7 +1729,7 @@ def _live_contact(session: Session, user: User, contact_id: int) -> Contact:
     check and the decision's write.
     """
     contact = session.scalars(
-        _locked(scoped(user, Contact).where(Contact.id == contact_id))
+        _locked(scoped_contacts(user).where(Contact.id == contact_id))
     ).one_or_none()
     if contact is None:
         raise NotFound(f"contact {contact_id} is not one of user {user.id}'s")

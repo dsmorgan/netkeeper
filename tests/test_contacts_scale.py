@@ -41,7 +41,7 @@ from netkeeper.models import (
     User,
     UserKind,
 )
-from netkeeper.scoping import scoped
+from netkeeper.scoping import scoped, scoped_contacts
 
 CSRF = {"X-Netkeeper-Client": "1"}
 CONTACTS = 10_000
@@ -92,7 +92,7 @@ def _insert_crowd(session: Session, user: User) -> None:
     ]
     session.execute(insert(Contact), rows)
     session.flush()
-    ids = list(session.scalars(scoped(user, Contact).with_only_columns(Contact.id)))
+    ids = list(session.scalars(scoped_contacts(user).with_only_columns(Contact.id)))
     assert len(ids) == CONTACTS
     session.execute(
         insert(ContactEmail),
@@ -257,7 +257,7 @@ def crowd_lists(running_app: FastAPI, crowd: int) -> tuple[int, int]:
         static = ContactList(user_id=user.id, name="First 2000", kind=ListKind.STATIC)
         session.add(static)
         session.flush()
-        ids = list(session.scalars(scoped(user, Contact).with_only_columns(Contact.id)))[
+        ids = list(session.scalars(scoped_contacts(user).with_only_columns(Contact.id)))[
             :LIST_MEMBERS
         ]
         session.execute(

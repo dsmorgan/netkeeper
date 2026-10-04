@@ -51,7 +51,19 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import Delete, Select, Update, delete, event, func, inspect, select, update
+from sqlalchemy import (
+    ColumnElement,
+    Delete,
+    Select,
+    Update,
+    delete,
+    event,
+    false,
+    func,
+    inspect,
+    select,
+    update,
+)
 from sqlalchemy.orm import (
     InstanceState,
     Load,
@@ -66,7 +78,7 @@ from sqlalchemy.sql import ClauseElement, visitors
 from sqlalchemy.sql.base import Executable
 from sqlalchemy.sql.expression import TableClause
 
-from netkeeper.models import Base, User, UserOwned
+from netkeeper.models import Base, Contact, User, UserOwned
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +131,43 @@ def get_scoped[T: UserOwned](session: Session, user: User, model: type[T], id: i
     """
     (key,) = class_mapper(model).primary_key
     return session.scalars(scoped(user, model).where(key == id)).one_or_none()
+
+
+# --- the network: contacts other than the self contact (#342) ------------------
+
+
+def not_self() -> ColumnElement[bool]:
+    """``contacts.is_self`` is false: the row is someone in the network, not the user.
+
+    For a statement that reaches ``contacts`` through a join; a statement that
+    starts from contacts uses :func:`scoped_contacts` and its siblings instead.
+    """
+    return Contact.is_self.is_(false())
+
+
+def scoped_contacts(user: User) -> Select[tuple[Contact]]:
+    """``user``'s contacts, less the self contact: :func:`scoped` for anything that lists,
+    counts, searches, matches, exports, merges, enrolls or enriches contacts.
+
+    The self contact holds the user's own details for test sends (#342). Only
+    :mod:`netkeeper.crm.self_contact` reaches it, through plain :func:`scoped`.
+    """
+    return scoped(user, Contact).where(not_self())
+
+
+def scoped_contacts_count(user: User) -> Select[tuple[int]]:
+    """:func:`scoped_count` of :func:`scoped_contacts`."""
+    return scoped_count(user, Contact).where(not_self())
+
+
+def scoped_contacts_update(user: User) -> Update:
+    """:func:`scoped_update` of :func:`scoped_contacts`, for bulk actions."""
+    return scoped_update(user, Contact).where(not_self())
+
+
+def get_scoped_contact(session: Session, user: User, contact_id: int) -> Contact | None:
+    """:func:`get_scoped` for a contact in the network: None for the self contact too."""
+    return session.scalars(scoped_contacts(user).where(Contact.id == contact_id)).one_or_none()
 
 
 def unscoped[S: Executable](statement: S) -> S:

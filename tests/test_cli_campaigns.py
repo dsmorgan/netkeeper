@@ -26,7 +26,6 @@ from typer.testing import CliRunner
 from netkeeper import cli as cli_module
 from netkeeper import migrations
 from netkeeper.campaigns import templates as template_service
-from netkeeper.campaigns.render import me_fields
 from netkeeper.cli import app as cli
 from netkeeper.config import Settings
 from netkeeper.crm import lists as list_service
@@ -58,7 +57,6 @@ from netkeeper.web.api.campaigns import CampaignResultsOut, results_out
 
 runner = CliRunner()
 BODY = "Hi {{ first_name }}, it has been a while."
-ME = me_fields(Settings().me)  # what the CLI renders with, from the default config
 
 
 @pytest.fixture
@@ -103,7 +101,6 @@ def world(cli_db: sessionmaker[Session]) -> World:
                 channel=TemplateChannel.EMAIL,
                 subject="Catching up",
                 body=BODY,
-                me_keys=(),
             ).id
             for n in (1, 2)
         ]
@@ -195,12 +192,12 @@ def _complete_review(world: World, campaign_id: int) -> None:
         ).all()
         for step in steps:
             plan = campaign_review.prepare_test_send(
-                session, user, campaign_id, step.id, enrollment_id=None, me=ME, today=now.date()
+                session, user, campaign_id, step.id, today=now.date()
             )
             campaign_review.record_test_send(
                 session, user, plan, gmail_message_id=f"fake-{step.id}", now=now
             )
-        assert campaign_review.record_lint(session, user, campaign_id, me=ME, now=now).clean
+        assert campaign_review.record_lint(session, user, campaign_id, now=now).clean
 
 
 # --- create -------------------------------------------------------------------------

@@ -27,7 +27,6 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper import __version__, migrations
 from netkeeper.campaigns import gmail_oauth
 from netkeeper.campaigns import schedule as schedule_module
-from netkeeper.campaigns.render import me_fields
 from netkeeper.config import ConfigError, Settings, load_settings, render_toml
 from netkeeper.crm import do_not_send, import_runs, new_contact
 from netkeeper.crm.archive import ArchiveImport, import_archive
@@ -38,6 +37,7 @@ from netkeeper.crm.filters import FilterError, FilterTree, SortKey, parse_filter
 from netkeeper.crm.history import ImportReport, import_workbook
 from netkeeper.crm.history_workbook import WorkbookError, read_workbook
 from netkeeper.crm.lists import ListCount, find_list, list_lists, list_views, member_counts
+from netkeeper.crm.self_contact import ensure_self_contact
 from netkeeper.crm.tags import ensure_default_rules, find_tag, list_tags, run_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.linkedin.activity_lock import SINGLE_ACCOUNT_KEY, account_key
@@ -310,7 +310,7 @@ def _with_derived_week(rendered: str, settings: Settings) -> str:
 
 @db_app.command("upgrade")
 def db_upgrade(ctx: typer.Context) -> None:
-    """Apply pending migrations, then make sure the local user exists."""
+    """Apply pending migrations, then make sure the local user and its self contact exist."""
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
     url = database_url()
@@ -319,6 +319,7 @@ def db_upgrade(ctx: typer.Context) -> None:
         migrations.upgrade(engine)
         with session_scope(make_session_factory(engine), write=True) as session:
             user = ensure_local_user(session, settings=settings)
+            ensure_self_contact(session, user, legacy=settings.legacy_me)
         revision = migrations.current_revision(engine)
     finally:
         engine.dispose()
@@ -2587,7 +2588,6 @@ def campaigns_status(
     opt-outs per step. For a draft or reviewing campaign it lists what activation
     still needs.
     """
-    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
     with _campaign_db() as factory, session_scope(factory) as session, _campaign_errors():
         user = _local_user_or_exit(session)
         now = datetime.now(UTC)
@@ -2595,9 +2595,7 @@ def campaigns_status(
         if as_json:
             typer.echo(results_out(results).model_dump_json(indent=2))
             return
-        detail = campaign_service.campaign_status(
-            session, user, campaign_id, me=me_fields(settings.me), now=now
-        )
+        detail = campaign_service.campaign_status(session, user, campaign_id, now=now)
         by_step = {r.step_id: r for r in results.steps}
         c = detail.campaign
         lines = [
@@ -2788,7 +2786,6 @@ def campaigns_review_step(
     them), every blocked message, and whether the step is approved. Approve the
     step with `netkeeper campaigns approve-step`.
     """
-    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
     with _campaign_db() as factory, session_scope(factory) as session, _campaign_errors():
         user = _local_user_or_exit(session)
         step = campaign_review.step_at(session, user, campaign_id, position)
@@ -2797,7 +2794,6 @@ def campaigns_review_step(
             user,
             campaign_id,
             step.id,
-            me=me_fields(settings.me),
             now=datetime.now(UTC),
             offset=index - 1,
             limit=1,
@@ -2857,8 +2853,6 @@ def campaigns_approve_step(
     confirm; there is no flag to skip the question. Page through the rest with
     `review-step`.
     """
-    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
-    me = me_fields(settings.me)
     picked = sorted(set(enrollment or ()))
     with _campaign_db() as factory:
         # Read, then ask, then write: a writer held across the prompt would lock out serve.
@@ -2870,7 +2864,6 @@ def campaigns_approve_step(
                 user,
                 campaign_id,
                 step.id,
-                me=me,
                 now=datetime.now(UTC),
                 limit=campaign_review.STEP_PAGE_MAX,
             )
@@ -2891,7 +2884,6 @@ def campaigns_approve_step(
                         user,
                         campaign_id,
                         step.id,
-                        me=me,
                         now=datetime.now(UTC),
                         offset=offset,
                         limit=campaign_review.STEP_PAGE_MAX,
@@ -2950,7 +2942,7 @@ def campaigns_approve_step(
             user = _local_user_or_exit(session)
             if review.per_message:
                 campaign_review.approve_messages(
-                    session, user, campaign_id, step.id, seen, me=me, now=datetime.now(UTC)
+                    session, user, campaign_id, step.id, seen, now=datetime.now(UTC)
                 )
             else:
                 campaign_review.approve_step(
@@ -2959,7 +2951,6 @@ def campaigns_approve_step(
                     campaign_id,
                     step.id,
                     fingerprint_seen=review.fingerprint,
-                    me=me,
                     now=datetime.now(UTC),
                 )
     if review.per_message:
@@ -3004,7 +2995,6 @@ def campaigns_activate(
     it runs.
     """
     settings = _load_settings_or_exit(ctx.ensure_object(CliState))
-    me = me_fields(settings.me)
     with _campaign_db() as factory:
         # Read, then ask, then write: a writer held across the prompt would lock out serve.
         with session_scope(factory) as session, _campaign_errors():
@@ -3013,7 +3003,7 @@ def campaigns_activate(
             name = campaign.name
             timezone = user.timezone
             now = datetime.now(UTC)
-            gaps = campaign_review.missing(session, user, campaign, me=me, now=now)
+            gaps = campaign_review.missing(session, user, campaign, now=now)
             guards, note = campaign_review.guard_summary_and_note(session, user, campaign, now=now)
             chosen = _start_or_exit(start, now_flag, timezone=timezone, now=now)
             starts_at = campaign_service.resolve_start(
@@ -3053,7 +3043,6 @@ def campaigns_activate(
                     user,
                     campaign_id,
                     settings=settings,
-                    me=me,
                     now=datetime.now(UTC),
                     starts_at=starts_at,
                 )
@@ -3191,9 +3180,7 @@ def campaigns_step_time(
         _campaign_errors(),
     ):
         user = _local_user_or_exit(session)
-        detail = campaign_service.campaign_status(
-            session, user, campaign_id, me=me_fields(settings.me), now=datetime.now(UTC)
-        )
+        detail = campaign_service.campaign_status(session, user, campaign_id, now=datetime.now(UTC))
         step = next((s.step for s in detail.steps if s.step.position == position), None)
         if step is None:
             typer.echo(f"error: campaign {campaign_id} has no step {position}", err=True)

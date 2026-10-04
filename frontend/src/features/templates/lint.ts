@@ -44,6 +44,8 @@ export const WHY_IT_MATTERS: Readonly<Record<LintRule, string>> = {
   bad_link: "A link that doesn't parse won't open for the person you send it to.",
   missing_value:
     'This contact has no value for the field, so the message has a blank where it goes.',
+  removed_field:
+    'The me.* fields were removed, so this renders as a blank. Write your own details into the template; a test send shows the contact fields with yours, from Settings.',
 }
 
 /**
@@ -66,6 +68,8 @@ export const PROMPT_RULES: Readonly<Record<LintRule, string | null>> = {
   missing_subject: 'Give every email a subject line.',
   bad_link: 'Write every link in full, starting with https://.',
   missing_value: null,
+  removed_field:
+    'Use no placeholder for a detail about me. Leave out my own name and signature: I add them myself.',
 }
 
 const LINE_PREFIX = /^line (\d+): /

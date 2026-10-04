@@ -328,7 +328,6 @@ def _seed_templates(session: Session, user: User) -> int:
         channel=TemplateChannel.EMAIL,
         subject="Hello",
         body=body,
-        me_keys=(),
     )
     session.add(
         Template(
@@ -348,7 +347,6 @@ def _seed_templates(session: Session, user: User) -> int:
         channel=TemplateChannel.LINKEDIN,
         subject=None,
         body=body,
-        me_keys=(),
     )
     session.flush()
     return 2
@@ -450,7 +448,6 @@ def _seed_campaigns(session: Session, user: User) -> int:
         channel=TemplateChannel.EMAIL,
         subject="Hello",
         body="Hi {{ first_name }}",
-        me_keys=(),
     )
     for name in ("first", "second"):
         campaign_service.create_campaign(

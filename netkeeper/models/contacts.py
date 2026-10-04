@@ -232,6 +232,14 @@ class Contact(UserOwned, TimestampMixin, Base):
         Index("ix_contacts_user_id_met_source", "user_id", "met_source"),
         Index("ix_contacts_user_id_archived_at", "user_id", "archived_at"),
         Index("ix_contacts_user_id_last_contacted_at", "user_id", "last_contacted_at"),
+        # One self contact per user (#342): NULL-free, so a partial unique index on user_id.
+        Index(
+            "uq_contacts_user_id_self",
+            "user_id",
+            unique=True,
+            sqlite_where=text("is_self"),
+            postgresql_where=text("is_self"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, sort_order=-100)
@@ -319,6 +327,12 @@ class Contact(UserOwned, TimestampMixin, Base):
         nullable=False,
         default=dict,
         server_default=text("'{}'"),
+    )
+    # The user's own details, held as a contact (#342): what a test send renders with.
+    # One per user, never part of the network: every query that lists, counts, matches
+    # or acts on contacts leaves it out through ``netkeeper.scoping.scoped_contacts``.
+    is_self: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
     )
     # Set on the loser of a merge (spec 8.2). Losing the winner leaves the loser alone.
     merged_into_id: Mapped[int | None] = mapped_column(

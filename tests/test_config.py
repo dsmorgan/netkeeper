@@ -9,8 +9,8 @@ from typer.testing import CliRunner
 from netkeeper.cli import app
 from netkeeper.config import (
     ConfigError,
+    LegacyMe,
     LinkedInSettings,
-    MeSettings,
     Settings,
     load_settings,
     render_toml,
@@ -18,10 +18,6 @@ from netkeeper.config import (
 from netkeeper.paths import data_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-# The identity the example file ships with; the built-in defaults are blank.
-EXAMPLE_ME = MeSettings(
-    name="Your Name", website="https://example.com", signature="Your first name"
-)
 
 
 @pytest.fixture
@@ -62,22 +58,22 @@ def test_example_config_is_appendix_b_verbatim() -> None:
     assert (REPO_ROOT / "config.example.toml").read_text() == _appendix_b()
 
 
-def test_example_config_loads_cleanly_with_placeholder_identity(
+def test_example_config_loads_cleanly_as_the_defaults(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     example = REPO_ROOT / "config.example.toml"
     with caplog.at_level(logging.WARNING, logger="netkeeper.config"):
         settings = load_settings(example)
     assert settings.source_path == example
-    assert settings.me == EXAMPLE_ME
-    assert replace(settings, source_path=None, me=MeSettings()) == Settings()
+    assert replace(settings, source_path=None) == Settings()
+    assert settings.legacy_me is None
     assert caplog.records == []
 
 
-def test_built_in_identity_defaults_are_blank() -> None:
-    assert MeSettings() == MeSettings(
-        name="", website="", scheduling_link="", signature="", city="", extra={}
-    )
+def test_the_example_config_has_no_me_section() -> None:
+    """#342: [me] is gone; your own details are the self contact."""
+    assert "me" not in tomllib.loads((REPO_ROOT / "config.example.toml").read_text())
+    assert not hasattr(Settings(), "me")
 
 
 def test_explicit_path_wins(isolated: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -277,36 +273,42 @@ def test_list_shape_is_validated(isolated: Path, body: str, key: str) -> None:
     assert key in str(info.value)
 
 
-def test_me_extra_collects_additional_merge_fields(
+def test_an_old_me_section_loads_with_one_deprecation_warning_and_is_ignored(
     isolated: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    path = _write(isolated / "c.toml", '[me]\nname = "Ada"\ncompany = "Analytical Engines"\n')
-    with caplog.at_level(logging.WARNING, logger="netkeeper.config"):
-        settings = load_settings(path)
-    assert settings.me == MeSettings(name="Ada", extra={"company": "Analytical Engines"})
-    assert caplog.records == []
-
-
-def test_me_extra_keys_no_template_can_name_are_kept_with_a_warning(
-    isolated: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    body = '[me]\npodcast = "P"\n"my-site" = "a"\n_tok = "b"\n2nd = "c"\n'
+    """#342: an older config still loads. ``[me]`` is left out of the settings, warned
+    about once, and only name, website and city are kept aside to seed the self contact."""
+    body = (
+        '[me]\nname = " Ada Lovelace "\nwebsite = "https://ada.example"\nsignature = "A"\n'
+        'scheduling_link = "https://ada.example/meet"\ncity = "London"\npodcast = "P"\n'
+        "[web]\nport = 9001\n"
+    )
     path = _write(isolated / "c.toml", body)
     with caplog.at_level(logging.WARNING, logger="netkeeper.config"):
         settings = load_settings(path)
-    assert settings.me.extra == {"podcast": "P", "my-site": "a", "_tok": "b", "2nd": "c"}
-    warned = [record.getMessage() for record in caplog.records]
-    assert len(warned) == 3
-    for key in ("me.my-site", "me._tok", "me.2nd"):
-        assert any(key in message and "cannot be used as a merge field" in message
-                   for message in warned), key  # fmt: skip
-    assert not any("podcast" in message for message in warned)
+    assert settings.web.port == 9001
+    assert settings.legacy_me == LegacyMe(
+        name="Ada Lovelace", website="https://ada.example", city="London"
+    )
+    assert replace(settings, source_path=None, legacy_me=None, web=Settings().web) == Settings()
+    [warning] = [record.getMessage() for record in caplog.records]
+    assert "ignoring the deprecated [me] section" in warning
+    assert "About you" in warning and "Remove [me]" in warning
 
 
-def test_me_extra_must_be_strings(isolated: Path) -> None:
-    path = _write(isolated / "c.toml", "[me]\nyears = 12\n")
-    with pytest.raises(ConfigError, match=r"me\.years must be a string"):
-        load_settings(path)
+def test_an_old_me_section_with_values_that_are_not_strings_still_loads(
+    isolated: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The section is ignored, so nothing in it can stop netkeeper from starting."""
+    path = _write(isolated / "c.toml", '[me]\nname = 12\ncity = "Paris"\nyears = 3\n')
+    with caplog.at_level(logging.WARNING, logger="netkeeper.config"):
+        settings = load_settings(path)
+    assert settings.legacy_me == LegacyMe(city="Paris")
+    assert len(caplog.records) == 1
+
+
+def test_a_config_without_me_has_no_legacy_values(isolated: Path) -> None:
+    assert load_settings(_write(isolated / "c.toml", "[web]\nport = 1\n")).legacy_me is None
 
 
 def test_malformed_toml_raises_config_error(isolated: Path) -> None:
@@ -362,7 +364,6 @@ def test_render_toml_round_trips_through_load_settings(isolated: Path) -> None:
     original = load_settings(
         _write(
             isolated / "c.toml",
-            '[me]\nname = "Ada"\ncompany = "Quote \\"co\\""\n'
             '[campaigns]\nholidays = ["2026-12-25"]\nlinkedin_auto_send = true\n'
             "[linkedin.pacing]\ndistraction_p = 0.25\n",
         )
@@ -373,7 +374,7 @@ def test_render_toml_round_trips_through_load_settings(isolated: Path) -> None:
 
 def test_render_toml_of_defaults_matches_example_file() -> None:
     example = (REPO_ROOT / "config.example.toml").read_text()
-    rendered = render_toml(replace(Settings(), me=EXAMPLE_ME))
+    rendered = render_toml(Settings())
     assert tomllib.loads(rendered) == tomllib.loads(example)
 
 

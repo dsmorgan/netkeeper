@@ -101,7 +101,7 @@ from netkeeper.models import (
     SavedView,
     User,
 )
-from netkeeper.scoping import get_scoped, scoped, scoped_delete
+from netkeeper.scoping import get_scoped, scoped, scoped_contacts, scoped_delete
 from netkeeper.services.settings_kv import get_setting, set_setting
 
 log = logging.getLogger(__name__)
@@ -480,7 +480,7 @@ def add_members(session: Session, user: User, list_id: int, contact_ids: Sequenc
         return 0
     owned_ids = set(
         session.scalars(
-            scoped(user, Contact).with_only_columns(Contact.id).where(Contact.id.in_(unique_ids))
+            scoped_contacts(user).with_only_columns(Contact.id).where(Contact.id.in_(unique_ids))
         )
     )
     missing = [contact_id for contact_id in unique_ids if contact_id not in owned_ids]
@@ -543,7 +543,7 @@ def _static_members_base(user: User, row: ContactList) -> Select[tuple[Contact]]
     query so the two can never drift on what "live" means.
     """
     return (
-        scoped(user, Contact)
+        scoped_contacts(user)
         .join(ListMember, ListMember.contact_id == Contact.id)
         .where(
             ListMember.list_id == row.id,

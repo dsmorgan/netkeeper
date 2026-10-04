@@ -84,7 +84,6 @@ from netkeeper.models import (
     MESSAGE_SUBJECT_MAX_LENGTH,
     Campaign,
     CampaignStatus,
-    Contact,
     ContactEmail,
     ContactSource,
     DoNotSendReason,
@@ -100,7 +99,7 @@ from netkeeper.models import (
 )
 from netkeeper.models import Message as MessageRow
 from netkeeper.models.base import utcnow
-from netkeeper.scoping import get_scoped, scoped
+from netkeeper.scoping import get_scoped, get_scoped_contact, scoped
 from netkeeper.services import campaign_engine as engine
 
 log = logging.getLogger(__name__)
@@ -571,7 +570,7 @@ def record_reply(session: Session, user: User, reply: Reply) -> bool:
     )
     enrollment.replied_at = enrollment.replied_at or message.internal_date
     if reply.unsubscribe:
-        contact = get_scoped(session, user, Contact, enrollment.contact_id)
+        contact = get_scoped_contact(session, user, enrollment.contact_id)
         if contact is not None and not contact.do_not_contact:
             contact.do_not_contact = True
             contact.do_not_contact_reason = (

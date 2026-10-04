@@ -23,7 +23,6 @@ from netkeeper.campaigns.render import (
     MAX_NESTING,
     MAX_OUTPUT_CHARS,
     MAX_TRUNCATE_LENGTH,
-    ME_FIELDS,
     PLACEHOLDER_EXAMPLES,
     FieldGroup,
     LintIssue,
@@ -35,20 +34,16 @@ from netkeeper.campaigns.render import (
     ago,
     has_errors,
     lint,
-    me_fields,
     merge_fields,
     placeholder_example,
     render,
 )
-from netkeeper.config import MeSettings
 from netkeeper.models import TemplateChannel
 
 EMAIL = TemplateChannel.EMAIL
 LINKEDIN = TemplateChannel.LINKEDIN
 TODAY = date(2026, 9, 26)
-ME = {"name": "Ada Fixture", "website": "https://ada.example", "scheduling_link": "",
-      "signature": "Ada", "city": ""}  # fmt: skip
-GOOD_BODY = "Hi {{ first_name }}, {{ me.name }} here."
+GOOD_BODY = "Hi {{ first_name }}, Ada here."
 
 
 def _rules(issues: list[LintIssue]) -> list[tuple[LintRule, str | None]]:
@@ -56,7 +51,7 @@ def _rules(issues: list[LintIssue]) -> list[tuple[LintRule, str | None]]:
 
 
 def _values(**contact: object) -> MergeValues:
-    return MergeValues(contact=contact, me=ME)
+    return MergeValues(contact=contact)
 
 
 # --- lint: a clean template -----------------------------------------------------------
@@ -64,9 +59,8 @@ def _values(**contact: object) -> MergeValues:
 
 def test_a_template_naming_every_merge_field_lints_clean() -> None:
     contact = " ".join(f"{{{{ {name} }}}}" for name in CONTACT_FIELDS)
-    me = " ".join(f"{{{{ me.{name} }}}}" for name in ME_FIELDS)
     body = (
-        f"{contact} {me} {{{{ campaign.name }}}} {{{{ step.number }}}} "
+        f"{contact} {{{{ campaign.name }}}} {{{{ step.number }}}} "
         "{{ previous_send_date | ago }} {{ personal_line }}"
         "{% if company %}at {{ company | upper }}{% elif title %}!{% else %}?{% endif %}"
         "{{ years_since_connected + 1 }} {{ step.number * 2 }} {{ first_name ~ '!' }}"
@@ -75,29 +69,62 @@ def test_a_template_naming_every_merge_field_lints_clean() -> None:
         "{{ first_name | default('there') | trim | title | lower | capitalize }}"
         "{{ company | truncate(10, true, end='..', leeway=0) }} {{ none }} {{ true }}"
     )
-    assert lint(EMAIL, "Hello {{ first_name }}", body, ME.keys()) == []
+    assert lint(EMAIL, "Hello {{ first_name }}", body) == []
     assert not has_errors([])
 
 
-def test_extra_me_keys_from_the_config_are_merge_fields() -> None:
-    me = me_fields(MeSettings(name="Ada", extra={"podcast": "Fixture Hour"}))
-    assert me["podcast"] == "Fixture Hour" and set(ME_FIELDS) <= set(me)
-    body = "{{ first_name }}: {{ me.podcast }}"
-    assert lint(LINKEDIN, None, body, me.keys()) == []
-    assert _rules(lint(LINKEDIN, None, body, ME.keys())) == [
-        (LintRule.UNDEFINED_VARIABLE, "me.podcast")
-    ]
+@pytest.mark.parametrize(
+    ("body", "name"),
+    [
+        ("{{ first_name }}, {{ me.name }} here", "me.name"),
+        ("{{ first_name }} {{ me.signature }}", "me.signature"),
+        ("{{ first_name }} {{ me.podcast }}", "me.podcast"),  # was an extra [me] key
+        ("{{ first_name }} {{ me }}", "me"),
+        ("{{ first_name }} {{ me.name | upper }}", "me.name"),
+    ],
+)
+def test_a_me_field_is_a_removed_field_error_that_says_what_to_do(body: str, name: str) -> None:
+    """#320, #342: templates use contact fields only. A template written for ``me.*`` is told
+    why, rather than seeing a bare "not a merge field"."""
+    [issue] = lint(LINKEDIN, None, body)
+    assert (issue.rule, issue.field, issue.severity) == (
+        LintRule.REMOVED_FIELD,
+        name,
+        Severity.ERROR,
+    )
+    assert issue.line == 1
+    assert "were removed" in issue.message
+    assert "write your own details" in issue.message and "About you" in issue.message
+    assert has_errors([issue])
+
+
+def test_a_template_saved_with_a_me_field_renders_it_empty_with_the_error() -> None:
+    """An old template still renders (a preview shows it), never sends: the error blocks
+    activation, and the field is empty rather than a value from anywhere."""
+    rendered = render(
+        LINKEDIN,
+        None,
+        "Hi {{ first_name }}, {{ me.name }} here",
+        _values(first_name="Bo"),
+        today=TODAY,
+    )
+    assert rendered.body == "Hi Bo,  here"
+    assert _rules(list(rendered.issues)) == [(LintRule.REMOVED_FIELD, "me.name")]
+
+
+def test_the_removed_field_rule_is_pinned() -> None:
+    """The rule's value is stored in ``lint_json`` and read by the editor."""
+    assert LintRule.REMOVED_FIELD.value == "removed_field"
 
 
 # --- lint: each rule is an error --------------------------------------------------------
 
 
 def test_undefined_variables_are_errors() -> None:
-    body = "{{ first_name }} {{ nickname }} {{ me.age }} {{ campaign.owner }} {{ step.when }}"
-    issues = lint(LINKEDIN, None, body, ME.keys())
+    body = "{{ first_name }} {{ nickname }} {{ campaign.owner }} {{ step.when }}"
+    issues = lint(LINKEDIN, None, body)
     assert _rules(issues) == [
         (LintRule.UNDEFINED_VARIABLE, "nickname"),
-        (LintRule.UNDEFINED_VARIABLE, "me.age"),
         (LintRule.UNDEFINED_VARIABLE, "campaign.owner"),
         (LintRule.UNDEFINED_VARIABLE, "step.when"),
     ]
@@ -106,13 +133,13 @@ def test_undefined_variables_are_errors() -> None:
 
 
 def test_a_group_of_fields_used_whole_or_computed_is_an_error() -> None:
-    body = "{{ first_name }} {{ me }} {{ me | upper }} {{ me[first_name] }}"
-    issues = lint(LINKEDIN, None, body, ME.keys())
+    body = "{{ first_name }} {{ step }} {{ step | upper }} {{ step[first_name] }}"
+    issues = lint(LINKEDIN, None, body)
     assert [(issue.rule, issue.field, issue.message) for issue in issues] == [
         (
             LintRule.UNDEFINED_VARIABLE,
-            "me",
-            "`me` is a group of fields; name one, like `me.name`",
+            "step",
+            "`step` is a group of fields; name one, like `step.number`",
         ),
         (
             LintRule.UNSUPPORTED,
@@ -124,7 +151,7 @@ def test_a_group_of_fields_used_whole_or_computed_is_an_error() -> None:
 
 def test_the_globals_jinja_ships_are_not_merge_fields() -> None:
     body = "{{ first_name }}{{ range }}{{ cycler }}{{ lipsum }}"
-    assert {name for _, name in _rules(lint(LINKEDIN, None, body, ME.keys()))} == {
+    assert {name for _, name in _rules(lint(LINKEDIN, None, body))} == {
         "range",
         "cycler",
         "lipsum",
@@ -132,29 +159,29 @@ def test_the_globals_jinja_ships_are_not_merge_fields() -> None:
 
 
 def test_a_body_with_no_per_contact_field_is_an_error() -> None:
-    issues = lint(LINKEDIN, None, "Hi, {{ me.name }} here. {{ campaign.name }}", ME.keys())
+    issues = lint(LINKEDIN, None, "Hi, Ada here. {{ campaign.name }}")
     assert _rules(issues) == [(LintRule.NO_CONTACT_FIELD, None)]
     assert issues[0].part is Part.BODY and issues[0].severity is Severity.ERROR
 
 
 def test_a_contact_field_in_the_subject_alone_does_not_count() -> None:
-    issues = lint(EMAIL, "Hi {{ first_name }}", "Hello there", ME.keys())
+    issues = lint(EMAIL, "Hi {{ first_name }}", "Hello there")
     assert _rules(issues) == [(LintRule.NO_CONTACT_FIELD, None)]
 
 
 def test_personal_line_counts_as_a_per_contact_field() -> None:
-    assert lint(LINKEDIN, None, "{{ personal_line }}", ME.keys()) == []
+    assert lint(LINKEDIN, None, "{{ personal_line }}") == []
 
 
 @pytest.mark.parametrize("subject", [None, "", "   "])
 def test_an_email_with_no_subject_is_an_error(subject: str | None) -> None:
-    issues = lint(EMAIL, subject, GOOD_BODY, ME.keys())
+    issues = lint(EMAIL, subject, GOOD_BODY)
     assert _rules(issues) == [(LintRule.MISSING_SUBJECT, None)]
     assert issues[0].part is Part.SUBJECT
 
 
 def test_a_linkedin_message_needs_no_subject() -> None:
-    assert lint(LINKEDIN, None, GOOD_BODY, ME.keys()) == []
+    assert lint(LINKEDIN, None, GOOD_BODY) == []
 
 
 @pytest.mark.parametrize(
@@ -171,7 +198,7 @@ def test_a_linkedin_message_needs_no_subject() -> None:
     ],
 )
 def test_links_that_do_not_parse_are_errors(link: str) -> None:
-    issues = lint(LINKEDIN, None, f"{{{{ first_name }}}}, see {link} today", ME.keys())
+    issues = lint(LINKEDIN, None, f"{{{{ first_name }}}}, see {link} today")
     assert [issue.rule for issue in issues] == [LintRule.BAD_LINK]
     assert issues[0].severity is Severity.ERROR
 
@@ -186,24 +213,24 @@ def test_links_that_do_not_parse_are_errors(link: str) -> None:
         "http://localhost:8000/x",
         "https://[::1]:8443/",
         "https://bücher.example/",
-        "https://{{ me.website }}",  # completed by a merge field
+        "https://{{ company }}.example",  # completed by a merge field
         "https://example.com/{{ first_name }}",
-        "{{ me.website }}/calendar",
+        "{{ company }}/calendar",
         "mailto:ada@example.test and ftp://files.example",  # not http(s); not checked
     ],
 )
 def test_links_that_parse_or_are_completed_by_a_field_pass(text: str) -> None:
-    assert lint(LINKEDIN, None, f"{{{{ first_name }}}} {text}", ME.keys()) == []
+    assert lint(LINKEDIN, None, f"{{{{ first_name }}}} {text}") == []
 
 
 def test_bad_links_in_the_subject_are_reported_against_it() -> None:
-    issues = lint(EMAIL, "See http:/x.example", GOOD_BODY, ME.keys())
+    issues = lint(EMAIL, "See http:/x.example", GOOD_BODY)
     assert [(i.rule, i.part) for i in issues] == [(LintRule.BAD_LINK, Part.SUBJECT)]
 
 
 def test_a_template_that_does_not_parse_is_a_syntax_error() -> None:
     for body in ["{{ first_name ", "{% if first_name %}", "{{ first_name | }}"]:
-        issues = lint(LINKEDIN, None, body, ME.keys())
+        issues = lint(LINKEDIN, None, body)
         assert [issue.rule for issue in issues] == [LintRule.SYNTAX], body
         assert issues[0].message.startswith("line 1: ")
 
@@ -220,7 +247,7 @@ def test_a_template_that_does_not_parse_is_a_syntax_error() -> None:
 def test_reaching_for_another_template_is_refused(tag: str) -> None:
     """Each compiles and then fails at render, so it has to fail lint: lint is the gate."""
     body = "{{ first_name }}\n" + tag
-    issues = lint(LINKEDIN, None, body, ME.keys())
+    issues = lint(LINKEDIN, None, body)
     assert LintRule.UNSUPPORTED in {issue.rule for issue in issues}
     assert issues[0].message.startswith("line 2: `")
     with pytest.raises(TemplateRenderError, match="is not available in a message template"):
@@ -267,7 +294,7 @@ ESCAPES = [
 @pytest.mark.parametrize("escape", ESCAPES)
 def test_escapes_fail_lint_and_the_render(escape: str) -> None:
     body = f"{{{{ first_name }}}} {escape}"
-    rules = {issue.rule for issue in lint(LINKEDIN, None, body, ME.keys())}
+    rules = {issue.rule for issue in lint(LINKEDIN, None, body)}
     assert rules & {LintRule.UNSAFE_ATTRIBUTE, LintRule.UNSUPPORTED, LintRule.ATTRIBUTE_ACCESS}
     with pytest.raises(TemplateRenderError):
         render(LINKEDIN, None, body, _values(first_name="A"), today=TODAY)
@@ -319,7 +346,6 @@ def test_an_error_inside_the_template_is_a_render_error_not_a_crash() -> None:
 def test_render_fills_every_kind_of_field() -> None:
     values = MergeValues(
         contact={"first_name": "Bo", "company": "Fixture Co", "connected_year": 2019},
-        me=ME,
         campaign_name="First 100",
         step_number=2,
         previous_send_date=datetime(2026, 9, 19, 23, 30, tzinfo=UTC),
@@ -330,7 +356,7 @@ def test_render_fills_every_kind_of_field() -> None:
         "Re: {{ campaign.name }}",
         "Hi {{ first_name }} ({{ company }}, since {{ connected_year }}). "
         "Step {{ step.number }}, {{ previous_send_date | ago }}. {{ personal_line }} "
-        "{{ me.signature }}",
+        "Ada",
         values,
         today=TODAY,
     )
@@ -342,16 +368,16 @@ def test_render_fills_every_kind_of_field() -> None:
 
 
 def test_missing_fields_render_empty_with_a_warning_not_an_exception() -> None:
-    values = MergeValues(contact={"first_name": "Bo", "company": None, "title": "  "}, me=ME)
+    values = MergeValues(contact={"first_name": "Bo", "company": None, "title": "  "})
     rendered = render(
         EMAIL,
         "{{ first_name }}, {{ campaign.name }}",
         "Hi {{ first_name }} at {{ company }} as {{ title }}, {{ location }}. "
-        "{{ previous_send_date | ago }} {{ me.city }} {{ step.number }}",
+        "{{ previous_send_date | ago }} {{ step.number }}",
         values,
         today=TODAY,
     )
-    assert rendered.body == "Hi Bo at  as , .   "
+    assert rendered.body == "Hi Bo at  as , .  "
     assert rendered.subject == "Bo, "
     warnings = [(i.part, i.field) for i in rendered.issues if i.severity is Severity.WARNING]
     assert warnings == [
@@ -360,7 +386,6 @@ def test_missing_fields_render_empty_with_a_warning_not_an_exception() -> None:
         (Part.BODY, "title"),
         (Part.BODY, "location"),
         (Part.BODY, "previous_send_date"),
-        (Part.BODY, "me.city"),
         (Part.BODY, "step.number"),
     ]
     assert {i.rule for i in rendered.issues} == {LintRule.MISSING_VALUE}
@@ -388,8 +413,8 @@ def test_render_carries_lint_errors_along_with_the_output() -> None:
 
 
 def test_a_link_broken_by_a_merge_value_is_a_warning() -> None:
-    values = MergeValues(contact={"first_name": "Bo"}, me={**ME, "website": "https://"})
-    rendered = render(LINKEDIN, None, "{{ first_name }} {{ me.website }}", values, today=TODAY)
+    values = MergeValues(contact={"first_name": "Bo", "company": "https://"})
+    rendered = render(LINKEDIN, None, "{{ first_name }} {{ company }}", values, today=TODAY)
     assert [(i.rule, i.severity, i.field) for i in rendered.issues] == [
         (LintRule.BAD_LINK, Severity.WARNING, "https://")
     ]
@@ -482,7 +507,7 @@ FULL = {"first_name": "Bo", "company": "Acme", "connected_year": 2019, "years_si
 def test_a_missing_field_never_raises_whatever_the_template_does(
     shape: str, missing: str, present: str
 ) -> None:
-    assert lint(LINKEDIN, None, shape, ME.keys()) == []
+    assert lint(LINKEDIN, None, shape) == []
     empty = render(LINKEDIN, None, shape, _values(), today=TODAY)
     assert empty.body == missing
     assert {i.rule for i in empty.issues} == {LintRule.MISSING_VALUE}
@@ -566,7 +591,7 @@ def test_every_node_type_off_the_allowlist_is_refused(node_type: type[nodes.Node
     body = "{{ first_name }}" + REFUSED_SAMPLES[node_type]
     tree = render_module._environment(TODAY).parse(body)
     assert any(type(node) is node_type for node in tree.find_all(nodes.Node))
-    issues = lint(LINKEDIN, None, body, ME.keys())
+    issues = lint(LINKEDIN, None, body)
     assert LintRule.UNSUPPORTED in {issue.rule for issue in issues}
     with pytest.raises(TemplateRenderError, match="is not available in a message template"):
         render(LINKEDIN, None, body, _values(first_name="Bo"), today=TODAY)
@@ -580,7 +605,7 @@ def test_every_node_type_off_the_allowlist_is_refused(node_type: type[nodes.Node
         ("{{ first_name.strip() }}", LintRule.UNSUPPORTED),
         ("{{ first_name.format }}", LintRule.ATTRIBUTE_ACCESS),
         ("{{ last_position_change.max }}", LintRule.ATTRIBUTE_ACCESS),
-        ("{{ me.name.upper }}", LintRule.ATTRIBUTE_ACCESS),
+        ("{{ campaign.name.upper }}", LintRule.ATTRIBUTE_ACCESS),
         ("{{ first_name | int }}", LintRule.UNSUPPORTED),
         ("{{ years_since_connected | round }}", LintRule.UNSUPPORTED),
         ("{{ first_name | tojson }}", LintRule.UNSUPPORTED),
@@ -602,7 +627,7 @@ def test_expressions_off_the_allowlist_are_refused_even_for_a_missing_field(
     shape: str, why: LintRule
 ) -> None:
     body = "{{ first_name }}" + shape
-    assert why in {issue.rule for issue in lint(LINKEDIN, None, body, ME.keys())}
+    assert why in {issue.rule for issue in lint(LINKEDIN, None, body)}
     for values in (_values(), _values(**FULL)):
         with pytest.raises(TemplateRenderError):  # a refused template, never a crash
             render(LINKEDIN, None, body, values, today=TODAY)
@@ -652,7 +677,7 @@ def test_the_review_probes_are_refused_fast() -> None:
     tojson = "{{ first_name | tojson(indent=1000000000) }}"
     nested = "{{ [[first_name] * 40000] * 40000 }}"
     for body, refused in ((doubling, "with"), (tojson, "tojson"), (nested, "list")):
-        assert (LintRule.UNSUPPORTED, refused) in _rules(lint(LINKEDIN, None, body, ME.keys()))
+        assert (LintRule.UNSUPPORTED, refused) in _rules(lint(LINKEDIN, None, body))
         assert "is not available in a message template" in str(_fails_fast(body))
 
 
@@ -689,7 +714,7 @@ def test_filter_results_count_against_the_budget() -> None:
 def test_numbers_stay_small() -> None:
     big = "9" * MAX_LITERAL_CHARS  # about 3,300 bits; four of them pass 10,000
     body = "{{ first_name }}{{ " + " * ".join([big] * 4) + " }}"
-    assert lint(LINKEDIN, None, body, ME.keys()) == []
+    assert lint(LINKEDIN, None, body) == []
     assert "bits" in str(_fails_fast(body))
 
 
@@ -699,7 +724,7 @@ def test_numbers_stay_small() -> None:
 )
 def test_a_huge_number_literal_is_refused_not_a_crash(digits: int, rule: LintRule) -> None:
     body = "{{ first_name }}{{ " + "9" * digits + " }}"
-    assert rule in {issue.rule for issue in lint(LINKEDIN, None, body, ME.keys())}
+    assert rule in {issue.rule for issue in lint(LINKEDIN, None, body)}
     _fails_fast(body)
 
 
@@ -716,7 +741,7 @@ def test_a_huge_number_literal_is_refused_not_a_crash(digits: int, rule: LintRul
 def test_deep_nesting_is_refused_fast_not_a_crash(deep: str) -> None:
     body = "{{ first_name }}" + (deep if deep.startswith("{%") else "{{ " + deep + " }}")
     start = time.perf_counter()
-    issues = lint(LINKEDIN, None, body, ME.keys())
+    issues = lint(LINKEDIN, None, body)
     assert time.perf_counter() - start < 1.0
     assert has_errors(issues)
     assert {issue.rule for issue in issues} <= {LintRule.UNSUPPORTED, LintRule.SYNTAX}
@@ -736,12 +761,12 @@ def test_the_nesting_limit_is_ours_not_the_compilers() -> None:
         return "{{ " + " and ".join(["first_name"] * terms) + " }}"
 
     jinja2.Environment().from_string(chain(50))  # compiles fine without the walker
-    assert lint(LINKEDIN, None, chain(MAX_NESTING - 1), ME.keys()) == []
+    assert lint(LINKEDIN, None, chain(MAX_NESTING - 1)) == []
     rendered = render(
         LINKEDIN, None, chain(MAX_NESTING - 1), _values(first_name="Ada"), today=TODAY
     )
     assert rendered.body == "Ada"
-    issues = lint(LINKEDIN, None, chain(MAX_NESTING), ME.keys())
+    issues = lint(LINKEDIN, None, chain(MAX_NESTING))
     assert _rules(issues) == [(LintRule.UNSUPPORTED, "nesting")]
     assert "nesting deeper than 50 levels" in str(_fails_fast(chain(MAX_NESTING)))
 
@@ -786,9 +811,9 @@ def test_each_finding_about_one_place_names_its_line() -> None:
         "{% for x in y %}{% endfor %}\n"  # 5
         "see http:/broken\n"  # 6
     )
-    assert _lines(lint(LINKEDIN, None, body, ME.keys())) == [
+    assert _lines(lint(LINKEDIN, None, body)) == [
         (LintRule.UNDEFINED_VARIABLE, "frist_name", 2),
-        (LintRule.UNDEFINED_VARIABLE, "me.age", 3),
+        (LintRule.REMOVED_FIELD, "me.age", 3),
         (LintRule.UNSAFE_ATTRIBUTE, "_x", 3),
         (LintRule.ATTRIBUTE_ACCESS, "company.upper", 4),
         (LintRule.UNSUPPORTED, "for", 5),
@@ -797,12 +822,12 @@ def test_each_finding_about_one_place_names_its_line() -> None:
 
 
 def test_a_syntax_error_names_its_line() -> None:
-    [issue] = lint(LINKEDIN, None, "{{ first_name }}\n\n{{ oops", ME.keys())
+    [issue] = lint(LINKEDIN, None, "{{ first_name }}\n\n{{ oops")
     assert (issue.rule, issue.line) == (LintRule.SYNTAX, 3)
 
 
 def test_a_finding_about_the_whole_part_has_no_line() -> None:
-    issues = lint(EMAIL, "", "no fields\nat all", ME.keys())
+    issues = lint(EMAIL, "", "no fields\nat all")
     assert _lines(issues) == [
         (LintRule.MISSING_SUBJECT, None, None),
         (LintRule.NO_CONTACT_FIELD, None, None),
@@ -813,16 +838,16 @@ def test_a_bad_link_after_tags_and_fields_that_span_lines_names_the_right_line()
     body = (
         "{{\n first_name\n}}\n"  # lines 1-3
         "{% if company\n %}x{% endif %}{# a\ncomment #}\n"  # lines 4-6
-        "go to https://{{ me.website }}/ok or https://bad_host!.example\n"  # line 7
+        "go to https://{{ company }}.example/ok or https://bad_host!.example\n"  # line 7
     )
-    assert _lines(lint(LINKEDIN, None, body, ME.keys())) == [
+    assert _lines(lint(LINKEDIN, None, body)) == [
         (LintRule.BAD_LINK, "https://bad_host!.example", 7)
     ]
 
 
 def test_the_same_finding_twice_is_reported_once_at_its_first_line() -> None:
     body = "{{ first_name }}\n{{ frist_name }}\n{{ frist_name }}"
-    assert _lines(lint(LINKEDIN, None, body, ME.keys())) == [
+    assert _lines(lint(LINKEDIN, None, body)) == [
         (LintRule.UNDEFINED_VARIABLE, "frist_name", 2)
     ]
 
@@ -839,7 +864,7 @@ def test_a_missing_value_warning_names_the_line_the_field_is_first_used_on() -> 
 
 
 def test_merge_fields_list_every_field_spec_11_1_names() -> None:
-    fields = merge_fields(ME.keys())
+    fields = merge_fields()
     assert [(f.name, f.group, f.insert) for f in fields] == [
         ("first_name", FieldGroup.CONTACT, "first_name"),
         ("last_name", FieldGroup.CONTACT, "last_name"),
@@ -850,46 +875,31 @@ def test_merge_fields_list_every_field_spec_11_1_names() -> None:
         ("years_since_connected", FieldGroup.CONTACT, "years_since_connected"),
         ("last_position_change", FieldGroup.CONTACT, "last_position_change"),
         ("personal_line", FieldGroup.PERSONAL, "personal_line"),
-        ("me.name", FieldGroup.ME, "me.name"),
-        ("me.website", FieldGroup.ME, "me.website"),
-        ("me.scheduling_link", FieldGroup.ME, "me.scheduling_link"),
-        ("me.signature", FieldGroup.ME, "me.signature"),
-        ("me.city", FieldGroup.ME, "me.city"),
         ("campaign.name", FieldGroup.CAMPAIGN, "campaign.name"),
         ("step.number", FieldGroup.CAMPAIGN, "step.number"),
         ("previous_send_date", FieldGroup.CAMPAIGN, "previous_send_date | ago"),
     ]
     assert all(f.description.strip() for f in fields)
+    assert not any(f.name.startswith("me") for f in fields)  # #320, #342
+    assert [g.value for g in FieldGroup] == ["contact", "personal", "campaign"]
 
 
 def test_every_listed_field_lints_clean_so_the_list_and_lint_agree() -> None:
-    me = me_fields(MeSettings(name="Ada", extra={"podcast": "Fixture Hour"}))
-    fields = merge_fields(me.keys())
-    assert "me.podcast" in [f.name for f in fields]
-    for item in fields:
+    for item in merge_fields():
         body = f"{{{{ first_name }}}} {{{{ {item.insert} }}}}"
-        assert lint(LINKEDIN, None, body, me.keys()) == [], item.name
-
-
-def test_an_extra_me_key_is_listed_once_with_a_generic_description() -> None:
-    names = [f.name for f in merge_fields(["name", "podcast", "name"])]
-    assert names.count("me.name") == 1 and names.count("me.podcast") == 1
-    [podcast] = [f for f in merge_fields(["podcast"]) if f.name == "me.podcast"]
-    assert "podcast" in podcast.description
-    assert placeholder_example("me.podcast") == "(your podcast)"
+        assert lint(LINKEDIN, None, body) == [], item.name
 
 
 def test_merge_fields_name_exactly_what_lint_allows() -> None:
     """The reverse of the clean-lint test: every name lint allows is listed, and no other."""
-    me_keys = ("podcast",)
     allowed = set(render_module.SCALAR_FIELDS) | {
         f"{namespace}.{key}"
         for namespace, keys in render_module.NAMESPACE_FIELDS.items()
-        for key in (*keys, *(me_keys if namespace == "me" else ()))
+        for key in keys
     }
-    assert {f.name for f in merge_fields(me_keys)} == allowed
+    assert {f.name for f in merge_fields()} == allowed
     for name in allowed:  # and lint does allow each one
-        assert lint(LINKEDIN, None, f"{{{{ first_name }}}} {{{{ {name} }}}}", me_keys) == []
+        assert lint(LINKEDIN, None, f"{{{{ first_name }}}} {{{{ {name} }}}}") == []
 
 
 def test_a_field_lint_allows_but_the_list_cannot_place_is_an_error(
@@ -899,21 +909,13 @@ def test_a_field_lint_allows_but_the_list_cannot_place_is_an_error(
         render_module, "NAMESPACE_FIELDS", {**render_module.NAMESPACE_FIELDS, "sender": ("email",)}
     )
     with pytest.raises(ValueError, match="'sender' has no group"):
-        merge_fields(())
+        merge_fields()
     monkeypatch.undo()
     monkeypatch.setattr(render_module, "SCALAR_FIELDS", render_module.SCALAR_FIELDS | {"nickname"})
     with pytest.raises(ValueError, match="'nickname' has no group"):
-        merge_fields(())
-
-
-def test_me_keys_no_template_can_name_are_not_listed() -> None:
-    keys = ("podcast", "my-site", "_tok", "2nd", "café")
-    names = [f.name for f in merge_fields(keys)]
-    assert "me.podcast" in names and "me.café" in names
-    assert not {"me.my-site", "me._tok", "me.2nd"} & set(names)
-    for key in ("my-site", "_tok", "2nd"):  # lint refuses each, which is why
-        assert lint(LINKEDIN, None, f"{{{{ first_name }}}} {{{{ me.{key} }}}}", keys) != []
+        merge_fields()
 
 
 def test_every_listed_field_has_an_invented_placeholder() -> None:
-    assert {f.name for f in merge_fields(())} == set(PLACEHOLDER_EXAMPLES)
+    assert {f.name for f in merge_fields()} == set(PLACEHOLDER_EXAMPLES)
+    assert all(placeholder_example(f.name) for f in merge_fields())

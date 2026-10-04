@@ -51,7 +51,7 @@ from netkeeper.models import (
     TagSource,
     User,
 )
-from netkeeper.scoping import install_scope_guard, scoped, scoped_count
+from netkeeper.scoping import install_scope_guard, scoped, scoped_contacts, scoped_count
 from netkeeper.services.users import ensure_local_user
 from netkeeper.web.app import create_app
 
@@ -282,7 +282,8 @@ def _contact_snapshot(session: Session, user: User) -> dict[str, tuple[object, .
             contact.current_title,
             contact.connected_on,
         )
-        for contact in session.scalars(scoped(user, Contact))
+        # The app's database has the self contact (#342), the CLI's has none yet.
+        for contact in session.scalars(scoped_contacts(user))
     }
 
 

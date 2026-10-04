@@ -52,7 +52,7 @@ from netkeeper.config import LinkedInSettings
 from netkeeper.models import Contact, SyncRun, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.models.base import utcnow
 from netkeeper.paths import data_dir
-from netkeeper.scoping import get_scoped, scoped
+from netkeeper.scoping import get_scoped_contact, scoped_contacts
 from netkeeper.services import budgets, enrich_plan, run_contacts, runs
 from netkeeper.services import heat as heat_rows
 from netkeeper.services import posture as posture_service
@@ -468,7 +468,7 @@ def _pins_out(session: SessionDep, user: User, pinned: list[int]) -> list[PinOut
         return []
     rows = {
         contact.id: contact
-        for contact in session.scalars(scoped(user, Contact).where(Contact.id.in_(pinned)))
+        for contact in session.scalars(scoped_contacts(user).where(Contact.id.in_(pinned)))
     }
     return [
         PinOut(
@@ -496,7 +496,7 @@ def list_pins(user: CurrentUser, session: SessionDep) -> list[PinOut]:
 )
 def pin_contact(body: PinIn, user: CurrentUser, session: SessionDep) -> list[PinOut]:
     """Pin a contact to the front of the next enrichment (spec 9.6, at most five)."""
-    if get_scoped(session, user, Contact, body.contact_id) is None:
+    if get_scoped_contact(session, user, body.contact_id) is None:
         raise HTTPException(status_code=404, detail="no such contact")
     account = ensure_account(session, user)
     try:

@@ -4,6 +4,7 @@ import { meQuery } from '@/api/queries'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 
+import { AboutYouSection } from './about-you-section'
 import { DoNotSendSection } from './do-not-send-section'
 import { type GmailOutcome, GmailSection } from './gmail-section'
 import { PostureSection } from './posture-section'
@@ -18,7 +19,7 @@ export function SettingsPage({ gmail = {} }: { gmail?: GmailOutcome }) {
         <CardHeader>
           <CardTitle level={2}>Settings</CardTitle>
           <CardDescription>
-            Gmail auth, sending hours, pacing, budgets, LLM, [me] merge fields, backups.
+            Gmail auth, sending hours, about you, pacing, budgets, LLM, backups.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex items-center gap-2">
@@ -33,6 +34,8 @@ export function SettingsPage({ gmail = {} }: { gmail?: GmailOutcome }) {
       <GmailSection outcome={gmail} />
 
       <SendingHoursSection />
+
+      <AboutYouSection />
 
       <DoNotSendSection />
 

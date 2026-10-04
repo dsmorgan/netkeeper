@@ -9,7 +9,7 @@ a parsed template must be on :data:`ALLOWED_NODES`, checked by one walker
 
 - text and ``{{ }}`` output; names; literals that are text (at most
   :data:`MAX_LITERAL_CHARS`), whole numbers, true, false and none;
-- ``me.<key>``, ``campaign.name`` and ``step.number``, the only attributes;
+- ``campaign.name`` and ``step.number``, the only attributes;
 - the filters in :data:`ALLOWED_FILTERS` and the tests in :data:`ALLOWED_TESTS`,
   with ``truncate``'s length at most :data:`MAX_TRUNCATE_LENGTH`;
 - ``{% if %}`` and ``x if y else z``; comparisons, ``in``, ``and``, ``or``,
@@ -41,7 +41,7 @@ render on every send.
   ``~`` through the environment (:class:`_CodeGenerator`), since Jinja joins
   it in a module-level function the sandbox never sees.
 - Merge values are data, never template source. A contact whose name is
-  ``{{ me.name }}`` (imported data is not trusted) renders that text literally.
+  ``{{ company }}`` (imported data is not trusted) renders that text literally.
 - The rendered subject is one line: CR, LF and the other line breaks become
   a space, so no merge value can add an email header.
 
@@ -51,8 +51,7 @@ An HTML body needs it on (spec 11.1), which netkeeper does not build yet.
 Merge fields (spec 11.1)
 ------------------------
 - Contact: :data:`CONTACT_FIELDS`. ``first_name`` resolves to the contact's
-  preferred name.
-- You: ``me.<key>`` for :data:`ME_FIELDS` and any extra key under ``[me]``.
+  preferred name. A test send fills them from the self contact, your own details.
 - Campaign: ``campaign.name``, ``step.number``, ``previous_send_date``.
 - ``personal_line`` (spec 12), written per contact at preview time.
 
@@ -73,9 +72,13 @@ applies is an error, and :func:`has_errors` is what blocks activation:
 - :attr:`LintRule.SYNTAX`: the template does not parse.
 - :attr:`LintRule.UNSUPPORTED`: anything off the allowlist.
 - :attr:`LintRule.UNSAFE_ATTRIBUTE`: a ``_``-prefixed attribute.
-- :attr:`LintRule.ATTRIBUTE_ACCESS`: an attribute of anything but ``me``,
-  ``campaign`` and ``step``. Merge fields are plain values.
+- :attr:`LintRule.ATTRIBUTE_ACCESS`: an attribute of anything but ``campaign``
+  and ``step``. Merge fields are plain values.
 - :attr:`LintRule.UNDEFINED_VARIABLE`: a name that is not a merge field.
+- :attr:`LintRule.REMOVED_FIELD`: ``me`` or ``me.<key>``, the fields ``[me]`` in
+  the config used to fill (#320, #342). The message says what to do instead. A
+  template saved before the removal keeps its text: this error is what keeps it
+  out of an active campaign until it is edited, and it renders those fields empty.
 - :attr:`LintRule.NO_CONTACT_FIELD`: a body that names no per-contact field.
   Identical bulk mail is a spam signal.
 - :attr:`LintRule.MISSING_SUBJECT`: an email template with no subject.
@@ -113,7 +116,6 @@ from jinja2.runtime import Context, Undefined
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from jinja2.tests import TESTS
 
-from netkeeper.config import MeSettings, is_me_key
 from netkeeper.models.campaigns import TemplateChannel
 
 CONTACT_FIELDS: Final = (
@@ -134,11 +136,18 @@ PREVIOUS_SEND_DATE: Final = "previous_send_date"
 PER_CONTACT_FIELDS: Final = frozenset((*CONTACT_FIELDS, PERSONAL_LINE))
 """Fields that differ from one contact to the next. A body must name at least one."""
 
-ME_FIELDS: Final = ("name", "website", "scheduling_link", "signature", "city")
-"""``me.<key>`` fields that always exist. Extra keys under ``[me]`` join them."""
+REMOVED_NAMESPACE: Final = "me"
+"""The ``me.<key>`` fields, removed in #320 and #342. Lint names them with
+:attr:`LintRule.REMOVED_FIELD`, never as an unknown name, so a template written for
+them says what changed."""
+
+REMOVED_FIELD_ADVICE: Final = (
+    "the me.* fields were removed: write your own details, such as your name or "
+    "signature, into the template as text. A test send renders the contact fields "
+    "with your own details, from Settings, About you"
+)
 
 NAMESPACE_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
-    "me": ME_FIELDS,
     "campaign": ("name",),
     "step": ("number",),
 }
@@ -154,7 +163,6 @@ class FieldGroup(enum.StrEnum):
 
     CONTACT = "contact"
     PERSONAL = "personal"
-    ME = "me"
     CAMPAIGN = "campaign"
 
 
@@ -182,11 +190,6 @@ _FIELD_DESCRIPTIONS: Final[Mapping[str, str]] = {
     "years_since_connected": "Whole years since you connected with the contact.",
     "last_position_change": "The latest date the contact started or left a job.",
     PERSONAL_LINE: "A line written for this contact at preview time (spec 12).",
-    "me.name": "Your name, from [me] in the config.",
-    "me.website": "Your website, from [me] in the config.",
-    "me.scheduling_link": "Your scheduling link, from [me] in the config.",
-    "me.signature": "Your signature, from [me] in the config.",
-    "me.city": "Your city, from [me] in the config.",
     "campaign.name": "The name of the campaign sending the message.",
     "step.number": "Which step of the campaign this message is, counting from 1.",
     PREVIOUS_SEND_DATE: 'When the previous step went to this contact, as words like "last week".',
@@ -202,11 +205,6 @@ PLACEHOLDER_EXAMPLES: Final[Mapping[str, str]] = {
     "years_since_connected": "6",
     "last_position_change": "2025-03-01",
     PERSONAL_LINE: "Congratulations on the new role at Example Co.",
-    "me.name": "Your Name",
-    "me.website": "https://example.com",
-    "me.scheduling_link": "https://example.com/meet",
-    "me.signature": "Your Name",
-    "me.city": "Your City",
     "campaign.name": "Example campaign",
     "step.number": "2",
     PREVIOUS_SEND_DATE: "3 weeks ago",
@@ -218,7 +216,6 @@ is made up: none is anyone's real data."""
 _GROUPS: Final[Mapping[str, FieldGroup]] = {
     **dict.fromkeys(CONTACT_FIELDS, FieldGroup.CONTACT),
     PERSONAL_LINE: FieldGroup.PERSONAL,
-    "me": FieldGroup.ME,
     "campaign": FieldGroup.CAMPAIGN,
     "step": FieldGroup.CAMPAIGN,
     PREVIOUS_SEND_DATE: FieldGroup.CAMPAIGN,
@@ -232,7 +229,6 @@ _GROUP_ORDER: Final = tuple(FieldGroup)
 _SPEC_ORDER: Final = (
     *CONTACT_FIELDS,
     PERSONAL_LINE,
-    *(f"me.{key}" for key in ME_FIELDS),
     "campaign.name",
     "step.number",
     PREVIOUS_SEND_DATE,
@@ -250,43 +246,31 @@ def _group(name: str) -> FieldGroup:
         raise ValueError(f"merge field {name!r} has no group in the editor's field list") from None
 
 
-def merge_fields(me_keys: Collection[str]) -> tuple[MergeField, ...]:
+def merge_fields() -> tuple[MergeField, ...]:
     """Every merge field a template may name, in the order spec 11.1 lists them.
 
     Derived from the names the lint walker allows: :data:`SCALAR_FIELDS`, and each
-    namespace of :data:`NAMESPACE_FIELDS` with its keys, ``me`` with ``me_keys`` too.
-    So a field removed there leaves this list, and one added there must be given a
-    group and a description here or this raises. ``me_keys`` are the ``me.<key>``
-    names that exist, as for :func:`lint`; one a template cannot name
-    (:func:`is_me_key`) is left out.
+    namespace of :data:`NAMESPACE_FIELDS` with its keys. So a field removed there
+    leaves this list, and one added there must be given a group and a description
+    here or this raises.
     """
     found: list[tuple[str, FieldGroup]] = [(name, _group(name)) for name in SCALAR_FIELDS]
     for namespace, keys in NAMESPACE_FIELDS.items():
         group = _group(namespace)
-        extra = me_keys if namespace == "me" else ()
-        for key in dict.fromkeys((*keys, *extra)):
-            if is_me_key(key):
-                found.append((f"{namespace}.{key}", group))
+        found.extend((f"{namespace}.{key}", group) for key in keys)
     rank = {name: index for index, name in enumerate(_SPEC_ORDER)}
     found.sort(
         key=lambda item: (_GROUP_ORDER.index(item[1]), rank.get(item[0], len(rank)), item[0])
     )
-    fields: list[MergeField] = []
-    for name, group in found:
-        if group is FieldGroup.ME and name not in _FIELD_DESCRIPTIONS:
-            key = name.removeprefix("me.")
-            description = f"Your value for `{key}`, from [me] in the config."
-        else:
-            description = _FIELD_DESCRIPTIONS[name]
-        fields.append(MergeField(name, group, description, _INSERTS.get(name, name)))
-    return tuple(fields)
+    return tuple(
+        MergeField(name, group, _FIELD_DESCRIPTIONS[name], _INSERTS.get(name, name))
+        for name, group in found
+    )
 
 
 def placeholder_example(name: str) -> str:
     """An invented example value for the merge field ``name``."""
-    if name in PLACEHOLDER_EXAMPLES:
-        return PLACEHOLDER_EXAMPLES[name]
-    return f"(your {name.removeprefix('me.')})"
+    return PLACEHOLDER_EXAMPLES[name]
 
 
 MAX_OUTPUT_CHARS: Final = 100_000
@@ -312,7 +296,7 @@ ALLOWED_NODES: Final[frozenset[type[nodes.Node]]] = frozenset(
         nodes.TemplateData,
         nodes.Name,
         nodes.Const,
-        nodes.Getattr,  # on me, campaign and step only
+        nodes.Getattr,  # on campaign and step only
         nodes.Filter,  # ALLOWED_FILTERS only
         nodes.Test,  # ALLOWED_TESTS only
         nodes.Keyword,  # a filter's or test's keyword argument
@@ -378,7 +362,7 @@ _HTTP_LINK = re.compile(r"\bhttps?:[^\s<>\"']*", re.IGNORECASE)
 _TRAILING = ".,;:!?)]}'\""
 _HOST_LABEL = re.compile(r"^[\w-]+$")
 # What a merge expression becomes when links are checked in the template text before
-# rendering: a value of the right shape, so ``https://{{ me.website }}`` is not
+# rendering: a value of the right shape, so ``https://{{ company }}.com`` is not
 # reported as a link with no host.
 _PLACEHOLDER = "x"
 
@@ -398,6 +382,7 @@ class LintRule(enum.StrEnum):
     MISSING_SUBJECT = "missing_subject"
     BAD_LINK = "bad_link"
     MISSING_VALUE = "missing_value"
+    REMOVED_FIELD = "removed_field"
 
 
 class Part(enum.StrEnum):
@@ -456,12 +441,10 @@ class MergeValues:
     """Everything one render can fill in. ``None`` or a blank string means "no value".
 
     ``contact`` is keyed by :data:`CONTACT_FIELDS`; a key left out has no value.
-    ``me`` is :func:`me_fields` of the config. The campaign fields are ``None``
-    outside a campaign, which is every preview until campaigns exist.
+    The campaign fields are ``None`` outside a campaign, as in a preview.
     """
 
     contact: Mapping[str, object]
-    me: Mapping[str, str]
     campaign_name: str | None = None
     step_number: int | None = None
     previous_send_date: date | datetime | None = None
@@ -491,13 +474,6 @@ _RENDER_REFUSES: Final = frozenset(
         LintRule.ATTRIBUTE_ACCESS,
     }
 )
-
-
-def me_fields(me: MeSettings) -> dict[str, str]:
-    """The ``me.<key>`` values from ``[me]``: :data:`ME_FIELDS`, then any extra keys."""
-    values = {name: str(getattr(me, name)) for name in ME_FIELDS}
-    values.update(me.extra)
-    return values
 
 
 # --- the environment ----------------------------------------------------------
@@ -618,7 +594,7 @@ class _Sandbox(ImmutableSandboxedEnvironment):
         )
 
     def is_safe_attribute(self, obj: Any, attr: str, value: Any) -> bool:
-        # Only me, campaign and step have attributes; a missing field answers any.
+        # Only campaign and step have attributes; a missing field answers any.
         return isinstance(obj, SimpleNamespace | Undefined) and super().is_safe_attribute(
             obj, attr, value
         )
@@ -768,13 +744,19 @@ def _is_number(node: nodes.Node) -> bool:
 class _Walker:
     """Checks one part's tree against the allowlist, and collects the fields it names."""
 
-    def __init__(self, analysis: _Analysis, part: Part, me_keys: Collection[str]) -> None:
+    def __init__(self, analysis: _Analysis, part: Part) -> None:
         self.analysis = analysis
         self.part = part
-        self.allowed: dict[str, Collection[str]] = {
-            **NAMESPACE_FIELDS,
-            "me": (*ME_FIELDS, *me_keys),
-        }
+        self.allowed: Mapping[str, Collection[str]] = NAMESPACE_FIELDS
+
+    def removed(self, node: nodes.Node, name: str) -> None:
+        self.analysis.error(
+            LintRule.REMOVED_FIELD,
+            self.part,
+            f"`{name}`: {REMOVED_FIELD_ADVICE}",
+            name,
+            node.lineno,
+        )
 
     def refuse(self, node: nodes.Node, what: str, name: str | None) -> None:
         self.analysis.error(
@@ -828,6 +810,8 @@ class _Walker:
             self.refuse(node, f"assigning `{name}`", name)
         elif name == "self":
             self.refuse(node, "`self`", name)
+        elif name == REMOVED_NAMESPACE:
+            self.removed(node, name)
         elif name in SCALAR_FIELDS:
             self.analysis.refer(name, node.lineno)
         elif name in self.allowed:
@@ -870,6 +854,8 @@ class _Walker:
                 key,
                 node.lineno,
             )
+        elif isinstance(base, nodes.Name) and base.name == REMOVED_NAMESPACE:
+            self.removed(node, f"{base.name}.{key}")
         elif not isinstance(base, nodes.Name) or base.name not in self.allowed:
             dotted = f"{base.name}.{key}" if isinstance(base, nodes.Name) else key
             self.analysis.error(
@@ -923,12 +909,12 @@ class _Walker:
 
 def refused_nodes(source: str) -> Iterator[str]:
     """The name of every node in ``source`` the allowlist refuses; for tests and tooling."""
-    for issue in lint(TemplateChannel.LINKEDIN, None, source, ()):
+    for issue in lint(TemplateChannel.LINKEDIN, None, source):
         if issue.rule is LintRule.UNSUPPORTED and issue.field is not None:
             yield issue.field
 
 
-def _analyse(source: str, part: Part, me_keys: Collection[str]) -> _Analysis:
+def _analyse(source: str, part: Part) -> _Analysis:
     analysis = _Analysis()
     env = _environment(date.min)
     try:
@@ -945,7 +931,7 @@ def _analyse(source: str, part: Part, me_keys: Collection[str]) -> _Analysis:
         analysis.error(LintRule.SYNTAX, part, f"the template does not parse: {exc}")
         analysis.compiled = False
         return analysis
-    _Walker(analysis, part, me_keys).walk(tree, None)
+    _Walker(analysis, part).walk(tree, None)
     if not has_errors(analysis.issues):
         # The allowlist and the nesting limit should leave nothing for this to find.
         try:
@@ -1042,7 +1028,7 @@ def _bad_links(text: str) -> list[tuple[str, int]]:
 
 
 def _lint(
-    channel: TemplateChannel, subject: str | None, body: str, me_keys: Collection[str]
+    channel: TemplateChannel, subject: str | None, body: str
 ) -> tuple[list[LintIssue], dict[Part, _Analysis]]:
     issues: list[LintIssue] = []
     if channel is TemplateChannel.EMAIL and not (subject or "").strip():
@@ -1053,8 +1039,8 @@ def _lint(
         )
     analyses: dict[Part, _Analysis] = {}
     if subject is not None:
-        analyses[Part.SUBJECT] = _analyse(subject, Part.SUBJECT, me_keys)
-    analyses[Part.BODY] = _analyse(body, Part.BODY, me_keys)
+        analyses[Part.SUBJECT] = _analyse(subject, Part.SUBJECT)
+    analyses[Part.BODY] = _analyse(body, Part.BODY)
     for analysis in analyses.values():
         issues.extend(analysis.issues)
 
@@ -1072,15 +1058,13 @@ def _lint(
     return issues, analyses
 
 
-def lint(
-    channel: TemplateChannel, subject: str | None, body: str, me_keys: Collection[str]
-) -> list[LintIssue]:
-    """Save-time lint of a template's text. ``me_keys`` are the ``me.<key>`` names that exist.
+def lint(channel: TemplateChannel, subject: str | None, body: str) -> list[LintIssue]:
+    """Save-time lint of a template's text.
 
     Every issue it returns is an error; :func:`has_errors` of the result is what
     blocks activation.
     """
-    issues, _ = _lint(channel, subject, body, me_keys)
+    issues, _ = _lint(channel, subject, body)
     return issues
 
 
@@ -1089,7 +1073,7 @@ def fields_used(channel: TemplateChannel, subject: str | None, body: str) -> fro
 
     A part that does not parse names nothing here; lint reports it as an error.
     """
-    _, analyses = _lint(channel, subject, body, ())
+    _, analyses = _lint(channel, subject, body)
     return frozenset(name for analysis in analyses.values() for name in analysis.references)
 
 
@@ -1115,8 +1099,6 @@ def _value_of(values: MergeValues, name: str) -> object:
         return values.campaign_name
     if name == "step.number":
         return values.step_number
-    if name.startswith("me."):
-        return values.me.get(name.removeprefix("me."))
     return values.contact.get(name)
 
 
@@ -1127,9 +1109,6 @@ def _context(values: MergeValues) -> dict[str, object]:
         for name, value in values.contact.items()
         if name in CONTACT_FIELDS and not _missing(value)
     }
-    context["me"] = SimpleNamespace(
-        **{key: value for key, value in values.me.items() if not _missing(value)}
-    )
     if not _missing(values.campaign_name):
         context["campaign"] = SimpleNamespace(name=values.campaign_name)
     if values.step_number is not None:
@@ -1184,7 +1163,7 @@ def render(
     field with no value here, then a :attr:`LintRule.BAD_LINK` warning for each
     link that came out broken once values were filled in.
     """
-    issues, analyses = _lint(channel, subject, body, values.me.keys())
+    issues, analyses = _lint(channel, subject, body)
     for issue in issues:
         if issue.rule in _RENDER_REFUSES:
             raise TemplateRenderError(f"{issue.part.value}: {issue.message}")

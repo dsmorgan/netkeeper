@@ -12,13 +12,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns import templates as service
-from netkeeper.config import MeSettings, Settings
 from netkeeper.db import session_scope
 from netkeeper.models import CampaignStatus, TemplateChannel, User, UserKind
 
 CSRF = {"X-Netkeeper-Client": "1"}
 EMAIL = {"name": "reconnect", "channel": "email", "subject": "Hi {{ first_name }}",
-         "body": "Hi {{ first_name }}, {{ me.name }} here."}  # fmt: skip
+         "body": "Hi {{ first_name }}, Ada here."}  # fmt: skip
 
 
 def _factory(app: FastAPI) -> sessionmaker[Session]:
@@ -64,7 +63,7 @@ async def test_create_list_get_update_delete(client: httpx.AsyncClient) -> None:
 
 
 async def test_lint_errors_are_reported_not_refused(client: httpx.AsyncClient) -> None:
-    created = await _create(client, subject=None, body="{{ me.__class__ }}")
+    created = await _create(client, subject=None, body="{{ step.__class__ }}")
     assert {i["rule"] for i in created["lint"]} == {
         "missing_subject",
         "unsafe_attribute",
@@ -72,10 +71,14 @@ async def test_lint_errors_are_reported_not_refused(client: httpx.AsyncClient) -
     }
 
 
-async def test_me_fields_come_from_the_config(client: httpx.AsyncClient) -> None:
-    """The test app runs on default settings, so [me] has only the five standard keys."""
+async def test_a_me_field_is_a_removed_field_lint_error(client: httpx.AsyncClient) -> None:
+    """#320, #342: the save goes through, and lint says what changed for each ``me.*``."""
     created = await _create(client, body="{{ first_name }} {{ me.podcast }} {{ me.city }}")
-    assert [i["field"] for i in created["lint"]] == ["me.podcast"]
+    assert [(i["rule"], i["field"]) for i in created["lint"]] == [
+        ("removed_field", "me.podcast"),
+        ("removed_field", "me.city"),
+    ]
+    assert all("were removed" in i["message"] for i in created["lint"])
 
 
 @pytest.mark.parametrize(
@@ -269,7 +272,6 @@ async def test_another_users_template_and_contact_are_404(
             channel=TemplateChannel.LINKEDIN,
             subject=None,
             body="{{ first_name }}",
-            me_keys=(),
         ).id
         their_contact = factories.make_contact(session, other).id
     url = f"/api/v1/templates/{theirs}"
@@ -353,10 +355,9 @@ async def test_merge_fields_without_a_contact_are_invented_placeholders(
     assert all(f["example"] and f["description"] for f in listed["fields"])
 
 
-async def test_merge_fields_with_a_contact_show_its_values_and_me_from_the_config(
+async def test_merge_fields_with_a_contact_show_its_values_and_no_me_fields(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
-    running_app.state.settings = Settings(me=MeSettings(name="Ada Fixture", extra={"pod": "P"}))
     with session_scope(_factory(running_app), write=True) as session:
         user = session.scalars(select(User)).one()
         contact_id = factories.make_contact(
@@ -370,9 +371,7 @@ async def test_merge_fields_with_a_contact_show_its_values_and_me_from_the_confi
     assert shown["first_name"] == ("Bo", "contact")
     assert shown["company"] == ("Fixture Co", "contact")
     assert shown["location"] == (None, "contact")  # renders empty for this contact
-    assert shown["me.name"] == ("Ada Fixture", "config")
-    assert shown["me.website"] == (None, "config")
-    assert shown["me.pod"] == ("P", "config")
+    assert not [name for name in shown if name.startswith("me")]  # #320, #342
     assert shown["campaign.name"] == ("Example campaign", "placeholder")
     assert shown["personal_line"][1] == "placeholder"
 

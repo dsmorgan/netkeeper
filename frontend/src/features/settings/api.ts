@@ -13,6 +13,8 @@ export type DoNotSendEntry = components['schemas']['DoNotSendOut']
 export type SendingHours = components['schemas']['SendingHoursOut']
 export type SendingHoursIn = components['schemas']['SendingHoursIn']
 export type Day = SendingHoursIn['days'][number]
+export type SelfContact = components['schemas']['SelfContactOut']
+export type SelfContactIn = components['schemas']['SelfContactIn']
 
 /**
  * Every protection the LinkedIn extractor has (spec section 9, P2-11), read-only.
@@ -73,5 +75,25 @@ export const sendingHoursQuery = queryOptions({
 export async function saveSendingHours(body: SendingHoursIn): Promise<SendingHours> {
   const { data, error, response } = await api.PUT('/api/v1/settings/sending-hours', { body })
   if (data === undefined) throw failure(error, response, 'PUT /settings/sending-hours')
+  return data
+}
+
+/**
+ * Your own details, held as the self contact (#342): what a test send renders a
+ * template's contact fields with. Never in your contact lists or campaigns.
+ */
+export const selfContactQuery = queryOptions({
+  queryKey: ['self-contact'] as const,
+  queryFn: async ({ signal }): Promise<SelfContact> => {
+    const { data, error, response } = await api.GET('/api/v1/settings/self-contact', { signal })
+    if (data === undefined) throw failure(error, response, 'GET /settings/self-contact')
+    return data
+  },
+})
+
+/** Replace your own details; 422 for a value that is too long. */
+export async function saveSelfContact(body: SelfContactIn): Promise<SelfContact> {
+  const { data, error, response } = await api.PUT('/api/v1/settings/self-contact', { body })
+  if (data === undefined) throw failure(error, response, 'PUT /settings/self-contact')
   return data
 }
