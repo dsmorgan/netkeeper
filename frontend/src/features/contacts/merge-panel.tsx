@@ -36,11 +36,14 @@ import {
   type MergeCandidate,
 } from './api'
 import { displayName, formatDateTime } from './format'
-import { describeMoves } from './merge-text'
+import { describeMoves, labelled, labelledDetail } from './merge-text'
 import type { ContactDetail, MergeMoves } from './types'
 import { MET_LABELS } from './types'
 
-/** The other contact, once picked: enough to name it before its preview arrives. */
+/**
+ * A contact in the merge, once picked: its id and its name with a distinguishing
+ * detail ({@link labelled}), which names it before its preview arrives.
+ */
 export interface MergeTarget {
   id: number
   name: string
@@ -148,7 +151,7 @@ function MergePicker({
               <button
                 type="button"
                 className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-muted focus-visible:bg-muted focus-visible:outline-none"
-                onClick={() => onPick({ id: row.id, name: displayName(row) })}
+                onClick={() => onPick({ id: row.id, name: labelled(row) })}
               >
                 <span className="font-medium">
                   {displayName(row)}
@@ -193,10 +196,15 @@ function MergeReview({
 }) {
   const queryClient = useQueryClient()
   const preview = useQuery(mergePreviewQuery(keep.id, fold.id))
+  // Once the preview is in, both names carry the details it has in full.
+  const keepName = preview.data ? labelledDetail(preview.data.survivor) : keep.name
+  const foldName = preview.data ? labelledDetail(preview.data.loser) : fold.name
   const [confirming, setConfirming] = useState(false)
   const merge = useMutation({
     mutationFn: () => mergeContacts(keep.id, fold.id),
     onSuccess: (survivor) => {
+      // Drop every preview first: one of these two, refetched now, would only answer 409.
+      queryClient.removeQueries({ queryKey: [...contactsKeys.all, 'merge-preview'] })
       queryClient.setQueryData(contactsKeys.detail(survivor.id), survivor)
       void queryClient.invalidateQueries({ queryKey: contactsKeys.all })
       setConfirming(false)
@@ -207,14 +215,14 @@ function MergeReview({
   return (
     <div className="flex flex-col gap-3">
       <p>
-        <span className="font-medium">{keep.name}</span> stays.{' '}
-        <span className="font-medium">{fold.name}</span> is merged into them and its link leads
-        there from now on.
+        <span className="font-medium">{keepName}</span> stays.{' '}
+        <span className="font-medium">{foldName}</span> is merged into them and its link leads there
+        from now on.
       </p>
       <div className="flex flex-wrap gap-2">
         <Button size="sm" variant="outline" onClick={onSwap} disabled={merge.isPending}>
           <ArrowLeftRight data-icon="inline-start" />
-          Keep {fold.name} instead
+          Keep {foldName} instead
         </Button>
         <Button size="sm" variant="ghost" onClick={onPickAnother} disabled={merge.isPending}>
           Choose another contact
@@ -247,15 +255,15 @@ function MergeReview({
               setConfirming(open)
               if (!open) merge.reset()
             }}
-            title={`Merge ${fold.name} into ${keep.name}?`}
+            title={`Merge ${foldName} into ${keepName}?`}
             confirmLabel="Merge"
             pending={merge.isPending}
             error={merge.error?.message ?? null}
             onConfirm={() => merge.mutateAsync()}
           >
             <p>
-              {keep.name} keeps its record. Everything below moves to it from {fold.name}, and{' '}
-              {fold.name} stops showing anywhere.
+              {keepName} keeps its record. Everything below moves to it from {foldName}, and{' '}
+              {foldName} stops showing anywhere.
             </p>
             <ul className="list-disc pl-5">
               {describeMoves(preview.data.moves).map((line) => (
@@ -319,10 +327,10 @@ function PreviewTable({
               Field
             </th>
             <th scope="col" className="py-1 pr-3 font-medium">
-              Stays: {displayName(survivor)}
+              Stays: {labelledDetail(survivor)}
             </th>
             <th scope="col" className="py-1 pr-3 font-medium">
-              Merged away: {displayName(loser)}
+              Merged away: {labelledDetail(loser)}
             </th>
             <th scope="col" className="py-1 font-medium">
               After the merge

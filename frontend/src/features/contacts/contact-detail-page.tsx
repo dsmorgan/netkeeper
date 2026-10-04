@@ -24,6 +24,7 @@ import {
 import { useContactWrite } from './use-contact-write'
 import { displayName, formatDate, formatDateTime, gmailSearchUrl } from './format'
 import { MergePanel, type MergeTarget, type Survivor } from './merge-panel'
+import { labelled, labelledDetail } from './merge-text'
 import { WriteError } from './merged-notice'
 import { NeedsReviewBadge, NeedsReviewNotice } from './needs-review'
 import { PossibleDuplicates } from './possible-duplicates'
@@ -161,7 +162,7 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
         <MergePanel
           // A new pick from the hint starts the panel over on that contact.
           key={`${contact.id}-${merging.target?.id ?? 'pick'}`}
-          contact={{ id: contact.id, name }}
+          contact={{ id: contact.id, name: labelledDetail(contact) }}
           initialTarget={merging.target}
           initialSurvivor={merging.survivor}
           onClose={() => setMerging(null)}
@@ -200,7 +201,10 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
               contactId={contact.id}
               onMerge={(match) =>
                 setMerging({
-                  target: { id: match.contact_id, name: displayName(match) },
+                  target: {
+                    id: match.contact_id,
+                    name: labelled({ ...match, id: match.contact_id }),
+                  },
                   // A card contact folds into the confirmed one it duplicates.
                   survivor: match.needs_review ? 'this' : 'other',
                 })

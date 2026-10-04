@@ -353,7 +353,6 @@ function remember(passed: PassedCard[], entry: PassedCard): PassedCard[] {
   return next.length > MAX_PASSED ? next.slice(next.length - MAX_PASSED) : next
 }
 
-/** Rewrite one contact wherever the queue is holding it: in hand or in the trail. */
 /** The card fields a merge can change, read off the survivor the merge answered with. */
 const MERGED_FIELDS = [
   'first_name',
@@ -384,6 +383,7 @@ function fromSurvivor(contact: TriageContact, survivor: ContactDetail): TriageCo
   return { ...contact, ...picked }
 }
 
+/** Rewrite one contact wherever the queue is holding it: in hand or in the trail. */
 function patchContact(
   state: TriageQueueState,
   contactId: number,
@@ -1066,16 +1066,19 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
           ...contact,
           merged_into_id: survivor.id,
         }))
-        const kept = patchContact(away, survivor.id, (contact) => fromSurvivor(contact, survivor))
-        // Not a triage decision, so not on the undo stack: nothing takes a merge back.
-        return {
-          ...kept,
-          notice:
-            'Merged. The contact merged away leaves the queue; → moves on. A merge can’t be undone.',
-        }
+        return patchContact(away, survivor.id, (contact) => fromSurvivor(contact, survivor))
       })
+      // The card on screen was merged away: nothing is left to decide on it, so move on,
+      // as → would. Not a triage decision, so not on the undo stack either.
+      const moved = onScreen(stateRef.current)?.contact.id === loserId && forward()
+      commit((state) => ({
+        ...state,
+        notice: moved
+          ? 'Merged, and moved on: the contact merged away left the queue. A merge can’t be undone.'
+          : 'Merged. A merge can’t be undone.',
+      }))
     },
-    [commit],
+    [commit, forward],
   )
 
   const patchTags = useCallback(

@@ -143,6 +143,7 @@ describe('a possible duplicate of a card contact (#363)', () => {
               li_public_id: 'ada-ventura',
               needs_review: false,
               matched_by: ['name'],
+              linkedin_ids_differ: false,
             },
           ])
         }
@@ -164,7 +165,7 @@ describe('a possible duplicate of a card contact (#363)', () => {
 
   it('shows the hint in the review band and merges only after the confirmation', async () => {
     const { backend, posted } = renderWithDuplicate()
-    await currentName()
+    const name = await currentName()
 
     const band = screen.getByRole('region', { name: 'Needs review' })
     const hint = await within(band).findByRole('list', { name: 'Possible duplicates' })
@@ -177,7 +178,7 @@ describe('a possible duplicate of a card contact (#363)', () => {
 
     fireEvent.click(within(hint).getByRole('button', { name: 'Merge with Ada Ventura' }))
     const panel = await screen.findByRole('region', { name: 'Merge contacts' })
-    await within(panel).findByRole('columnheader', { name: 'Stays: Ada Ventura' })
+    await within(panel).findByRole('columnheader', { name: 'Stays: Ada Ventura (Tessellate Labs)' })
 
     // While the panel is open, the keyboard map stands aside: no key decides the card.
     fireEvent.keyDown(window, { key: 'm' })
@@ -192,12 +193,16 @@ describe('a possible duplicate of a card contact (#363)', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Merge' }))
       await Promise.resolve()
     })
-    await waitFor(() => expect(screen.getByTestId('triage-notice')).toHaveTextContent(/Merged/))
+    await waitFor(() =>
+      expect(screen.getByTestId('triage-notice')).toHaveTextContent(/Merged, and moved on/),
+    )
     expect(posted.filter((path) => path === '/api/v1/contacts/2/merge')).toHaveLength(1)
     expect(screen.queryByRole('region', { name: 'Merge contacts' })).toBeNull()
-    // The card merged away no longer offers confirm or reject.
+    // The card merged away is behind: the next contact is on screen, with nothing decided.
+    await waitFor(async () => expect(await currentName()).not.toBe(name))
     expect(screen.queryByRole('region', { name: 'Needs review' })).toBeNull()
     expect(backend.byId(1).met).toBe('unknown')
+    expect(backend.countOf('/api/v1/triage/decisions')).toBe(0)
   })
 
   it('shows no hint for an ordinary contact', async () => {

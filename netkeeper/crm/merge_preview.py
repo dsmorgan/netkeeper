@@ -9,12 +9,20 @@ preview resolves rows the same way (``crm/import_runs.py``, ``_dry_run``).
 
 Rolling back needs a writer session, because the merge writes before the
 savepoint is undone; the database keeps none of it.
+
+The merge logs as it goes ("merging contact 4 into 2", "do-not-send: entry
+added"), and those lines read as an audit trail. A preview must not leave one
+for a merge that never happened, so while it runs a context variable is set and
+a filter on the identity and do-not-send loggers drops their records. The
+preview logs one line of its own once it has rolled back.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from sqlalchemy.orm import InstrumentedAttribute, Session
@@ -41,6 +49,26 @@ from netkeeper.models import (
 )
 from netkeeper.models.base import UserOwned
 from netkeeper.scoping import get_scoped, scoped
+
+log = logging.getLogger(__name__)
+
+_previewing: ContextVar[bool] = ContextVar("netkeeper_merge_previewing", default=False)
+"""Set while a preview runs the merge, so its log lines are not taken for a real merge's."""
+
+QUIET_LOGGERS: tuple[str, ...] = ("netkeeper.crm.identity", "netkeeper.crm.do_not_send")
+"""The loggers a merge writes its audit lines to, silenced inside a preview."""
+
+
+class _NotInPreview(logging.Filter):
+    """Drops a record logged while a merge preview runs (:data:`_previewing`)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _previewing.get()
+
+
+_FILTER = _NotInPreview()
+for _name in QUIET_LOGGERS:
+    logging.getLogger(_name).addFilter(_FILTER)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +135,7 @@ def preview_merge[T](
     """
     if not is_writer(session):
         raise RuntimeError("a merge preview writes inside a savepoint; use a writer session")
-    with _rolled_back(session):
+    with _rolled_back(session), _quiet():
         # merge_contacts checks these too; checking first keeps a refused merge
         # from rendering a "before" for a row it would never touch.
         survivor = live_contact(session, user, survivor_id)
@@ -120,7 +148,21 @@ def preview_merge[T](
         merged = merge_contacts(session, user, survivor_id, loser_id)
         result = render(merged)
         moves = before.moves(_Holdings.of(session, user, merged.id, loser.id))
+    log.info(
+        "merge preview of contact %d into %d (rolled back)",
+        loser_id,
+        survivor_id,
+    )
     return MergePreview(before_survivor, before_loser, result, moves)
+
+
+@contextmanager
+def _quiet() -> Iterator[None]:
+    token = _previewing.set(True)
+    try:
+        yield
+    finally:
+        _previewing.reset(token)
 
 
 @contextmanager

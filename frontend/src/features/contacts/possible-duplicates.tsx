@@ -19,20 +19,19 @@ import { duplicatesQuery } from './api'
 import { displayName } from './format'
 import type { PossibleDuplicate } from './types'
 
-const REASONS: Record<PossibleDuplicate['matched_by'][number], string> = {
-  email: 'the same email address',
-  phone: 'the same phone number',
-  slug: 'the same name under a different LinkedIn id',
-  name: 'the same name',
+const ALSO: Partial<Record<PossibleDuplicate['matched_by'][number], string>> = {
+  email: 'email address',
+  phone: 'phone number',
 }
 
-/** Why the backend thinks so, in words: its strongest reason first. */
+/**
+ * Why the backend thinks so, in words. The names always agree; a shared address
+ * or number adds to that, and differing LinkedIn ids count against it.
+ */
 function reasonText(match: PossibleDuplicate): string {
-  // A slug match is a name match too; saying "the same name" twice says nothing.
-  const reasons = match.matched_by.includes('slug')
-    ? match.matched_by.filter((reason) => reason !== 'name')
-    : match.matched_by
-  return reasons.map((reason) => REASONS[reason]).join(', ')
+  const also = match.matched_by.flatMap((reason) => ALSO[reason] ?? [])
+  const same = also.length === 0 ? 'the same name' : `the same name and ${also.join(' and ')}`
+  return match.linkedin_ids_differ ? `${same}; LinkedIn ids differ` : same
 }
 
 export function PossibleDuplicates({

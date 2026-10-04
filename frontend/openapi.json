@@ -8051,7 +8051,7 @@
         "type": "object"
       },
       "PossibleDuplicateOut": {
-        "description": "Another contact that may be the same person (#363). A hint; nothing merges on its own.\n\n``matched_by``, strongest first: ``email`` (an address on both), ``phone`` (a\nnumber on both), ``slug`` (the same name under a LinkedIn slug changed before\nany sync), ``name`` (the same first or preferred name and last name).",
+        "description": "Another contact that may be the same person (#363). A hint; nothing merges on its own.\n\nThe names always agree (``name``: the same last name and first or preferred\nname). ``matched_by`` adds, strongest first, ``email`` (a personal address on\nboth; role addresses such as ``info@`` never count) and ``phone`` (a number\non both). ``linkedin_ids_differ``: both carry a LinkedIn slug and they\ndiffer, which counts against a match, so such a match ranks last.",
         "properties": {
           "contact_id": {
             "title": "Contact Id",
@@ -8098,13 +8098,16 @@
             ],
             "title": "Li Public Id"
           },
+          "linkedin_ids_differ": {
+            "title": "Linkedin Ids Differ",
+            "type": "boolean"
+          },
           "matched_by": {
             "items": {
               "enum": [
                 "name",
                 "email",
-                "phone",
-                "slug"
+                "phone"
               ],
               "type": "string"
             },
@@ -8129,7 +8132,8 @@
           "current_company",
           "li_public_id",
           "needs_review",
-          "matched_by"
+          "matched_by",
+          "linkedin_ids_differ"
         ],
         "title": "PossibleDuplicateOut",
         "type": "object"
@@ -13823,7 +13827,7 @@
     },
     "/api/v1/contacts/{contact_id}/duplicates": {
       "get": {
-        "description": "Other live contacts that may be this person, strongest match first (#363).\n\nA hint for a person to act on, never a merge: by email, phone, the same\nname, or the same name under a LinkedIn slug changed before any sync. Two\ncontacts with different LinkedIn URNs never match. Only this user's\ncontacts, at most five. A merged-away id stands for its survivor.",
+        "description": "Other live contacts that may be this person, strongest match first (#363).\n\nA hint for a person to act on, never a merge. The names must agree; a\nshared personal email or phone strengthens the match, and differing\nLinkedIn slugs weaken it (ranked last). Two contacts with different\nLinkedIn URNs never match. Only this user's\ncontacts, at most five. A merged-away id stands for its survivor.",
         "operationId": "list_possible_duplicates",
         "parameters": [
           {

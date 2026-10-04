@@ -405,9 +405,10 @@ def list_possible_duplicates(
 ) -> list[PossibleDuplicateOut]:
     """Other live contacts that may be this person, strongest match first (#363).
 
-    A hint for a person to act on, never a merge: by email, phone, the same
-    name, or the same name under a LinkedIn slug changed before any sync. Two
-    contacts with different LinkedIn URNs never match. Only this user's
+    A hint for a person to act on, never a merge. The names must agree; a
+    shared personal email or phone strengthens the match, and differing
+    LinkedIn slugs weaken it (ranked last). Two contacts with different
+    LinkedIn URNs never match. Only this user's
     contacts, at most five. A merged-away id stands for its survivor.
     """
     with translate_errors():
@@ -423,6 +424,7 @@ def list_possible_duplicates(
             li_public_id=match.contact.li_public_id,
             needs_review=match.contact.needs_review_at is not None,
             matched_by=list(match.matched_by),
+            linkedin_ids_differ=match.linkedin_ids_differ,
         )
         for match in found
     ]
