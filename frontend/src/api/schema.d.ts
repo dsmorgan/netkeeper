@@ -7940,7 +7940,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description The inbox poll has no runner */
+            /** @description A run kind the worker can't start */
             422: {
                 headers: {
                     [name: string]: unknown;

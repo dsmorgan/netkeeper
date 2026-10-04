@@ -16,6 +16,7 @@ import httpx
 import pytest
 from campaign_fakes import NOW
 from fastapi import FastAPI
+from run_fakes import fake_provider
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -35,12 +36,13 @@ from netkeeper.models import (
     UserKind,
 )
 from netkeeper.scoping import get_scoped, scoped
-from netkeeper.services import runs
+from netkeeper.services import budgets, runs
 from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.linkedin_session import record_session_evidence
 from netkeeper.services.linkedin_steps import record_prefill_outcome
 from netkeeper.web.api import linkedin_steps as api
 from netkeeper.web.security import CLIENT_HEADER, CLIENT_HEADER_VALUE
+from netkeeper.worker import NO_SOURCE, BrowserWorker
 
 HEADERS = {CLIENT_HEADER: CLIENT_HEADER_VALUE}
 BASE = "/api/v1/campaigns/linkedin"
@@ -255,6 +257,33 @@ async def test_check_asks_for_an_inbox_poll(
         SyncRunKind.MESSAGE_SEND,
         SyncRunKind.INBOX,
     ]
+    # The real worker, on a fake Chrome: with no page source yet (P4-01), the poll ends
+    # failed before it attaches, and spends no inbox_polls unit.
+    provider, connector = fake_provider()
+    worker = BrowserWorker(
+        provider,
+        running_app.state.session_factory,
+        running_app.state.settings.linkedin,
+        clock=lambda: NOW,
+    )
+    run_id = accepted.json()["run_id"]
+    with session_scope(running_app.state.session_factory) as session:
+        user_id = _local(session).id
+    await worker.execute(run_id, user_id)
+    inbox = next(run for run in _runs(running_app) if run.id == run_id)
+    assert (inbox.status, inbox.stop_reason) == (SyncRunStatus.FAILED, NO_SOURCE)
+    assert connector.attaches == 0
+    with session_scope(running_app.state.session_factory) as session:
+        user = _local(session)
+        spent = budgets.status(
+            session,
+            user,
+            ensure_account(session, user).id,
+            budgets.ActionClass.INBOX_POLLS,
+            now=NOW,
+            settings=running_app.state.settings.linkedin.budget,
+        ).day.count
+    assert spent == 0
     missing = await client.post(f"{BASE}/messages/999/check", headers=HEADERS)
     assert missing.status_code == 404
 
