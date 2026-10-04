@@ -91,7 +91,9 @@ export function answerFormat(channel: TemplateChannel, steps: number): string {
         `Step ${step}`,
         ...(channel === 'email' ? ['Subject: <one line>'] : []),
         'Body:',
-        '<the message, over as many lines as it needs>',
+        channel === 'linkedin'
+          ? '<the message, as one paragraph on one line>'
+          : '<the message, over as many lines as it needs>',
         `End of step ${step}`,
       ].join('\n'),
     )
