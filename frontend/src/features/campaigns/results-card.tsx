@@ -11,7 +11,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ErrorNote, LoadingNote } from '@/features/crm/controls'
 
 import type { CampaignResults, DaySends, EnrollmentStatus } from './api'
-import { bucketSends, formatDay, formatRate } from './format'
+import { bucketSends, formatDay, formatRate, type SendsBucket } from './format'
 
 /** The enrollments table's anchor, which the tiles link to. */
 export const ENROLLMENTS_ANCHOR = 'enrollments'
@@ -102,6 +102,11 @@ function unitOf(size: number): string {
   return `${size / 7} weeks`
 }
 
+/** "in a day", "in a week", "in 2 weeks". */
+function inUnit(size: number): string {
+  return size === 1 || size === 7 ? `in a ${unitOf(size)}` : `in ${unitOf(size)}`
+}
+
 export function SendsChart({ days, timezone }: { days: DaySends[]; timezone: string }) {
   if (days.length === 0) {
     return <p className="text-muted-foreground">Nothing sent yet, so no sends per day.</p>
@@ -117,23 +122,28 @@ export function SendsChart({ days, timezone }: { days: DaySends[]; timezone: str
   const total = buckets.reduce((sum, b) => sum + b.sent, 0)
   const first = buckets[0]
   const last = buckets[buckets.length - 1]
+  // The last bucket has fewer days than the others when the days do not divide evenly.
+  const partial = size > 1 && days.length % size !== 0
+  const tooltip = (b: SendsBucket) =>
+    `${label(b.start)}${partial && b === last ? ' (partial)' : ''}: ${b.sent} sent`
   return (
     <figure className="flex min-w-0 flex-col gap-1 overflow-x-auto">
       <figcaption className="text-muted-foreground">
-        Sends per {unit} ({timezone}), most {most} in a {unit}
+        Sends per {unit} ({timezone}), most {most} {inUnit(size)}
+        {partial && `; the last ${unit === 'week' ? 'week' : 'bar'} is partial`}
       </figcaption>
       <div
         role="img"
         aria-label={`Sends per ${unit}: ${total} over ${days.length} ${
           days.length === 1 ? 'day' : 'days'
-        }, at most ${most} in a ${unit}`}
+        }, at most ${most} ${inUnit(size)}${partial ? ', the last bar partial' : ''}`}
         className="flex h-24 items-end gap-px border-b border-border"
       >
         {buckets.map((b) => (
           <div
             key={b.start}
             data-testid="sends-bar"
-            title={`${label(b.start)}: ${b.sent} sent`}
+            title={tooltip(b)}
             className="min-w-[2px] flex-1 rounded-t-sm bg-chart-3"
             style={{ height: `${(b.sent / most) * 100}%` }}
           />

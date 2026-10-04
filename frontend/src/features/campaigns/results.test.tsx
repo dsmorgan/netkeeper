@@ -161,9 +161,39 @@ describe('campaign results', () => {
     expect(axis.getByText('Week of Jan 1')).toBeVisible()
     // The 43rd week starts on day 295: October 22.
     expect(axis.getByText('Week of Oct 22')).toBeVisible()
-    expect(card.getByText(/^Sends per week \(America\/New_York\)/)).toBeVisible()
+    expect(bars[42]).toHaveAttribute('title', 'Week of Oct 22 (partial): 7 sent')
+    expect(card.getByText(/^Sends per week \(America\/New_York\)/)).toHaveTextContent(
+      'most 8 in a week; the last week is partial',
+    )
     expect(card.getByRole('img', { name: /Sends per week: 343 over 300 days/ })).toBeVisible()
     expect(card.getByRole('figure').className).toContain('overflow-x-auto')
+  })
+
+  it('says "in 2 weeks" and marks the partial last bar past 420 days', async () => {
+    const start = new Date(2030, 0, 1)
+    const days = Array.from({ length: 500 }, (_, i) => {
+      const day = new Date(start)
+      day.setDate(start.getDate() + i)
+      const iso = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(
+        day.getDate(),
+      ).padStart(2, '0')}`
+      return { date: iso, sent: 1 }
+    })
+    mockFetch(backend([], results({ ...SOME_RESULTS, sends_per_day: days })))
+    await renderApp('/campaigns/5')
+
+    const card = within(await resultsCard())
+    const bars = await card.findAllByTestId('sends-bar')
+    // 500 days in 14-day bars: 35 full ones and a last one of 10 days.
+    expect(bars).toHaveLength(36)
+    expect(bars[0]).toHaveAttribute('title', '2 weeks from Jan 1: 14 sent')
+    expect(bars[35]).toHaveAttribute('title', expect.stringMatching(/ \(partial\): 10 sent$/))
+    expect(card.getByText(/^Sends per 2 weeks \(/)).toHaveTextContent(
+      'most 14 in 2 weeks; the last bar is partial',
+    )
+    expect(
+      card.getByRole('img', { name: /at most 14 in 2 weeks, the last bar partial$/ }),
+    ).toBeVisible()
   })
 
   it('shows no results card while the campaign is a draft', async () => {
