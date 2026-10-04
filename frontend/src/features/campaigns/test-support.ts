@@ -170,7 +170,7 @@ export function review(overrides: Partial<Review> = {}): Review {
     status: 'reviewing',
     content_fingerprint: 'c0ffee',
     audience_fingerprint: 'aud1ence',
-    guard_summary: '2 will send, 1 skipped (1 do-not-contact)',
+    guard_summary: '2 will start, 1 skipped (1 do-not-contact)',
     prior_contact_note: null,
     missing: ALL_MISSING,
     ...overrides,
@@ -180,12 +180,13 @@ export function review(overrides: Partial<Review> = {}): Review {
 /** The guard summary's details: one contact skipped for two reasons (#346). */
 export function guardDetails(overrides: Partial<GuardDetails> = {}): GuardDetails {
   return {
-    summary: '2 will send, 1 skipped (1 do-not-contact)',
-    will_send: 2,
+    summary: '2 will start, 1 skipped (1 do-not-contact)',
+    will_start: 2,
     not_enrolled: 0,
     skipped: [
       { contact_id: 403, name: 'Tobias Wrenfield', reasons: ['do-not-contact', 'no email'] },
     ],
+    skipped_total: 1,
     prior_contact_note: null,
     ...overrides,
   }

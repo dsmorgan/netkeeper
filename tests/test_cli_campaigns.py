@@ -251,7 +251,7 @@ def test_enroll_takes_the_list_through_the_guards(world: World) -> None:
     output = _ok("campaigns", "enroll", str(campaign_id))
 
     assert f"campaign {campaign_id}: 3 enrolled, 0 already in, 1 excluded" in output
-    assert "3 will send, 1 skipped (1 do-not-contact)" in output
+    assert "3 will start, 1 skipped (1 do-not-contact)" in output
     assert _enrollment_statuses(world, campaign_id) == [EnrollmentStatus.PENDING] * 3
     again = _ok("campaigns", "enroll", str(campaign_id))
     assert "0 enrolled, 3 already in" in again
@@ -428,7 +428,7 @@ def test_activate_after_a_complete_review_asks_then_activates(world: World) -> N
     assert declined.exit_code == 1
     assert "stays in review" in declined.output
     # #346: the guard summary is shown, and gates nothing; no acknowledgement was made.
-    assert "guards: 3 will send, 1 skipped (1 do-not-contact)" in declined.output
+    assert "guards: 3 will start, 1 skipped (1 do-not-contact)" in declined.output
     assert _campaign(world, campaign_id).status is CampaignStatus.REVIEWING
 
     result = _run("campaigns", "activate", str(campaign_id), input="y\n")
@@ -446,11 +446,22 @@ def test_guards_lists_each_skipped_contact_with_every_reason(world: World) -> No
 
     output = _ok("campaigns", "guards", str(campaign_id))
 
-    assert output.splitlines()[0] == "guards: 3 will send, 1 skipped (1 do-not-contact)"
+    assert output.splitlines()[0] == "guards: 3 will start, 1 skipped (1 do-not-contact)"
     assert output.splitlines()[1].split() == ["CONTACT", "NAME", "SKIPPED", "BECAUSE"]
     [row] = output.splitlines()[2:]
     assert row.startswith(str(world.contacts[3])) and row.endswith("do-not-contact")
     assert "note:" not in output  # nobody the old tool emailed
+    assert "showing the first" not in output
+
+    with session_scope(world.factory, write=True) as session:
+        for contact_id in world.contacts[:2]:
+            contact = get_scoped(session, _local(session), Contact, contact_id)
+            assert contact is not None
+            contact.archived_at = datetime.now(UTC)
+    cut = _ok("campaigns", "guards", str(campaign_id), "--limit", "1")
+    assert cut.splitlines()[0] == "guards: 1 will start, 3 skipped (2 archived, 1 do-not-contact)"
+    assert len(cut.splitlines()) == 4  # the line, the header, one row, the note
+    assert cut.splitlines()[-1] == "showing the first 1 of 3 skipped contacts"
 
     missing = _run("campaigns", "guards", "999")
     assert missing.exit_code == 1
@@ -811,7 +822,7 @@ def test_enroll_with_a_new_list_reports_what_it_removed(world: World) -> None:
     output = _ok("campaigns", "enroll", str(campaign_id), "--list", "Just one")
 
     assert "0 enrolled, 1 already in, 0 excluded, 2 removed; 1 pending" in output
-    assert "1 will send, none skipped" in output
+    assert "1 will start, none skipped" in output
     assert _enrollment_statuses(world, campaign_id) == [EnrollmentStatus.PENDING]
 
 

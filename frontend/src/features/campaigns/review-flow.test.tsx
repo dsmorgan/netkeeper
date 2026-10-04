@@ -5,7 +5,14 @@ import { jsonResponse, mockFetch } from '@/test/fetch'
 import { renderApp } from '@/test/render'
 
 import type { Campaign, Review } from './api'
-import { ALL_MISSING, campaign, campaignBackend, review, type Call } from './test-support'
+import {
+  ALL_MISSING,
+  campaign,
+  campaignBackend,
+  guardDetails,
+  review,
+  type Call,
+} from './test-support'
 
 function reviewing(overrides: Partial<Review> = {}) {
   return {
@@ -187,7 +194,7 @@ describe('review flow', () => {
     await renderApp('/campaigns/5')
 
     const guards = within(await screen.findByRole('region', { name: 'Guard summary' }))
-    expect(guards.getByText('2 will send, 1 skipped (1 do-not-contact)')).toBeVisible()
+    expect(guards.getByText('2 will start, 1 skipped (1 do-not-contact)')).toBeVisible()
     expect(guards.getByText(/activation doesn.t wait on it/)).toBeVisible()
     expect(guards.queryByRole('button', { name: /acknowledge/i })).toBeNull()
     // Every requirement met, and the guard summary is not among them (#346).
@@ -211,6 +218,7 @@ describe('review flow', () => {
       'Tobias Wrenfield: do-not-contact, no email',
     ])
     expect(calls.filter((c) => c.path.endsWith('/review/guards'))).toHaveLength(1)
+    expect(guards.queryByText(/Showing the first/)).toBeNull()
 
     fireEvent.click(guards.getByRole('button', { name: 'Hide skipped contacts' }))
     expect(guards.queryByRole('list', { name: 'Skipped contacts' })).toBeNull()
@@ -228,15 +236,30 @@ describe('review flow', () => {
     expect(guards.getByText('12 were emailed by the old tool; last on 2026-05-01.')).toBeVisible()
   })
 
+  it('says when the list of skipped contacts is cut short', async () => {
+    mockFetch(
+      campaignBackend(reviewing(), {
+        'GET /api/v1/campaigns/5/review/guards': () =>
+          jsonResponse(guardDetails({ skipped_total: 612 })),
+      }),
+    )
+    await renderApp('/campaigns/5')
+
+    const guards = within(await screen.findByRole('region', { name: 'Guard summary' }))
+    fireEvent.click(guards.getByRole('button', { name: 'Show skipped contacts' }))
+    expect(await guards.findByText('Showing the first 1 of 612 skipped contacts.')).toBeVisible()
+  })
+
   it('says so when the guards skip nobody', async () => {
     mockFetch(
-      campaignBackend(reviewing({ guard_summary: '3 will send, none skipped' }), {
+      campaignBackend(reviewing({ guard_summary: '3 will start, none skipped' }), {
         'GET /api/v1/campaigns/5/review/guards': () =>
           jsonResponse({
-            summary: '3 will send, none skipped',
-            will_send: 3,
+            summary: '3 will start, none skipped',
+            will_start: 3,
             not_enrolled: 0,
             skipped: [],
+            skipped_total: 0,
             prior_contact_note: null,
           }),
       }),

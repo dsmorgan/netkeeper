@@ -20,12 +20,18 @@ from campaign_fakes import ARMED_FOR_SEND, NOW, SETTINGS, FakeSender, make_mailb
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.render import me_fields
+from netkeeper.crm import do_not_send
+from netkeeper.crm import lists as list_service
 from netkeeper.db import session_scope
 from netkeeper.models import (
+    Campaign,
     CampaignStatus,
+    CampaignStep,
     Contact,
+    EmailStatus,
     Enrollment,
     EnrollmentStatus,
+    ListKind,
     Message,
     MessageStatus,
     StepMode,
@@ -34,8 +40,9 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.scoping import get_scoped, scoped
-from netkeeper.services import campaign_review
+from netkeeper.services import campaign_engine, campaign_review
 from netkeeper.services.campaign_engine import run_tick
+from netkeeper.services.campaign_guards import Reason, check_step
 
 ME = me_fields(SETTINGS.me)
 
@@ -51,9 +58,12 @@ class Reviewed:
     excluded: int
 
 
-def _reviewing(factory: sessionmaker[Session], *, subject: str, body: str) -> Reviewed:
+def _reviewing(
+    factory: sessionmaker[Session], *, subject: str, body: str, bob_elsewhere: bool = False
+) -> Reviewed:
     """A one-step email campaign under review: two contacts whose message can be sent,
-    one whose subject renders empty, and one a guard excludes."""
+    one whose subject renders empty, and one a guard excludes. ``bob_elsewhere``: bob
+    is first enrolled in a draft campaign, an enrollment older than this one's."""
     with session_scope(factory, write=True) as session:
         user = factories.make_user(session)
         mailbox = make_mailbox(session, user, **ARMED_FOR_SEND)
@@ -70,8 +80,12 @@ def _reviewing(factory: sessionmaker[Session], *, subject: str, body: str) -> Re
         assert template is not None
         template.subject, template.body = subject, body
 
+        other = factories.make_campaign(session, user, status=CampaignStatus.DRAFT)
+
         def enroll(email: str, **contact: Any) -> int:
             row = factories.make_contact(session, user, emails=[email], **contact)
+            if bob_elsewhere and email.startswith("bob@"):
+                factories.make_enrollment(session, other, row, status=EnrollmentStatus.PENDING)
             return factories.make_enrollment(
                 session, campaign, row, status=EnrollmentStatus.PENDING
             ).id
@@ -162,17 +176,64 @@ def test_blocked_messages_are_listed_apart_and_never_sent(
             assert enrollment is not None and enrollment.current_step is None
 
 
+def _exclude_bob(
+    session: Session, user: User, campaign_id: int, contact: Contact, how: Reason
+) -> None:
+    """Make a guard exclude bob, after activation, for ``how``."""
+    if how is Reason.DO_NOT_CONTACT:
+        contact.do_not_contact = True
+    elif how is Reason.NO_EMAIL:
+        contact.emails.clear()
+    elif how is Reason.NEEDS_REVIEW:
+        contact.needs_review_at = NOW
+    elif how is Reason.ARCHIVED:
+        contact.archived_at = NOW
+    elif how is Reason.MERGED:
+        contact.merged_into_id = factories.make_contact(session, user).id
+    elif how is Reason.DO_NOT_SEND:
+        do_not_send.add_by_hand(session, user, "bob@contacts.example")
+    elif how is Reason.ADDRESS_BOUNCED_ELSEWHERE:
+        twin = factories.make_contact(session, user, emails=["bob@contacts.example"])
+        twin.emails[0].status = EmailStatus.BOUNCED
+    elif how is Reason.IN_ANOTHER_CAMPAIGN:
+        # Bob's older enrollment, in a campaign that was a draft, now runs.
+        for campaign in session.scalars(scoped(user, Campaign).where(Campaign.id != campaign_id)):
+            campaign.status = CampaignStatus.REVIEWING
+    else:
+        raise AssertionError(how)
+    session.flush()
+
+
+@pytest.mark.parametrize(
+    "how",
+    [
+        Reason.DO_NOT_CONTACT,
+        Reason.NO_EMAIL,
+        Reason.NEEDS_REVIEW,
+        Reason.DO_NOT_SEND,
+        Reason.IN_ANOTHER_CAMPAIGN,
+        Reason.ARCHIVED,
+        Reason.MERGED,
+        Reason.ADDRESS_BOUNCED_ELSEWHERE,
+    ],
+    ids=lambda r: r.value,
+)
 def test_a_contact_a_guard_excludes_after_activation_is_never_sent(
-    session_factory: sessionmaker[Session],
+    session_factory: sessionmaker[Session], how: Reason
 ) -> None:
     """#346: activation needs no guard acknowledgement, and the guards still apply when
-    the step fires: a contact that became do-not-contact after the review, after the
-    approval and after activation is sent nothing."""
-    r = _reviewing(session_factory, subject="{{ first_name }}", body="Hi {{ first_name }}")
+    the step fires: a contact a guard excludes only after the review, the approval and
+    activation is sent nothing, whatever the guard."""
+    r = _reviewing(
+        session_factory,
+        subject="{{ first_name }}",
+        body="Hi {{ first_name }}",
+        bob_elsewhere=how is Reason.IN_ANOTHER_CAMPAIGN,
+    )
     with session_scope(r.factory) as session:
         campaign = campaign_review.get_campaign(session, r.user, r.campaign_id)
         assert campaign_review.guard_summary(session, r.user, campaign, now=NOW) == (
-            "3 will send, 1 skipped (1 do-not-contact)"
+            "3 will start, 1 skipped (1 do-not-contact)"
         )
     _complete_and_activate(r, _review(r))
     with session_scope(r.factory, write=True) as session:
@@ -180,7 +241,10 @@ def test_a_contact_a_guard_excludes_after_activation_is_never_sent(
         assert enrollment is not None
         contact = get_scoped(session, r.user, Contact, enrollment.contact_id)
         assert contact is not None
-        contact.do_not_contact = True
+        _exclude_bob(session, r.user, r.campaign_id, contact, how)
+        step = get_scoped(session, r.user, CampaignStep, r.step_id)
+        assert step is not None
+        assert how in check_step(session, r.user, enrollment, step, now=NOW).reasons
 
     sender = FakeSender()
     _tick_until_quiet(r, sender)
@@ -193,6 +257,96 @@ def test_a_contact_a_guard_excludes_after_activation_is_never_sent(
                     Message.enrollment_id == r.ok[1], Message.status == MessageStatus.SENT
                 )
             )
+        )
+
+
+def _summary(r: Reviewed) -> campaign_review.GuardReport:
+    with session_scope(r.factory) as session:
+        campaign = campaign_review.get_campaign(session, r.user, r.campaign_id)
+        return campaign_review.guard_report(session, r.user, campaign, now=NOW)
+
+
+def test_of_two_pending_enrollments_sharing_an_address_only_the_newer_is_skipped(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#346 review: the summary judges a pending enrollment as the engine judges its
+    first step, so it counts the older of two sharing an address as starting, and the
+    engine sends to it, once."""
+    r = _reviewing(session_factory, subject="{{ first_name }}", body="Hi {{ first_name }}")
+    with session_scope(r.factory, write=True) as session:
+        campaign = campaign_review.get_campaign(session, r.user, r.campaign_id)
+        twin = factories.make_contact(session, r.user, emails=["ada@contacts.example"])
+        newer = factories.make_enrollment(
+            session, campaign, twin, status=EnrollmentStatus.PENDING
+        ).id
+
+    report = _summary(r)
+    assert report.summary == (
+        "3 will start, 2 skipped (1 do-not-contact, 1 address already in this campaign)"
+    )
+    assert [(c.contact_id, c.reasons) for c in report.skipped if c.contact_id == twin.id] == [
+        (twin.id, ("address already in this campaign",))
+    ]
+    review = _review(r)
+    blocked = {m.enrollment_id: m.blocked for m in review.blocked}
+    assert blocked[newer] == "excluded by a guard: address already in this campaign"
+    assert r.ok[0] not in blocked  # the older one sends, in the review as in the engine
+
+    _complete_and_activate(r, review)
+    sender = FakeSender()
+    _tick_until_quiet(r, sender)
+
+    assert sorted(f.to_address or "" for f in sender.firings) == [
+        "ada@contacts.example",
+        "bob@contacts.example",
+    ]
+    with session_scope(r.factory) as session:
+        sent = set(
+            session.scalars(
+                scoped(r.user, Message)
+                .with_only_columns(Message.enrollment_id)
+                .where(Message.status == MessageStatus.SENT)
+            )
+        )
+    assert sent == set(r.ok)
+
+
+def test_a_source_contact_not_enrolled_is_judged_against_the_pending_enrollments(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#346 review: a source contact sharing a pending enrollment's address is skipped,
+    as enrolling it would be; the pending one still starts."""
+    r = _reviewing(session_factory, subject="{{ first_name }}", body="Hi {{ first_name }}")
+    with session_scope(r.factory, write=True) as session:
+        campaign = campaign_review.get_campaign(session, r.user, r.campaign_id)
+        twin = factories.make_contact(session, r.user, emails=["bob@contacts.example"])
+        loner = factories.make_contact(session, r.user, emails=["cy@contacts.example"])
+        members = [
+            *session.scalars(
+                scoped(r.user, Enrollment)
+                .with_only_columns(Enrollment.contact_id)
+                .where(Enrollment.campaign_id == r.campaign_id)
+            ),
+            twin.id,
+            loner.id,
+        ]
+        source = list_service.create_list(session, r.user, "Source", ListKind.STATIC)
+        list_service.add_members(session, r.user, source.id, members)
+        campaign.source_list_id = source.id
+
+    report = _summary(r)
+    assert report.summary == (
+        "3 will start, 2 skipped (1 do-not-contact, 1 address already in this campaign),"
+        " 1 not enrolled"
+    )
+    assert twin.id in {c.contact_id for c in report.skipped}
+    with session_scope(r.factory, write=True) as session:
+        result = campaign_engine.enroll(
+            session, r.user, r.campaign_id, [twin.id, loner.id], now=NOW
+        )
+        assert [v.contact_id for v in result.verdicts if v.eligible] == [loner.id]
+        assert {v.contact_id: v.reasons for v in result.verdicts}[twin.id] == (
+            Reason.DUPLICATE_ADDRESS,
         )
 
 

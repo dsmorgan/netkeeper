@@ -4979,20 +4979,25 @@
             "title": "Skipped",
             "type": "array"
           },
+          "skipped_total": {
+            "title": "Skipped Total",
+            "type": "integer"
+          },
           "summary": {
             "title": "Summary",
             "type": "string"
           },
-          "will_send": {
-            "title": "Will Send",
+          "will_start": {
+            "title": "Will Start",
             "type": "integer"
           }
         },
         "required": [
           "summary",
-          "will_send",
+          "will_start",
           "not_enrolled",
           "skipped",
+          "skipped_total",
           "prior_contact_note"
         ],
         "title": "GuardsOut",
@@ -12767,7 +12772,7 @@
     },
     "/api/v1/campaigns/{campaign_id}/review/guards": {
       "get": {
-        "description": "The guard summary's details: each skipped contact, with every reason (#346).",
+        "description": "The guard summary's details: the first ``limit`` skipped contacts, each with every\nreason (#346).",
         "operationId": "get_guards_api_v1_campaigns__campaign_id__review_guards_get",
         "parameters": [
           {
@@ -12776,6 +12781,18 @@
             "required": true,
             "schema": {
               "title": "Campaign Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
               "type": "integer"
             }
           }

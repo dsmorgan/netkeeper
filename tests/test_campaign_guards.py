@@ -216,7 +216,7 @@ def test_the_summary_names_both_address_reasons() -> None:
         (5, None), (2, Reason.DUPLICATE_ADDRESS), (1, Reason.ADDRESS_BOUNCED_ELSEWHERE)
     )
     assert skip_summary(verdicts, contacted_within_days=30) == (
-        "5 will send, 3 skipped (2 address already in this campaign,"
+        "5 will start, 3 skipped (2 address already in this campaign,"
         " 1 address bounced on another contact)"
     )
 
@@ -364,39 +364,40 @@ def test_the_summary_is_the_spec_example() -> None:
         (4, Reason.DO_NOT_CONTACT),
     )
     assert skip_summary(verdicts, contacted_within_days=30) == (
-        "175 will send, 37 skipped (30 no email, 4 do-not-contact, 3 contacted in the last 30 days)"
+        "175 will start, 37 skipped (30 no email, 4 do-not-contact,"
+        " 3 contacted in the last 30 days)"
     )
 
 
 def test_the_summary_counts_each_contact_once_under_its_first_reason() -> None:
     both = Verdict(1, (Reason.DO_NOT_CONTACT, Reason.NO_EMAIL))
     assert skip_summary([both, Verdict(2, ())], contacted_within_days=30) == (
-        "1 will send, 1 skipped (1 do-not-contact)"
+        "1 will start, 1 skipped (1 do-not-contact)"
     )
 
 
 def test_the_summary_breaks_a_tie_in_reason_order() -> None:
     verdicts = _verdicts((2, Reason.NO_LINKEDIN), (2, Reason.ARCHIVED), (1, Reason.MERGED))
     assert skip_summary(verdicts, contacted_within_days=30) == (
-        "0 will send, 5 skipped (2 archived, 2 no LinkedIn profile, 1 merged into another contact)"
+        "0 will start, 5 skipped (2 archived, 2 no LinkedIn profile, 1 merged into another contact)"
     )
 
 
 def test_the_summary_with_nobody_excluded_and_nobody_at_all() -> None:
     assert skip_summary(_verdicts((3, None)), contacted_within_days=30) == (
-        "3 will send, none skipped"
+        "3 will start, none skipped"
     )
-    assert skip_summary([], contacted_within_days=30) == "0 will send, none skipped"
+    assert skip_summary([], contacted_within_days=30) == "0 will start, none skipped"
 
 
 def test_the_summary_counts_a_contact_not_enrolled_apart() -> None:
-    """#346: "will send" means an enrolled contact no guard skips."""
+    """#346: "will start" means an enrolled contact no guard skips."""
     verdicts = [Verdict(1, ()), Verdict(2, ()), Verdict(3, (Reason.NO_EMAIL,))]
     assert skip_summary(verdicts, contacted_within_days=30, enrolled={1, 3}) == (
-        "1 will send, 1 skipped (1 no email), 1 not enrolled"
+        "1 will start, 1 skipped (1 no email), 1 not enrolled"
     )
     assert skip_summary(verdicts[:2], contacted_within_days=30, enrolled={1}) == (
-        "1 will send, none skipped, 1 not enrolled"
+        "1 will start, none skipped, 1 not enrolled"
     )
 
 
@@ -654,7 +655,7 @@ def test_enrollment_verdicts_come_in_id_order_with_the_summary(
     )
     assert [v.contact_id for v in verdicts] == sorted([good.id, no_email.id, blocked.id])
     assert skip_summary(verdicts, contacted_within_days=30) == (
-        "1 will send, 2 skipped (1 do-not-contact, 1 no email)"
+        "1 will start, 2 skipped (1 do-not-contact, 1 no email)"
     )
 
 

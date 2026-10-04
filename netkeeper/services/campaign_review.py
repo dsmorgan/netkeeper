@@ -17,7 +17,7 @@ every requirement not met, unless each of these is recorded and still current:
   ``reauth_required`` or ``disabled`` since its test send (#299).
 
 **The guard summary gates nothing** (#346). :func:`guard_summary` is one line, such
-as ``"8 will send, 2 skipped (1 contacted in the last 30 days, 1 no email)"``, and
+as ``"8 will start, 2 skipped (1 contacted in the last 30 days, 1 no email)"``, and
 :func:`guard_report` adds each skipped contact with every reason, and a note of how
 many the old tool emailed (#65). Nobody acknowledges it: the guards apply again
 when each step fires (:func:`~netkeeper.services.campaign_guards.check_step`), so a
@@ -115,9 +115,9 @@ from netkeeper.services.campaign_guards import (
     UNSENDABLE_EMAIL_STATUSES,
     GuardPolicy,
     Verdict,
+    check_audience,
     check_contact,
-    check_enrollment,
-    load_facts,
+    load_pending_facts,
     reason_label,
     skip_summary,
 )
@@ -293,6 +293,10 @@ def audience_fingerprint(session: Session, user: User, campaign: Campaign) -> st
     return _audience(session, user, campaign)[1]
 
 
+GUARD_DETAILS_MAX: Final = 500
+"""The most skipped contacts one :func:`guard_report` lists."""
+
+
 @dataclass(frozen=True, slots=True)
 class SkippedContact:
     """One contact the guards skip, with every reason, not only the one counted."""
@@ -306,13 +310,16 @@ class SkippedContact:
 class GuardReport:
     """The guard summary with its details, for the review screen (#346).
 
-    ``prior_contact`` is :meth:`netkeeper.crm.history.PriorContact.note` over the
-    contacts that will send (#65): informational, like the rest."""
+    ``skipped`` lists the first skipped contacts, by contact id, up to the limit
+    asked for; ``skipped_total`` counts them all. ``prior_contact`` is
+    :meth:`netkeeper.crm.history.PriorContact.note` over the contacts that will start
+    (#65): informational, like the rest."""
 
     summary: str
-    will_send: int
+    will_start: int
     not_enrolled: int
     skipped: tuple[SkippedContact, ...]
+    skipped_total: int
     prior_contact: str | None
 
 
@@ -320,45 +327,72 @@ def _guard_verdicts(
     session: Session, user: User, campaign: Campaign, *, now: datetime
 ) -> tuple[list[Verdict], set[int]]:
     """The verdicts over the audience (its source's contacts and the pending ones), and
-    the pending enrollments' contacts."""
-    enrolled = {e.contact_id for e in _pending(session, user, campaign.id)}
+    the pending enrollments' contacts. A pending enrollment is judged as the engine
+    will judge its first step, so the summary counts what the engine will send
+    (:func:`~netkeeper.services.campaign_guards.check_audience`)."""
+    pending = [(e.id, e.contact_id) for e in _pending(session, user, campaign.id)]
+    enrolled = {c for _, c in pending}
     ids = source_contact_ids(session, user, campaign) | enrolled
-    return check_enrollment(session, user, campaign, ids, now=now), enrolled
+    return check_audience(session, user, campaign, ids, pending, now=now), enrolled
+
+
+def _starting(verdicts: Sequence[Verdict], enrolled: Collection[int]) -> list[int]:
+    return [v.contact_id for v in verdicts if v.eligible and v.contact_id in enrolled]
 
 
 def guard_summary(session: Session, user: User, campaign: Campaign, *, now: datetime) -> str:
-    """Spec 11.8's line over the audience: who will send, and who is skipped and why.
+    """Spec 11.8's line over the audience: who will start, and who is skipped and why.
 
-    From :func:`~netkeeper.services.campaign_guards.check_enrollment` and
+    From :func:`~netkeeper.services.campaign_guards.check_audience` and
     :func:`~netkeeper.services.campaign_guards.skip_summary`, never restated.
     """
+    return guard_summary_and_note(session, user, campaign, now=now)[0]
+
+
+def guard_summary_and_note(
+    session: Session, user: User, campaign: Campaign, *, now: datetime
+) -> tuple[str, str | None]:
+    """:func:`guard_summary` and the old tool's note over the contacts that will start
+    (#65), from one pass of the guards, without the per-contact details."""
     verdicts, enrolled = _guard_verdicts(session, user, campaign, now=now)
-    return skip_summary(
+    summary = skip_summary(
         verdicts, contacted_within_days=campaign.contacted_within_days_guard, enrolled=enrolled
     )
+    return summary, prior_contact(session, user, _starting(verdicts, enrolled)).note()
 
 
-def guard_report(session: Session, user: User, campaign: Campaign, *, now: datetime) -> GuardReport:
-    """:func:`guard_summary` with its details on demand: each skipped contact, with every
-    reason that applies, and the old tool's note (#346, #65). Reads only."""
+def guard_report(
+    session: Session,
+    user: User,
+    campaign: Campaign,
+    *,
+    now: datetime,
+    limit: int = GUARD_DETAILS_MAX,
+) -> GuardReport:
+    """:func:`guard_summary` with its details on demand: the first ``limit`` skipped
+    contacts (at most :data:`GUARD_DETAILS_MAX`), each with every reason that applies,
+    and the old tool's note (#346, #65). Reads only."""
+    limit = max(1, min(limit, GUARD_DETAILS_MAX))
     verdicts, enrolled = _guard_verdicts(session, user, campaign, now=now)
     window = campaign.contacted_within_days_guard
-    sending = [v.contact_id for v in verdicts if v.eligible and v.contact_id in enrolled]
+    sending = _starting(verdicts, enrolled)
     excluded = [v for v in verdicts if not v.eligible]
-    contacts = _contacts(session, user, [v.contact_id for v in excluded])
+    shown = excluded[:limit]
+    contacts = _contacts(session, user, [v.contact_id for v in shown])
     skipped = tuple(
         SkippedContact(
             v.contact_id,
             _contact_name(contacts.get(v.contact_id)),
             tuple(reason_label(r, contacted_within_days=window) for r in v.reasons),
         )
-        for v in excluded
+        for v in shown
     )
     return GuardReport(
         summary=skip_summary(verdicts, contacted_within_days=window, enrolled=enrolled),
-        will_send=len(sending),
+        will_start=len(sending),
         not_enrolled=sum(1 for v in verdicts if v.eligible and v.contact_id not in enrolled),
         skipped=skipped,
+        skipped_total=len(excluded),
         prior_contact=prior_contact(session, user, sending).note(),
     )
 
@@ -633,7 +667,11 @@ def _render_messages(
     fire, for this step's channel; the render is the engine's."""
     today = local_today(user.timezone, now)
     contacts = _contacts(session, user, [e.contact_id for e in pending])
-    facts = load_facts(session, user, list(contacts), campaign_id=campaign.id)
+    # As check_step reads them at the fire: a duplicate address or another campaign
+    # counts only for an older enrollment (#346 review).
+    facts = load_pending_facts(
+        session, user, [(e.id, e.contact_id) for e in pending], campaign_id=campaign.id
+    )
     policy = GuardPolicy(contacted_within_days=campaign.contacted_within_days_guard)
     step_print = step_fingerprint(step, template, campaign, me)
     per_message = is_per_message(template)
