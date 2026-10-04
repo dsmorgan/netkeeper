@@ -719,13 +719,24 @@ _ALLOWED_FORMAT: Final = frozenset(
     {"\u200c", "\u200d"} | {chr(cp) for cp in range(0xE0020, 0xE0080)}
 )
 _UNTYPABLE_CATEGORIES: Final = frozenset({"Cc", "Zl", "Zp", "Cs", "Co", "Cn"})
-# Invisible characters outside Cf: the combining grapheme joiner and the Hangul fillers.
-_INVISIBLE: Final = frozenset({"\u034f", "\u115f", "\u1160", "\u3164"})
-# A subdivision flag: the black flag, one or more tag digits or lowercase tag letters,
-# and the cancel tag (for example England, U+1F3F4 + "gbeng" in tags + U+E007F).
-_TAG_FLAG_RE: Final = regex.compile(
-    "\U0001f3f4[\U000e0030-\U000e0039\U000e0061-\U000e007a]+\U000e007f"
+# Invisible characters outside Cf: the combining grapheme joiner, the Hangul fillers
+# (including the halfwidth one), and the Mongolian free variation selectors.
+_INVISIBLE: Final = frozenset(
+    {"\u034f", "\u115f", "\u1160", "\u3164", "\uffa0", "\u180b", "\u180c", "\u180d", "\u180f"}
 )
+# The only variation selectors a step may carry: text (U+FE0E) and emoji (U+FE0F)
+# presentation. Every other one (U+FE00 to U+FE0D, U+E0100 to U+E01EF) is refused.
+_ALLOWED_VARIATION_SELECTORS: Final = frozenset({"\ufe0e", "\ufe0f"})
+
+
+def _tag_flag(code: str) -> str:
+    """The subdivision flag for ``code``: U+1F3F4, ``code`` in tag characters, cancel tag."""
+    return "\U0001f3f4" + "".join(chr(0xE0000 + ord(c)) for c in code) + "\U000e007f"
+
+
+# The only tag sequences a step may carry: the three RGI subdivision flags, England,
+# Scotland, and Wales. Any other tag sequence could carry a hidden payload.
+SUBDIVISION_FLAGS: Final = frozenset(_tag_flag(code) for code in ("gbeng", "gbsct", "gbwls"))
 _TAG_FIRST: Final = 0xE0020
 _TAG_LAST: Final = 0xE007F
 # The characters after which, followed by whitespace, the next character gets the
@@ -743,7 +754,9 @@ def is_untypable(char: str) -> bool:
     code point, and a format character (Cf) other than ZWJ, ZWNJ, and the tag
     characters U+E0020 to U+E007F. That refuses bidi controls, a zero-width space,
     and a byte-order mark. Also true for the invisible combining grapheme joiner
-    (U+034F) and Hangul fillers (U+115F, U+1160, U+3164). Unassigned means unassigned
+    (U+034F), the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), the Mongolian
+    free variation selectors (U+180B to U+180D, U+180F), and every variation selector
+    other than U+FE0E and U+FE0F. Unassigned means unassigned
     in the Unicode version of Python's :mod:`unicodedata`.
 
     A tag character passes here, but only :func:`is_untypable_cluster` decides
@@ -753,6 +766,8 @@ def is_untypable(char: str) -> bool:
     category = unicodedata.category(char)
     if category in _UNTYPABLE_CATEGORIES or char in _INVISIBLE:
         return True
+    if _is_refused_variation_selector(char):
+        return True
     return category == "Cf" and char not in _ALLOWED_FORMAT
 
 
@@ -761,21 +776,25 @@ def _is_variation_selector(char: str) -> bool:
     return 0xFE00 <= code <= 0xFE0F or 0xE0100 <= code <= 0xE01EF
 
 
+def _is_refused_variation_selector(char: str) -> bool:
+    return _is_variation_selector(char) and char not in _ALLOWED_VARIATION_SELECTORS
+
+
 def is_untypable_cluster(cluster: str) -> bool:
     """Whether no typing step may carry this grapheme cluster.
 
     True when any code point in it is :func:`is_untypable`, when it holds more than
     one variation selector, or when it holds a tag character (U+E0020 to U+E007F) and
-    isn't exactly a subdivision flag: U+1F3F4, then tag digits or lowercase tag
-    letters, then the cancel tag U+E007F. Tags anywhere else can carry invisible
-    text. This is the rule :func:`typing_plan` and :class:`TypeStep` apply.
+    isn't exactly one of :data:`SUBDIVISION_FLAGS` (England, Scotland, or Wales).
+    Any other tag sequence can carry invisible text. This is the rule
+    :func:`typing_plan` and :class:`TypeStep` apply.
     """
     if any(is_untypable(char) for char in cluster):
         return True
     if sum(_is_variation_selector(char) for char in cluster) > 1:
         return True
     has_tag = any(_TAG_FIRST <= ord(char) <= _TAG_LAST for char in cluster)
-    return has_tag and _TAG_FLAG_RE.fullmatch(cluster) is None
+    return has_tag and cluster not in SUBDIVISION_FLAGS
 
 
 class TypingPlanError(ValueError):
@@ -811,6 +830,8 @@ class UnsupportedCharacter(TypingPlanError):
 # The largest sigma a TypingProfile accepts. At 2, a lognormal's 99th percentile is
 # about 100 times its median; anything wider is a typo, not a typist.
 _MAX_SIGMA: Final = 2.0
+# The longest thinking pause a TypingProfile accepts, in seconds.
+_MAX_THINKING_S: Final = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -847,8 +868,10 @@ class TypingProfile:
         if not (math.isfinite(self.thinking_p) and 0 <= self.thinking_p <= 1):
             raise InvalidTypingProfile("thinking_p must be between 0 and 1")
         low, high = self.thinking_range_s
-        if not (math.isfinite(low) and math.isfinite(high) and 0 <= low <= high):
-            raise InvalidTypingProfile("thinking_range_s must be finite, with 0 <= low <= high")
+        if not (math.isfinite(low) and 0 <= low <= high <= _MAX_THINKING_S):
+            raise InvalidTypingProfile(
+                f"thinking_range_s must have 0 <= low <= high <= {_MAX_THINKING_S:.0f}"
+            )
 
 
 DEFAULT_TYPING: Final = TypingProfile()

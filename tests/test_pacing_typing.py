@@ -295,6 +295,11 @@ def test_format_private_surrogate_and_unassigned_are_refused(char: str) -> None:
         "\U0001f3f4\U000e007f",  # a black flag with no tag letters
         "\U0001f3f4\U000e0048\U000e0049\U000e007f",  # uppercase tag letters
         "\U000e007f",  # a lone cancel tag
+        # A long tag body: a payload hidden in an otherwise well-formed flag.
+        "\U0001f3f4" + "".join(chr(0xE0000 + ord(c)) for c in "gbeng" * 20) + "\U000e007f",
+        "\U0001f3f4\U000e0067\U000e007f",  # a one-character tag body
+        # A well-formed but non-RGI subdivision (California).
+        "\U0001f3f4\U000e0075\U000e0073\U000e0063\U000e0061\U000e007f",
     ],
 )
 def test_tag_characters_outside_a_subdivision_flag_are_refused(text: str) -> None:
@@ -305,7 +310,14 @@ def test_tag_characters_outside_a_subdivision_flag_are_refused(text: str) -> Non
         TypeStep(chunk=text, delay_before_s=0.1, newline=False)
 
 
-@pytest.mark.parametrize("flag", [_FLAG_ENGLAND, _FLAG_SCOTLAND])
+_FLAG_WALES = "\U0001f3f4\U000e0067\U000e0062\U000e0077\U000e006c\U000e0073\U000e007f"
+
+
+def test_the_subdivision_flags_are_pinned() -> None:
+    assert frozenset({_FLAG_ENGLAND, _FLAG_SCOTLAND, _FLAG_WALES}) == pacing.SUBDIVISION_FLAGS
+
+
+@pytest.mark.parametrize("flag", [_FLAG_ENGLAND, _FLAG_SCOTLAND, _FLAG_WALES])
 def test_subdivision_flags_are_typable(flag: str) -> None:
     assert not is_untypable_cluster(flag)
     plan = typing_plan(f"go {flag}", random.Random(0))
@@ -323,6 +335,14 @@ def test_subdivision_flags_are_typable(flag: str) -> None:
         "\u115f",  # Hangul choseong filler
         "\u1160",  # Hangul jungseong filler
         "\u3164",  # Hangul filler
+        "\uffa0",  # halfwidth Hangul filler
+        "a\u180b",  # Mongolian free variation selector one
+        "a\u180c",  # Mongolian free variation selector two
+        "a\u180d",  # Mongolian free variation selector three
+        "a\u180f",  # Mongolian free variation selector four
+        "a\ufe01b\ufe02c\ufe03",  # variation selectors other than FE0E and FE0F
+        "a\ufe00",
+        "\u8fbb\U000e0100",  # one ideographic variation selector
     ],
 )
 def test_invisible_fillers_and_stacked_variation_selectors_are_refused(text: str) -> None:
@@ -330,10 +350,10 @@ def test_invisible_fillers_and_stacked_variation_selectors_are_refused(text: str
         typing_plan(text, random.Random(0), allow_newlines=True)
 
 
-def test_one_variation_selector_is_typable() -> None:
-    heart = "\u2764\ufe0f"
-    assert not is_untypable_cluster(heart)
-    assert typing_plan(heart, random.Random(0))[0].chunk == heart
+@pytest.mark.parametrize("cluster", ["\u2764\ufe0f", "\u2764\ufe0e"])
+def test_one_presentation_selector_is_typable(cluster: str) -> None:
+    assert not is_untypable_cluster(cluster)
+    assert typing_plan(cluster, random.Random(0))[0].chunk == cluster
 
 
 def test_newline_pairs_other_than_crlf_are_two_steps() -> None:
@@ -604,6 +624,7 @@ def test_max_seconds_never_raises_the_ceiling(max_seconds: float) -> None:
         {"thinking_range_s": (-1.0, 1.0)},
         {"thinking_range_s": (0.8, math.inf)},
         {"thinking_range_s": (math.nan, 1.0)},
+        {"thinking_range_s": (0.8, 60.001)},
     ],
     ids=lambda field: next(iter(field)),
 )
@@ -616,6 +637,7 @@ def test_a_profile_out_of_range_is_refused(field: dict[str, object]) -> None:
 def test_profile_edges_that_are_allowed() -> None:
     pacing.TypingProfile(char_sigma=0.0, extra_sigma=2.0, thinking_p=0.0)
     pacing.TypingProfile(thinking_p=1.0, thinking_range_s=(1.0, 1.0))
+    pacing.TypingProfile(thinking_range_s=(0.0, 60.0))
 
 
 def test_an_empty_body_is_an_empty_plan() -> None:
