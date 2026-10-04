@@ -19,19 +19,26 @@ runs, and the LinkedIn ones besides. It refuses with the reasons when:
 - a reply is on the enrollment (it then ends ``replied``);
 - the step already has an outbound message, whatever its status (never twice);
 - another outbound message on the enrollment is still waiting;
-- the cadence (the step's delay after the latest sent message) has not passed;
+- the cadence (the step's delay after the latest step fired: a send, or a prefill
+  the person discarded, :func:`~netkeeper.services.campaign_engine.latest_fired`) has
+  not passed;
 - the guards (:func:`netkeeper.services.campaign_guards.check_step`) exclude the
   contact. A LinkedIn step needs the contact's ``li_urn``;
 - a prefill is already open for the user: a LinkedIn message ``scheduled`` (claimed,
-  its run not recorded) or ``prefilled`` (spec 11.6: one at a time);
+  its run not recorded) or ``prefilled`` less than three days ago (spec 11.6: one at a
+  time). The refusal names the open message. A partial unique index (0036) holds the
+  same rule in the database;
 - it is outside ``[linkedin] active_hours`` (spec 9.5);
 - the channel guard (:func:`netkeeper.services.campaign_guards.check_channel`)
   refuses: the session is flagged, heat is at its skip threshold, no evidence says
   the session is logged in, or today's ``li_prefills`` (or ``profile_visits``)
   budget is spent;
-- the template has lint errors, or the body does not render;
+- the template has lint errors, the body does not render or renders empty, or the
+  rendered message has an error for this contact (``rendered_errors``: the enrollment
+  is parked with ``not_sent_error`` "blocked: <rules>");
 - the run cannot be recorded (:func:`netkeeper.services.runs.create_run`: one running
-  run per account; a ``message_send`` run is never scheduled).
+  run per account; a ``message_send`` run is never scheduled, and is recorded only
+  with the claim's gate token, :data:`netkeeper.services.runs.MESSAGE_SEND_GATE`).
 
 **Step approvals** (#339) are the review gate's: a campaign is ``active`` only once
 every step, LinkedIn steps included, was approved, so a claim on a campaign that is
@@ -54,17 +61,25 @@ again. The run left ``running`` is failed at the next start.
 - ``not_typed`` or ``too_long`` (refused before any key): the claim is given back, as
   an email send that sent nothing is: the message row is deleted, the reason goes on
   the enrollment, and it is ready again :func:`~netkeeper.services.campaign_engine.retry_after`
-  later. :data:`NOT_TYPED_PARK_AFTER` in a row park it for a person.
+  later. :data:`NOT_TYPED_PARK_AFTER` in a row park it for a person; ``too_long``
+  parks it at once, since the same body would be too long again.
 - ``partially_typed`` or ``unknown``: ``failed`` with the reason, and the enrollment
   parked. Never retyped: a person clears the composer.
 
 **Stale.** The engine's tick turns a ``prefilled`` message ``stale``
 :data:`~netkeeper.services.campaign_engine.PREFILL_STALE_AFTER` after its prefill
 (:func:`~netkeeper.services.campaign_engine.mark_stale`). The enrollment stays
-parked, and the message waits for a person: :func:`waiting_for_you` lists it.
+parked, and the message waits for a person: :func:`waiting_for_you` lists it. A
+claim marks them too, before it decides, and a ``prefilled`` message that old never
+holds the one open slot.
 
-**Discard** (:func:`discard`): the message is ``discarded``, the step counts as fired,
-and the enrollment moves to its next step or completes.
+**Interrupted.** A claimed message whose run ended without an outcome (a crash) stays
+``scheduled`` and holds the one open slot: nobody knows what its composer holds.
+:func:`waiting_for_you` lists it as interrupted, and :func:`discard` lets it go.
+
+**Discard** (:func:`discard`): the message is ``discarded`` with ``discarded_at``, the
+step counts as fired, and the enrollment moves to its next step, due that step's delay
+after the discard (or after a later send), or completes.
 
 Nothing here imports browser code (``tests/test_browser_safety.py``).
 """
@@ -79,11 +94,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from netkeeper.campaigns import schedule
-from netkeeper.campaigns.render import MergeValues, TemplateRenderError, render
+from netkeeper.campaigns.render import MergeValues, Severity, TemplateRenderError, render
 from netkeeper.campaigns.templates import activation_errors, contact_fields
 from netkeeper.config import Settings
 from netkeeper.linkedin.messaging import MessageOutcome, MessageOutcomeKind
@@ -161,6 +177,7 @@ class Refusal(enum.StrEnum):
     BAD_ACTIVE_HOURS = "bad_active_hours"
     RUN_IN_PROGRESS = "run_in_progress"
     RUN_REFUSED = "run_refused"
+    RENDERED_ERRORS = "rendered_errors"
 
 
 #: Refusals about the user, not the enrollment: every other enrollment would get the
@@ -204,7 +221,12 @@ StartRun = Callable[[Session, User, datetime], SyncRun]
 def start_message_send_run(session: Session, user: User, now: datetime) -> SyncRun:
     """Record the manual ``message_send`` run a claim names (:func:`runs.create_run`)."""
     return runs.create_run(
-        session, user, SyncRunKind.MESSAGE_SEND, trigger=SyncRunTrigger.MANUAL, now=now
+        session,
+        user,
+        SyncRunKind.MESSAGE_SEND,
+        trigger=SyncRunTrigger.MANUAL,
+        now=now,
+        gate=runs.MESSAGE_SEND_GATE,
     )
 
 
@@ -281,18 +303,33 @@ def ready_to_prefill(
 # --- the claim ------------------------------------------------------------------------
 
 
-def _open_prefill(session: Session, user: User) -> int | None:
-    return session.scalar(
+def _open_prefill(session: Session, user: User, now: datetime) -> Message | None:
+    """The user's open prefill, if there is one. A ``prefilled`` message
+    :data:`PREFILL_STALE_AFTER` old no longer holds the slot, even before the tick
+    marks it ``stale``."""
+    return session.scalars(
         scoped(user, Message)
-        .with_only_columns(Message.id)
         .where(
             Message.channel == TemplateChannel.LINKEDIN,
             Message.direction == MessageDirection.OUT,
-            Message.status.in_(OPEN_STATUSES),
+            or_(
+                Message.status == MessageStatus.SCHEDULED,
+                and_(
+                    Message.status == MessageStatus.PREFILLED,
+                    or_(
+                        Message.prefilled_at.is_(None),
+                        Message.prefilled_at > now - PREFILL_STALE_AFTER,
+                    ),
+                ),
+            ),
         )
         .order_by(Message.id)
         .limit(1)
-    )
+    ).first()
+
+
+def _open_detail(message: Message) -> str:
+    return f"message {message.id} is {message.status.value}; send or discard it first"
 
 
 def channel_state(
@@ -349,6 +386,8 @@ class _Claimer:
 
     def claim(self, enrollment_id: int) -> PrefillClaim:
         session, user, now = self.session, self.user, self.now
+        # Whatever the tick has not marked yet: a prefill nobody sent goes stale.
+        engine.mark_stale(session, user, now=now)
         enrollment = engine._enrollment(session, user, enrollment_id)
         campaign = engine._campaign(session, user, enrollment.campaign_id)
 
@@ -408,10 +447,12 @@ class _Claimer:
         if engine._waiting(session, user, enrollment.id):
             return self.park(enrollment, Skip.WAITING_ON_UNSENT)
         latest = engine._latest_sent(session, user, enrollment.id)
-        if latest is None and step.position > 1:
+        # A discarded prefill counts as fired: the next step's delay counts from it.
+        anchor = engine.latest_fired(session, user, enrollment.id)
+        if anchor is None and step.position > 1:
             return self.park(enrollment, Skip.WAITING_ON_UNSENT)
-        if latest is not None:
-            next_due = engine.follow_up_due(self.settings, user, step, latest, hours)
+        if anchor is not None:
+            next_due = engine.follow_up_due(self.settings, user, step, anchor, hours)
             if next_due > now:
                 enrollment.next_action_at = next_due
                 return self.refuse(enrollment, Skip.NOT_DUE)
@@ -421,8 +462,9 @@ class _Claimer:
             return self._excluded(enrollment, verdict.reasons, slots, hours)
 
         # The user and the browser: one open prefill, active hours, the channel.
-        if _open_prefill(session, user) is not None:
-            return self.refuse(enrollment, Refusal.PREFILL_OPEN)
+        open_prefill = _open_prefill(session, user, now)
+        if open_prefill is not None:
+            return self.refuse(enrollment, Refusal.PREFILL_OPEN, detail=_open_detail(open_prefill))
         try:
             runs.refuse_if_outside_active_hours(self.settings.linkedin, now=now)
         except runs.OutsideActiveHours as exc:
@@ -494,25 +536,38 @@ class _Claimer:
             return self.park(enrollment, Skip.RENDER_FAILED)
         if not rendered.body.strip():
             return self.park(enrollment, Skip.RENDER_FAILED)
+        errors = sorted({i.rule.value for i in rendered.issues if i.severity is Severity.ERROR})
+        if errors:
+            # What this contact's message would say is wrong (an empty merge value, a
+            # body over LinkedIn's limit ...): a person looks at it, never a retry.
+            enrollment.not_sent_error = f"blocked: {', '.join(errors)}"[: engine.ERROR_MAX_LENGTH]
+            return self.park(enrollment, Refusal.RENDERED_ERRORS, *errors)
         try:
-            run = self.start_run(session, user, now)
+            # One savepoint for the run and the message: the database's one-open-prefill
+            # index (0036) refusing the message takes the run back with it.
+            with session.begin_nested():
+                run = self.start_run(session, user, now)
+                message = Message(
+                    user_id=user.id,
+                    enrollment_id=enrollment.id,
+                    step_id=step.id,
+                    contact_id=enrollment.contact_id,
+                    channel=TemplateChannel.LINKEDIN,
+                    direction=MessageDirection.OUT,
+                    status=MessageStatus.SCHEDULED,
+                    body_rendered=rendered.body,
+                    scheduled_at=now,
+                    sync_run_id=run.id,
+                )
+                session.add(message)
+                session.flush()
         except runs.RunAlreadyRunning as exc:
             return self.refuse(enrollment, Refusal.RUN_IN_PROGRESS, detail=str(exc))
         except runs.RunError as exc:
             return self.refuse(enrollment, Refusal.RUN_REFUSED, detail=str(exc))
-        message = Message(
-            user_id=user.id,
-            enrollment_id=enrollment.id,
-            step_id=step.id,
-            contact_id=enrollment.contact_id,
-            channel=TemplateChannel.LINKEDIN,
-            direction=MessageDirection.OUT,
-            status=MessageStatus.SCHEDULED,
-            body_rendered=rendered.body,
-            scheduled_at=now,
-            sync_run_id=run.id,
-        )
-        session.add(message)
+        except IntegrityError:
+            log.warning("enrollment %d: another prefill opened meanwhile", enrollment.id)
+            return self.refuse(enrollment, Refusal.PREFILL_OPEN, detail="another prefill is open")
         enrollment.next_action_at = None
         session.flush()
         log.info(
@@ -628,7 +683,16 @@ def record_prefill_outcome(
         log.info("message %d is prefilled; it waits for the person to send it", message.id)
         return True
     if kind in (MessageOutcomeKind.NOT_TYPED, MessageOutcomeKind.TOO_LONG):
-        _give_back(session, user, settings, message, reason, now=now)
+        # Too long now is too long next time: parked at once, never retried.
+        _give_back(
+            session,
+            user,
+            settings,
+            message,
+            reason,
+            now=now,
+            park=kind is MessageOutcomeKind.TOO_LONG,
+        )
         return True
     # partially_typed, unknown: what the composer holds is not known. Never retyped.
     message.status = MessageStatus.FAILED
@@ -653,9 +717,11 @@ def _give_back(
     reason: str,
     *,
     now: datetime,
+    park: bool = False,
 ) -> None:
     """Nothing was typed: the row goes, so the step is free to be claimed again, and the
-    enrollment is ready again later, or parked after :data:`NOT_TYPED_PARK_AFTER` in a row."""
+    enrollment is ready again later, or parked after :data:`NOT_TYPED_PARK_AFTER` in a row
+    (at once with ``park``: a body too long)."""
     enrollment = engine._enrollment(session, user, message.enrollment_id)
     enrollment.not_sent_count += 1
     enrollment.not_sent_since = enrollment.not_sent_since or now
@@ -663,7 +729,7 @@ def _give_back(
     tries = enrollment.not_sent_count
     session.delete(message)
     session.flush()
-    if tries >= NOT_TYPED_PARK_AFTER:
+    if park or tries >= NOT_TYPED_PARK_AFTER:
         enrollment.next_action_at = None
         log.warning(
             "enrollment %d: %d prefills in a row typed nothing; it waits for a person",
@@ -689,24 +755,37 @@ def _give_back(
 
 @dataclass(frozen=True, slots=True)
 class WaitingPrefill:
-    """One LinkedIn message waiting for the person: ``prefilled``, or ``stale``."""
+    """One LinkedIn message waiting for the person: ``prefilled``, ``stale``, or
+    ``interrupted``: claimed (``scheduled``) and its run over without an outcome, so
+    nobody knows what the composer holds."""
 
     message: Message
     enrollment: Enrollment
     campaign: Campaign
     contact: Contact
 
+    @property
+    def interrupted(self) -> bool:
+        return self.message.status is MessageStatus.SCHEDULED
+
 
 def waiting_for_you(
     session: Session, user: User, *, limit: int, offset: int = 0
 ) -> tuple[list[WaitingPrefill], int]:
-    """``prefilled`` and ``stale`` LinkedIn messages, oldest prefill first, and how many.
-    Read-only."""
+    """``prefilled``, ``stale`` and interrupted LinkedIn messages (claimed, their run not
+    running), oldest first, and how many. An interrupted one blocks every later prefill
+    (one open at a time) until the person discards it. Read-only."""
+    run_running = and_(
+        SyncRun.id == Message.sync_run_id,
+        SyncRun.user_id == user.id,
+        SyncRun.status == SyncRunStatus.RUNNING,
+    )
     statement = (
         scoped(user, Message)
         .join(Enrollment, Enrollment.id == Message.enrollment_id)
         .join(Campaign, Campaign.id == Enrollment.campaign_id)
         .join(Contact, Contact.id == Message.contact_id)
+        .outerjoin(SyncRun, run_running)
         .where(
             Enrollment.user_id == user.id,
             Campaign.user_id == user.id,
@@ -714,13 +793,16 @@ def waiting_for_you(
             not_self(),  # never the self contact (#342)
             Message.channel == TemplateChannel.LINKEDIN,
             Message.direction == MessageDirection.OUT,
-            Message.status.in_(WAITING_STATUSES),
+            or_(
+                Message.status.in_(WAITING_STATUSES),
+                and_(Message.status == MessageStatus.SCHEDULED, SyncRun.id.is_(None)),
+            ),
         )
     )
     total = session.scalar(statement.with_only_columns(func.count(Message.id)).order_by(None))
     rows = session.execute(
         statement.add_columns(Enrollment, Campaign, Contact)
-        .order_by(Message.prefilled_at, Message.id)
+        .order_by(Message.id)
         .offset(offset)
         .limit(min(limit, READY_PAGE_MAX))
     ).tuples()
@@ -770,9 +852,12 @@ def _run_running(session: Session, user: User, run_id: int | None) -> bool:
     return status is SyncRunStatus.RUNNING
 
 
-def discard(session: Session, user: User, message_id: int, *, settings: Settings) -> Message:
-    """The person will not send it: ``discarded``. The step counts as fired (never twice,
-    as for a discarded Gmail draft), and the enrollment moves to its next step or
+def discard(
+    session: Session, user: User, message_id: int, *, settings: Settings, now: datetime
+) -> Message:
+    """The person will not send it: ``discarded`` at ``now`` (``discarded_at``). The step
+    counts as fired (never twice, as for a discarded Gmail draft), and the enrollment
+    moves to its next step, due its delay after the discard (or after a later send), or
     completes. netkeeper changes nothing in LinkedIn: the composer is the person's.
 
     Raises :class:`LookupError` for a message that is not ``user``'s, and
@@ -780,7 +865,10 @@ def discard(session: Session, user: User, message_id: int, *, settings: Settings
     session."""
     engine._require_writer(session, "discard")
     message = _waiting_message(session, user, message_id, also_unrun=True)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
     message.status = MessageStatus.DISCARDED
+    message.discarded_at = now
     message.error = None
     session.flush()
     engine._after_settling(session, user, settings, message, fired=True)

@@ -385,7 +385,7 @@ def test_the_summary_breaks_a_tie_in_reason_order() -> None:
     verdicts = _verdicts((2, Reason.NO_LINKEDIN), (2, Reason.ARCHIVED), (1, Reason.MERGED))
     assert skip_summary(verdicts, contacted_within_days=30) == (
         "0 will start, 5 skipped (2 archived,"
-        " 2 no LinkedIn member id (needs enrichment first), 1 merged into another contact)"
+        " 2 no LinkedIn member id yet (a connections sync adds it), 1 merged into another contact)"
     )
 
 
@@ -426,7 +426,7 @@ def test_every_reason_has_its_label() -> None:
         "email_invalid": "invalid email",
         "do_not_send": "address on the do-not-send list",
         "address_bounced_elsewhere": "address bounced on another contact",
-        "no_linkedin": "no LinkedIn member id (needs enrichment first)",
+        "no_linkedin": "no LinkedIn member id yet (a connections sync adds it)",
         "duplicate_address": "address already in this campaign",
         "in_another_campaign": "in another campaign",
         "contacted_recently": "contacted in the last 1 day",

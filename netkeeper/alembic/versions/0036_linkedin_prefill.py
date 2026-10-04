@@ -6,6 +6,11 @@
   ``prefilled`` message goes ``stale`` three days after it.
 - ``sync_run_id``: the ``message_send`` run that typed it (``SET NULL`` when that
   run is deleted), indexed.
+- ``discarded_at``: when the person discarded a LinkedIn prefill; the next step's
+  delay counts from it.
+- ``uq_messages_one_open_prefill``: a partial unique index on ``user_id`` over the
+  open LinkedIn prefills (outbound, ``scheduled`` or ``prefilled``), so one open
+  prefill per user holds in the database, PostgreSQL included.
 - An index on ``(user_id, li_conversation_urn)``, for the inbox poll that finds a
   prefilled message sent (P4-02).
 
@@ -33,21 +38,36 @@ TABLE: Final = "messages"
 RUN_FK: Final = "fk_messages_sync_run_id_sync_runs"
 RUN_INDEX: Final = "ix_messages_sync_run_id"
 CONVERSATION_INDEX: Final = "ix_messages_user_id_li_conversation_urn"
+OPEN_INDEX: Final = "uq_messages_one_open_prefill"
+OPEN_WHERE: Final = (
+    "channel = 'linkedin' AND direction = 'out' AND status IN ('scheduled', 'prefilled')"
+)
 
 
 def upgrade() -> None:
     with op.batch_alter_table(TABLE) as batch:
         batch.add_column(sa.Column("prefilled_at", sa.DateTime(), nullable=True))
         batch.add_column(sa.Column("sync_run_id", sa.Integer(), nullable=True))
+        batch.add_column(sa.Column("discarded_at", sa.DateTime(), nullable=True))
         batch.create_foreign_key(RUN_FK, "sync_runs", ["sync_run_id"], ["id"], ondelete="SET NULL")
     op.create_index(RUN_INDEX, TABLE, ["sync_run_id"], unique=False)
     op.create_index(CONVERSATION_INDEX, TABLE, ["user_id", "li_conversation_urn"], unique=False)
+    op.create_index(
+        OPEN_INDEX,
+        TABLE,
+        ["user_id"],
+        unique=True,
+        sqlite_where=sa.text(OPEN_WHERE),
+        postgresql_where=sa.text(OPEN_WHERE),
+    )
 
 
 def downgrade() -> None:
+    op.drop_index(OPEN_INDEX, table_name=TABLE)
     op.drop_index(CONVERSATION_INDEX, table_name=TABLE)
     op.drop_index(RUN_INDEX, table_name=TABLE)
     with op.batch_alter_table(TABLE) as batch:
         batch.drop_constraint(RUN_FK, type_="foreignkey")
+        batch.drop_column("discarded_at")
         batch.drop_column("sync_run_id")
         batch.drop_column("prefilled_at")

@@ -7537,6 +7537,8 @@ export interface components {
             contact_name: string;
             /** Enrollment Id */
             enrollment_id: number;
+            /** Interrupted */
+            interrupted: boolean;
             /** Message Id */
             message_id: number;
             /** Prefilled At */

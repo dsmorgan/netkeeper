@@ -3015,3 +3015,27 @@ def test_0036_downgrades_to_messages_without_a_prefill(migration_engine: Engine)
     with migration_engine.begin() as connection:
         assert _count(connection, "messages") == 1
     migrations.upgrade(migration_engine, "0036")
+
+
+def test_0036_holds_one_open_linkedin_prefill_per_user(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0036")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+        connection.execute(
+            text("UPDATE messages SET channel = 'linkedin', status = 'prefilled' WHERE id = 1")
+        )
+        # Other statuses, inbound and email messages are not held.
+        _insert_message(connection, id=2, enrollment_id=1, contact_id=1, step_id=1)
+        connection.execute(text("UPDATE messages SET channel = 'linkedin' WHERE id = 2"))
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_message(connection, id=3, enrollment_id=1, contact_id=1, step_id=1)
+        connection.execute(
+            text("UPDATE messages SET channel = 'linkedin', status = 'scheduled' WHERE id = 3")
+        )
+    with migration_engine.begin() as connection:
+        connection.execute(text("UPDATE messages SET status = 'stale' WHERE id = 1"))
+        _insert_message(connection, id=3, enrollment_id=1, contact_id=1, step_id=1)
+        connection.execute(
+            text("UPDATE messages SET channel = 'linkedin', status = 'scheduled' WHERE id = 3")
+        )
+        assert _count(connection, "messages") == 3

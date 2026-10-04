@@ -153,8 +153,36 @@ def test_one_run_per_account_at_a_time(writer: Session, user: User) -> None:
 
 @pytest.mark.parametrize("kind", [SyncRunKind.MESSAGE_SEND])
 def test_a_kind_with_no_runner_is_refused(writer: Session, user: User, kind: SyncRunKind) -> None:
+    # A message_send run also needs the prefill claim's gate (P4-09): given it, the
+    # missing runner still refuses.
     with pytest.raises(runs.RunError, match="no runner"):
-        runs.create_run(writer, user, kind, trigger=SyncRunTrigger.MANUAL, now=NOW)
+        runs.create_run(
+            writer,
+            user,
+            kind,
+            trigger=SyncRunTrigger.MANUAL,
+            now=NOW,
+            gate=runs.MESSAGE_SEND_GATE,
+        )
+
+
+@pytest.mark.parametrize("trigger", list(SyncRunTrigger))
+def test_a_message_send_run_needs_the_prefill_claims_gate(
+    writer: Session, user: User, trigger: SyncRunTrigger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P4-09: even once message_send has a runner, only a prefill claim records one."""
+    monkeypatch.setattr(runs, "RUNNABLE_KINDS", runs.RUNNABLE_KINDS | {SyncRunKind.MESSAGE_SEND})
+    with pytest.raises(runs.RunError, match=r"never scheduled|prefill claim"):
+        runs.create_run(writer, user, SyncRunKind.MESSAGE_SEND, trigger=trigger, now=NOW)
+    with pytest.raises(runs.RunError, match="never scheduled"):
+        runs.create_run(
+            writer,
+            user,
+            SyncRunKind.MESSAGE_SEND,
+            trigger=SyncRunTrigger.SCHEDULED,
+            now=NOW,
+            gate=runs.MESSAGE_SEND_GATE,
+        )
 
 
 def test_max_visits_is_for_enrichment_and_positive(writer: Session, user: User) -> None:

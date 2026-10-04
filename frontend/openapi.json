@@ -12380,6 +12380,10 @@
             "title": "Enrollment Id",
             "type": "integer"
           },
+          "interrupted": {
+            "title": "Interrupted",
+            "type": "boolean"
+          },
           "message_id": {
             "title": "Message Id",
             "type": "integer"
@@ -12403,6 +12407,7 @@
         "required": [
           "message_id",
           "status",
+          "interrupted",
           "enrollment_id",
           "campaign_id",
           "campaign_name",

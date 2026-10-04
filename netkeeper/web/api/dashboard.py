@@ -49,6 +49,7 @@ def list_next_fires(
 
     A LinkedIn step is listed too, with ``ready_to_prefill``: a person prefills it
     (P4-09), and the tick never fires it."""
+    now = utcnow()
     fires, total = campaign_engine.upcoming(session, user, limit=limit, include_linkedin=True)
     return NextFirePage(
         items=[
@@ -61,7 +62,7 @@ def list_next_fires(
                 channel=None if fire.step is None else fire.step.channel.value,
                 contact_id=fire.contact.id,
                 contact_name=_name(fire.contact),
-                ready_to_prefill=fire.ready_to_prefill,
+                ready_to_prefill=fire.ready_to_prefill(now),
             )
             for fire in fires
         ],
