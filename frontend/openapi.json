@@ -6372,8 +6372,6 @@
         "required": [
           "id",
           "kind",
-          "channel",
-          "li_conversation_urn",
           "contact_id",
           "contact_name",
           "campaign_id",
@@ -6381,6 +6379,7 @@
           "enrollment_id",
           "enrollment_status",
           "channel",
+          "li_conversation_urn",
           "subject",
           "snippet",
           "received_at",
