@@ -238,25 +238,31 @@ def test_one_users_poll_never_touches_another_users_contacts(writer: Session, us
     assert _interactions(writer, other) == []
 
 
-def test_the_reply_hook_gets_only_new_inbound_messages(
+def test_the_reply_hook_gets_only_new_messages(
     writer: Session, user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[tuple[inbox_apply.NewInbound, ...]] = []
-    monkeypatch.setattr(inbox_apply, "REPLY_HANDLERS", [lambda s, u, new: calls.append(new)])
+    calls: list[inbox_apply.InboxNews] = []
+    monkeypatch.setattr(inbox_apply, "REPLY_HANDLERS", [lambda s, u, news: calls.append(news)])
     _contact(writer, user, ADA)
     read = delta(a_thread_with(ADA, THEN))
     inbox_apply.apply_delta(writer, user, read, polled_at=NOW)
     inbox_apply.apply_delta(writer, user, read, polled_at=NOW)
 
-    assert [len(new) for new in calls] == [1, 0]
-    (first,) = calls[0]
+    assert [(len(n.inbound), len(n.outbound)) for n in calls] == [(1, 1), (0, 0)]
+    (first,) = calls[0].inbound
     assert first.message_urn == "urn:li:msg_message:INVENTEDONE2"
     assert first.conversation_urn == "urn:li:msg_conversation:INVENTEDONE"
+    assert first.at == THEN + timedelta(minutes=1)  # the page's time, not truncated
+    assert first.snippet == "Invented reply."
+    assert "Invented reply." not in repr(calls[0])  # the snippet stays out of a repr
+    (sent,) = calls[0].outbound
+    assert (sent.message_urn, sent.at) == ("urn:li:msg_message:INVENTEDONE1", THEN)
+    assert calls[0].polled_at == NOW
 
 
-def test_the_reply_hook_list_starts_empty() -> None:
-    """P4-02 (#381) adds its handler; until then a poll calls nothing."""
-    assert inbox_apply.REPLY_HANDLERS == []
+def test_the_campaigns_handler_is_on_the_reply_hook() -> None:
+    """P4-02 (#381): a poll always records campaign replies and confirms prefilled sends."""
+    assert [inbox_apply.campaign_replies_handler] == inbox_apply.REPLY_HANDLERS
 
 
 def test_an_external_id_is_unique_per_user(writer: Session, user: User) -> None:
@@ -539,7 +545,9 @@ def test_an_archived_inbound_message_is_adopted_and_still_reaches_the_reply_hook
 ) -> None:
     """#388 review, S2: a reply the archive already recorded is the poll's reply too."""
     calls: list[tuple[inbox_apply.NewInbound, ...]] = []
-    monkeypatch.setattr(inbox_apply, "REPLY_HANDLERS", [lambda s, u, new: calls.append(new)])
+    monkeypatch.setattr(
+        inbox_apply, "REPLY_HANDLERS", [lambda s, u, news: calls.append(news.inbound)]
+    )
     ada = _contact(writer, user, ADA)
     archived = add_interaction(
         writer,

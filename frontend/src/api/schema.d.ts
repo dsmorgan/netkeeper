@@ -5164,6 +5164,7 @@ export interface components {
             campaign_id: number;
             /** Campaign Name */
             campaign_name: string;
+            channel: components["schemas"]["TemplateChannel"];
             /** Contact Id */
             contact_id: number;
             /** Contact Name */

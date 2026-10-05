@@ -18,6 +18,7 @@ from netkeeper.models import (
     Message,
     MessageDirection,
     MessageStatus,
+    TemplateChannel,
     User,
     UserKind,
 )
@@ -109,6 +110,7 @@ async def test_lists_every_kind_newest_first(
         "campaign_name": "Spring hello",
         "enrollment_id": seed["replied"],
         "enrollment_status": "replied",
+        "channel": "email",
         "subject": "Re: Catching up",
         "snippet": "Good to hear <b>from</b> you",  # as stored: the page shows it as text
         "received_at": "2030-06-03T12:00:00Z",
@@ -117,6 +119,37 @@ async def test_lists_every_kind_newest_first(
     bounce = page["items"][1]
     assert (bounce["snippet"], bounce["enrollment_status"]) == (None, "bounced")
     assert bounce["received_at"] == "2030-06-04T12:00:00Z"
+
+
+async def test_a_linkedin_reply_says_its_channel(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """P4-02 (#381): a LinkedIn reply has a snippet and no subject."""
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = session.scalars(select(User).where(User.kind == UserKind.LOCAL)).one()
+        campaign = factories.make_campaign(session, user, channels=(TemplateChannel.LINKEDIN,))
+        enrollment = factories.make_enrollment(
+            session, campaign, factories.make_contact(session, user)
+        )
+        reply = _reply(
+            session,
+            enrollment,
+            3,
+            channel=TemplateChannel.LINKEDIN,
+            subject=None,
+            snippet="Happy to talk",
+            li_message_urn="urn:li:msg_message:INVENTED1",
+        )
+        reply_id = reply.id
+
+    [item] = (await client.get("/api/v1/inbox")).json()["items"]
+    assert (item["id"], item["channel"], item["subject"], item["snippet"]) == (
+        reply_id,
+        "linkedin",
+        None,
+        "Happy to talk",
+    )
 
 
 async def test_filters_by_kind_handled_and_enrollment(

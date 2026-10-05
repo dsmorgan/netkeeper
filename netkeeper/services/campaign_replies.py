@@ -1,4 +1,5 @@
-"""Reply and bounce detection for Gmail (spec 11.5 "Bounces", 11.7; item P3-08).
+"""Reply and bounce detection for Gmail (spec 11.5 "Bounces", 11.7; item P3-08), and
+reply and send detection for LinkedIn (P4-02, #381; the end of this docstring).
 
 :func:`poll_replies` runs in the campaign engine's tick thread, from
 :meth:`netkeeper.services.campaign_sender.GmailSender.reconcile`, before anything
@@ -59,13 +60,33 @@ An automatic answer (:func:`is_auto_reply`: out of office and the like) is ignor
 
 netkeeper deletes nothing in Gmail (ADR 0003): this module reads, and adds the
 campaign label to a reply.
+
+LinkedIn
+--------
+The LinkedIn inbox poll (P4-08) calls :func:`apply_linkedin_news` from
+:data:`netkeeper.crm.inbox_apply.REPLY_HANDLERS`, in its writer session, with the
+one-to-one messages new to the poll (a group thread never reaches it, nor the self
+contact). Two things follow, in this order:
+
+- **Sent.** A ``prefilled`` or ``stale`` LinkedIn message becomes ``sent`` when the
+  first message you sent in the contact's conversation after its ``prefilled_at``
+  shows up, whatever its text. Its next step is scheduled from that send.
+- **Reply.** An inbound message from the contact dated after an enrollment's
+  **first** send, on any channel, is a reply on each enrollment the Gmail poll would
+  watch (:func:`linkedin_watches`): stored as an inbound ``linkedin`` message (its
+  snippet, never more), linked to the poll's ``li_in`` interaction, and a live
+  enrollment becomes ``replied``, or ``opted_out`` when the snippet holds one of
+  :data:`UNSUBSCRIBE_PHRASES`. A completed enrollment's reply is recorded and it
+  stays ``completed``. An enrollment with nothing sent yet has no reply.
+
+Recording is idempotent per enrollment and message URN. No snippet reaches a log.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from email.utils import parseaddr
@@ -76,20 +97,24 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.compose import campaign_label
 from netkeeper.campaigns.gmail import Gmail, GmailError, GmailNotFound, History, Message
+from netkeeper.config import Settings
 from netkeeper.crm import do_not_send
+from netkeeper.crm.inbox_apply import InboxNews, NewInbound, NewOutbound
 from netkeeper.crm.interactions import add_interaction
-from netkeeper.db import session_scope
+from netkeeper.db import is_writer, session_scope
 from netkeeper.models import (
     MESSAGE_SNIPPET_MAX_LENGTH,
     MESSAGE_SUBJECT_MAX_LENGTH,
     Campaign,
     CampaignStatus,
+    Contact,
     ContactEmail,
     ContactSource,
     DoNotSendReason,
     EmailStatus,
     Enrollment,
     EnrollmentStatus,
+    Interaction,
     InteractionKind,
     Mailbox,
     MessageDirection,
@@ -99,7 +124,7 @@ from netkeeper.models import (
 )
 from netkeeper.models import Message as MessageRow
 from netkeeper.models.base import utcnow
-from netkeeper.scoping import get_scoped, get_scoped_contact, scoped
+from netkeeper.scoping import get_scoped, get_scoped_contact, not_self, scoped
 from netkeeper.services import campaign_engine as engine
 
 log = logging.getLogger(__name__)
@@ -110,9 +135,9 @@ REPLY_POLL_EVERY: Final = timedelta(minutes=10)
 WATCH_AFTER_COMPLETED: Final = timedelta(days=30)
 """A completed enrollment is watched this long after its latest send, for a late reply."""
 
-UNSUBSCRIBE_PHRASES: Final = ("unsubscribe", "remove me", "stop emailing")
-"""Spec 11.7's phrases. Matched as whole words, without case, in a reply's subject and
-snippet."""
+UNSUBSCRIBE_PHRASES: Final = ("unsubscribe", "remove me", "stop emailing", "stop messaging")
+"""Spec 11.7's phrases, and "stop messaging" for LinkedIn (#381). Matched as whole words,
+without case, in an email reply's subject and snippet, and a LinkedIn reply's snippet."""
 
 UNSUBSCRIBE_REASON: Final = "unsubscribe"
 """The enrollment's ``exit_reason`` when a reply asks to unsubscribe."""
@@ -141,6 +166,9 @@ they are watched only :data:`WATCH_AFTER_COMPLETED` after their latest send."""
 
 LIVE: Final = frozenset({EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED})
 """What detection moves to ``replied``, ``bounced`` or ``opted_out`` (spec 11.3)."""
+
+PREFILL_WAITING: Final = frozenset({MessageStatus.PREFILLED, MessageStatus.STALE})
+"""A LinkedIn message in one of these is confirmed ``sent`` once the inbox shows it went."""
 
 _UNSUBSCRIBE: Final = re.compile(
     r"\b(?:" + "|".join(re.escape(p) for p in UNSUBSCRIBE_PHRASES) + r")\b", re.IGNORECASE
@@ -173,11 +201,17 @@ def is_auto_reply(message: Message) -> bool:
     return (message.header("Precedence") or "").strip().lower() in AUTO_REPLY_PRECEDENCE
 
 
-def asks_to_unsubscribe(message: Message) -> bool:
-    """Whether the message's subject or snippet holds one of :data:`UNSUBSCRIBE_PHRASES`,
-    as a whole word, without case. The one test for an unsubscribe request: the reply
-    poll and the history scan (#65) both use it."""
-    return bool(_UNSUBSCRIBE.search(f"{message.header('Subject') or ''} {message.snippet}"))
+def asks_to_unsubscribe(text: str) -> bool:
+    """Whether ``text`` holds one of :data:`UNSUBSCRIBE_PHRASES`, as a whole word, without
+    case. The one test for an unsubscribe request: the Gmail reply poll and the history
+    scan (#65) pass an email's :func:`email_text`, the LinkedIn reply hook a message's
+    snippet (#381)."""
+    return bool(_UNSUBSCRIBE.search(text))
+
+
+def email_text(message: Message) -> str:
+    """What an email's unsubscribe test reads: its subject and snippet, never the body."""
+    return f"{message.header('Subject') or ''} {message.snippet}"
 
 
 def is_daemon(message: Message) -> bool:
@@ -459,7 +493,10 @@ class _Poll:
                 if sender in watch.addresses and message.internal_date > watch.first_sent_at:
                     found.append(
                         Reply(
-                            watch.enrollment_id, message, asks_to_unsubscribe(message), watch.label
+                            watch.enrollment_id,
+                            message,
+                            asks_to_unsubscribe(email_text(message)),
+                            watch.label,
                         )
                     )
         return found
@@ -568,8 +605,20 @@ def record_reply(session: Session, user: User, reply: Reply) -> bool:
         message_id=row.id,
         source=ContactSource.SYNC,
     )
-    enrollment.replied_at = enrollment.replied_at or message.internal_date
-    if reply.unsubscribe:
+    _after_reply(session, user, enrollment, row, at=message.internal_date)
+    log.info("enrollment %d: reply recorded as message %d", enrollment.id, row.id)
+    return True
+
+
+def _after_reply(
+    session: Session, user: User, enrollment: Enrollment, row: MessageRow, *, at: datetime
+) -> None:
+    """What a recorded reply does, on either channel: ``replied_at``; for one asking to
+    unsubscribe, the contact ``do_not_contact`` and every address of theirs on the
+    do-not-send list; and a live enrollment ends ``replied`` or ``opted_out``. A completed
+    enrollment stays ``completed``."""
+    enrollment.replied_at = enrollment.replied_at or at
+    if row.asks_unsubscribe:
         contact = get_scoped_contact(session, user, enrollment.contact_id)
         if contact is not None and not contact.do_not_contact:
             contact.do_not_contact = True
@@ -583,15 +632,13 @@ def record_reply(session: Session, user: User, reply: Reply) -> bool:
                     session, user, email.email, DoNotSendReason.OPTED_OUT, contact_id=contact.id
                 )
     if enrollment.status in LIVE:
-        if reply.unsubscribe:
+        if row.asks_unsubscribe:
             engine.end_enrollment(
                 session, user, enrollment, EnrollmentStatus.OPTED_OUT, UNSUBSCRIBE_REASON
             )
         else:
             engine.end_enrollment(session, user, enrollment, EnrollmentStatus.REPLIED, "replied")
     session.flush()
-    log.info("enrollment %d: reply recorded as message %d", enrollment.id, row.id)
-    return True
 
 
 def record_bounce(session: Session, user: User, bounce: Bounce) -> bool:
@@ -705,3 +752,224 @@ def poll_replies(
                 if isinstance(item, Reply):
                     label(gmail, mailbox.mailbox_id, item.label, item.message.id)
     return caught_up
+
+
+# --- LinkedIn (P4-02, #381) --------------------------------------------------------------
+#
+# The LinkedIn inbox poll (:mod:`netkeeper.crm.inbox_apply`) calls
+# :func:`apply_linkedin_news` in its writer session with the messages new to the poll.
+# Group threads never reach it: the apply skips them, and matches a conversation to a
+# contact by its counterpart's URN only, never to the self contact (#342).
+
+
+def linkedin_watches(
+    session: Session, user: User, contact_id: int, *, now: datetime
+) -> list[tuple[Enrollment, datetime]]:
+    """The contact's enrollments a LinkedIn reply counts for, each with its first send.
+
+    The set the Gmail poll watches (:func:`reply_work`), on any channel: an enrollment
+    with at least one sent outbound message, ``active`` or ``paused``, or ``completed``
+    with its latest send under :data:`WATCH_AFTER_COMPLETED` before ``now``. A live
+    enrollment of an ended or archived campaign (#345) is watched like a completed one.
+    Never the self contact's. Read-only.
+    """
+    rows = session.execute(
+        scoped(user, Enrollment)
+        .join(Campaign, Campaign.id == Enrollment.campaign_id)
+        .join(Contact, Contact.id == Enrollment.contact_id)
+        .add_columns(Campaign.status)
+        .where(
+            Campaign.user_id == user.id,
+            Contact.user_id == user.id,
+            not_self(),
+            Enrollment.contact_id == contact_id,
+            Enrollment.status.in_((*LIVE, EnrollmentStatus.COMPLETED)),
+        )
+        .order_by(Enrollment.id)
+    ).all()
+    if not rows:
+        return []
+    sent: dict[int, tuple[datetime, datetime]] = {}
+    for enrollment_id, first, latest in session.execute(
+        scoped(user, MessageRow)
+        .with_only_columns(
+            MessageRow.enrollment_id, func.min(MessageRow.sent_at), func.max(MessageRow.sent_at)
+        )
+        .where(
+            MessageRow.enrollment_id.in_([enrollment.id for enrollment, _ in rows]),
+            MessageRow.direction == MessageDirection.OUT,
+            MessageRow.sent_at.is_not(None),
+        )
+        .group_by(MessageRow.enrollment_id)
+    ):
+        sent[enrollment_id] = (first, latest)
+    watched: list[tuple[Enrollment, datetime]] = []
+    for enrollment, campaign_status in rows:
+        times = sent.get(enrollment.id)
+        if times is None:
+            continue  # nothing sent yet: nothing to reply to
+        first, latest = times
+        finished = enrollment.status is EnrollmentStatus.COMPLETED or (
+            campaign_status in CAMPAIGN_OVER
+        )
+        if finished and now - latest > WATCH_AFTER_COMPLETED:
+            continue
+        watched.append((enrollment, first))
+    return watched
+
+
+def record_linkedin_reply(
+    session: Session, user: User, enrollment_id: int, inbound: NewInbound
+) -> bool:
+    """Store a LinkedIn reply on the enrollment, link the poll's ``li_in`` interaction to
+    it, and end a live enrollment (the LinkedIn twin of :func:`record_reply`).
+
+    The message is ``in``, ``received``, ``linkedin``, with the conversation and message
+    URNs, the snippet (at most :data:`MESSAGE_SNIPPET_MAX_LENGTH`), ``sent_at`` the
+    message's time, and the step of the latest send before it. A snippet holding one of
+    :data:`UNSUBSCRIBE_PHRASES` opts the contact out. False when the enrollment already
+    holds this message. The caller decides it is a reply (:func:`linkedin_watches`).
+    Needs a writer session."""
+    enrollment = get_scoped(session, user, Enrollment, enrollment_id)
+    if enrollment is None:
+        return False
+    known = session.scalar(
+        scoped(user, MessageRow)
+        .with_only_columns(MessageRow.id)
+        .where(
+            MessageRow.enrollment_id == enrollment.id,
+            MessageRow.direction == MessageDirection.IN,
+            MessageRow.li_message_urn == inbound.message_urn,
+        )
+        .limit(1)
+    )
+    if known is not None:
+        return False
+    step_id = session.scalar(
+        scoped(user, MessageRow)
+        .with_only_columns(MessageRow.step_id)
+        .where(
+            MessageRow.enrollment_id == enrollment.id,
+            MessageRow.direction == MessageDirection.OUT,
+            MessageRow.sent_at.is_not(None),
+            MessageRow.sent_at <= inbound.at,
+        )
+        .order_by(MessageRow.sent_at.desc(), MessageRow.id.desc())
+        .limit(1)
+    )
+    snippet = inbound.snippet[:MESSAGE_SNIPPET_MAX_LENGTH]
+    row = MessageRow(
+        user_id=user.id,
+        enrollment_id=enrollment.id,
+        step_id=step_id,
+        contact_id=enrollment.contact_id,
+        channel=TemplateChannel.LINKEDIN,
+        direction=MessageDirection.IN,
+        status=MessageStatus.RECEIVED,
+        snippet=snippet,
+        asks_unsubscribe=asks_to_unsubscribe(snippet),
+        sent_at=inbound.at,
+        li_conversation_urn=inbound.conversation_urn,
+        li_message_urn=inbound.message_urn,
+    )
+    session.add(row)
+    session.flush()
+    interaction = get_scoped(session, user, Interaction, inbound.interaction_id)
+    if interaction is not None and interaction.message_id is None:
+        # One interaction, one message: with two campaigns watching the contact, the
+        # first enrollment's row holds the link (the timeline shows the reply once).
+        interaction.message_id = row.id
+    _after_reply(session, user, enrollment, row, at=inbound.at)
+    log.info("enrollment %d: LinkedIn reply recorded as message %d", enrollment.id, row.id)
+    return True
+
+
+def confirm_linkedin_sends(
+    session: Session,
+    user: User,
+    outbound: Sequence[NewOutbound],
+    *,
+    settings: Settings,
+    now: datetime,
+) -> list[int]:
+    """Each ``prefilled`` or ``stale`` LinkedIn message the person has now sent becomes
+    ``sent``; returns their ids.
+
+    A waiting message is confirmed by the first message you sent in the contact's
+    one-to-one conversation (the message's own, when the prefill learned it) after its
+    ``prefilled_at``, whatever its text: you may edit it before sending. Each sent
+    message confirms at most one, the oldest prefill first. The message takes that
+    message's time as ``sent_at`` and its URNs, the poll's ``li_out`` interaction is
+    linked to it (so the guards read it as this enrollment's own step, not as other
+    contact), and the enrollment's next step is scheduled from the send (spec 11.3), or
+    the enrollment completes. Needs a writer session."""
+    if not outbound:
+        return []
+    waiting = session.scalars(
+        scoped(user, MessageRow)
+        .join(Enrollment, Enrollment.id == MessageRow.enrollment_id)
+        .where(
+            Enrollment.user_id == user.id,
+            Enrollment.contact_id.in_({o.contact_id for o in outbound}),
+            MessageRow.channel == TemplateChannel.LINKEDIN,
+            MessageRow.direction == MessageDirection.OUT,
+            MessageRow.status.in_(PREFILL_WAITING),
+            MessageRow.prefilled_at.is_not(None),
+        )
+        .order_by(MessageRow.prefilled_at, MessageRow.id)
+    ).all()
+    used: set[str] = set()
+    confirmed: list[int] = []
+    for message in waiting:
+        assert message.prefilled_at is not None
+        enrollment = get_scoped(session, user, Enrollment, message.enrollment_id)
+        if enrollment is None:
+            continue
+        sent = next(
+            (
+                o
+                for o in outbound  # oldest first
+                if o.message_urn not in used
+                and o.contact_id == enrollment.contact_id
+                and o.at > message.prefilled_at
+                and message.li_conversation_urn in (None, o.conversation_urn)
+            ),
+            None,
+        )
+        if sent is None:
+            continue
+        used.add(sent.message_urn)
+        message.status = MessageStatus.SENT
+        message.sent_at = sent.at
+        message.li_conversation_urn = sent.conversation_urn
+        message.li_message_urn = sent.message_urn
+        message.error = None
+        interaction = get_scoped(session, user, Interaction, sent.interaction_id)
+        if interaction is not None:
+            interaction.message_id = message.id
+        session.flush()
+        engine.schedule_next(session, user, message.enrollment_id, settings=settings, now=now)
+        confirmed.append(message.id)
+        log.info("message %d is sent (seen in the LinkedIn inbox)", message.id)
+    return confirmed
+
+
+def apply_linkedin_news(session: Session, user: User, news: InboxNews) -> None:
+    """The inbox poll's reply hook (:data:`netkeeper.crm.inbox_apply.REPLY_HANDLERS`).
+
+    In the poll's writer session: first the sends it saw confirm waiting prefills
+    (:func:`confirm_linkedin_sends`), so a reply right after one counts; then each inbound
+    message dated after an enrollment's first send, on any channel, is that watched
+    enrollment's reply (:func:`linkedin_watches`, :func:`record_linkedin_reply`). The
+    engine's next claim reads the reply in its own writer session, so no later step
+    fires. Never logs a snippet."""
+    if not is_writer(session):
+        raise RuntimeError("recording LinkedIn replies needs a writer session")
+    settings = news.settings if news.settings is not None else Settings()
+    confirm_linkedin_sends(session, user, news.outbound, settings=settings, now=news.polled_at)
+    for inbound in news.inbound:
+        for enrollment, first_sent_at in linkedin_watches(
+            session, user, inbound.contact_id, now=news.polled_at
+        ):
+            if inbound.at > first_sent_at:
+                record_linkedin_reply(session, user, enrollment.id, inbound)

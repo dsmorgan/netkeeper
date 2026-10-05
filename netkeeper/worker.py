@@ -198,6 +198,7 @@ class BrowserWorker:
         rng: random.Random | None = None,
         profiles: ProfileSourceFactory = profile_source,
         inbox_sources: InboxSourceFactory = inbox_source,
+        campaign_settings: Settings | None = None,
     ) -> None:
         self.provider = provider
         self._factory = factory
@@ -213,6 +214,9 @@ class BrowserWorker:
         # The inbox poll's source (P4-08): a test passes a fake; live, P4-01's page
         # source once it exists, and until then a factory that refuses.
         self._inbox_sources = inbox_sources
+        # The whole config, for the inbox poll's reply hook (P4-02): a prefilled message
+        # seen sent schedules the next step by the campaign settings. None: the defaults.
+        self._campaign_settings = campaign_settings
 
     async def execute(self, run_id: int, user_id: int) -> runs.RunOutcome:
         """Run ``run_id`` to its end and record how it ended. See the module docstring.
@@ -287,6 +291,7 @@ class BrowserWorker:
                 settings=self._settings,
                 run_id=run_id,
                 clock=self._clock,
+                campaign_settings=self._campaign_settings,
             )
             return
         if facts.kind is SyncRunKind.ENRICH:
@@ -485,7 +490,9 @@ def serve_extractor(
             chosen = AttachBrowserProvider(
                 settings.linkedin.cdp_url, locks=ActivityLocks(legacy_partner=partner)
             )
-        return BrowserWorker(chosen, factory, settings.linkedin, bus=bus)
+        return BrowserWorker(
+            chosen, factory, settings.linkedin, bus=bus, campaign_settings=settings
+        )
 
     return ServeExtractor(executor=executor)
 

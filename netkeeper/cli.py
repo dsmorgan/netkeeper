@@ -1303,7 +1303,9 @@ def _run_by_hand(
             f"run {run_id} ({kind.value}) started; `netkeeper linkedin cancel {run_id}` stops it"
         )
         bus = EventBus()
-        worker = BrowserWorker(_provider(settings), factory, settings.linkedin, bus=bus)
+        worker = BrowserWorker(
+            _provider(settings), factory, settings.linkedin, bus=bus, campaign_settings=settings
+        )
         asyncio.run(_execute_printing(worker, bus, run_id, user_id))
         with session_scope(factory) as session:
             user = _local_user_or_exit(session)
@@ -3784,7 +3786,9 @@ def _execute_by_hand(
 ) -> None:
     """Run a recorded run in this terminal, and print how it ended (as `linkedin sync`)."""
     bus = EventBus()
-    worker = BrowserWorker(_provider(settings), factory, settings.linkedin, bus=bus)
+    worker = BrowserWorker(
+        _provider(settings), factory, settings.linkedin, bus=bus, campaign_settings=settings
+    )
     asyncio.run(_execute_printing(worker, bus, run_id, user_id))
     with session_scope(factory) as session:
         user = _local_user_or_exit(session)

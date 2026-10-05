@@ -16,7 +16,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from netkeeper.models import EnrollmentStatus
+from netkeeper.models import EnrollmentStatus, TemplateChannel
 from netkeeper.services import inbox as service
 from netkeeper.services.inbox import InboxKind
 from netkeeper.web.deps import CurrentUser, SessionDep
@@ -40,9 +40,13 @@ class InboxItemOut(BaseModel):
     campaign_name: str
     enrollment_id: int
     enrollment_status: EnrollmentStatus
+    channel: TemplateChannel
+    """Where it arrived: ``email`` (Gmail) or ``linkedin`` (the inbox poll, P4-02)."""
     subject: str | None
+    """An email's subject; ``null`` for a LinkedIn message, which has none."""
     snippet: str | None
-    """Gmail's snippet as plain text; ``null`` for a bounce, whose notice is not stored."""
+    """The snippet as plain text (Gmail's, or at most 200 characters of a LinkedIn
+    message); ``null`` for a bounce, whose notice is not stored."""
     received_at: datetime | None
     handled_at: datetime | None
 
@@ -70,6 +74,7 @@ def _out(item: service.InboxItem) -> InboxItemOut:
         campaign_name=item.campaign_name,
         enrollment_id=m.enrollment_id,
         enrollment_status=item.enrollment_status,
+        channel=m.channel,
         subject=m.subject,
         snippet=m.snippet if item.kind is not InboxKind.BOUNCE else None,
         received_at=item.received_at,

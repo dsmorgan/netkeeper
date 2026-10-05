@@ -26,6 +26,7 @@ real database is only read; nothing is sent.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import random
 from collections.abc import Callable, Iterator
@@ -35,12 +36,14 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Final
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns import schedule
 from netkeeper.config import Settings
+from netkeeper.crm.inbox_apply import apply_delta
 from netkeeper.db import session_scope
+from netkeeper.linkedin.messaging import MessageOutcome, MessageOutcomeKind
 from netkeeper.models import (
     Campaign,
     CampaignStatus,
@@ -55,12 +58,17 @@ from netkeeper.models import (
     MessageDirection,
     StepCondition,
     StepMode,
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunTrigger,
     Template,
     TemplateChannel,
     User,
     UserKind,
 )
 from netkeeper.scoping import get_scoped, scoped
+from netkeeper.services import runs
 from netkeeper.services.campaign_engine import (
     Firing,
     Sender,
@@ -69,6 +77,14 @@ from netkeeper.services.campaign_engine import (
     run_tick,
 )
 from netkeeper.services.campaign_review import source_contact_ids
+from netkeeper.services.linkedin_accounts import ensure_account
+from netkeeper.services.linkedin_session import record_session_evidence
+from netkeeper.services.linkedin_steps import claim_next, record_prefill_outcome
+from netkeeper.services.simulate_inbox import (
+    SimulatedInboxMessage,
+    simulated_conversation_urn,
+    simulated_delta,
+)
 from netkeeper.services.simulate_run import scratch_database
 
 MAX_TICKS: Final = 20_000
@@ -105,6 +121,163 @@ class CampaignSimulation:
     ended_at: datetime
 
 
+# --- LinkedIn steps and replies, simulated (P4-02, #381) ------------------------------------
+
+SEND_AFTER_PREFILL_S: Final = (60.0, 600.0)
+"""How long after a prefill the simulated person sends it, in seconds."""
+
+PREFILL_RETRY: Final = timedelta(minutes=15)
+"""How soon a replay asks again for a LinkedIn step it could not prefill yet (LinkedIn's
+active hours, the sending hours)."""
+
+
+@dataclass
+class SimulatedLinkedIn:
+    """The person and the LinkedIn inbox, for a replay. Nothing touches a browser.
+
+    After each tick, a LinkedIn step that is ready is claimed through the real claim
+    (:func:`~netkeeper.services.linkedin_steps.claim_next`: one open prefill at a time,
+    LinkedIn's active hours, the sending hours) and recorded ``prefilled``. The replay
+    spends no ``li_prefills`` budget (the prefill run spends it, P4-03), so it does not
+    show the day's cap. The
+    simulated person sends it a random ``send_after_s`` later, and the next inbox read
+    shows it: the real apply (:func:`~netkeeper.crm.inbox_apply.apply_delta`) and its
+    reply hook confirm it ``sent``, and the next step counts from then.
+
+    ``replies`` maps a contact's LinkedIn URN to how long after the first message sent
+    to them, on any channel, they answer on LinkedIn. The same reply hook records it, so
+    a pending step on any channel never fires.
+    """
+
+    rng: random.Random
+    replies: dict[str, timedelta] = field(default_factory=dict)
+    send_after_s: tuple[float, float] = SEND_AFTER_PREFILL_S
+    prefilled: list[int] = field(default_factory=list)
+    """The message ids prefilled, in order."""
+    _inbox: list[tuple[int, SimulatedInboxMessage]] = field(default_factory=list)
+    """What the inbox will show, with the user it belongs to."""
+    _queued_replies: set[str] = field(default_factory=set)
+    _numbers: Iterator[int] = field(default_factory=lambda: itertools.count(1))
+    _retry: bool = False
+
+    def before_tick(
+        self, factory: sessionmaker[Session], *, settings: Settings, now: datetime
+    ) -> None:
+        """Queue the replies whose first send happened, then read what the inbox shows."""
+        self._queue_replies(factory)
+        due = [(owner, item) for owner, item in self._inbox if item.at <= now]
+        if not due:
+            return
+        self._inbox = [(owner, item) for owner, item in self._inbox if item.at > now]
+        for user_id in sorted({user_id for user_id, _ in due}):
+            delta = simulated_delta(
+                (item for owner, item in due if owner == user_id), numbers=self._numbers
+            )
+            with session_scope(factory, write=True) as session:
+                user = session.get_one(User, user_id)
+                apply_delta(session, user, delta, polled_at=now, settings=settings)
+
+    def after_tick(
+        self, factory: sessionmaker[Session], *, settings: Settings, now: datetime
+    ) -> None:
+        """Prefill what is ready, as a person asking for "prefill next" would, and queue
+        the replies whose first send has happened."""
+        self._queue_replies(factory)
+        self._retry = False
+        with session_scope(factory) as session:
+            users = [user.id for user in _local_users(session)]
+        for user_id in users:
+            with session_scope(factory, write=True) as session:
+                user = session.get_one(User, user_id)
+                claim = claim_next(session, user, now=now, settings=settings, start_run=_start_run)
+                if claim is None:
+                    continue
+                if not claim.claimed or claim.message_id is None:
+                    self._retry = True
+                    continue
+                message = get_scoped(session, user, Message, claim.message_id)
+                assert message is not None
+                outcome = MessageOutcome(
+                    MessageOutcomeKind.PREFILLED,
+                    "simulated",
+                    simulated_conversation_urn(message.contact_id),
+                    len(message.body_rendered or ""),
+                )
+                record_prefill_outcome(
+                    session, user, claim.message_id, outcome, settings=settings, now=now
+                )
+                if claim.run_id is not None:
+                    runs.finish_run(
+                        session, user, claim.run_id, status=SyncRunStatus.COMPLETED, now=now
+                    )
+                contact = get_scoped(session, user, Contact, message.contact_id)
+                assert contact is not None
+                self.prefilled.append(claim.message_id)
+                sent = SimulatedInboxMessage(
+                    at=now + timedelta(seconds=self.rng.uniform(*self.send_after_s)),
+                    contact_id=contact.id,
+                    counterpart_urn=contact.li_urn or "",
+                    outbound=True,
+                )
+                self._inbox.append((user_id, sent))
+
+    def next_wake(self, now: datetime) -> datetime | None:
+        """The next inbox read with something to show, or a retry of a refused prefill."""
+        found = [item.at for _, item in self._inbox if item.at > now]
+        if self._retry:
+            found.append(now + PREFILL_RETRY)
+        return min(found) if found else None
+
+    def _queue_replies(self, factory: sessionmaker[Session]) -> None:
+        todo = {urn: wait for urn, wait in self.replies.items() if urn not in self._queued_replies}
+        if not todo:
+            return
+        found: list[tuple[int, int, str, datetime]] = []
+        with session_scope(factory) as session:
+            for user in _local_users(session):
+                rows = session.execute(
+                    scoped(user, Message)
+                    .join(Contact, Contact.id == Message.contact_id)
+                    .with_only_columns(Contact.id, Contact.li_urn, func.min(Message.sent_at))
+                    .where(
+                        Contact.user_id == user.id,
+                        Contact.li_urn.in_(todo),
+                        Message.direction == MessageDirection.OUT,
+                        Message.sent_at.is_not(None),
+                    )
+                    .group_by(Contact.id, Contact.li_urn)
+                ).all()
+                found += [(user.id, c, u, at) for c, u, at in rows if u is not None and at]
+        for user_id, contact_id, urn, first in found:
+            if urn in self._queued_replies:
+                continue
+            self._queued_replies.add(urn)
+            reply = SimulatedInboxMessage(
+                at=first + todo[urn], contact_id=contact_id, counterpart_urn=urn, outbound=False
+            )
+            self._inbox.append((user_id, reply))
+
+
+def _local_users(session: Session) -> list[User]:
+    return list(session.scalars(select(User).where(User.kind == UserKind.LOCAL).order_by(User.id)))
+
+
+def _start_run(session: Session, user: User, now: datetime) -> SyncRun:
+    """The claim's ``message_send`` run, recorded straight in: a replay has no runner."""
+    account = ensure_account(session, user)
+    run = SyncRun(
+        user_id=user.id,
+        linkedin_account_id=account.id,
+        kind=SyncRunKind.MESSAGE_SEND,
+        status=SyncRunStatus.RUNNING,
+        trigger=SyncRunTrigger.MANUAL,
+        started_at=now,
+    )
+    session.add(run)
+    session.flush()
+    return run
+
+
 def _next_minute(at: datetime) -> datetime:
     whole = at.replace(second=0, microsecond=0)
     return whole if whole == at else whole + timedelta(minutes=1)
@@ -123,6 +296,7 @@ def simulate_campaign(
     seed: int = 0,
     max_ticks: int = MAX_TICKS,
     sender: Sender | None = None,
+    linkedin: SimulatedLinkedIn | None = None,
 ) -> CampaignSimulation:
     """Tick every local user's campaigns from ``start`` until ``end`` or nothing is left to do.
 
@@ -130,6 +304,10 @@ def simulate_campaign(
     :class:`~netkeeper.campaigns.gmail_fake.FakeGmail` to replay replies too (P3-08). It
     reads the virtual time from its ``reconcile``'s ``now``; ``firings`` lists only what
     the default sender was handed.
+
+    ``linkedin`` prefills LinkedIn steps and replays the LinkedIn inbox
+    (:class:`SimulatedLinkedIn`, P4-02): its inbox is read before each tick, and what is
+    ready is prefilled after it. Without it, a LinkedIn step never fires.
     """
     if start.tzinfo is None or end.tzinfo is None:
         raise ValueError("the simulation's times must be timezone-aware")
@@ -142,6 +320,8 @@ def simulate_campaign(
             raise RuntimeError(f"the campaign schedule stopped moving after {ticks} ticks")
         ticks += 1
         simulated.now = now
+        if linkedin is not None:
+            linkedin.before_tick(factory, settings=settings, now=now)
         results = run_tick(
             factory,
             settings=settings,
@@ -149,10 +329,17 @@ def simulate_campaign(
             clock=_frozen(now),
             rng=spacing,
         )
-        if any(result.fired for result in results):
+        prefilled = 0
+        if linkedin is not None:
+            before = len(linkedin.prefilled)
+            linkedin.after_tick(factory, settings=settings, now=now)
+            prefilled = len(linkedin.prefilled) - before
+        if prefilled or any(result.fired for result in results):
             now += timedelta(minutes=1)
             continue
         wakes = [r.next_wake for r in results if r.next_wake is not None]
+        if linkedin is not None and (wake := linkedin.next_wake(now)) is not None:
+            wakes.append(wake)
         if not wakes:
             break
         now = _next_minute(max(min(wakes), now + timedelta(minutes=1)))
@@ -361,8 +548,17 @@ def _seed_scratch(
         )
     except schedule.ScheduleError as exc:
         raise InvalidSchedule(str(exc)) from exc
+    if any(step.channel is TemplateChannel.LINKEDIN for step in shape.steps):
+        # The replay's prefills need an account whose session is known to be signed in.
+        ensure_account(session, user)
+        record_session_evidence(session, user, logged_in=True, source="simulation", now=start)
     for n in range(1, shape.audience + 1):
-        contact = Contact(user_id=user.id, first_name=f"Sim{n}", last_name="Contact")
+        contact = Contact(
+            user_id=user.id,
+            first_name=f"Sim{n}",
+            last_name="Contact",
+            li_urn=f"urn:li:fsd_profile:SIMULATED{n}",
+        )
         contact.emails.append(
             ContactEmail(user_id=user.id, email=f"sim{n}@example.com", is_primary=True)
         )
@@ -391,7 +587,8 @@ def simulate_schedule(
 ) -> ScheduleReport:
     """Replay ``shape`` from its first step, for ``days`` from ``start``, in a scratch
     database deleted again before this returns. Nothing is sent: the sender is
-    :class:`SimulatedSender`, which says every step went out, drafts included."""
+    :class:`SimulatedSender`, which says every step went out, drafts included, and
+    LinkedIn steps are prefilled and sent by :class:`SimulatedLinkedIn`."""
     if days < 1:
         raise InvalidSchedule(f"days must be at least 1, got {days}")
     if start.tzinfo is None:
@@ -405,7 +602,12 @@ def simulate_schedule(
         with session_scope(factory, write=True) as session:
             user_id = _seed_scratch(session, shape, start=start, settings=settings)
         run = simulate_campaign(
-            factory, settings=settings, start=start, end=start + timedelta(days=days), seed=seed
+            factory,
+            settings=settings,
+            start=start,
+            end=start + timedelta(days=days),
+            seed=seed,
+            linkedin=SimulatedLinkedIn(random.Random(seed + 2)),  # noqa: S311 -- replay
         )
         with session_scope(factory) as session:
             user = session.get_one(User, user_id)
@@ -494,7 +696,9 @@ def render_schedule(report: ScheduleReport) -> str:
     ]
     if any(s.channel is TemplateChannel.LINKEDIN for s in shape.steps):
         lines.append(
-            "LinkedIn steps do not fire yet (P4): the replay stops each contact at the first one"
+            "LinkedIn steps are prefilled one at a time, within LinkedIn's active hours, and the"
+            " next step counts from when the replay sends each, minutes later; in use, each"
+            " waits for you to send it, and the day's prefill budget also limits them"
         )
     if any(s.mode is StepMode.DRAFT for s in shape.steps):
         lines.append(

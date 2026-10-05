@@ -146,7 +146,12 @@ def test_the_detection_constants_are_pinned() -> None:
     """Safety constants against numbers written out here (CLAUDE.md)."""
     assert timedelta(minutes=10) == replies.REPLY_POLL_EVERY
     assert timedelta(days=30) == replies.WATCH_AFTER_COMPLETED
-    assert replies.UNSUBSCRIBE_PHRASES == ("unsubscribe", "remove me", "stop emailing")
+    assert replies.UNSUBSCRIBE_PHRASES == (
+        "unsubscribe",
+        "remove me",
+        "stop emailing",
+        "stop messaging",
+    )
     assert frozenset({"mailer-daemon", "postmaster"}) == replies.DAEMON_LOCAL_PARTS
     assert replies.SEARCH_MAX == 20
     assert {s.value for s in replies.LIVE} == {"active", "paused"}

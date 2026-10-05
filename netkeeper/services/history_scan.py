@@ -105,6 +105,7 @@ from netkeeper.models import (
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services.campaign_replies import (
     asks_to_unsubscribe,
+    email_text,
     is_auto_reply,
     is_daemon,
     is_hard_bounce,
@@ -498,7 +499,7 @@ def classify_from(message: Message, address: str) -> HistoryReplyKind | None:
         return HistoryReplyKind.REPLY
     # A real auto-reply (Auto-Submitted, X-Autoreply) that asks to be removed still
     # counts as asking: err toward not mailing.
-    if asks_to_unsubscribe(message):
+    if asks_to_unsubscribe(email_text(message)):
         return HistoryReplyKind.UNSUBSCRIBE
     if is_auto_reply(message):
         return HistoryReplyKind.AUTO

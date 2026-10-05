@@ -23,6 +23,7 @@ function item(overrides: Partial<InboxItem> = {}): InboxItem {
     campaign_name: 'Spring hello',
     enrollment_id: 302,
     enrollment_status: 'replied',
+    channel: 'email',
     subject: 'Re: Catching up',
     snippet: 'Good to hear <b>from</b> you',
     received_at: '2030-06-18T12:00:00Z',
@@ -123,6 +124,22 @@ describe('inbox', () => {
     const bounce = within(rowOf(/^Bounce from Ines/))
     expect(bounce.getByText('Bounced: Catching up')).toBeVisible()
     expect(screen.getByText('3 unhandled of every kind.')).toBeVisible()
+  })
+
+  it('names a LinkedIn reply, which has no subject (P4-02)', async () => {
+    mockFetch(
+      inbox({
+        total: 1,
+        unhandled: 1,
+        items: [item({ channel: 'linkedin', subject: null, snippet: 'Happy to talk next week' })],
+      }),
+    )
+    await renderApp('/inbox')
+
+    const reply = within(await screen.findByRole('listitem', { name: /^Reply from Tobias/ }))
+    expect(reply.getByText('LinkedIn message')).toBeVisible()
+    expect(reply.getByText('Happy to talk next week')).toBeVisible()
+    expect(reply.queryByText('(no subject)')).toBeNull()
   })
 
   it('filters by kind and by handled state', async () => {
