@@ -28,8 +28,10 @@ import functools
 import math
 import random
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
+from types import MappingProxyType
 from typing import Final
 from zoneinfo import ZoneInfo
 
@@ -821,6 +823,11 @@ class InvalidTypingProfile(TypingPlanError):
     """A :class:`TypingProfile` with a value no plan should use."""
 
 
+class TypingPlanMismatch(TypingPlanError):
+    """The steps a plan built don't type the body back exactly. A safety net: no body
+    should reach it, and its message never quotes the body."""
+
+
 class UnsupportedCharacter(TypingPlanError):
     """The body has a code point :func:`is_untypable` refuses, other than CR or LF.
 
@@ -896,6 +903,10 @@ class TypeStep:
     between newlines) and ``offset`` is where in ``line`` it starts. With the default
     empty ``line``, the chunk is checked as a line of its own. Neither field is part
     of the step's repr or equality.
+
+    ``line`` holds a whole line of the message body. :func:`dataclasses.asdict`,
+    :func:`dataclasses.astuple`, and :mod:`pickle` all include it, so nothing may log,
+    serialize, or persist a step; only ``repr`` and ``str`` leave it out.
     """
 
     chunk: str
@@ -907,6 +918,8 @@ class TypeStep:
     def __post_init__(self) -> None:
         if not math.isfinite(self.delay_before_s) or self.delay_before_s < 0:
             raise ValueError("delay_before_s must be finite and not negative")
+        if type(self.line) is not str or type(self.offset) is not int:
+            raise ValueError("a step's line is a str and its offset an int")
         if self.newline:
             if self.chunk:
                 raise ValueError("a newline step has an empty chunk")
@@ -940,11 +953,13 @@ def _is_one_cluster_in(chunk: str, line: str, offset: int) -> bool:
 
 
 @functools.lru_cache(maxsize=4)
-def _cluster_spans(line: str) -> dict[int, int]:
+def _cluster_spans(line: str) -> Mapping[int, int]:
     """Where each grapheme cluster of ``line`` starts, mapped to where it ends.
 
-    Cached, because a plan builds one step per cluster of the same line."""
-    return {found.start(): found.end() for found in _GRAPHEME_RE.finditer(line)}
+    Cached, because a plan builds one step per cluster of the same line, and read-only,
+    because every caller shares the cached mapping. :func:`typing_plan` clears the
+    cache when it finishes, so no line of a message outlives its plan here."""
+    return MappingProxyType({found.start(): found.end() for found in _GRAPHEME_RE.finditer(line)})
 
 
 TypingPlan = tuple[TypeStep, ...]
@@ -1068,8 +1083,10 @@ def typing_plan(
     delays, not the round trip of each key press, so real typing takes somewhat
     longer. Because the plan is random, a body near the ceiling can pass with one
     seed and fail with another: P4-03 must build the plan before it spends any
-    budget or navigates, so a refusal costs nothing. No error message quotes the
-    text.
+    budget or navigates, so a refusal costs nothing. A plan whose steps don't type
+    the body back exactly (newlines as one newline step each) raises
+    :class:`TypingPlanMismatch` rather than being returned; no body should reach it.
+    No error message quotes the text.
     """
     return _typing_plan_unclamped(
         text,
@@ -1112,6 +1129,26 @@ def _typing_plan_unclamped(
                 f"character {position} is a tag or variation-selector sequence no step types"
             )
 
+    try:
+        plan = _steps(located, units, rng, profile)
+    finally:
+        _cluster_spans.cache_clear()
+    typed = "".join("\n" if step.newline else step.chunk for step in plan)
+    if typed != _NEWLINE_RE.sub("\n", text):
+        raise TypingPlanMismatch("the plan's steps do not type this body back exactly")
+    duration = plan_duration(plan)
+    if not (math.isfinite(duration) and duration <= max_seconds):
+        raise TypingTooLong(duration, max_seconds)
+    return plan
+
+
+def _steps(
+    located: list[tuple[str, str, int]],
+    units: list[str],
+    rng: random.Random,
+    profile: TypingProfile,
+) -> TypingPlan:
+    """One step per unit, drawing the delays from ``rng`` in :func:`typing_plan`'s order."""
     steps: list[TypeStep] = []
     extra_medians = {
         "word": profile.word_extra_median_s,
@@ -1131,8 +1168,4 @@ def _typing_plan_unclamped(
                 TypeStep(chunk=unit, delay_before_s=delay, newline=False, line=line, offset=offset)
             )
 
-    plan: TypingPlan = tuple(steps)
-    duration = plan_duration(plan)
-    if not (math.isfinite(duration) and duration <= max_seconds):
-        raise TypingTooLong(duration, max_seconds)
-    return plan
+    return tuple(steps)
