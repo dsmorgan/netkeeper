@@ -7,8 +7,16 @@ import { FakeEventSource, resetFakeEventSource } from '@/test/fake-event-source'
 import { jsonResponse, mockFetch } from '@/test/fetch'
 
 import type { MailboxPoll, PollCheck, PollStatus } from './api'
-import { pollStatusQuery } from './api'
-import { ago, checkSummary, everyText, nextText, repliesText, STATE_TEXT } from './format'
+import { pollStatusKeys, pollStatusQuery } from './api'
+import {
+  LATE_AFTER_MS,
+  ago,
+  checkSummary,
+  everyText,
+  nextText,
+  repliesText,
+  STATE_TEXT,
+} from './format'
 import { PollStatusHeader } from './poll-status-header'
 import { RepliesChecked } from './replies-checked'
 
@@ -25,6 +33,8 @@ function check(overrides: Partial<PollCheck> = {}): PollCheck {
     last_at: minutes(-3),
     next_at: minutes(7),
     reason: null,
+    requested: false,
+    requested_at: null,
     ...overrides,
   }
 }
@@ -82,13 +92,23 @@ function pollStatus(overrides: Partial<PollStatus> = {}): PollStatus {
   }
 }
 
-function renderWith(ui: React.ReactNode, current: () => PollStatus) {
+const CHECK_NOW = '/api/v1/poll-status/gmail-replies/check-now'
+
+function renderWith(
+  ui: React.ReactNode,
+  current: () => PollStatus,
+  checkNow: () => Response | Promise<Response> = () =>
+    jsonResponse({ already_requested: false }, 202),
+) {
   let fetches = 0
   mockFetch((request) => {
     const { pathname } = new URL(request.url)
     if (pathname === '/api/v1/poll-status') {
       fetches += 1
       return jsonResponse(current())
+    }
+    if (pathname === CHECK_NOW && request.method === 'POST') {
+      return checkNow()
     }
     return jsonResponse({ detail: `unexpected ${pathname}` }, 500)
   })
@@ -101,7 +121,7 @@ function renderWith(ui: React.ReactNode, current: () => PollStatus) {
       </EventStreamContext>
     </QueryClientProvider>,
   )
-  return { source, fetches: () => fetches }
+  return { source, fetches: () => fetches, queryClient }
 }
 
 beforeEach(() => {
@@ -177,8 +197,16 @@ describe('format', () => {
 })
 
 describe('PollStatusHeader', () => {
-  it('refetches every minute', () => {
-    expect(pollStatusQuery.refetchInterval).toBe(60_000)
+  it('refetches every minute, and every 15 seconds while a check now waits', () => {
+    const interval = pollStatusQuery.refetchInterval as (query: unknown) => number
+    const at = (data: PollStatus) => interval({ state: { data } })
+    expect(at(pollStatus())).toBe(60_000)
+    expect(
+      at(
+        pollStatus({ items: [check({ state: 'due', requested: true, requested_at: minutes(0) })] }),
+      ),
+    ).toBe(15_000)
+    expect(interval({ state: { data: undefined } })).toBe(60_000)
   })
 
   it('shows Gmail and the LinkedIn inbox in the header', async () => {
@@ -250,5 +278,158 @@ describe('RepliesChecked', () => {
     )
     await waitFor(() => expect(fetches()).toBeGreaterThan(0))
     expect(screen.queryByText(/Replies/)).not.toBeInTheDocument()
+  })
+})
+
+describe('Check now', () => {
+  async function openPopover() {
+    fireEvent.click(await screen.findByRole('button', { name: /Background checks/ }))
+    const dialog = await screen.findByRole('dialog')
+    return within(dialog).getByRole('region', { name: 'Gmail' })
+  }
+
+  it('asks for the reply poll, then waits for the tick and the new last-checked time', async () => {
+    let current = pollStatus()
+    let release: () => void = () => {}
+    let posts = 0
+    const { queryClient } = renderWith(
+      <PollStatusHeader />,
+      () => current,
+      () => {
+        posts += 1
+        return new Promise((resolve) => {
+          release = () => resolve(jsonResponse({ already_requested: false }, 202))
+        })
+      },
+    )
+    const gmail = await openPopover()
+    const button = within(gmail).getByRole('button', { name: 'Check now' })
+    expect(button).toBeEnabled()
+
+    fireEvent.click(button)
+    await waitFor(() => expect(button).toBeDisabled())
+    fireEvent.click(button)
+    expect(posts).toBe(1)
+
+    current = pollStatus({
+      items: [check({ state: 'due', next_at: null, requested: true, requested_at: minutes(0) })],
+    })
+    act(() => release())
+    expect(await within(gmail).findByText('Checking within a minute')).toBeInTheDocument()
+    expect(button).toBeDisabled()
+
+    // The tick polled: the next refresh shows the new time, and the button is back.
+    current = pollStatus({ items: [check({ last_at: minutes(0), next_at: minutes(10) })] })
+    await act(() => queryClient.invalidateQueries({ queryKey: pollStatusKeys.all }))
+    await waitFor(() => expect(button).toBeEnabled())
+    expect(within(gmail).getByText('checked just now · next in 10 min')).toBeInTheDocument()
+  })
+
+  it('stays pending until the poll status refetch settles, even when it fails', async () => {
+    let refetch: (() => void) | null = null
+    let refetches = 0
+    mockFetch((request) => {
+      const { pathname } = new URL(request.url)
+      if (pathname === '/api/v1/poll-status') {
+        refetches += 1
+        if (refetches === 1) return jsonResponse(pollStatus())
+        return new Promise((resolve) => {
+          refetch = () => resolve(jsonResponse({ detail: 'down' }, 500))
+        })
+      }
+      if (pathname === CHECK_NOW) return jsonResponse({ already_requested: false }, 202)
+      return jsonResponse({ detail: `unexpected ${pathname}` }, 500)
+    })
+    const source = new FakeEventSource('/api/v1/events')
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <EventStreamContext
+          value={{ status: 'connected', source: source as unknown as EventSource }}
+        >
+          <RepliesChecked mailboxId={3} />
+        </EventStreamContext>
+      </QueryClientProvider>,
+    )
+    const button = await screen.findByRole('button', { name: 'Check now' })
+
+    fireEvent.click(button)
+    await waitFor(() => expect(refetch).not.toBeNull())
+    expect(button).toBeDisabled() // the POST answered; the refetch has not
+
+    act(() => refetch?.())
+    await waitFor(() => expect(button).toBeEnabled()) // a failed refetch does not stick
+  })
+
+  it('comes back, saying so, when the check still has not run after three minutes', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    vi.setSystemTime(NOW)
+    renderWith(<PollStatusHeader />, () =>
+      pollStatus({
+        items: [check({ state: 'due', next_at: null, requested: true, requested_at: minutes(0) })],
+      }),
+    )
+    const gmail = await openPopover()
+    const button = within(gmail).getByRole('button', { name: 'Check now' })
+    expect(button).toBeDisabled()
+    expect(within(gmail).getByText('Checking within a minute')).toBeInTheDocument()
+
+    act(() => vi.advanceTimersByTime(LATE_AFTER_MS))
+
+    expect(button).toBeEnabled()
+    expect(within(gmail).getByText('The check hasn’t run yet')).toBeInTheDocument()
+  })
+
+  it('shows a refusal with its reason and does not get stuck', async () => {
+    renderWith(
+      <PollStatusHeader />,
+      () => pollStatus(),
+      () => jsonResponse({ detail: 'No mailbox is armed, so netkeeper doesn’t read Gmail' }, 409),
+    )
+    const gmail = await openPopover()
+    const button = within(gmail).getByRole('button', { name: 'Check now' })
+
+    fireEvent.click(button)
+
+    expect(await within(gmail).findByRole('alert')).toHaveTextContent(
+      'No mailbox is armed, so netkeeper doesn’t read Gmail',
+    )
+    await waitFor(() => expect(button).toBeEnabled())
+  })
+
+  it('is disabled while the check cannot run', async () => {
+    renderWith(<PollStatusHeader />, () =>
+      pollStatus({
+        items: [check({ state: 'off', next_at: null, reason: 'Gmail isn’t connected' })],
+      }),
+    )
+    const gmail = await openPopover()
+    expect(within(gmail).getByRole('button', { name: 'Check now' })).toBeDisabled()
+  })
+
+  it('sits beside the campaign’s replies line while its mailbox is polled', async () => {
+    let posts = 0
+    renderWith(
+      <RepliesChecked mailboxId={3} />,
+      () => pollStatus(),
+      () => {
+        posts += 1
+        return jsonResponse({ already_requested: false }, 202)
+      },
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Check now' }))
+    await waitFor(() => expect(posts).toBe(1))
+  })
+
+  it('is not offered beside a mailbox whose replies are not polled', async () => {
+    const { fetches } = renderWith(<RepliesChecked mailboxId={3} />, () =>
+      pollStatus({
+        mailboxes: [mailboxPoll({ state: 'off', next_at: null, reason: 'disarmed' })],
+      }),
+    )
+    await waitFor(() => expect(fetches()).toBeGreaterThan(0))
+    expect(await screen.findByText(/Replies checked/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Check now' })).not.toBeInTheDocument()
   })
 })

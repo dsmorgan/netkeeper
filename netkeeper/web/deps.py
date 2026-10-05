@@ -75,6 +75,10 @@ def read_only[Endpoint: Callable[..., Any]](endpoint: Endpoint) -> Endpoint:
     ``tests/test_web_deps.py`` keeps the list of marked routes, so adding one is
     a visible change. ``tests/test_web_deps.py`` also fails a marked route whose
     method is safe already, which would only be noise.
+
+    "Only reads" is about the database. A handler that changes in-memory state
+    outside it, and no row, may carry the mark: Gmail "Check now" (#409) sets a
+    flag on the running sender and reads the mailboxes to refuse.
     """
     setattr(endpoint, READ_ONLY_ATTR, True)
     return endpoint

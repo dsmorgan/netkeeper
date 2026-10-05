@@ -11,6 +11,7 @@ import {
 import { cn } from '@/lib/utils'
 
 import { pollStatusQuery, usePollStatusRefresh, type PollCheck, type PollStatus } from './api'
+import { CheckRepliesNow } from './check-now'
 import { checkSummary, everyText } from './format'
 import { useNow } from './use-now'
 
@@ -107,6 +108,7 @@ function ChecksDetail({ status, now }: { status: PollStatus; now: number }) {
                   {check.reason && (
                     <span className="text-xs text-muted-foreground">{check.reason}</span>
                   )}
+                  {check.key === 'gmail_replies' && <CheckRepliesNow check={check} />}
                 </li>
               ))}
             </ul>
