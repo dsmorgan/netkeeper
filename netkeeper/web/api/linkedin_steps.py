@@ -6,7 +6,8 @@
 - ``GET /campaigns/linkedin/options``: whether the builder may offer ``auto_send``.
 - ``GET /campaigns/linkedin/waiting``: ``prefilled`` and ``stale`` messages, waiting
   for you to send or discard them, and ``interrupted`` ones (claimed, their run over
-  with no outcome), waiting for you to discard them.
+  with no outcome), waiting for you to discard them. ``campaign_id`` keeps one
+  campaign's (#383).
 - ``POST /campaigns/linkedin/prefill`` with ``{"enrollment_id": n}`` or
   ``{"next": true}``: claims the step (every check in
   :mod:`netkeeper.services.linkedin_steps`) and submits its ``message_send`` run to
@@ -208,10 +209,16 @@ def get_options(request: Request, user: CurrentUser) -> OptionsOut:
 
 @router.get("/waiting", operation_id="list_linkedin_waiting")
 def list_waiting(
-    user: CurrentUser, session: SessionDep, limit: Limit = 20, offset: Offset = 0
+    user: CurrentUser,
+    session: SessionDep,
+    limit: Limit = 20,
+    offset: Offset = 0,
+    campaign_id: Annotated[int | None, Query(description="Only this campaign's.")] = None,
 ) -> WaitingPage:
     """Prefilled and stale LinkedIn messages, waiting for you to send or discard them."""
-    rows, total = service.waiting_for_you(session, user, limit=limit, offset=offset)
+    rows, total = service.waiting_for_you(
+        session, user, limit=limit, offset=offset, campaign_id=campaign_id
+    )
     return WaitingPage(
         items=[
             WaitingOut(

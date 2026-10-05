@@ -40,10 +40,10 @@ function failure(error: unknown, response: Response, what: string): Error {
   return new Error(detailMessage(error) ?? `${what} returned ${response.status}`)
 }
 
-/** The posture row whose warning **Acknowledge** clears (#383). */
-export const LINKEDIN_REPLY_POLL_ROW = 'linkedin reply poll'
-/** The posture row for ADR 0004's manual LinkedIn sends: off means auto-send is on. */
-export const MANUAL_SENDS_ROW = 'manual linkedin sends'
+/** The posture row's `key` whose warning **Acknowledge** clears (#383). */
+export const FIRST_POLL_SHORT_KEY = 'linkedin_first_poll_short'
+/** The `key` of ADR 0004's manual LinkedIn sends row: off means auto-send is on. */
+export const MANUAL_SENDS_KEY = 'manual_linkedin_sends'
 
 /**
  * You checked older LinkedIn replies by hand: clear the warning that the first inbox

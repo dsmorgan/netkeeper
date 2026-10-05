@@ -44,6 +44,7 @@ def get_posture(request: Request, user: CurrentUser, session: SessionDep) -> Pos
         protections=[
             ProtectionOut(
                 name=protection.name,
+                key=protection.key,
                 status=protection.status.value,
                 value=protection.value,
                 summary=protection.summary,

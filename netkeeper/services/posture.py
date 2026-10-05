@@ -243,6 +243,12 @@ class Status(enum.StrEnum):
     UNKNOWN = "unknown"
 
 
+KEY_MANUAL_LINKEDIN_SENDS: Final = "manual_linkedin_sends"
+"""The key of ADR 0004's row: off means auto-send is on."""
+KEY_LINKEDIN_FIRST_POLL_SHORT: Final = "linkedin_first_poll_short"
+"""The key of the row a short first LinkedIn inbox poll raises; Settings acknowledges it."""
+
+
 @dataclass(frozen=True, slots=True)
 class Protection:
     """One protection: what it is, whether it is in force, and anything wrong with it.
@@ -264,6 +270,9 @@ class Protection:
     warnings: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
     brief: str | None = None
+    key: str | None = None
+    """A stable id for a row the UI acts on (#383): :data:`KEY_MANUAL_LINKEDIN_SENDS`,
+    :data:`KEY_LINKEDIN_FIRST_POLL_SHORT`. None for the rest; ``name`` is for reading."""
 
     @property
     def summary(self) -> str:
@@ -1254,9 +1263,11 @@ def _auto_send(settings: Settings) -> Protection:
             name="manual linkedin sends",
             status=Status.ON,
             value="auto-send off (ADR 0004)",
+            key=KEY_MANUAL_LINKEDIN_SENDS,
         )
     return Protection(
         name="manual linkedin sends",
+        key=KEY_MANUAL_LINKEDIN_SENDS,
         status=Status.OFF,
         value="auto-send ON",
         warnings=(
@@ -1626,7 +1637,8 @@ def _linkedin_reply_poll(session: Session, user: User, *, now: datetime) -> Prot
     A first poll that could not read back to the earliest outreach it watches counted
     as complete anyway, so replies older than what it read were never seen. That stays
     a warning until a person checks them by hand and acknowledges it
-    (``netkeeper linkedin inbox-acknowledge``); no poll clears it.
+    (Settings, Posture, **Acknowledge**, or ``netkeeper linkedin inbox-acknowledge``); no
+    poll clears it.
     """
     in_use = inbox_hold.linkedin_in_use(session, user)
     short_of = short_first_poll(session, user)
@@ -1663,11 +1675,12 @@ def _linkedin_reply_poll(session: Session, user: User, *, now: datetime) -> Prot
     if short_of is not None:
         warnings = (
             f"the first LinkedIn inbox poll couldn't read back to {short_of:%Y-%m-%d};"
-            " check older LinkedIn replies by hand, then run"
-            " `netkeeper linkedin inbox-acknowledge`",
+            " check older LinkedIn replies by hand, then click Acknowledge in Settings,"
+            " Posture, or run `netkeeper linkedin inbox-acknowledge`",
         )
     return Protection(
         name="linkedin reply poll",
+        key=KEY_LINKEDIN_FIRST_POLL_SHORT,
         status=Status.ON,
         value=value,
         notes=tuple(notes),

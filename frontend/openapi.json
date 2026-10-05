@@ -8834,6 +8834,17 @@
       "ProtectionOut": {
         "description": "One row of the posture report (spec section 9): what it is, whether it is in\nforce, and anything wrong with it. ``status`` is `netkeeper.services.posture.Status`'s\nvalue (``on``, ``off``, ``unknown``); ``off``/``unknown`` always carry a warning.\n``notes`` describe a choice the user made, not a fault, and never affect ``ok``.\n``summary`` is the row in a few words, for the collapsed view (#340): the same\nas ``value`` for most rows, a one-line form of it for the long ones. ``value``\nkeeps the full detail.",
         "properties": {
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -13557,6 +13568,24 @@
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
+            }
+          },
+          {
+            "description": "Only this campaign's.",
+            "in": "query",
+            "name": "campaign_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only this campaign's.",
+              "title": "Campaign Id"
             }
           }
         ],

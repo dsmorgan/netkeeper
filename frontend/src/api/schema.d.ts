@@ -6263,6 +6263,8 @@ export interface components {
          *     keeps the full detail.
          */
         ProtectionOut: {
+            /** Key */
+            key?: string | null;
             /** Name */
             name: string;
             /** Notes */
@@ -8394,6 +8396,8 @@ export interface operations {
                 limit?: number;
                 /** @description Items to skip. */
                 offset?: number;
+                /** @description Only this campaign's. */
+                campaign_id?: number | null;
             };
             header?: never;
             path?: never;

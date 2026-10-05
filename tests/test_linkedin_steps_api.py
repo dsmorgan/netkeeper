@@ -420,3 +420,20 @@ async def test_a_linkedin_steps_counts_by_status_are_on_the_campaign(
     [step] = campaign["steps"]
     assert step["outbound"] == {"prefilled": 1}
     assert (step["fired"], step["sent"]) == (1, 0)
+
+
+async def test_waiting_keeps_one_campaigns(
+    client: httpx.AsyncClient, running_app: FastAPI, executor: FakeExecutor, with_runner: None
+) -> None:
+    """#383: the campaign page's waiting list, filtered on the server."""
+    message_id = await _prefilled(client, running_app)
+    with session_scope(running_app.state.session_factory) as session:
+        message = get_scoped(session, _local(session), Message, message_id)
+        assert message is not None
+        enrollment = get_scoped(session, _local(session), Enrollment, message.enrollment_id)
+        assert enrollment is not None
+        campaign_id = enrollment.campaign_id
+    mine = (await client.get(f"{BASE}/waiting", params={"campaign_id": campaign_id})).json()
+    assert [item["message_id"] for item in mine["items"]] == [message_id]
+    other = (await client.get(f"{BASE}/waiting", params={"campaign_id": campaign_id + 1})).json()
+    assert other == {"items": [], "total": 0}

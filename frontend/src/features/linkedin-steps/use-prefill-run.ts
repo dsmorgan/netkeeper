@@ -97,3 +97,13 @@ export function usePrefillRun(): PrefillRun {
     },
   }
 }
+
+/**
+ * Whether the run a button started is still going (or not read back yet), so the
+ * button stays off until it ends. False with no run.
+ */
+export function useRunGoing(runId: number | null): boolean {
+  const run = useQuery({ ...runQuery(runId ?? 0), enabled: runId !== null })
+  if (runId === null) return false
+  return !run.isSuccess || run.data.status === 'running'
+}

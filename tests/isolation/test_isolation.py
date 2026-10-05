@@ -21,6 +21,7 @@ from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import (
+    Campaign,
     Contact,
     ContactTag,
     InteractionKind,
@@ -30,13 +31,20 @@ from netkeeper.models import (
     UserKind,
 )
 from netkeeper.models.base import utcnow
-from netkeeper.scoping import scoped_count
+from netkeeper.scoping import scoped, scoped_count
 from netkeeper.services.linkedin_session import flag_session
 from netkeeper.web.app import API_PREFIX
 from netkeeper.web.security import CLIENT_HEADER, CLIENT_HEADER_VALUE
 
 from .harness import acting_as, assert_isolated
-from .registry import IMPORT_CSV, IMPORT_MAPPING, REGISTRY, ListEndpoint, seed_contacts
+from .registry import (
+    IMPORT_CSV,
+    IMPORT_MAPPING,
+    REGISTRY,
+    ListEndpoint,
+    _seed_linkedin_ready,
+    seed_contacts,
+)
 
 if not REGISTRY:
     pytest.skip("REGISTRY is empty: no list endpoints exist yet", allow_module_level=True)
@@ -289,3 +297,24 @@ async def test_inbound_this_week_is_isolated(running_app: FastAPI) -> None:
 
     assert (await _get(running_app, a_id, "/dashboard/inbound"))["count"] == 1
     assert (await _get(running_app, b_id, "/dashboard/inbound"))["count"] == 0
+
+
+async def test_one_campaigns_linkedin_queue_is_isolated(running_app: FastAPI) -> None:
+    """#383: ``GET /campaigns/linkedin/ready?campaign_id=`` with another user's campaign
+    answers nothing, its per-step counts included."""
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        a = User(kind=UserKind.HOSTED, display_name="A")
+        b = User(kind=UserKind.HOSTED, display_name="B")
+        session.add_all([a, b])
+        session.flush()
+        _seed_linkedin_ready(session, a)
+        _seed_linkedin_ready(session, b)
+        campaign_id = session.scalars(scoped(a, Campaign)).one().id
+        a_id, b_id = a.id, b.id
+
+    path = f"/campaigns/linkedin/ready?campaign_id={campaign_id}"
+    mine = await _get(running_app, a_id, path)
+    assert (mine["total"], mine["by_step"]) == (2, {"1": 2})
+    theirs = await _get(running_app, b_id, path)
+    assert theirs == {"items": [], "total": 0, "by_step": {}}

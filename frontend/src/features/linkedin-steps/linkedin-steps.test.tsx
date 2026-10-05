@@ -206,6 +206,73 @@ describe('the LinkedIn queue', () => {
     expect(screen.getByRole('button', { name: 'Prefill Ada Pemberton' })).toBeEnabled()
   })
 
+  it('a refusal is an alert', async () => {
+    renderSection({
+      [`POST ${PREFILL}`]: () =>
+        jsonResponse(
+          { detail: { enrollment_id: 31, reasons: ['prefill_open'], detail: null } },
+          409,
+        ),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Prefill Rosalind Quillfeather' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Not prefilled. Nothing was typed in Chrome.',
+    )
+  })
+
+  it('never says nothing was typed when the request itself failed (a 5xx)', async () => {
+    renderSection({
+      [`POST ${PREFILL}`]: () => jsonResponse({ detail: 'internal error' }, 500),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Prefill Rosalind Quillfeather' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      'The prefill request failed. Check Waiting for you and the LinkedIn page before you try again.',
+    )
+    expect(alert).not.toHaveTextContent('Nothing was typed')
+  })
+
+  it('never says nothing was typed when the network failed', async () => {
+    renderSection({
+      [`POST ${PREFILL}`]: () => {
+        throw new TypeError('Failed to fetch')
+      },
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Prefill Rosalind Quillfeather' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('The prefill request failed.')
+    expect(alert).not.toHaveTextContent('Nothing was typed')
+  })
+
+  it('turns every Prefill button off while the prefill request is pending', async () => {
+    const { calls } = renderSection({
+      [`POST ${PREFILL}`]: () => new Promise<Response>(() => {}),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Prefill Rosalind Quillfeather' }))
+
+    await waitFor(() => {
+      for (const button of screen.getAllByRole('button', { name: /^Prefill/ })) {
+        expect(button).toBeDisabled()
+      }
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Prefill Ada Pemberton' }))
+    expect(posts(calls, PREFILL)).toHaveLength(1)
+  })
+
+  it('keeps Prefill off when what waits for you cannot be read', async () => {
+    const { calls } = renderSection({
+      'GET /api/v1/campaigns/linkedin/waiting': () => jsonResponse({ detail: 'boom' }, 500),
+    })
+    expect(await screen.findByText('What waits for you is unavailable.')).toBeVisible()
+    for (const button of screen.getAllByRole('button', { name: /^Prefill/ })) {
+      expect(button).toBeDisabled()
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Prefill Rosalind Quillfeather' }))
+    expect(posts(calls, PREFILL)).toEqual([])
+  })
+
   it('allows one prefill at a time: an open one turns every Prefill button off', async () => {
     renderSection({
       'GET /api/v1/campaigns/linkedin/waiting': () => jsonResponse(waitingPage([waitingItem()])),
@@ -268,11 +335,21 @@ describe('the LinkedIn queue', () => {
     expect(screen.queryByRole('button', { name: 'Prefill next' })).toBeNull()
   })
 
-  it('shows auto-send on as a warning when the flag is on', async () => {
+  it('shows auto-send on as a highlighted note, not an alert, when the flag is on', async () => {
     renderSection({
       'GET /api/v1/campaigns/linkedin/options': () => jsonResponse({ auto_send: true }),
     })
-    expect(await screen.findByText('Auto-send on')).toBeVisible()
+    const badge = await screen.findByText('Auto-send on')
+    expect(badge.closest('[role="note"]')).not.toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('says auto-send is unknown when the setting cannot be read', async () => {
+    renderSection({
+      'GET /api/v1/campaigns/linkedin/options': () => jsonResponse({ detail: 'boom' }, 500),
+    })
+    expect(await screen.findByText('Auto-send: unknown')).toBeVisible()
+    expect(screen.queryByText('Auto-send off')).toBeNull()
   })
 })
 
@@ -382,28 +459,47 @@ describe('waiting for you', () => {
     expect(screen.queryByText(ONE_AT_A_TIME)).toBeNull()
   })
 
-  it("keeps a campaign's waiting list to that campaign", async () => {
-    renderSection(
+  it("asks the server for one campaign's waiting list, and the queue checks every campaign's", async () => {
+    const { calls } = renderSection(
       {
-        'GET /api/v1/campaigns/linkedin/waiting': () =>
+        'GET /api/v1/campaigns/linkedin/waiting': (call) =>
           jsonResponse(
-            waitingPage([
-              waitingItem({ status: 'stale', prefilled_at: hoursAgo(80) }),
-              waitingItem({
-                message_id: 72,
-                campaign_id: 6,
-                status: 'stale',
-                prefilled_at: hoursAgo(90),
-                contact_name: 'Other Person',
-              }),
-            ]),
+            waitingPage(
+              call.query.get('campaign_id') === '5'
+                ? []
+                : [waitingItem({ campaign_id: 6, contact_name: 'Other Person' })],
+            ),
           ),
       },
       5,
     )
-    const list = await screen.findByRole('list', { name: 'Waiting for you' })
-    expect(within(list).getAllByRole('listitem')).toHaveLength(1)
-    expect(screen.queryByText('Other Person')).toBeNull()
+    expect(await screen.findByText('Nothing waits for you.')).toBeVisible()
+    const waiting = calls.filter((c) => c.path === '/api/v1/campaigns/linkedin/waiting')
+    expect(new Set(waiting.map((c) => c.query.get('campaign_id')))).toEqual(new Set(['5', null]))
+    // An open prefill in another campaign still holds the one slot.
+    expect(await screen.findByText(ONE_AT_A_TIME)).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Prefill Rosalind Quillfeather' })).toBeDisabled()
+  })
+
+  it('keeps "I sent it, check now" off while the check it started runs', async () => {
+    let checkRun = run({ id: 91, kind: 'inbox', status: 'running' })
+    const { calls, source } = renderSection({
+      'GET /api/v1/campaigns/linkedin/waiting': () => jsonResponse(waitingPage([waitingItem()])),
+      'POST /api/v1/campaigns/linkedin/messages/71/check': () =>
+        jsonResponse({ run_id: 91, task_id: 't' }, 202),
+      'GET /api/v1/linkedin/runs/91': () => jsonResponse(checkRun),
+    })
+
+    const button = await screen.findByRole('button', { name: 'I sent it, check now' })
+    fireEvent.click(button)
+    await screen.findByText(/Checking your LinkedIn inbox/)
+    expect(button).toBeDisabled()
+    fireEvent.click(button)
+    expect(posts(calls, '/api/v1/campaigns/linkedin/messages/71/check')).toHaveLength(1)
+
+    checkRun = run({ id: 91, kind: 'inbox', status: 'completed' })
+    act(() => source.emit('run.finished', { run_id: 91, status: 'completed' }))
+    await waitFor(() => expect(button).toBeEnabled())
   })
 })
 
