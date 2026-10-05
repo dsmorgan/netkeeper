@@ -470,6 +470,7 @@ def test_the_cause_codes_are_pinned() -> None:
         "navigation_timed_out",
         "profile_screen_lost",
         "contact_info_lost",
+        "profile_status",
         "id_mismatch",
         "unknown",
     }

@@ -35,6 +35,8 @@ logic, only what the job may do and what happens after it stops:
   (:class:`~netkeeper.linkedin.enrich.UnreadableCause`), nothing from the page:
   in ``progress_json.unreadable_visits`` as the run goes, so a run that ends by
   exception keeps them, and in ``counts_json.unreadable_visits`` when it stops.
+  A visit whose answer stopped the run at once as ``route_changed`` (a 500 on the
+  profile, say) is in ``counts_json.stopped_by`` the same way.
 * **The stopping response.** ``Throttled`` or ``Checkpoint`` raises heat;
   ``Checkpoint`` or ``LoggedOut`` sets the session flag (spec 9.7). The run is
   recorded ``completed`` when every target was visited and ``aborted``
@@ -160,6 +162,9 @@ class EnrichRunReport:
             "heat_raised": self.heat_raised,
             "session_flagged": self.session_flagged,
             "unreadable_visits": visit_records(self.result.unreadable_visits),
+            "stopped_by": None
+            if self.result.stopped_by is None
+            else visit_records((self.result.stopped_by,))[0],
         }
 
 
@@ -431,7 +436,20 @@ async def enrich_contacts(
                 unreadable_seen.append(
                     UnreadableVisit(handed_over, harvest.contact_ref, harvest.unreadable_cause)
                 )
+                # Kept before the harvest is written: a write that fails ends the run by
+                # exception, and the reason must already be on it.
+                await off_loop(record_reasons)
             await off_loop(apply_harvest, harvest)
+
+        def record_reasons() -> None:
+            with session_scope(factory, write=True) as session:
+                runs.record_progress_field(
+                    session,
+                    _load_user(session, user_id),
+                    run_id,
+                    "unreadable_visits",
+                    visit_records(tuple(unreadable_seen)),
+                )
 
         def record_progress(event: ProgressEvent) -> None:
             with session_scope(factory, write=True) as session:

@@ -1864,7 +1864,9 @@ class RunAccepted(BaseModel):
 
 
 class RunOut(BaseModel):
-    """One run: what it is, how far it got, and how it ended. Counts only, never names.
+    """One run: what it is, how far it got, and how it ended. Never a name, slug, or URN:
+    ``progress`` and ``counts`` hold numbers, reason words, and an enrichment's per-visit
+    reason record (contact ids and fixed codes, #405).
 
     ``planned``/``completed`` are an enrichment plan's size and progress.
     ``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.
@@ -1950,10 +1952,13 @@ class RunLostAnswerOut(BaseModel):
 
 class RunDiagnosticsOut(BaseModel):
     """Why a run's visits or answers could not be read (#405), nothing from the page.
-    Both lists are empty for a run that has none, or one recorded before #405."""
+    Both lists are empty for a run that has none, or one recorded before #405.
+    ``stopped_by`` is the visit whose answer stopped the run at once as
+    ``route_changed`` (a status no limit forgives), or null."""
 
     unreadable_visits: list[RunVisitReasonOut]
     lost_answers: list[RunLostAnswerOut]
+    stopped_by: RunVisitReasonOut | None
 
 
 class PeriodBudgetOut(BaseModel):

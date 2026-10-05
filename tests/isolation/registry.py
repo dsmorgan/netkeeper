@@ -28,7 +28,6 @@ from netkeeper.models import (
     DoNotSendReason,
     ImportRun,
     InteractionKind,
-    JsonValue,
     ListKind,
     MessageDirection,
     MessageStatus,
@@ -443,31 +442,6 @@ def _seed_run_contacts(session: Session, user: User) -> int:
     return 2
 
 
-def _seed_run_diagnostics(session: Session, user: User) -> int:
-    """An aborted enrichment of ``user`` with two unreadable visits on its contacts (#405)."""
-    run = runs.create_run(
-        session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=SEED_AT
-    )
-    visits: list[JsonValue] = [
-        {"visit": number, "contact_id": factories.make_contact(session, user).id, "reason": "x"}
-        for number in (1, 2)
-    ]
-    runs.finish_run(
-        session,
-        user,
-        run.id,
-        status=SyncRunStatus.ABORTED,
-        now=SEED_AT,
-        counts={"unreadable_visits": visits},
-    )
-    return 2
-
-
-def diagnostics_count(body: Any) -> int:
-    """Item count of a run's diagnostics: its unreadable visits and lost answers."""
-    return len(body["unreadable_visits"]) + len(body["lost_answers"])
-
-
 def _own_run(session: Session, user: User) -> dict[str, str]:
     """``run_id`` of the user's newest run; the placeholder points nowhere when they
     have none, which the endpoint answers ``404``."""
@@ -677,12 +651,6 @@ REGISTRY: list[ListEndpoint] = [
         f"{API_PREFIX}/linkedin/runs/{{run_id}}/contacts",
         _seed_run_contacts,
         paged_count,
-        path_params=_own_run,
-    ),
-    ListEndpoint(
-        f"{API_PREFIX}/linkedin/runs/{{run_id}}/diagnostics",
-        _seed_run_diagnostics,
-        diagnostics_count,
         path_params=_own_run,
     ),
     ListEndpoint(f"{API_PREFIX}/linkedin/pins", _seed_pins, array_count),

@@ -394,7 +394,7 @@ class PageProfiles:
                 )
             outcome = _status_outcome(response)
             if outcome is not Outcome.OK:
-                return Answer(outcome, masked(response.url))
+                return Answer(outcome, masked(response.url), cause=_status_cause(outcome))
             if response.body is None:
                 cause = _lost_cause(response)
                 # #197: this profile's screen arrived with no body the browser could
@@ -526,7 +526,9 @@ class PageProfiles:
                     else:
                         outcome = _status_outcome(response)
                         if outcome is not Outcome.OK:
-                            blocked = Answer(outcome, masked(response.url))
+                            blocked = Answer(
+                                outcome, masked(response.url), cause=_status_cause(outcome)
+                            )
             if blocked is not None:
                 return blocked
             response = await observation.next(0.0)
@@ -836,6 +838,12 @@ CLICK_REFUSAL_CAUSES: Final[Mapping[str, UnreadableCause]] = {
     "the control opens something else": UnreadableCause.CONTACT_INFO_CONTROL_ELSEWHERE,
     "the control could not be clicked": UnreadableCause.CONTACT_INFO_CONTROL_UNCLICKABLE,
 }
+
+
+def _status_cause(outcome: Outcome) -> UnreadableCause | None:
+    """The cause a profile's stopping status carries (#405): only a ``RouteChanged`` one
+    needs one, since the other outcomes are the run's stop reason themselves."""
+    return UnreadableCause.PROFILE_STATUS if outcome is Outcome.ROUTE_CHANGED else None
 
 
 def _refusal_cause(refusal: str | None) -> UnreadableCause:

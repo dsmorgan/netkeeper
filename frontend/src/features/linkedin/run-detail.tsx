@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -39,13 +39,6 @@ export function RunDetail({
   const budget = useQuery(budgetQuery)
   const queryClient = useQueryClient()
   const [resuming, setResuming] = useState(false)
-  const card = useRef<HTMLDivElement>(null)
-
-  // Opened from a row of the runs list, the detail sits below it: bring it into view
-  // (#405). jsdom has no scrollIntoView, hence the optional call.
-  useEffect(() => {
-    card.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
-  }, [runId, run.isSuccess])
 
   const cancel = useMutation({
     mutationFn: () => cancelRun(runId),
@@ -83,7 +76,7 @@ export function RunDetail({
   const marker = `${String(counted?.unreadable ?? 0)}/${String(counted?.mismatched ?? 0)}`
 
   return (
-    <Card size="sm" ref={card} role="region" aria-label={`Run ${data.id}`}>
+    <Card size="sm" role="region" aria-label={`Run ${data.id}`}>
       <CardHeader>
         <CardTitle level={2} className="flex items-center gap-2">
           {RUN_KIND_LABELS[data.kind]}
@@ -125,7 +118,7 @@ export function RunDetail({
         {data.status !== 'running' && (
           <FieldList title="Counts" fields={formatFields(data.counts)} />
         )}
-        <RunReasons runId={runId} marker={marker} />
+        <RunReasons runId={runId} marker={marker} stopReason={data.stop_reason} />
 
         <div className="flex flex-wrap gap-2">
           {data.status === 'running' && (

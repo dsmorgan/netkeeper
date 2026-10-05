@@ -388,10 +388,21 @@ def create_run(
 def record_progress(
     session: Session, user: User, run_id: int, progress: Mapping[str, JsonValue]
 ) -> SyncRun:
-    """Replace the run's ``progress_json`` with ``progress`` (counts only)."""
+    """Replace the run's ``progress_json`` with ``progress``: counts, reason words, and an
+    enrichment's per-visit reason record (#405), never anything from the page."""
     _require_writer(session)
     run = get_run(session, user, run_id)
     run.progress_json = dict(progress)
+    return run
+
+
+def record_progress_field(
+    session: Session, user: User, run_id: int, key: str, value: JsonValue
+) -> SyncRun:
+    """Set one key of the run's ``progress_json``, keeping the rest as it was (#405)."""
+    _require_writer(session)
+    run = get_run(session, user, run_id)
+    run.progress_json = {**(run.progress_json or {}), key: value}
     return run
 
 

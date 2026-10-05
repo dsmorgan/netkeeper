@@ -8,7 +8,7 @@ import {
   createRouter,
 } from '@tanstack/react-router'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { jsonResponse, mockFetch } from '@/test/fetch'
 
@@ -56,6 +56,7 @@ const REASONS = {
     },
   ],
   lost_answers: [],
+  stopped_by: null,
 }
 
 /** The detail under a minimal router (its contact links need one). */
@@ -151,6 +152,7 @@ describe('RunDetail reasons (#405)', () => {
           lost_answers: [
             { start: 80, cause: 'Error (no resource)', ending: 'the page moved past it' },
           ],
+          stopped_by: null,
         }),
     })
     const lost = await screen.findByRole('region', { name: 'Lost answers' })
@@ -168,6 +170,48 @@ describe('RunDetail reasons (#405)', () => {
   })
 })
 
+describe('a route_changed stop always says why (#415 review)', () => {
+  const STOPPED = run({
+    id: 51,
+    kind: 'enrich',
+    status: 'aborted',
+    stop_reason: 'route_changed',
+    stop_reason_text: 'the page’s answers changed shape',
+    counts: { planned: 44, unreadable: 0 },
+  })
+
+  it('names the visit whose answer stopped the run at once, and its code', async () => {
+    renderDetail(51, {
+      'GET /api/v1/linkedin/runs/51': () => jsonResponse(STOPPED),
+      'GET /api/v1/linkedin/runs/51/diagnostics': () =>
+        jsonResponse({
+          unreadable_visits: [],
+          lost_answers: [],
+          stopped_by: {
+            visit: 2,
+            contact_id: 42,
+            contact_exists: true,
+            first_name: 'Rosalind',
+            last_name: 'Quillfeather',
+            reason: 'profile_status',
+            reason_text: 'the profile answered a status that stopped the run at once',
+          },
+        }),
+    })
+    const note = await screen.findByText(/Stopped at once by the page’s answer on visit 2/)
+    expect(note).toHaveTextContent('the profile answered a status that stopped the run at once')
+    expect(within(note).getByText('profile_status')).toBeInTheDocument()
+    expect(within(note).getByRole('link', { name: 'Rosalind Quillfeather' })).toBeInTheDocument()
+  })
+
+  it('says nothing was recorded rather than show an empty list', async () => {
+    renderDetail(51, { 'GET /api/v1/linkedin/runs/51': () => jsonResponse(STOPPED) })
+    expect(
+      await screen.findByText('No per-visit reasons were recorded for this run.'),
+    ).toBeInTheDocument()
+  })
+})
+
 describe('the runs list (#405)', () => {
   it('shows each run’s id, and a click anywhere on the row opens it', async () => {
     renderLinkedInPage({
@@ -180,11 +224,47 @@ describe('the runs list (#405)', () => {
       .getAllByRole('table')
       .find((table) => within(table).queryByRole('columnheader', { name: 'Kind' }))!
     const [header, row] = within(runs).getAllByRole('row')
-    expect(within(header!).getAllByRole('columnheader')[0]).toHaveTextContent('Run')
+    const headers = within(header!).getAllByRole('columnheader')
+    expect(headers[0]).toHaveTextContent('Kind')
+    expect(headers[1]).toHaveTextContent('Run')
+    // The kind stays the row's header.
+    expect(within(row!).getByRole('rowheader')).toHaveTextContent('Enrichment')
     const cell = within(row!).getByText('37')
 
     expect(screen.queryByRole('region', { name: 'Run 37' })).not.toBeInTheDocument()
     act(() => fireEvent.click(cell))
     expect(await screen.findByRole('region', { name: 'Run 37' })).toBeInTheDocument()
+  })
+})
+
+describe('bringing the detail into view (#415 review)', () => {
+  function stubMotion(reduced: boolean) {
+    const scrolled: ScrollIntoViewOptions[] = []
+    const scroll = vi.fn(function (options?: ScrollIntoViewOptions | boolean) {
+      if (typeof options === 'object') scrolled.push(options)
+    })
+    Element.prototype.scrollIntoView = scroll
+    window.matchMedia = vi.fn().mockReturnValue({ matches: reduced }) as typeof window.matchMedia
+    return { scrolled, scroll }
+  }
+
+  afterEach(() => {
+    // jsdom has neither; the page must work without them too.
+    delete (Element.prototype as Partial<Element>).scrollIntoView
+    delete (window as Partial<Window>).matchMedia
+  })
+
+  it.each([
+    [false, 'smooth'],
+    [true, 'auto'],
+  ] as const)('scrolls on a row click (reduced motion %s: %s)', async (reduced, behavior) => {
+    const { scrolled } = stubMotion(reduced)
+    renderLinkedInPage({
+      'GET /api/v1/linkedin/runs': () => jsonResponse(runPage([ABORTED])),
+      'GET /api/v1/linkedin/runs/37': () => jsonResponse(ABORTED),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Enrichment' }))
+    await screen.findByRole('region', { name: 'Run 37' })
+    expect(scrolled).toEqual([{ block: 'nearest', behavior }])
   })
 })

@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { statusQuery } from './api'
 import { BrowserCard } from './browser-card'
@@ -25,7 +25,19 @@ function message(error: unknown): string {
 export function LinkedInPage() {
   const status = useQuery(statusQuery)
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null)
+  const detail = useRef<HTMLDivElement>(null)
+  const scrollToDetail = useRef(false)
   useRunEvents()
+
+  // A run opened from the runs list shows below it: bring it into view (#405), and
+  // only then, not when a start or a resume selects one. Smooth unless the reader
+  // asked for reduced motion; jsdom has neither call, hence the optional ones.
+  useEffect(() => {
+    if (!scrollToDetail.current || selectedRunId === null) return
+    scrollToDetail.current = false
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+    detail.current?.scrollIntoView?.({ block: 'nearest', behavior: reduced ? 'auto' : 'smooth' })
+  }, [selectedRunId])
 
   return (
     <div className="flex max-w-6xl flex-col gap-4">
@@ -51,9 +63,17 @@ export function LinkedInPage() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <div className="flex flex-col gap-4">
-          <RunsPanel selectedRunId={selectedRunId} onSelect={setSelectedRunId} />
+          <RunsPanel
+            selectedRunId={selectedRunId}
+            onSelect={(runId) => {
+              scrollToDetail.current = true
+              setSelectedRunId(runId)
+            }}
+          />
           {selectedRunId !== null && (
-            <RunDetail runId={selectedRunId} onResumed={setSelectedRunId} />
+            <div ref={detail}>
+              <RunDetail runId={selectedRunId} onResumed={setSelectedRunId} />
+            </div>
           )}
         </div>
         <div className="flex flex-col gap-4">

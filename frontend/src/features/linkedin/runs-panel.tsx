@@ -26,7 +26,8 @@ function message(error: unknown): string {
 /**
  * Every run, newest first, filterable by kind and status; a row opens its detail
  * (spec 14.1). The Run column is the id `netkeeper linkedin run <id>` takes (#405).
- * The whole row is the click target; the kind is also a button, for the keyboard.
+ * The whole row is the click target; the kind, the row's header, is also a button,
+ * for the keyboard.
  */
 export function RunsPanel({
   selectedRunId,
@@ -109,10 +110,10 @@ export function RunsPanel({
               <thead className="text-muted-foreground">
                 <tr>
                   <th scope="col" className="py-1 pr-3 font-medium">
-                    Run
+                    Kind
                   </th>
                   <th scope="col" className="py-1 pr-3 font-medium">
-                    Kind
+                    Run
                   </th>
                   <th scope="col" className="py-1 pr-3 font-medium">
                     Status
@@ -138,7 +139,6 @@ export function RunsPanel({
                     )}
                     onClick={() => onSelect(item.id)}
                   >
-                    <td className="py-2 pr-3 text-muted-foreground tabular-nums">{item.id}</td>
                     <th scope="row" className="py-2 pr-3 font-normal">
                       <button
                         type="button"
@@ -152,6 +152,7 @@ export function RunsPanel({
                         {RUN_KIND_LABELS[item.kind]}
                       </button>
                     </th>
+                    <td className="py-2 pr-3 text-muted-foreground tabular-nums">{item.id}</td>
                     <td className="py-2 pr-3">
                       <span
                         className={cn(

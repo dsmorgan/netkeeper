@@ -6362,10 +6362,13 @@ export interface components {
          * RunDiagnosticsOut
          * @description Why a run's visits or answers could not be read (#405), nothing from the page.
          *     Both lists are empty for a run that has none, or one recorded before #405.
+         *     ``stopped_by`` is the visit whose answer stopped the run at once as
+         *     ``route_changed`` (a status no limit forgives), or null.
          */
         RunDiagnosticsOut: {
             /** Lost Answers */
             lost_answers: components["schemas"]["RunLostAnswerOut"][];
+            stopped_by: components["schemas"]["RunVisitReasonOut"] | null;
             /** Unreadable Visits */
             unreadable_visits: components["schemas"]["RunVisitReasonOut"][];
         };
@@ -6384,7 +6387,9 @@ export interface components {
         };
         /**
          * RunOut
-         * @description One run: what it is, how far it got, and how it ended. Counts only, never names.
+         * @description One run: what it is, how far it got, and how it ended. Never a name, slug, or URN:
+         *     ``progress`` and ``counts`` hold numbers, reason words, and an enrichment's per-visit
+         *     reason record (contact ids and fixed codes, #405).
          *
          *     ``planned``/``completed`` are an enrichment plan's size and progress.
          *     ``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.

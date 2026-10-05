@@ -145,6 +145,10 @@ class ProfilePage:
     #: A url the document answers a redirect to that the tab never follows (#198
     #: review, H1: a 3xx to a wall, then the navigation hangs).
     redirect_location: str | None = None
+    #: #405: the document's HTML verbatim, in place of one built from the screen.
+    document: str | None = None
+    #: #405: reading the Contact info control raises this (not a lost tab).
+    control_error: Exception | None = None
 
     def screen_body(self) -> bytes:
         if self.screen is not None:
@@ -176,6 +180,9 @@ class ProfileControls:
 
     async def count(self) -> int:
         self._tab.site.lookups.append("count")
+        page = self._tab.profile
+        if page is not None and page.control_error is not None:
+            raise page.control_error
         return self._matches()
 
     async def get_attribute(
@@ -391,7 +398,9 @@ class ProfileSite(FakeContext):
         elif landing.startswith("status:"):
             self._send(tab, "GET", url, int(landing.split(":")[1]), SHELL, "document")
         elif landing == "document":
-            html = document_html(page.screen_body()).encode("utf-8")
+            html = (
+                page.document if page.document is not None else document_html(page.screen_body())
+            ).encode("utf-8")
             self._send(tab, "GET", url, 200, html, "document", body_error=self._lose_screen(page))
         else:
             self._send(tab, "GET", url, 200, SHELL, "document")

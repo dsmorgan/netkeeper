@@ -2,7 +2,8 @@
 
 The dashboard's live run panel lists them: a name, an outcome, a link to the
 contact. Nothing else records it per contact -- a run's ``progress_json`` and
-``counts_json`` hold counts only, and an enrichment plan's ``completed`` list
+``counts_json`` hold counts and, since #405, only the visits that could not be
+read (``services.run_diagnostics``), and an enrichment plan's ``completed`` list
 says a contact is done, not how it went -- so the runners record it here as they
 write, in the same transaction as the write itself.
 

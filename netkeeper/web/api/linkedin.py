@@ -320,22 +320,24 @@ def get_run_diagnostics(run_id: int, user: CurrentUser, session: SessionDep) -> 
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     found = run_diagnostics.diagnose(session, user, run)
     return RunDiagnosticsOut(
-        unreadable_visits=[
-            RunVisitReasonOut(
-                visit=item.visit,
-                contact_id=item.contact_id,
-                contact_exists=item.contact_exists,
-                first_name=item.first_name,
-                last_name=item.last_name,
-                reason=item.reason,
-                reason_text=item.reason_text,
-            )
-            for item in found.unreadable_visits
-        ],
+        unreadable_visits=[_visit_out(item) for item in found.unreadable_visits],
         lost_answers=[
             RunLostAnswerOut(start=item.start, cause=item.cause, ending=item.ending)
             for item in found.lost_answers
         ],
+        stopped_by=None if found.stopped_by is None else _visit_out(found.stopped_by),
+    )
+
+
+def _visit_out(item: run_diagnostics.VisitReason) -> RunVisitReasonOut:
+    return RunVisitReasonOut(
+        visit=item.visit,
+        contact_id=item.contact_id,
+        contact_exists=item.contact_exists,
+        first_name=item.first_name,
+        last_name=item.last_name,
+        reason=item.reason,
+        reason_text=item.reason_text,
     )
 
 
