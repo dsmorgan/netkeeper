@@ -7,7 +7,7 @@ import {
   createRoute,
   createRouter,
 } from '@tanstack/react-router'
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { jsonResponse, mockFetch } from '@/test/fetch'
@@ -56,7 +56,7 @@ const REASONS = {
     },
   ],
   lost_answers: [],
-  stopped_by: null,
+  stopped_by: [],
 }
 
 /** The detail under a minimal router (its contact links need one). */
@@ -152,7 +152,7 @@ describe('RunDetail reasons (#405)', () => {
           lost_answers: [
             { start: 80, cause: 'Error (no resource)', ending: 'the page moved past it' },
           ],
-          stopped_by: null,
+          stopped_by: [],
         }),
     })
     const lost = await screen.findByRole('region', { name: 'Lost answers' })
@@ -187,21 +187,37 @@ describe('a route_changed stop always says why (#415 review)', () => {
         jsonResponse({
           unreadable_visits: [],
           lost_answers: [],
-          stopped_by: {
-            visit: 2,
-            contact_id: 42,
-            contact_exists: true,
-            first_name: 'Rosalind',
-            last_name: 'Quillfeather',
-            reason: 'profile_status',
-            reason_text: 'the profile answered a status that stopped the run at once',
-          },
+          stopped_by: [
+            {
+              visit: 2,
+              contact_id: 42,
+              contact_exists: true,
+              first_name: 'Rosalind',
+              last_name: 'Quillfeather',
+              reason: 'profile_status',
+              reason_text: 'the profile answered a status that stopped the run at once',
+            },
+          ],
         }),
     })
     const note = await screen.findByText(/Stopped at once by the page’s answer on visit 2/)
     expect(note).toHaveTextContent('the profile answered a status that stopped the run at once')
     expect(within(note).getByText('profile_status')).toBeInTheDocument()
     expect(within(note).getByRole('link', { name: 'Rosalind Quillfeather' })).toBeInTheDocument()
+  })
+
+  it('says nothing about per-visit reasons for a connections sync', async () => {
+    renderDetail(52, {
+      'GET /api/v1/linkedin/runs/52': () =>
+        jsonResponse({ ...STOPPED, id: 52, kind: 'connections_full', counts: { pages: 2 } }),
+    })
+    await screen.findByRole('region', { name: 'Run 52' })
+    await waitFor(() =>
+      expect(
+        screen.queryByText('No per-visit reasons were recorded for this run.'),
+      ).not.toBeInTheDocument(),
+    )
+    expect(screen.queryByText(/Stopped at once/)).not.toBeInTheDocument()
   })
 
   it('says nothing was recorded rather than show an empty list', async () => {

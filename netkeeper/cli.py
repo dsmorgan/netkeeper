@@ -1407,7 +1407,11 @@ def _run_lines(session: Session, user: User, run: SyncRun) -> list[str]:
             f"stopped at once by the page's answer on visit {stopped.visit}"
             f" (contact {stopped.contact_id}, {name}): {stopped.reason_text} ({stopped.reason})",
         ]
-    elif run.stop_reason == "route_changed" and not found.unreadable_visits:
+    elif (
+        run.kind is SyncRunKind.ENRICH
+        and run.stop_reason == "route_changed"
+        and not found.unreadable_visits
+    ):
         lines += ["", "no per-visit reasons were recorded for this run"]
     return lines
 
@@ -1415,13 +1419,23 @@ def _run_lines(session: Session, user: User, run: SyncRun) -> list[str]:
 _SINCE: Final = re.compile(r"^(\d+)([dh])$")
 
 
+#: The furthest back ``linkedin unreadable`` looks: ten years, far past any run.
+_SINCE_MAX: Final = timedelta(days=3650)
+
+
 def _since(text: str) -> timedelta:
-    """``14d`` or ``36h`` as a duration; anything else is a usage error."""
+    """``14d`` or ``36h`` as a duration, at most :data:`_SINCE_MAX`; else a usage error."""
     match = _SINCE.match(text.strip())
     if match is None or int(match.group(1)) == 0:
         raise typer.BadParameter("give a number of days or hours, like 14d or 36h")
     amount = int(match.group(1))
-    return timedelta(days=amount) if match.group(2) == "d" else timedelta(hours=amount)
+    try:
+        window = timedelta(days=amount) if match.group(2) == "d" else timedelta(hours=amount)
+    except OverflowError:
+        window = _SINCE_MAX + timedelta(days=1)
+    if window > _SINCE_MAX:
+        raise typer.BadParameter("look back at most 3650d (ten years)")
+    return window
 
 
 @linkedin_app.command("unreadable")

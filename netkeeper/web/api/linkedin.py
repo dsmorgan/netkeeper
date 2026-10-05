@@ -325,7 +325,7 @@ def get_run_diagnostics(run_id: int, user: CurrentUser, session: SessionDep) -> 
             RunLostAnswerOut(start=item.start, cause=item.cause, ending=item.ending)
             for item in found.lost_answers
         ],
-        stopped_by=None if found.stopped_by is None else _visit_out(found.stopped_by),
+        stopped_by=[] if found.stopped_by is None else [_visit_out(found.stopped_by)],
     )
 
 
