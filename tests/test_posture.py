@@ -244,6 +244,7 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "campaign templates",
         "route-changed breaker",
         "answer-lost limit",
+        "Contact info breaker",
         "network aging",
     ]
 
@@ -1789,6 +1790,56 @@ def test_a_corrupt_answer_lost_row_warns_unknown(writer: Session, user: User) ->
     row = _row(report, "answer-lost limit")
     assert row.status is Status.UNKNOWN
     assert row.warnings and "connections_full" in row.warnings[0]
+    assert not report.ok
+
+
+# --- #424: the Contact info breaker -------------------------------------------------------
+
+
+def _lose_contact_info(writer: Session, user: User, runs: int) -> None:
+    for _ in range(runs):
+        route_breaker.record_contact_info(
+            writer, user, ACCOUNT, answer_lost=True, clean_end=False, now=NOW
+        )
+
+
+def test_a_clear_contact_info_breaker_shows_no_warning(writer: Session, user: User) -> None:
+    row = _row(_report(writer, user), "Contact info breaker")
+    assert row.status is Status.ON and row.warnings == ()
+    assert row.value == "clear: no consecutive enrichment runs have ended answer_lost"
+
+
+def test_a_contact_info_streak_below_the_breaker_shows_its_count(
+    writer: Session, user: User
+) -> None:
+    _lose_contact_info(writer, user, 2)
+    row = _row(_report(writer, user), "Contact info breaker")
+    assert row.status is Status.ON and row.warnings == ()
+    assert row.value == "2 of 3 answer_lost enrichment runs in a row (since 2026-09-23 18:00 UTC)"
+
+
+def test_a_tripped_contact_info_breaker_warns(writer: Session, user: User) -> None:
+    _lose_contact_info(writer, user, 3)
+    report = _report(writer, user)
+    row = _row(report, "Contact info breaker")
+    assert row.status is Status.ON
+    assert (
+        row.value == "tripped: 3 answer_lost enrichment runs in a row (since 2026-09-23 18:00 UTC)"
+    )
+    assert len(row.warnings) == 1
+    warning = row.warnings[0]
+    assert "scheduled enrichment runs are skipped" in warning
+    assert "netkeeper linkedin enrich" in warning and "reset-breaker" in warning
+    assert not report.ok
+
+
+def test_a_corrupt_contact_info_row_warns_unknown(writer: Session, user: User) -> None:
+    set_setting(writer, user, f"linkedin.contact_info_breaker.{ACCOUNT}", "not an object")
+    report = _report(writer, user)
+    row = _row(report, "Contact info breaker")
+    assert row.status is Status.UNKNOWN
+    assert row.value == "stored state unreadable; treated as tripped"
+    assert row.warnings and "Scheduled enrichment runs are skipped" in row.warnings[0]
     assert not report.ok
 
 

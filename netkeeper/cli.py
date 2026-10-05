@@ -1348,6 +1348,22 @@ async def _execute_printing(
 _RUN_RECORD_KEYS: Final = frozenset({"unreadable_visits", "lost"})
 
 
+def _visit_table(visits: tuple[run_diagnostics.VisitReason, ...]) -> list[str]:
+    """Enrichment visits with their contacts and reasons, as table lines (#405)."""
+    return _format_table(
+        ("VISIT", "CONTACT", "NAME", "REASON"),
+        [
+            (
+                str(item.visit),
+                str(item.contact_id),
+                _contact_name(item.first_name, item.last_name, exists=item.contact_exists),
+                f"{item.reason_text} ({item.reason})",
+            )
+            for item in visits
+        ],
+    ).splitlines()
+
+
 def _run_lines(session: Session, user: User, run: SyncRun) -> list[str]:
     """A run as a field table: kind, status, how it ended, its counts; then why any of
     its visits or answers could not be read (#405)."""
@@ -1383,18 +1399,11 @@ def _run_lines(session: Session, user: User, run: SyncRun) -> list[str]:
     found = run_diagnostics.diagnose(session, user, run)
     if found.unreadable_visits:
         lines += ["", "unreadable visits:"]
-        lines += _format_table(
-            ("VISIT", "CONTACT", "NAME", "REASON"),
-            [
-                (
-                    str(item.visit),
-                    str(item.contact_id),
-                    _contact_name(item.first_name, item.last_name, exists=item.contact_exists),
-                    f"{item.reason_text} ({item.reason})",
-                )
-                for item in found.unreadable_visits
-            ],
-        ).splitlines()
+        lines += _visit_table(found.unreadable_visits)
+    if found.deferred_visits:
+        # #424: saved without Contact info, not unreadable, so listed apart.
+        lines += ["", "deferred Contact info (profile saved; read on a later visit):"]
+        lines += _visit_table(found.deferred_visits)
     if found.lost_answers:
         lines += ["", "lost answers:"]
         lines += _format_table(
@@ -1639,6 +1648,7 @@ def linkedin_schedule_status(ctx: typer.Context) -> None:
             pause = None if account is None else schedule_pause_state(session, user, account.id)
             route = route_breaker.state(session, user, account_id)
             lost = route_breaker.answer_lost_states(session, user, account_id)
+            info = route_breaker.contact_info_state(session, user, account_id)
     finally:
         engine.dispose()
     if armed_at is None:
@@ -1661,6 +1671,7 @@ def linkedin_schedule_status(ctx: typer.Context) -> None:
     typer.echo(_streak_line("route-changed breaker", "route_changed", route))
     for kind, streak in lost.items():
         typer.echo(_streak_line("answer-lost limit", "answer_lost", streak, kind=kind))
+    typer.echo(_streak_line("Contact info breaker", "answer_lost", info, kind=SyncRunKind.ENRICH))
 
 
 def _streak_line(
@@ -1670,19 +1681,21 @@ def _streak_line(
     *,
     kind: SyncRunKind | None = None,
 ) -> str:
-    """One line of `schedule status` for a streak that skips scheduled connections runs."""
+    """One line of `schedule status` for a streak that skips scheduled runs: connections
+    runs, or enrichment runs for the Contact info breaker (#424)."""
     runs_of = "connections" if kind is None else kind.value
-    if kind is not None:
+    skipped = "enrichment" if kind is SyncRunKind.ENRICH else "connections"
+    if kind is not None and kind is not SyncRunKind.ENRICH:
         name = f"{name} ({kind.value})"
     if not streak.readable:
         return (
-            f"{name}: stored state unreadable, treated as tripped; scheduled connections"
+            f"{name}: stored state unreadable, treated as tripped; scheduled {skipped}"
             " runs are skipped (`netkeeper linkedin schedule reset-breaker`)"
         )
     counted = f"{streak.count} of {streak.threshold} {stop_reason} {runs_of} runs in a row"
     if streak.tripped:
         return (
-            f"{name}: tripped, {counted}; scheduled connections runs are skipped"
+            f"{name}: tripped, {counted}; scheduled {skipped} runs are skipped"
             " (`netkeeper linkedin schedule reset-breaker`)"
         )
     return f"{name}: {counted}"
@@ -1814,6 +1827,12 @@ def linkedin_schedule_reset_breaker(
     `answer_lost` trip the answer-lost limit (#199) the same way; this clears
     every count. A manual run of that kind that completes with nothing lost
     clears its kind's count too.
+
+    Three enrichment runs in a row ending `answer_lost` (too many Contact info
+    answers lost) trip the Contact info breaker (#424), which skips scheduled
+    enrichment runs; this clears it too. A manual enrichment run (`netkeeper
+    linkedin enrich`) that reaches its end and reads Contact info clears it the
+    same way.
     """
     engine = make_engine(database_url())
     try:
@@ -1824,14 +1843,17 @@ def linkedin_schedule_reset_breaker(
             account_id = account_id_for(session, user)
             current = route_breaker.state(session, user, account_id)
             lost = route_breaker.answer_lost_states(session, user, account_id)
+            info = route_breaker.contact_info_state(session, user, account_id)
         if (
             current.readable
             and current.count == 0
             and all(s.readable and s.count == 0 for s in lost.values())
+            and info.readable
+            and info.count == 0
         ):
             typer.echo(
-                "neither the route-changed breaker nor the answer-lost limit has a count;"
-                " nothing to reset"
+                "none of the route-changed breaker, the answer-lost limit, and the Contact"
+                " info breaker has a count; nothing to reset"
             )
             return
         # A corrupt row reads as tripped (fail closed), and posture tells the
@@ -1848,14 +1870,19 @@ def linkedin_schedule_reset_breaker(
                     else f"answer_lost {kind.value} unreadable"
                     for kind, s in lost.items()
                 ),
+                f"{info.count} `answer_lost` enrich"
+                if info.readable
+                else "answer_lost enrich unreadable",
             ]
         )
         question = (
-            f"reset the route-changed breaker and the answer-lost limit ({counts} connections"
-            " run(s) in a row)? scheduled connections runs will be allowed to fire again"
-            if current.readable and all(s.readable for s in lost.values())
+            "reset the route-changed breaker, the answer-lost limit, and the Contact info"
+            f" breaker ({counts} run(s) in a row)? scheduled connections and enrichment runs"
+            " will be allowed to fire again"
+            if current.readable and all(s.readable for s in lost.values()) and info.readable
             else f"a stored breaker state is unreadable, so it reads as tripped ({counts})."
-            " reset them all? scheduled connections runs will be allowed to fire again"
+            " reset them all? scheduled connections and enrichment runs will be allowed to"
+            " fire again"
         )
         if not yes and not typer.confirm(question):
             typer.echo("cancelled: the breaker stays as it is")
@@ -1865,8 +1892,8 @@ def linkedin_schedule_reset_breaker(
     finally:
         engine.dispose()
     typer.echo(
-        "route-changed breaker and answer-lost limit reset; scheduled connections runs may"
-        " fire again when due"
+        "route-changed breaker, answer-lost limit, and Contact info breaker reset; scheduled"
+        " connections and enrichment runs may fire again when due"
     )
 
 

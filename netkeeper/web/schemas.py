@@ -1959,11 +1959,15 @@ class RunLostAnswerOut(BaseModel):
 
 class RunDiagnosticsOut(BaseModel):
     """Why a run's visits or answers could not be read (#405), nothing from the page.
-    Both lists are empty for a run that has none, or one recorded before #405.
+    The lists are empty for a run that has none, or one recorded before #405.
     ``stopped_by`` is the visit whose answer stopped the run at once as
-    ``route_changed`` (a status no limit forgives): one item, or none."""
+    ``route_changed`` (a status no limit forgives): one item, or none.
+    ``deferred_visits`` (#424) are the visits that saved the profile without its lost
+    Contact info (``contact_info_deferred``); they are not unreadable, so they are not
+    in ``unreadable_visits``."""
 
     unreadable_visits: list[RunVisitReasonOut]
+    deferred_visits: list[RunVisitReasonOut]
     lost_answers: list[RunLostAnswerOut]
     stopped_by: list[RunVisitReasonOut]
 

@@ -55,6 +55,7 @@ const REASONS = {
       reason_text: 'the profile’s id is not the contact’s; nothing saved',
     },
   ],
+  deferred_visits: [],
   lost_answers: [],
   stopped_by: [],
 }
@@ -149,6 +150,7 @@ describe('RunDetail reasons (#405)', () => {
       'GET /api/v1/linkedin/runs/9/diagnostics': () =>
         jsonResponse({
           unreadable_visits: [],
+          deferred_visits: [],
           lost_answers: [
             { start: 80, cause: 'Error (no resource)', ending: 'the page moved past it' },
           ],
@@ -158,6 +160,66 @@ describe('RunDetail reasons (#405)', () => {
     const lost = await screen.findByRole('region', { name: 'Lost answers' })
     expect(within(lost).getByText('80')).toBeInTheDocument()
     expect(within(lost).getByText('the page moved past it')).toBeInTheDocument()
+  })
+
+  it('lists deferred visits under their own heading, not as unreadable (#424)', async () => {
+    renderDetail(38, {
+      'GET /api/v1/linkedin/runs/38': () =>
+        jsonResponse(
+          run({
+            id: 38,
+            kind: 'enrich',
+            status: 'completed',
+            stop_reason: 'end_of_plan',
+            counts: { planned: 5, unreadable: 1, contact_info_lost: 1 },
+          }),
+        ),
+      'GET /api/v1/linkedin/runs/38/diagnostics': () =>
+        jsonResponse({
+          ...REASONS,
+          unreadable_visits: [REASONS.unreadable_visits[0]],
+          deferred_visits: [
+            {
+              visit: 5,
+              contact_id: 44,
+              contact_exists: true,
+              first_name: 'Odalys',
+              last_name: 'Brightwater',
+              reason: 'contact_info_deferred',
+              reason_text:
+                'the Contact info answer arrived with no readable body; the profile was saved,' +
+                ' and Contact info is read on a later visit (not counted as unreadable)',
+            },
+          ],
+        }),
+    })
+
+    const deferred = await screen.findByRole('region', { name: 'Deferred Contact info' })
+    const rows = within(deferred).getAllByRole('row')
+    expect(rows).toHaveLength(2)
+    expect(within(rows[1]!).getByText('5')).toBeInTheDocument()
+    expect(within(rows[1]!).getByRole('link', { name: 'Odalys Brightwater' })).toBeInTheDocument()
+    expect(within(rows[1]!).getByText('contact_info_deferred')).toBeInTheDocument()
+
+    const unreadable = screen.getByRole('region', { name: 'Unreadable visits' })
+    expect(within(unreadable).getAllByRole('row')).toHaveLength(2)
+    expect(within(unreadable).queryByText('contact_info_deferred')).not.toBeInTheDocument()
+    expect(within(unreadable).getByText('overlay_never_answered')).toBeInTheDocument()
+  })
+
+  it('shows a run with only deferred visits, and no unreadable heading', async () => {
+    renderDetail(39, {
+      'GET /api/v1/linkedin/runs/39': () =>
+        jsonResponse(run({ id: 39, kind: 'enrich', status: 'completed' })),
+      'GET /api/v1/linkedin/runs/39/diagnostics': () =>
+        jsonResponse({
+          ...REASONS,
+          unreadable_visits: [],
+          deferred_visits: [{ ...REASONS.unreadable_visits[0]!, reason: 'contact_info_deferred' }],
+        }),
+    })
+    expect(await screen.findByRole('region', { name: 'Deferred Contact info' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Unreadable visits' })).not.toBeInTheDocument()
   })
 
   it('shows nothing extra for a run with nothing unreadable', async () => {
@@ -186,6 +248,7 @@ describe('a route_changed stop always says why (#415 review)', () => {
       'GET /api/v1/linkedin/runs/51/diagnostics': () =>
         jsonResponse({
           unreadable_visits: [],
+          deferred_visits: [],
           lost_answers: [],
           stopped_by: [
             {

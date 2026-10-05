@@ -575,6 +575,54 @@ def test_a_tripped_connections_breaker_blocks_the_syncs(world: World, trip: Any)
     assert checks["linkedin_enrich"].state is S.SCHEDULED
 
 
+def _trip_contact_info(session: Session, user: User, account_id: int) -> None:
+    for _ in range(3):
+        route_breaker.record_contact_info(
+            session, user, account_id, answer_lost=True, clean_end=False, now=NOW
+        )
+    assert route_breaker.contact_info_tripped(session, user, account_id)
+
+
+def test_a_tripped_contact_info_breaker_blocks_enrichment_only(world: World) -> None:
+    """#424: enrichment's own streak blocks enrichment, with its reason; the syncs stay."""
+    kinds = (JobKind.ENRICH, JobKind.CONNECTIONS_INCREMENTAL, JobKind.CONNECTIONS_FULL)
+    for session, user in world.write():
+        _trip_contact_info(session, user, _arm_linkedin(session, user, kinds=kinds))
+
+    checks = world.read()
+
+    enrich = checks["linkedin_enrich"]
+    assert enrich.state is S.BLOCKED
+    assert enrich.next_at is None
+    assert enrich.reason == (
+        "Enrichment is stopped after several runs lost too many Contact info answers;"
+        " see Posture on the Settings page"
+    )
+    for key in ("linkedin_incremental_sync", "linkedin_full_sync"):
+        assert checks[key].state in (S.SCHEDULED, S.DUE)
+        assert checks[key].reason is None
+
+
+def test_a_contact_info_streak_below_the_threshold_leaves_enrichment_scheduled(
+    world: World,
+) -> None:
+    for session, user in world.write():
+        account_id = _arm_linkedin(session, user, kinds=(JobKind.ENRICH,))
+        for _ in range(2):
+            route_breaker.record_contact_info(
+                session, user, account_id, answer_lost=True, clean_end=False, now=NOW
+            )
+
+    assert world.read()["linkedin_enrich"].state is S.SCHEDULED
+
+
+def test_the_contact_info_breaker_reads_before_active_hours(world: World) -> None:
+    for session, user in world.write():
+        _trip_contact_info(session, user, _arm_linkedin(session, user, kinds=(JobKind.ENRICH,)))
+
+    assert world.read(now=NIGHT)["linkedin_enrich"].state is S.BLOCKED
+
+
 def test_a_breaker_reads_before_active_hours(world: World) -> None:
     """At fire time the scheduler checks the breaker; active hours come last."""
     for session, user in world.write():

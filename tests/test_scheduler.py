@@ -893,6 +893,77 @@ async def test_the_answer_lost_limit_does_not_skip_enrichment(
     assert result is not None and result.fired is True
 
 
+# --- the Contact info breaker: enrichment only (#424) ------------------------------
+
+
+def _contact_info_runs(session_factory: sessionmaker[Session], owner: User, runs: int) -> None:
+    with session_scope(session_factory, write=True) as session:
+        for _ in range(runs):
+            route_breaker.record_contact_info(
+                session, owner, ACCOUNT, answer_lost=True, clean_end=False, now=NOW
+            )
+
+
+async def test_a_tripped_contact_info_breaker_skips_an_enrichment_fire(
+    session_factory: sessionmaker[Session],
+) -> None:
+    result, calls = await _fire_after(
+        session_factory,
+        scheduler.JobKind.ENRICH,
+        lambda owner: _contact_info_runs(
+            session_factory, owner, route_breaker.CONTACT_INFO_THRESHOLD
+        ),
+    )
+    assert calls == 0
+    assert result is not None and result.fired is False
+    assert result.skipped_reason == "contact_info_breaker"
+    # the cadence still advances -- a skip is not a stall
+    assert result.next_due is not None
+    enrich = DEFAULT_SCHEDULES[scheduler.JobKind.ENRICH]
+    assert result.next_due > NOW + enrich.interval
+
+
+async def test_a_contact_info_streak_below_the_threshold_does_not_skip(
+    session_factory: sessionmaker[Session],
+) -> None:
+    result, calls = await _fire_after(
+        session_factory,
+        scheduler.JobKind.ENRICH,
+        lambda owner: _contact_info_runs(
+            session_factory, owner, route_breaker.CONTACT_INFO_THRESHOLD - 1
+        ),
+    )
+    assert calls == 1
+    assert result is not None and result.fired is True
+
+
+async def test_a_corrupt_contact_info_row_skips_an_enrichment_fire(
+    session_factory: sessionmaker[Session],
+) -> None:
+    def corrupt(owner: User) -> None:
+        with session_scope(session_factory, write=True) as session:
+            set_setting(session, owner, f"linkedin.contact_info_breaker.{ACCOUNT}", "not an object")
+
+    result, calls = await _fire_after(session_factory, scheduler.JobKind.ENRICH, corrupt)
+    assert calls == 0
+    assert result is not None and result.skipped_reason == "contact_info_breaker"
+
+
+@pytest.mark.parametrize("kind", _CONNECTIONS)
+async def test_the_contact_info_breaker_does_not_skip_connections(
+    session_factory: sessionmaker[Session], kind: scheduler.JobKind
+) -> None:
+    result, calls = await _fire_after(
+        session_factory,
+        kind,
+        lambda owner: _contact_info_runs(
+            session_factory, owner, route_breaker.CONTACT_INFO_THRESHOLD
+        ),
+    )
+    assert calls == 1
+    assert result is not None and result.fired is True
+
+
 # --- poll_and_fire: not-yet-due and never-established are both no-ops -------
 
 

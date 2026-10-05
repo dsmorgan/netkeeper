@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.db import session_scope
 from netkeeper.models import SyncRunKind, User
 from netkeeper.services import route_breaker
-from netkeeper.services.settings_kv import set_setting
+from netkeeper.services.settings_kv import get_setting, set_setting
 
 NOW = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
 ACCOUNT = 1
@@ -481,3 +481,162 @@ def test_a_negative_answer_lost_count_reads_as_tripped(writer: Session, user: Us
     state = route_breaker.answer_lost_state(writer, user, ACCOUNT, INCREMENTAL)
     assert (state.readable, state.tripped) == (False, True)
     assert route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+
+
+# --- #424: the Contact info breaker, enrichment's own streak --------------------------
+
+
+def _info_key(account_id: int) -> str:
+    return f"linkedin.contact_info_breaker.{account_id}"
+
+
+def _info_lost(writer: Session, user: User, account_id: int = ACCOUNT, now: datetime = NOW) -> None:
+    route_breaker.record_contact_info(
+        writer, user, account_id, answer_lost=True, clean_end=False, now=now
+    )
+
+
+def _info_read(writer: Session, user: User) -> None:
+    route_breaker.record_contact_info(
+        writer, user, ACCOUNT, answer_lost=False, clean_end=True, now=NOW
+    )
+
+
+def test_the_contact_info_threshold_is_three() -> None:
+    assert route_breaker.CONTACT_INFO_THRESHOLD == 3
+
+
+def test_a_never_recorded_account_has_no_contact_info_streak(writer: Session, user: User) -> None:
+    state = route_breaker.contact_info_state(writer, user, ACCOUNT)
+    assert (state.count, state.since, state.tripped, state.threshold) == (0, None, False, 3)
+    assert not route_breaker.contact_info_tripped(writer, user, ACCOUNT)
+
+
+def test_three_answer_lost_enrichment_runs_trip_the_breaker_and_two_do_not(
+    writer: Session, user: User
+) -> None:
+    _info_lost(writer, user)
+    _info_lost(writer, user, now=NOW + timedelta(hours=3))
+    state = route_breaker.contact_info_state(writer, user, ACCOUNT)
+    assert (state.count, state.since, state.tripped) == (2, NOW, False)
+    assert not route_breaker.contact_info_tripped(writer, user, ACCOUNT)
+    _info_lost(writer, user, now=NOW + timedelta(hours=6))
+    state = route_breaker.contact_info_state(writer, user, ACCOUNT)
+    assert (state.count, state.since, state.tripped) == (3, NOW, True)
+    assert route_breaker.contact_info_tripped(writer, user, ACCOUNT)
+    # The stored row, as it is written.
+    assert get_setting(writer, user, _info_key(ACCOUNT)) == {
+        "count": 3,
+        "since": NOW.isoformat(),
+    }
+
+
+def test_a_run_that_reads_contact_info_again_clears_the_breaker(
+    writer: Session, user: User
+) -> None:
+    for _ in range(4):
+        _info_lost(writer, user)
+    cleared = route_breaker.record_contact_info(
+        writer, user, ACCOUNT, answer_lost=False, clean_end=True, now=NOW
+    )
+    assert (cleared.count, cleared.since, cleared.tripped) == (0, None, False)
+    assert not route_breaker.contact_info_tripped(writer, user, ACCOUNT)
+    # The next loss starts a new streak at one, with a new since.
+    later = NOW + timedelta(days=1)
+    _info_lost(writer, user, now=later)
+    state = route_breaker.contact_info_state(writer, user, ACCOUNT)
+    assert (state.count, state.since) == (1, later)
+
+
+def test_any_other_enrichment_ending_leaves_the_streak_where_it_was(
+    writer: Session, user: User
+) -> None:
+    _info_lost(writer, user)
+    _info_lost(writer, user)
+    before = route_breaker.contact_info_state(writer, user, ACCOUNT)
+    after = route_breaker.record_contact_info(
+        writer, user, ACCOUNT, answer_lost=False, clean_end=False, now=NOW + timedelta(days=1)
+    )
+    assert after == before and before.count == 2
+    assert route_breaker.contact_info_state(writer, user, ACCOUNT) == before
+
+
+def test_an_enrichment_run_cannot_both_lose_too_many_and_end_cleanly(
+    writer: Session, user: User
+) -> None:
+    with pytest.raises(ValueError, match="both"):
+        route_breaker.record_contact_info(
+            writer, user, ACCOUNT, answer_lost=True, clean_end=True, now=NOW
+        )
+
+
+def test_record_contact_info_requires_a_writer_session(
+    session: Session, session_factory: sessionmaker[Session]
+) -> None:
+    with session_scope(session_factory, write=True) as setup:
+        user_id = factories.make_user(setup).id
+    owner = session.get(User, user_id)
+    assert owner is not None
+    with pytest.raises(RuntimeError, match="writer session"):
+        route_breaker.record_contact_info(
+            session, owner, ACCOUNT, answer_lost=True, clean_end=False, now=NOW
+        )
+
+
+def test_the_contact_info_breaker_and_the_connections_streaks_never_feed_each_other(
+    writer: Session, user: User
+) -> None:
+    for _ in range(route_breaker.CONTACT_INFO_THRESHOLD):
+        _info_lost(writer, user)
+    assert not route_breaker.tripped(writer, user, ACCOUNT)
+    assert not route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+    for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
+        _answer_lost(writer, user, kind=FULL)
+    for _ in range(route_breaker.THRESHOLD):
+        route_breaker.record(writer, user, ACCOUNT, route_changed=True, succeeded=False, now=NOW)
+    # A clean connections run of each kind clears neither the breaker nor this.
+    _clean(writer, user, FULL)
+    route_breaker.record(writer, user, ACCOUNT, route_changed=False, succeeded=True, now=NOW)
+    assert route_breaker.contact_info_state(writer, user, ACCOUNT).count == 3
+    # And clearing this clears none of theirs.
+    _answer_lost(writer, user, kind=INCREMENTAL)
+    _answer_lost(writer, user, kind=INCREMENTAL)
+    _answer_lost(writer, user, kind=INCREMENTAL)
+    _info_read(writer, user)
+    assert route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+
+
+def test_reset_clears_the_contact_info_breaker_too(writer: Session, user: User) -> None:
+    for _ in range(route_breaker.CONTACT_INFO_THRESHOLD):
+        _info_lost(writer, user)
+    route_breaker.reset(writer, user, ACCOUNT)
+    state = route_breaker.contact_info_state(writer, user, ACCOUNT)
+    assert (state.count, state.since, state.tripped) == (0, None, False)
+
+
+def test_the_contact_info_breaker_is_scoped_by_account_id(writer: Session, user: User) -> None:
+    for _ in range(route_breaker.CONTACT_INFO_THRESHOLD):
+        _info_lost(writer, user, 1)
+    assert route_breaker.contact_info_tripped(writer, user, 1)
+    assert not route_breaker.contact_info_tripped(writer, user, 2)
+
+
+@pytest.mark.parametrize("raw", ["not an object", {"count": -1, "since": None}, {"since": None}])
+def test_a_corrupt_contact_info_row_reads_as_tripped_and_heals(
+    writer: Session, user: User, raw: object
+) -> None:
+    set_setting(writer, user, _info_key(ACCOUNT), raw)  # type: ignore[arg-type]
+    state = route_breaker.contact_info_state(writer, user, ACCOUNT)
+    assert (state.readable, state.tripped) == (False, True)
+    assert route_breaker.contact_info_tripped(writer, user, ACCOUNT)
+    # Another ending writes nothing, so it stays corrupt (and tripped).
+    route_breaker.record_contact_info(
+        writer, user, ACCOUNT, answer_lost=False, clean_end=False, now=NOW
+    )
+    assert not route_breaker.contact_info_state(writer, user, ACCOUNT).readable
+    # One more answer_lost run keeps it tripped rather than restarting at 1.
+    _info_lost(writer, user)
+    updated = route_breaker.contact_info_state(writer, user, ACCOUNT)
+    assert (updated.readable, updated.count, updated.tripped) == (True, 3, True)
+    _info_read(writer, user)
+    assert not route_breaker.contact_info_tripped(writer, user, ACCOUNT)

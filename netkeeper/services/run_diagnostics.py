@@ -66,9 +66,16 @@ REASON_TEXT: Final[Mapping[str, str]] = {
 }
 
 
+#: The reason code of a visit that saved the profile without its lost Contact info
+#: (:attr:`netkeeper.linkedin.enrich.UnreadableCause.CONTACT_INFO_DEFERRED`, #405). It
+#: is stored with the unreadable visits but counts toward no limit (#424).
+DEFERRED: Final = "contact_info_deferred"
+
+
 @dataclass(frozen=True, slots=True)
 class VisitReason:
-    """One enrichment visit that counted toward the unreadable limits."""
+    """One enrichment visit that counted toward the unreadable limits, or one that
+    deferred its Contact info (#405)."""
 
     visit: int
     contact_id: int
@@ -91,15 +98,19 @@ class LostAnswerReason:
 
 @dataclass(frozen=True, slots=True)
 class RunDiagnostics:
-    """A run's per-visit and per-answer reasons. Both empty for a run that has none.
+    """A run's per-visit and per-answer reasons. All empty for a run that has none.
 
     ``stopped_by`` is the visit whose answer stopped the run at once as
     ``route_changed`` (not by the unreadable limits), or ``None``.
+    ``deferred_visits`` (#424) are the visits that saved the profile without its lost
+    Contact info (``contact_info_deferred``): recorded beside the unreadable ones, but
+    not unreadable, so they are listed apart.
     """
 
     unreadable_visits: tuple[VisitReason, ...]
     lost_answers: tuple[LostAnswerReason, ...]
     stopped_by: VisitReason | None = None
+    deferred_visits: tuple[VisitReason, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,7 +208,8 @@ def diagnose(session: Session, user: User, run: SyncRun) -> RunDiagnostics:
         )
 
     return RunDiagnostics(
-        unreadable_visits=tuple(named(*row) for row in visits),
+        unreadable_visits=tuple(named(*row) for row in visits if row[2] != DEFERRED),
+        deferred_visits=tuple(named(*row) for row in visits if row[2] == DEFERRED),
         lost_answers=_lost(run),
         stopped_by=None if stopped is None else named(*stopped),
     )

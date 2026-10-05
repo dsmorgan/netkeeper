@@ -73,7 +73,9 @@ export function RunDetail({
     data.completed < data.planned
 
   const counted = data.status === 'running' ? data.progress : data.counts
-  const marker = `${String(counted?.unreadable ?? 0)}/${String(counted?.mismatched ?? 0)}`
+  const marker = [counted?.unreadable, counted?.mismatched, counted?.contact_info_lost]
+    .map((count) => String(count ?? 0))
+    .join('/')
 
   return (
     <Card size="sm" role="region" aria-label={`Run ${data.id}`}>
