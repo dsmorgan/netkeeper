@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import factories
 import pytest
@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.render import LintIssue, LintRule, Part, Rendered, Severity
-from netkeeper.campaigns.templates import REMOVED_FIELD_BLOCK
+from netkeeper.campaigns.templates import REMOVED_FIELD_BLOCK, TEMPLATE_ERRORS_BLOCK, block_reason
 from netkeeper.config import BudgetSettings, LinkedInSettings, Settings
 from netkeeper.crm.self_contact import ensure_self_contact
 from netkeeper.db import session_scope
@@ -1088,8 +1088,7 @@ def test_a_rendered_error_parks_it_with_a_visible_reason(
     lane: Lane, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """B1: an error in this contact's rendered message refuses and parks, and says why on
-    the enrollment. The render is stubbed here; a real-path test follows once #387
-    (LinkedIn render errors) lands."""
+    the enrollment. The render is stubbed here; the real-path tests follow."""
     enrollment_id = lane.enroll()
     error = LintIssue(LintRule.NO_CONTACT_FIELD, Severity.ERROR, Part.BODY, "empty", "company")
     warning = LintIssue(LintRule.BAD_LINK, Severity.WARNING, Part.BODY, "odd link")
@@ -1101,6 +1100,61 @@ def test_a_rendered_error_parks_it_with_a_visible_reason(
         None,
         "blocked: no_contact_field",
     )
+    assert (lane.messages(enrollment_id), lane.runs()) == ([], [])
+
+
+def _set_body(lane: Lane, body: str) -> None:
+    def change(session: Session, user: User) -> None:
+        campaign = get_scoped(session, user, Campaign, lane.campaign_id)
+        assert campaign is not None
+        campaign.steps[0].template.body = body
+
+    lane.write(change)
+
+
+# Six times a 300-character company, the column's limit: about 1,800 characters,
+# whose expected typing time is well over TYPING_LINT_SECONDS (240 s).
+_SIX_COMPANIES: Final = "Hi {{ first_name }}, " + " ".join(["{{ company }}"] * 6)
+
+
+@pytest.mark.parametrize(
+    ("body", "company", "rule"),
+    [
+        ("Hi {{ first_name }}, {{ company }}", "Acme\nWidgets", "linkedin_newline"),
+        (_SIX_COMPANIES, ("Widgets " * 38)[:300], "linkedin_typing_time"),
+    ],
+)
+def test_a_rendered_linkedin_error_parks_it_on_the_real_path(
+    lane: Lane, body: str, company: str, rule: str
+) -> None:
+    """#379 (from #387's review): a template whose source passes activation, but whose
+    message for this contact breaks a LinkedIn rule once rendered, is never claimed. No
+    stub: the real render and the real pacing rules (#387)."""
+    _set_body(lane, body)
+
+    def blocked(session: Session, user: User) -> str | None:
+        campaign = get_scoped(session, user, Campaign, lane.campaign_id)
+        assert campaign is not None
+        return block_reason(campaign.steps[0].template)
+
+    assert lane.read(blocked) is None  # the source passes activation
+    enrollment_id = lane.enroll(contact={"current_company": company})
+    claim = lane.claim(enrollment_id)
+    assert claim.reasons == (Refusal.RENDERED_ERRORS, rule)
+    enrollment = lane.enrollment(enrollment_id)
+    assert (enrollment.next_action_at, enrollment.not_sent_error) == (None, f"blocked: {rule}")
+    assert (lane.messages(enrollment_id), lane.runs()) == ([], [])
+
+
+def test_a_linkedin_template_with_a_source_error_parks_via_block_reason(lane: Lane) -> None:
+    """A line break in an active campaign's LinkedIn template (#387's newline rule): the
+    step is blocked before anything renders, and the enrollment says so."""
+    enrollment_id = lane.enroll()
+    _set_body(lane, "Hi {{ first_name }},\nthanks for connecting.")
+    claim = lane.claim(enrollment_id)
+    assert claim.reasons == (Skip.TEMPLATE_ERRORS,)
+    enrollment = lane.enrollment(enrollment_id)
+    assert (enrollment.next_action_at, enrollment.not_sent_error) == (None, TEMPLATE_ERRORS_BLOCK)
     assert (lane.messages(enrollment_id), lane.runs()) == ([], [])
 
 
