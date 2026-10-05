@@ -86,6 +86,7 @@ from netkeeper.services import (
     keychain,
     linkedin_steps,
     route_breaker,
+    run_diagnostics,
     runs,
     simulate_campaign,
 )
@@ -1304,8 +1305,9 @@ def _run_by_hand(
         worker = BrowserWorker(_provider(settings), factory, settings.linkedin, bus=bus)
         asyncio.run(_execute_printing(worker, bus, run_id, user_id))
         with session_scope(factory) as session:
-            finished = runs.get_run(session, _local_user_or_exit(session), run_id)
-            lines = _run_lines(finished)
+            user = _local_user_or_exit(session)
+            finished = runs.get_run(session, user, run_id)
+            lines = _run_lines(session, user, finished)
             failed = finished.status is SyncRunStatus.FAILED
     finally:
         engine.dispose()
@@ -1338,8 +1340,14 @@ async def _execute_printing(
         await printer
 
 
-def _run_lines(run: SyncRun) -> list[str]:
-    """A run as a field table: kind, status, how it ended, its counts."""
+#: Counts that are per-visit or per-answer lists (#405): printed as their own
+#: tables after the field table, never squeezed into one cell.
+_RUN_RECORD_KEYS: Final = frozenset({"unreadable_visits", "lost"})
+
+
+def _run_lines(session: Session, user: User, run: SyncRun) -> list[str]:
+    """A run as a field table: kind, status, how it ended, its counts; then why any of
+    its visits or answers could not be read (#405)."""
     derived = runs.view(run)
     rows: list[tuple[str, str]] = [
         ("run", str(run.id)),
@@ -1357,6 +1365,8 @@ def _run_lines(run: SyncRun) -> list[str]:
     if run.resume_of_id is not None:
         rows.append(("resumes", f"run {run.resume_of_id}"))
     for key, value in sorted((run.counts_json or {}).items()):
+        if key in _RUN_RECORD_KEYS and isinstance(value, list):
+            continue
         if isinstance(value, dict):
             value = ", ".join(f"{k} {v}" for k, v in value.items() if v is not None) or "-"
         rows.append((key.replace("_", " "), "-" if value is None else str(value)))
@@ -1366,7 +1376,36 @@ def _run_lines(run: SyncRun) -> list[str]:
         rows.append(("notes", run.notes))
     if run.error:
         rows.append(("error", run.error))
-    return _format_table(("FIELD", "VALUE"), rows).splitlines()
+    lines = _format_table(("FIELD", "VALUE"), rows).splitlines()
+    found = run_diagnostics.diagnose(session, user, run)
+    if found.unreadable_visits:
+        lines += ["", "unreadable visits:"]
+        lines += _format_table(
+            ("VISIT", "CONTACT", "NAME", "REASON"),
+            [
+                (
+                    str(item.visit),
+                    str(item.contact_id),
+                    _contact_name(item.first_name, item.last_name, exists=item.contact_exists),
+                    f"{item.reason_text} ({item.reason})",
+                )
+                for item in found.unreadable_visits
+            ],
+        ).splitlines()
+    if found.lost_answers:
+        lines += ["", "lost answers:"]
+        lines += _format_table(
+            ("START", "CAUSE", "THEN"),
+            [(str(item.start), item.cause, item.ending or "-") for item in found.lost_answers],
+        ).splitlines()
+    return lines
+
+
+def _contact_name(first: str | None, last: str | None, *, exists: bool) -> str:
+    """A contact's name in netkeeper for a run's record, or why there is none."""
+    if not exists:
+        return "(deleted)"
+    return " ".join(part for part in (first, last) if part) or "(no name)"
 
 
 def _stopped_by(reason: str | None) -> str:
@@ -1423,7 +1462,7 @@ def linkedin_run(run_id: Annotated[int, typer.Argument(help="The run to show.")]
         with session_scope(factory) as session:
             user = _local_user_or_exit(session)
             try:
-                lines = _run_lines(runs.get_run(session, user, run_id))
+                lines = _run_lines(session, user, runs.get_run(session, user, run_id))
             except runs.RunNotFound as exc:
                 typer.echo(f"error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
@@ -3668,8 +3707,9 @@ def _execute_by_hand(
     worker = BrowserWorker(_provider(settings), factory, settings.linkedin, bus=bus)
     asyncio.run(_execute_printing(worker, bus, run_id, user_id))
     with session_scope(factory) as session:
-        finished = runs.get_run(session, _local_user_or_exit(session), run_id)
-        lines = _run_lines(finished)
+        user = _local_user_or_exit(session)
+        finished = runs.get_run(session, user, run_id)
+        lines = _run_lines(session, user, finished)
         failed = finished.status is SyncRunStatus.FAILED
     for line in lines:
         typer.echo(line)

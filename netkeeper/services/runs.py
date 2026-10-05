@@ -49,7 +49,9 @@ a scheduled one waits for its next due time.
 
 **Counts only.** ``progress_json`` and ``counts_json`` hold numbers and short
 reason words, never a name, URN, slug, cookie, or body, and ``error`` is one
-line from the exception that ended the run.
+line from the exception that ended the run. An enrichment's per-visit reasons
+(#405) hold netkeeper's own contact ids beside fixed codes, never anything the
+page said (:mod:`netkeeper.services.run_diagnostics` reads them back).
 
 Transactions belong to the caller, and every writer here needs a writer
 session (``session_scope(factory, write=True)``).

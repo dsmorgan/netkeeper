@@ -16,6 +16,7 @@ import type {
   Pin,
   RunAccepted,
   RunContacts,
+  RunDiagnostics,
   RunKind,
   RunPage,
   RunStatus,
@@ -62,6 +63,7 @@ export const linkedinKeys = {
   runList: (params: RunsParams) => [...linkedinKeys.runs(), 'list', params] as const,
   run: (runId: number) => [...linkedinKeys.runs(), 'detail', runId] as const,
   runContacts: (runId: number) => [...linkedinKeys.runs(), 'contacts', runId] as const,
+  runDiagnostics: (runId: number) => [...linkedinKeys.runs(), 'diagnostics', runId] as const,
 }
 
 // --- reads -------------------------------------------------------------------------
@@ -185,6 +187,27 @@ export function runContactsQuery(runId: number) {
       })
       if (data === undefined) {
         throw apiError(error, response, `GET /api/v1/linkedin/runs/${runId}/contacts`)
+      }
+      return data
+    },
+  })
+}
+
+/**
+ * Why a run's visits or answers could not be read (#405): each unreadable or
+ * mismatched enrichment visit with its contact and reason code, and each answer a
+ * connections sync lost. Fixed codes and netkeeper's own contacts, nothing from the page.
+ */
+export function runDiagnosticsQuery(runId: number) {
+  return queryOptions({
+    queryKey: linkedinKeys.runDiagnostics(runId),
+    queryFn: async ({ signal }): Promise<RunDiagnostics> => {
+      const { data, error, response } = await api.GET(
+        '/api/v1/linkedin/runs/{run_id}/diagnostics',
+        { params: { path: { run_id: runId } }, signal },
+      )
+      if (data === undefined) {
+        throw apiError(error, response, `GET /api/v1/linkedin/runs/${runId}/diagnostics`)
       }
       return data
     },

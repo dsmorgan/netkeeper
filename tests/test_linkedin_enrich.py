@@ -40,6 +40,8 @@ from netkeeper.linkedin.enrich import (
     ProfileHarvest,
     ProgressEvent,
     StopReason,
+    UnreadableCause,
+    UnreadableVisit,
     run_enrichment,
     stretched,
 )
@@ -403,6 +405,74 @@ async def test_mismatches_and_unreadable_profiles_share_the_runs_limit() -> None
     assert result.reason is StopReason.RESPONSE and result.outcome is Outcome.ROUTE_CHANGED
     assert (result.mismatched, result.unreadable) == (2, 1)
     assert browser.visited() == [p.slug for p in [*PROFILES, extra[0]]]
+
+
+async def test_the_run_records_each_suspect_visit_with_its_cause_and_contact() -> None:
+    """#405: the same run as above, recorded visit by visit. A source that names no
+    cause (this fake) is recorded as ``unknown``, never left out."""
+    extra = [Profile(201, "Extra", "One"), Profile(202, "Extra", "Two")]
+    people = [*PROFILES, *extra]
+    browser = FakeBrowser.of(
+        people,
+        urns={PROFILES[1].slug: STRANGER_URN, extra[0].slug: STRANGER_URN},
+        script={5: UNRECOGNIZED},
+    )
+
+    result, harvests, _ = await _run(_spec(people), browser)
+
+    assert result.unreadable_visits == (
+        UnreadableVisit(2, PROFILES[1].n, UnreadableCause.ID_MISMATCH),
+        UnreadableVisit(4, PROFILES[3].n, UnreadableCause.UNKNOWN),
+        UnreadableVisit(6, extra[0].n, UnreadableCause.ID_MISMATCH),
+    )
+    assert [h.unreadable_cause for h in harvests] == [
+        None,
+        UnreadableCause.ID_MISMATCH,
+        None,
+        UnreadableCause.UNKNOWN,
+        None,
+        UnreadableCause.ID_MISMATCH,
+    ]
+
+
+def test_a_not_found_harvest_carries_no_unreadable_cause() -> None:
+    with pytest.raises(ValueError, match="no unreadable cause"):
+        ProfileHarvest(
+            contact_ref=1,
+            requested_public_id="x",
+            outcome=Outcome.NOT_FOUND,
+            observed_at=NOW,
+            unreadable_cause=UnreadableCause.UNKNOWN,
+        )
+
+
+def test_the_cause_codes_are_pinned() -> None:
+    """Stored on runs: a renamed code orphans every record that already holds it."""
+    assert {cause.value for cause in UnreadableCause} == {
+        "profile_shape_unknown",
+        "contact_info_shape_unknown",
+        "landed_off_profile",
+        "left_profile",
+        "unexpected_profile",
+        "no_profile_screen",
+        "profile_screen_status",
+        "too_many_lazy_cards",
+        "contact_info_control_missing",
+        "contact_info_control_not_alone",
+        "contact_info_control_unreadable",
+        "contact_info_control_elsewhere",
+        "contact_info_control_unclickable",
+        "contact_info_not_clicked",
+        "overlay_never_answered",
+        "overlay_other_profile",
+        "overlay_redirected",
+        "overlay_status",
+        "navigation_timed_out",
+        "profile_screen_lost",
+        "contact_info_lost",
+        "id_mismatch",
+        "unknown",
+    }
 
 
 async def test_never_more_than_one_click_per_visit() -> None:

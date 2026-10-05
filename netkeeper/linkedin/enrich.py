@@ -166,6 +166,99 @@ MAX_UNREADABLE_PER_RUN: Final = 3
 GATE_REASONS: Final = frozenset({StopReason.BUDGET, StopReason.CANCELLED, StopReason.INACTIVE})
 
 
+class UnreadableCause(enum.StrEnum):
+    """Why one visit was unreadable, or counted toward the unreadable limits (#405).
+
+    A fixed vocabulary for the run's record, its log, and its detail view: never a
+    url, a slug, a name, or anything else the page said. Each distinct path that
+    makes a visit unreadable has its own code, so a run's per-visit record says
+    which one fired. Adding a code is safe; renaming one orphans the records that
+    already hold it.
+    """
+
+    PROFILE_SHAPE_UNKNOWN = "profile_shape_unknown"
+    """The profile answered in a shape the parser does not know."""
+
+    CONTACT_INFO_SHAPE_UNKNOWN = "contact_info_shape_unknown"
+    """The Contact info overlay answered in a shape the parser does not know."""
+
+    LANDED_OFF_PROFILE = "landed_off_profile"
+    """The navigation, or a redirect, left the tab somewhere that is not a profile."""
+
+    LEFT_PROFILE = "left_profile"
+    """The tab left the profile during the visit (a scroll, or before the click)."""
+
+    UNEXPECTED_PROFILE = "unexpected_profile"
+    """The tab is on a profile nobody asked for, and no redirect of this visit led there."""
+
+    NO_PROFILE_SCREEN = "no_profile_screen"
+    """The page loaded, but the profile's screen never arrived."""
+
+    PROFILE_SCREEN_STATUS = "profile_screen_status"
+    """The profile's screen request answered 404 (never read as a missing profile)."""
+
+    TOO_MANY_LAZY_CARDS = "too_many_lazy_cards"
+    """More lazy cards arrived than a profile loads."""
+
+    CONTACT_INFO_CONTROL_MISSING = "contact_info_control_missing"
+    """No Contact info control on the page."""
+
+    CONTACT_INFO_CONTROL_NOT_ALONE = "contact_info_control_not_alone"
+    """More than one Contact info control on the page."""
+
+    CONTACT_INFO_CONTROL_UNREADABLE = "contact_info_control_unreadable"
+    """The Contact info control could not be read."""
+
+    CONTACT_INFO_CONTROL_ELSEWHERE = "contact_info_control_elsewhere"
+    """The Contact info control opens something other than this profile's overlay."""
+
+    CONTACT_INFO_CONTROL_UNCLICKABLE = "contact_info_control_unclickable"
+    """The Contact info control could not be clicked."""
+
+    CONTACT_INFO_NOT_CLICKED = "contact_info_not_clicked"
+    """Contact info was not clicked, for a reason with no code of its own."""
+
+    OVERLAY_NEVER_ANSWERED = "overlay_never_answered"
+    """The click was sent, and the Contact info overlay never answered."""
+
+    OVERLAY_OTHER_PROFILE = "overlay_other_profile"
+    """The page asked for another profile's Contact info overlay."""
+
+    OVERLAY_REDIRECTED = "overlay_redirected"
+    """The overlay's answer redirected somewhere that is not a wall."""
+
+    OVERLAY_STATUS = "overlay_status"
+    """The overlay answered with a status that is neither Ok nor a wall."""
+
+    NAVIGATION_TIMED_OUT = "navigation_timed_out"
+    """The profile's navigation never finished loading (#197)."""
+
+    PROFILE_SCREEN_LOST = "profile_screen_lost"
+    """The profile's screen arrived, but the browser had no body to hand over (#197)."""
+
+    CONTACT_INFO_LOST = "contact_info_lost"
+    """The overlay answered, but the browser had no body to hand over (#197)."""
+
+    ID_MISMATCH = "id_mismatch"
+    """The profile's own id is not the contact's URN (#190): read, not clicked, not written."""
+
+    UNKNOWN = "unknown"
+    """A source that gave no cause: a fake, or a path with no code yet."""
+
+
+@dataclass(frozen=True, slots=True)
+class UnreadableVisit:
+    """One visit that counted toward the unreadable limits, for the run's record (#405).
+
+    ``visit`` is the visit's number in this run, from 1. ``contact_ref`` is the core's
+    own reference for the contact (its id), never anything from the page.
+    """
+
+    visit: int
+    contact_ref: int
+    cause: UnreadableCause
+
+
 @dataclass(frozen=True, slots=True)
 class EnrichTarget:
     """One contact to visit: the core's reference for it, the slug to visit it at, and
@@ -241,6 +334,8 @@ class ProfileHarvest:
     ``contact_info_from_copy`` is true when the Contact info was read from the body
     tap's streamed copy of the overlay's answer, not its own body (#207 review): the
     copy passed every check, but the core may still trust a thin one less.
+    ``unreadable_cause`` says why a ``RouteChanged`` harvest could not be read, or is
+    :attr:`UnreadableCause.ID_MISMATCH` on an ``Ok`` harvest under another id (#405).
     """
 
     contact_ref: int
@@ -250,8 +345,11 @@ class ProfileHarvest:
     details: ProfileDetails | None = None
     contact_info: ContactInfo | None = None
     contact_info_from_copy: bool = False
+    unreadable_cause: UnreadableCause | None = None
 
     def __post_init__(self) -> None:
+        if self.outcome is Outcome.NOT_FOUND and self.unreadable_cause is not None:
+            raise ValueError("a NotFound harvest has no unreadable cause")
         if self.outcome is Outcome.OK:
             if self.details is None:
                 raise ValueError("an Ok harvest carries the profile's details")
@@ -304,7 +402,9 @@ class EnrichResult:
     could not hand over (#197), naming the visit by its number in this run; and
     ``copied`` one fixed line per visit whose Contact info was read from the body
     tap's streamed copy instead (#207 review), and one per visit that kept a lazy
-    card read from such a copy (#196 item 12).
+    card read from such a copy (#196 item 12). ``unreadable_visits`` is every visit
+    that counted toward the unreadable limits, unreadable or id-mismatched, with its
+    fixed cause and the contact's reference, in order (#405).
     """
 
     reason: StopReason
@@ -321,6 +421,7 @@ class EnrichResult:
     mismatched: int = 0
     lost: tuple[str, ...] = ()
     copied: tuple[str, ...] = ()
+    unreadable_visits: tuple[UnreadableVisit, ...] = ()
 
 
 # --- the source seam ---------------------------------------------------------
@@ -340,7 +441,9 @@ class Answer[T]:
     over (#197): which answer it was and why, in fixed words, never the
     exception's message. ``from_copy`` marks an ``Ok`` value read from the body tap's
     streamed copy of an answer whose own body was lost (#203): for a profile, one
-    read with at least one lazy card from a copy (#196 item 12).
+    read with at least one lazy card from a copy (#196 item 12). ``cause`` is the
+    fixed code for why an unparsed answer could not be read (#405); a source that
+    leaves it ``None`` is recorded as :attr:`UnreadableCause.UNKNOWN`.
     """
 
     outcome: Outcome
@@ -349,6 +452,7 @@ class Answer[T]:
     unparsed: bool = False
     lost: str | None = None
     from_copy: bool = False
+    cause: UnreadableCause | None = None
 
 
 class ProfileSource(Protocol):
@@ -481,6 +585,7 @@ async def run_enrichment(
     pauses: list[float | None] = []
     lost: list[str] = []
     copied: list[str] = []
+    unreadable_visits: list[UnreadableVisit] = []
     visits = harvested = not_found = unreadable = unreadable_in_a_row = clicks = mismatched = 0
 
     def progress(stopped: StopReason | None = None) -> ProgressEvent:
@@ -522,6 +627,7 @@ async def run_enrichment(
             mismatched=mismatched,
             lost=tuple(lost),
             copied=tuple(copied),
+            unreadable_visits=tuple(unreadable_visits),
         )
 
     for index, step in enumerate(plan.steps):
@@ -572,6 +678,7 @@ async def run_enrichment(
                     info = await source.read_contact_info(details.value, back=back, pause_s=pause)
                     answers.append(info)
         failed = next((a for a in answers if a.outcome is not Outcome.OK), None)
+        cause: UnreadableCause | None = None
         if failed is not None and failed.outcome is Outcome.NOT_FOUND:
             outcome = Outcome.NOT_FOUND
             not_found += 1
@@ -580,17 +687,21 @@ async def run_enrichment(
             outcome = Outcome.ROUTE_CHANGED
             unreadable += 1
             unreadable_in_a_row += 1
+            cause = failed.cause or UnreadableCause.UNKNOWN
             if failed.lost is not None:
                 # #197: the browser received the answer but had no body to hand
                 # over. An unreadable visit like any other, counted the same way.
                 lost.append(f"visit {visits}: {failed.lost}")
                 log.info("enrichment: visit %d was unreadable: %s", visits, failed.lost)
+            # #405: every unreadable visit's cause, in fixed words, whatever it was.
+            log.info("enrichment: visit %d was unreadable (%s)", visits, cause.value)
         elif failed is not None:
             return await stop(StopReason.RESPONSE, failed.outcome, failed.final_url)
         elif mismatch:
             outcome = Outcome.OK
             mismatched += 1
             unreadable_in_a_row += 1
+            cause = UnreadableCause.ID_MISMATCH
         else:
             outcome = Outcome.OK
             harvested += 1
@@ -605,6 +716,7 @@ async def run_enrichment(
                 details=details.value,
                 contact_info=None if info is None else info.value,
                 contact_info_from_copy=info is not None and info.from_copy,
+                unreadable_cause=cause,
             )
             if details.from_copy:
                 # #196 item 12: noted only; the harvest is applied as any other.
@@ -617,7 +729,10 @@ async def run_enrichment(
                 requested_public_id=slug,
                 outcome=outcome,
                 observed_at=clock(),
+                unreadable_cause=cause,
             )
+        if cause is not None:
+            unreadable_visits.append(UnreadableVisit(visits, target.contact_ref, cause))
         await on_harvest(harvest)
         completed.append(target.contact_ref)
         await on_progress(progress())

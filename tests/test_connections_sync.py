@@ -1458,7 +1458,9 @@ async def test_a_lost_answer_ends_the_run_aborted_and_says_which_start(
         " (Error (no resource)); the page moved past it."
     )
     assert run.counts_json is not None
-    assert run.counts_json["lost"] == [{"start": 80, "cause": _LOST_CAUSE}]
+    assert run.counts_json["lost"] == [
+        {"start": 80, "cause": _LOST_CAUSE, "ending": "the page moved past it"}
+    ]
     assert run.counts_json["complete"] is False and run.counts_json["outcome"] is None
     with session_scope(session_factory) as session:
         user = session.get(User, user_id)
@@ -1549,8 +1551,8 @@ async def test_a_run_that_read_on_past_lost_answers_is_incomplete_and_ages_nobod
     run = _run_row(session_factory, user_id, report.run_id)
     assert (run.status, run.stop_reason) == (SyncRunStatus.ABORTED, "answer_lost")
     assert run.counts_json is not None and run.counts_json["lost"] == [
-        {"start": 40, "cause": _LOST_CAUSE},
-        {"start": 90, "cause": _LOST_CAUSE},
+        {"start": 40, "cause": _LOST_CAUSE, "ending": "the page moved past it"},
+        {"start": 90, "cause": _LOST_CAUSE, "ending": "the page moved past it"},
     ]
     assert run.notes == (
         "lost 2 of the page's answers, so this run is incomplete and aged nobody:"

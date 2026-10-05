@@ -15,9 +15,11 @@ unreadable cap be walked past? Can a body or a slug reach a log?
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import random
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -57,6 +59,8 @@ from netkeeper.linkedin.enrich import (
     EnrichTarget,
     ProfileHarvest,
     StopReason,
+    UnreadableCause,
+    UnreadableVisit,
     run_enrichment,
 )
 from netkeeper.linkedin.flagship import CONTACT_DETAILS_SCREEN_ID, NAVIGATION_PATH
@@ -69,7 +73,7 @@ from netkeeper.linkedin.observe import (
     ResponseRule,
 )
 from netkeeper.linkedin.pacing import ScrollPlan, ScrollStep, human_delay, plan_enrichment
-from netkeeper.linkedin.page_profiles import PageProfiles
+from netkeeper.linkedin.page_profiles import CLICK_REFUSAL_CAUSES, PageProfiles
 from netkeeper.linkedin.voyager import RouteChanged
 
 NOW = datetime(2026, 9, 24, 15, 0, tzinfo=UTC)
@@ -1478,3 +1482,99 @@ async def test_a_tap_may_only_narrow_its_observation(tapped: ResponseMatch) -> N
         assert opened is not None
         await observation.close()
         assert opened.detached
+
+
+# --- #405: each unreadable path has its own cause on the run's record ------------------------
+
+
+def _cause_cases() -> list[Any]:
+    card = experience_payload([Role("Right", "Right Co", None, "2020 - 2021")])
+    cases: list[tuple[ProfilePage, UnreadableCause]] = [
+        (
+            ProfilePage(PRIYA, screen=profile_payload(PRIYA, location=LOCATION, identity="none")),
+            UnreadableCause.PROFILE_SHAPE_UNKNOWN,
+        ),
+        (
+            ProfilePage(
+                PRIYA,
+                overlay=contact_info_payload(PRIYA, email_urls=["https://example.test/not-mail"]),
+            ),
+            UnreadableCause.CONTACT_INFO_SHAPE_UNKNOWN,
+        ),
+        (ProfilePage(PRIYA, landing=f"{ORIGIN}/feed/"), UnreadableCause.LANDED_OFF_PROFILE),
+        (ProfilePage(PRIYA, tab_after_scroll=f"{ORIGIN}/feed/"), UnreadableCause.LEFT_PROFILE),
+        (ProfilePage(PRIYA, silently_to=MATEO.slug), UnreadableCause.UNEXPECTED_PROFILE),
+        (ProfilePage(PRIYA, landing="shell"), UnreadableCause.NO_PROFILE_SCREEN),
+        (
+            ProfilePage(PRIYA, landing="screen", screen_status=404),
+            UnreadableCause.PROFILE_SCREEN_STATUS,
+        ),
+        (
+            ProfilePage(PRIYA, components=tuple((card, None) for _ in range(41))),
+            UnreadableCause.TOO_MANY_LAZY_CARDS,
+        ),
+        (ProfilePage(PRIYA, controls=0), UnreadableCause.CONTACT_INFO_CONTROL_MISSING),
+        (ProfilePage(PRIYA, controls=2), UnreadableCause.CONTACT_INFO_CONTROL_NOT_ALONE),
+        (
+            ProfilePage(PRIYA, href="/in/someone-else-fake/overlay/contact-info/"),
+            UnreadableCause.CONTACT_INFO_CONTROL_ELSEWHERE,
+        ),
+        (
+            ProfilePage(PRIYA, click_error=RuntimeError("not actionable")),
+            UnreadableCause.CONTACT_INFO_CONTROL_UNCLICKABLE,
+        ),
+        (ProfilePage(PRIYA, overlay_answers=0), UnreadableCause.OVERLAY_NEVER_ANSWERED),
+        (ProfilePage(PRIYA, overlay_vanity=MATEO.slug), UnreadableCause.OVERLAY_OTHER_PROFILE),
+        (ProfilePage(PRIYA, overlay_status=500), UnreadableCause.OVERLAY_STATUS),
+        (
+            ProfilePage(PRIYA, goto_error=navigation_timeout()),
+            UnreadableCause.NAVIGATION_TIMED_OUT,
+        ),
+        (ProfilePage(PRIYA, screen_error=LOST), UnreadableCause.PROFILE_SCREEN_LOST),
+        (ProfilePage(PRIYA, overlay_error=LOST), UnreadableCause.CONTACT_INFO_LOST),
+    ]
+    return [pytest.param(page, cause, id=cause.value) for page, cause in cases]
+
+
+@pytest.mark.parametrize(("page", "cause"), _cause_cases())
+async def test_each_unreadable_path_records_its_own_cause(
+    page: ProfilePage, cause: UnreadableCause, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#405: the run's record says which path made the visit unreadable, by a fixed code
+    and the contact's reference, and the log line says the same; nothing from the page."""
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    site = ProfileSite([page, ProfilePage(MATEO)])
+    out = await visit(
+        site, [target(PRIYA, urn=MATEO.urn if page.silently_to else None), target(MATEO)]
+    )
+    assert out.outcomes[0] is Outcome.ROUTE_CHANGED
+    assert out.harvests[0].unreadable_cause is cause
+    assert out.harvests[1].unreadable_cause is None
+    assert out.result.unreadable_visits == (UnreadableVisit(1, PRIYA.n, cause),)
+    assert f"visit 1 was unreadable ({cause.value})" in caplog.text
+    assert PRIYA.slug not in caplog.text
+
+
+async def test_a_profile_under_another_id_is_recorded_as_a_mismatch() -> None:
+    site = ProfileSite([ProfilePage(PRIYA), ProfilePage(MATEO)])
+    out = await visit(site, [target(PRIYA, urn=MATEO.urn), target(MATEO)])
+    assert out.outcomes == [Outcome.OK, Outcome.OK]
+    assert out.harvests[0].unreadable_cause is UnreadableCause.ID_MISMATCH
+    assert out.result.unreadable_visits == (
+        UnreadableVisit(1, PRIYA.n, UnreadableCause.ID_MISMATCH),
+    )
+
+
+def test_every_click_refusal_the_browser_gives_has_its_own_cause() -> None:
+    """A refusal phrase added to ``click_contact_info`` must be given a cause here too,
+    or its visits read as the catch-all ``contact_info_not_clicked``."""
+    source = inspect.getsource(browser_module.BrowserRun.click_contact_info)
+    phrases = set(re.findall(r'ContactInfoClick\(page, False, "([^"]+)"\)', source))
+    assert phrases, "found no refusal phrases; the pattern no longer matches the source"
+    assert phrases == set(CLICK_REFUSAL_CAUSES)
+    controls = {
+        "no Contact info control on the page": "contact_info_control_missing",
+        "more than one Contact info control": "contact_info_control_not_alone",
+    }
+    for phrase, code in controls.items():
+        assert CLICK_REFUSAL_CAUSES[phrase].value == code

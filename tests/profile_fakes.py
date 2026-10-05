@@ -26,7 +26,7 @@ from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
 from netkeeper.linkedin.classify import Outcome
-from netkeeper.linkedin.enrich import Answer, masked
+from netkeeper.linkedin.enrich import Answer, UnreadableCause, masked
 from netkeeper.linkedin.pacing import ScrollPlan
 from netkeeper.linkedin.voyager import (
     ContactInfo,
@@ -183,6 +183,7 @@ class Scripted:
     final_url: str = f"{ORIGIN}/in/_/"
     unparsed: bool = False
     lost: str | None = None  # #197: the answer's body could not be read
+    cause: UnreadableCause | None = None  # #405: why an unparsed answer could not be read
 
 
 THROTTLED = Scripted(Outcome.THROTTLED)
@@ -256,6 +257,7 @@ class FakeBrowser:
                 masked(scripted.final_url),
                 unparsed=scripted.unparsed,
                 lost=scripted.lost,
+                cause=scripted.cause,
             )
         self._slug = unquote(urlsplit(landed).path.split("/")[2])
         if self._slug not in self.profiles:
@@ -276,6 +278,7 @@ class FakeBrowser:
                 masked(scripted.final_url),
                 unparsed=scripted.unparsed,
                 lost=scripted.lost,
+                cause=scripted.cause,
             )
         details = details_of(self.profiles[self._slug])
         if self._slug in self.urns:
@@ -306,6 +309,7 @@ class FakeBrowser:
                 masked(scripted.final_url),
                 unparsed=scripted.unparsed,
                 lost=scripted.lost,
+                cause=scripted.cause,
             )
         return Answer(Outcome.OK, f"{ORIGIN}/in/_/", contact_info_of(self.profiles[self._slug]))
 

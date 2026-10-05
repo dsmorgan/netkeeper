@@ -29,6 +29,12 @@ logic, only what the job may do and what happens after it stops:
 * **Each harvest** is mapped in its own writer session as it arrives, in the
   same transaction as the stored plan's record that the contact is done, so a
   resumed plan skips exactly what was written.
+* **Why a visit was unreadable** (#405). Every visit that counts toward the
+  unreadable limits -- unreadable, or under another id -- is recorded on the run
+  as its visit number, the contact's id, and a fixed reason code
+  (:class:`~netkeeper.linkedin.enrich.UnreadableCause`), nothing from the page:
+  in ``progress_json.unreadable_visits`` as the run goes, so a run that ends by
+  exception keeps them, and in ``counts_json.unreadable_visits`` when it stops.
 * **The stopping response.** ``Throttled`` or ``Checkpoint`` raises heat;
   ``Checkpoint`` or ``LoggedOut`` sets the session flag (spec 9.7). The run is
   recorded ``completed`` when every target was visited and ``aborted``
@@ -72,6 +78,7 @@ from netkeeper.linkedin.enrich import (
     ProgressEvent,
     ProgressSink,
     StopReason,
+    UnreadableVisit,
     run_enrichment,
 )
 from netkeeper.models import JsonValue, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
@@ -152,7 +159,16 @@ class EnrichRunReport:
             "outcome": None if self.result.outcome is None else self.result.outcome.value,
             "heat_raised": self.heat_raised,
             "session_flagged": self.session_flagged,
+            "unreadable_visits": visit_records(self.result.unreadable_visits),
         }
+
+
+def visit_records(visits: tuple[UnreadableVisit, ...]) -> list[JsonValue]:
+    """``unreadable_visits`` as the run stores it: visit number, contact id, reason code."""
+    return [
+        {"visit": visit.visit, "contact_id": visit.contact_ref, "reason": visit.cause.value}
+        for visit in visits
+    ]
 
 
 def _utcnow() -> datetime:
@@ -391,6 +407,10 @@ async def enrich_contacts(
             sleep=sleep,
         )
         counts = mapping.HarvestCounts()
+        # #405: each visit counted toward the unreadable limits, as it is handed over.
+        # A harvest is one visit, in order, so its number is how many came before it.
+        handed_over = 0
+        unreadable_seen: list[UnreadableVisit] = []
 
         def apply_harvest(harvest: ProfileHarvest) -> None:
             # One transaction: the harvest and the plan's record that its contact is
@@ -405,6 +425,12 @@ async def enrich_contacts(
                 )
 
         async def on_harvest(harvest: ProfileHarvest) -> None:
+            nonlocal handed_over
+            handed_over += 1
+            if harvest.unreadable_cause is not None:
+                unreadable_seen.append(
+                    UnreadableVisit(handed_over, harvest.contact_ref, harvest.unreadable_cause)
+                )
             await off_loop(apply_harvest, harvest)
 
         def record_progress(event: ProgressEvent) -> None:
@@ -421,6 +447,7 @@ async def enrich_contacts(
                         "unreadable": event.unreadable,
                         "mismatched": event.mismatched,
                         "stopped": None if event.stopped is None else event.stopped.value,
+                        "unreadable_visits": visit_records(tuple(unreadable_seen)),
                     },
                 )
 

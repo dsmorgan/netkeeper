@@ -70,12 +70,21 @@ const KNOWN_ORDER = [
   'stopped',
 ]
 
+/**
+ * Per-visit and per-answer records (#405) that live in `counts`/`progress` but are
+ * lists, not counts: the run detail shows them as their own table from
+ * `GET /linkedin/runs/{id}/diagnostics`, never as a JSON blob in a field.
+ */
+const RECORD_KEYS = ['unreadable_visits', 'lost']
+
 /** `progress`/`counts` (both `Record<string, unknown> | null`) as labeled, ordered lines. */
 export function formatFields(data: Record<string, unknown> | null | undefined): Field[] {
   if (data === null || data === undefined) return []
-  const keys = Object.keys(data)
+  const keys = Object.keys(data).filter(
+    (key) => !(RECORD_KEYS.includes(key) && Array.isArray(data[key])),
+  )
   const ordered = [
-    ...KNOWN_ORDER.filter((key) => key in data),
+    ...KNOWN_ORDER.filter((key) => keys.includes(key)),
     ...keys.filter((key) => !KNOWN_ORDER.includes(key)).sort(),
   ]
   return ordered.map((key) => ({ label: titleCase(key), value: display(data[key]) }))

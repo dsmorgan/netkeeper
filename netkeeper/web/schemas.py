@@ -1922,6 +1922,40 @@ class RunContactsOut(BaseModel):
     items: list[RunContactOut]
 
 
+class RunVisitReasonOut(BaseModel):
+    """One enrichment visit that counted toward the unreadable limits (#405).
+
+    ``visit`` is its number in the run, from 1; ``reason`` a fixed code and
+    ``reason_text`` the same in plain words. The name is the contact's in
+    netkeeper, ``None`` for a contact deleted since (``contact_exists`` false).
+    """
+
+    visit: int
+    contact_id: int
+    contact_exists: bool
+    first_name: str | None
+    last_name: str | None
+    reason: str
+    reason_text: str
+
+
+class RunLostAnswerOut(BaseModel):
+    """One answer a connections run lost (#200): the list offset, a fixed cause, and
+    how the run went on, ``None`` for a run recorded before that was kept."""
+
+    start: int
+    cause: str
+    ending: str | None
+
+
+class RunDiagnosticsOut(BaseModel):
+    """Why a run's visits or answers could not be read (#405), nothing from the page.
+    Both lists are empty for a run that has none, or one recorded before #405."""
+
+    unreadable_visits: list[RunVisitReasonOut]
+    lost_answers: list[RunLostAnswerOut]
+
+
 class PeriodBudgetOut(BaseModel):
     count: int
     limit: int
