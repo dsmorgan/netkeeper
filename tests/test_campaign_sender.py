@@ -57,9 +57,9 @@ from netkeeper.models import (
 )
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import campaign_engine as engine_module
+from netkeeper.services import campaign_replies, sending_hours
 from netkeeper.services import campaign_sender as sender_module
 from netkeeper.services import mailboxes as mailbox_service
-from netkeeper.services import sending_hours
 from netkeeper.services.campaign_engine import (
     DRAFT_DISCARDED_REASON,
     DRAFT_MISSING,
@@ -2240,46 +2240,46 @@ def test_a_linkedin_reply_between_the_claim_and_the_send_stops_the_send(
     reply and before Gmail is asked to send it. Nothing goes out; the retry's claim ends
     the enrollment."""
     urn = profile_urn("ada")
-    answer: list[Callable[[], None]] = []
+    answer: list[Callable[[], object]] = []
 
     def opener(user_id: int, mailbox_id: int) -> Any:
         while answer:
             answer.pop()()
-        return mail.gmail
+        return box.gmail
 
-    mail = make_mail(
+    box = make_mail(
         session_factory,
         modes=(StepMode.SEND, StepMode.SEND),
         same_thread=(False, False),
         opener=opener,
     )
-    enrollment_id = mail.enroll()
-    _give_urn(mail, enrollment_id, urn)
-    [(_, first)] = mail.tick().fired
+    enrollment_id = box.enroll()
+    _give_urn(box, enrollment_id, urn)
+    [(_, first)] = box.tick().fired
     assert first.at is not None
-    due = mail.enrollment(enrollment_id).next_action_at
+    due = box.enrollment(enrollment_id).next_action_at
     assert due is not None
 
     def mark_polled(session: Session) -> None:
-        mailbox = get_scoped(session, mail.user, Mailbox, mail.mailbox.id)
+        mailbox = get_scoped(session, box.user, Mailbox, box.mailbox.id)
         assert mailbox is not None
         mailbox.replies_polled_at = due  # replies are not stale: step 2 may go
 
-    mail.write(mark_polled)
+    box.write(mark_polled)
     reply = conversation("one", urn, [inbox_message(1, sender=urn, at=due - timedelta(hours=1))])
     answer.append(
-        lambda: mail.write(
-            lambda s: inbox_apply.apply_delta(s, mail.user, inbox_delta(reply), polled_at=due)
+        lambda: box.write(
+            lambda s: inbox_apply.apply_delta(s, box.user, inbox_delta(reply), polled_at=due)
         )
     )
-    result = mail.tick(due)
+    result = box.tick(due)
 
     [(_, outcome)] = result.fired
     assert outcome.outcome is SendOutcome.NOT_SENT
-    assert len(mail.gmail.sent()) == 1  # step 1 only
-    assert mail.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
-    assert mail.enrollment(enrollment_id).next_action_at is None
-    assert not mail.tick(due + timedelta(hours=3)).fired
+    assert len(box.gmail.sent()) == 1  # step 1 only
+    assert box.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
+    assert box.enrollment(enrollment_id).next_action_at is None
+    assert not box.tick(due + timedelta(hours=3)).fired
 
 
 def test_a_failing_catch_up_never_takes_back_the_settle(
@@ -2296,7 +2296,7 @@ def test_a_failing_catch_up_never_takes_back_the_settle(
         session.flush()
         raise RuntimeError("an invented failure")
 
-    monkeypatch.setattr(sender_module.replies, "catch_up_linkedin_replies", broken)
+    monkeypatch.setattr(campaign_replies, "catch_up_linkedin_replies", broken)
     enrollment_id = drafts.enroll()
     drafts.tick()
     [draft_id] = drafts.gmail.drafts()
