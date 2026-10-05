@@ -201,6 +201,15 @@ netkeeper sends from one mailbox at a time. To use a different Gmail account, fi
 
 Disconnecting doesn't revoke the grant on Google's side. To revoke it too, open <https://myaccount.google.com/permissions> and remove netkeeper.
 
+## Testing reply detection
+
+netkeeper never counts a reply you send from the mailbox it reads, including from a `+` alias of it such as `you+test@gmail.com`. Two rules drop such a reply:
+
+- Gmail labels every message you send **Sent**, even when it also lands in your inbox, and netkeeper skips sent messages so your own follow-ups never count as replies.
+- A reply counts only when it comes from one of the contact's addresses. Gmail sends from your main address unless you set the alias up as a send-as address, so the reply's `From` doesn't match a test contact enrolled at the alias.
+
+To test reply detection, enroll a contact whose address is a different Gmail account, and reply from that account. A real contact replying from their own mailbox is unaffected.
+
 ## Troubleshooting
 
 The Settings page and `netkeeper gmail status` show a short reason code:
