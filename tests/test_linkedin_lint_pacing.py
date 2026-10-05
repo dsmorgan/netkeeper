@@ -78,6 +78,12 @@ TEXTS: dict[str, str] = {
     "text_presentation": "\u2764\ufe0e thanks",
     "keycap": "1\ufe0f\u20e3 first",
     "zwnj": "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645",
+    # A Unicode 17 linker between consonants: a cluster whose end depends on the text
+    # before it, from regex 2026.9.29 on (#411).
+    "vedic_linker": "Hi \u0915\u1cf5\u0915 ok",
+    "vedic_linker_two": "Hi \u0915\u1cf6\u0915 ok",
+    "zanabazar_linker": "Hi \U00011a0b\U00011a3a\U00011a0b ok",
+    "linker_run": "\u0915\u094d\u1cf5\u1cf5\u0915\u200b",
     "lf": "Hi Bo,\nthanks",
     "cr": "Hi Bo,\rthanks",
     "crlf": "Hi Bo,\r\nthanks",
@@ -264,3 +270,25 @@ def test_lint_and_the_plan_agree_on_each_code_point_of_a_sweep() -> None:
 def test_a_cluster_is_judged_whole_as_the_plan_judges_it(cluster: str) -> None:
     flagged = LintRule.LINKEDIN_UNTYPABLE in _errors(_rendered(f"Hi {cluster} Bo"))
     assert flagged == is_untypable_cluster(cluster)
+
+
+# Consonants, linkers old and new, marks, joiners, regional indicators, and a few
+# characters lint and the plan refuse: texts whose clusters lean on what comes before.
+_CONTEXT_ALPHABET = [
+    *("\u0915", "\u0916", "\u1cf5", "\u1cf6", "\u094d", "\U00011a0b", "\U00011a3a"),
+    *("\U00011a47", "\u17d2", "\u1780", "a", " ", "\u0301", "\u200d", "\ufe0f"),
+    *("\U0001f1f5", "\U0001f1f9", "\U0001f600", "\n", "\u200b", "\ufe00", "\U000e0067"),
+]
+
+
+def test_lint_and_the_plan_agree_on_texts_whose_clusters_depend_on_context() -> None:
+    rng = random.Random(411)
+    disagree = []
+    for _ in range(300):
+        body = "".join(rng.choice(_CONTEXT_ALPHABET) for _ in range(rng.randint(1, 10)))
+        text = f"\u0915{body}x"  # rendering would trim whitespace at either end
+        char_errors = _errors(_rendered(text)) & CHARACTER_RULES
+        refusal = _refusal(text, 0)  # anything but a TypingPlanError fails the test here
+        if bool(char_errors) != (refusal in {MultilineRefused, UnsupportedCharacter}):
+            disagree.append(ascii(text))
+    assert disagree == []
