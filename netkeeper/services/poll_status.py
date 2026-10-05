@@ -195,6 +195,9 @@ class Serving:
     replies_due: frozenset[int] = frozenset()
     """Mailboxes the running sender polls again at the next tick, alone (#413)."""
     replies_not_ready: Mapping[int, str] = field(default_factory=dict)
+    replies_retry_at: Mapping[int, datetime] = field(default_factory=dict)
+    """Due mailboxes still in their backoff after a failed poll, with their retry time:
+    neither the next tick nor a "Check now" reads them before it (#409)."""
     """Mailboxes the running sender's last poll could not open, with the code (#413)."""
     drafts_polled_at: datetime | None = None
     drafts_every: timedelta = DRAFTS_POLL_EVERY
@@ -262,7 +265,11 @@ def _mailbox_poll(
     elif (code := serving.replies_not_ready.get(mailbox.id)) is not None:
         state, reason = CheckState.BLOCKED, _cannot_open(mailbox, code)
     elif mailbox.id in serving.replies_due:
-        state = CheckState.DUE
+        retry_at = serving.replies_retry_at.get(mailbox.id)
+        if retry_at is not None and retry_at > now:  # backing off after a failed poll
+            state, next_at = CheckState.SCHEDULED, retry_at
+        else:
+            state = CheckState.DUE
     else:
         state, next_at = _next(
             serving.replies_polled_at,

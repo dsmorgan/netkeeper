@@ -755,8 +755,10 @@ def poll_replies(
     now: datetime,
     label: Labeler | None = None,
     only: Collection[int] | None = None,
+    skip: Collection[int] = (),
 ) -> RepliesPolled:
-    """One poll of every armed mailbox of the user (the module), or of those in ``only``.
+    """One poll of every armed mailbox of the user (the module), or of those in ``only``,
+    leaving out those in ``skip`` (a "Check now" skips one still in its backoff, #409).
     Blocking. Says how each mailbox it looked at ended (:class:`RepliesPolled`). A
     mailbox that is not ready is skipped, not counted against the others, so it never
     makes the healthy ones poll again before their interval (#413).
@@ -772,6 +774,7 @@ def poll_replies(
         work = reply_work(session, user, now=now)
     if only is not None:
         work = [mailbox for mailbox in work if mailbox.mailbox_id in only]
+    work = [mailbox for mailbox in work if mailbox.mailbox_id not in skip]
     caught_up: set[int] = set()
     behind: set[int] = set()
     failed: set[int] = set()
