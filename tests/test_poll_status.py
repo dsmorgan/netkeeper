@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -268,7 +268,7 @@ def test_replies_follow_the_senders_interval(world: World) -> None:
 def test_replies_with_no_gate_time_or_overdue_are_due(
     world: World, polled: datetime | None
 ) -> None:
-    """A fresh start, or a poll that stopped part way: the next tick polls."""
+    """A fresh start, or a full poll overdue: the next tick polls."""
     for session, user in world.write():
         _mailbox(session, user, polled=NOW - timedelta(minutes=1))
 
@@ -332,6 +332,55 @@ def test_one_mailbox_needing_sign_in_is_named_on_the_running_check(world: World)
     assert replies.reason is not None and "stuck@example.test" in replies.reason
     assert "ok@example.test" not in replies.reason
     assert [p.state for p in status.mailboxes] == [S.SCHEDULED, S.BLOCKED]
+
+
+def test_a_mailbox_needing_sign_in_stays_named_and_leaves_the_others_scheduled(
+    world: World,
+) -> None:
+    """#413: the sender retries a mailbox that is not ready at every tick, alone. That
+    retry is not the check's next poll: the others keep their interval, and the stuck
+    one is still blocked and named."""
+    for session, user in world.write():
+        _mailbox(session, user, polled=NOW, email="ok@example.test")
+        stuck = _mailbox(
+            session,
+            user,
+            polled=NOW - timedelta(hours=3),
+            email="stuck@example.test",
+            status=MailboxStatus.REAUTH_REQUIRED,
+        )
+        stuck_id = stuck.id
+    gate = NOW - timedelta(minutes=1)
+    serving = replace(_serving(replies=gate), replies_due=frozenset({stuck_id}))
+
+    status = world.status(serving=serving)
+    replies = status.checks[0]
+
+    assert replies.state is S.SCHEDULED
+    assert replies.next_at == gate + timedelta(minutes=10)
+    assert replies.reason is not None and "stuck@example.test" in replies.reason
+    assert [p.state for p in status.mailboxes] == [S.SCHEDULED, S.BLOCKED]
+    assert status.mailboxes[1].reason is not None
+    assert "stuck@example.test" in status.mailboxes[1].reason
+
+
+def test_a_ready_mailbox_due_again_is_due_alone(world: World) -> None:
+    """A mailbox whose poll stopped part way is polled again at the next tick (#413): it
+    and the check are due; the other mailbox keeps its time."""
+    for session, user in world.write():
+        first = _mailbox(session, user, polled=NOW, email="a@example.test")
+        _mailbox(session, user, polled=NOW, email="b@example.test")
+        first_id = first.id
+    gate = NOW - timedelta(minutes=1)
+    serving = replace(_serving(replies=gate), replies_due=frozenset({first_id}))
+
+    status = world.status(serving=serving)
+
+    assert status.checks[0].state is S.DUE
+    assert status.checks[0].next_at is None
+    assert status.checks[0].last_at == gate
+    assert [p.state for p in status.mailboxes] == [S.DUE, S.SCHEDULED]
+    assert status.mailboxes[1].next_at == gate + timedelta(minutes=10)
 
 
 def _drafted(session: Session, user: User, mailbox: Mailbox) -> None:
@@ -581,6 +630,30 @@ def _no_gmail(user_id: int, mailbox_id: int) -> object:
     raise AssertionError("the poll status opened Gmail")
 
 
+async def test_endpoint_reads_the_mailboxes_the_sender_polls_again(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """#413: a mailbox the running sender polls again at the next tick is ``due``; the
+    other keeps the sender's interval."""
+    factory = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = session.scalars(select(User)).one()
+        user_id = user.id
+        again = _mailbox(session, user, polled=None, email="a@example.test").id
+        _mailbox(session, user, polled=None, email="b@example.test")
+    sender = GmailSender(factory, opener=_no_gmail)  # type: ignore[arg-type]
+    sender._replies_polled[user_id] = datetime.now(UTC) - timedelta(minutes=2)
+    sender._replies_due[user_id] = {again}
+    running_app.state.campaign_engine = _Engine(sender)
+
+    body = (await client.get("/api/v1/poll-status")).json()
+
+    by_key = {item["key"]: item for item in body["items"]}
+    assert by_key["gmail_replies"]["state"] == "due"
+    assert [m["state"] for m in body["mailboxes"]] == ["due", "scheduled"]
+    assert sender.replies_due(user_id) == frozenset({again})
+
+
 async def test_endpoint_reads_the_running_sender_and_never_runs_a_check(
     running_app: FastAPI, client: httpx.AsyncClient
 ) -> None:
@@ -616,6 +689,7 @@ async def test_endpoint_reads_the_running_sender_and_never_runs_a_check(
     # Nothing moved: the sender's memory, the mailbox, and the settings are as they were.
     assert sender.drafts_polled_at(user_id) == drafted_at
     assert sender.replies_polled_at(user_id) == replied_at
+    assert sender.replies_due(user_id) == frozenset()
     with session_scope(factory) as session:
         again = session.get(User, user_id)
         assert again is not None

@@ -76,6 +76,11 @@ Each tick, before anything is chosen, :meth:`GmailSender.reconcile` looks up wha
   :func:`netkeeper.services.campaign_replies.poll_replies`. A ``same_thread``
   follow-up whose thread holds a message from the other side since the first
   step sends nothing (``not_sent``) and asks for a poll on the next tick.
+  Every armed mailbox is polled once an interval; one that stopped part way, was
+  not ready (it needs signing in again), or holds a follow-up because its replies
+  are stale is polled again alone at the next tick, never the others with it
+  (#413). A mailbox not ready keeps its old ``replies_polled_at``, so its own
+  new conversations stay held until a poll of it catches up.
 
 Arming (#277)
 -------------
@@ -287,6 +292,9 @@ class GmailSender:
         self._drafts_polled: dict[int, datetime] = {}
         self._replies_every = replies_every
         self._replies_polled: dict[int, datetime] = {}
+        # Mailboxes the next tick polls again before the interval, per user (#413): one
+        # that stopped part way, is not ready, or holds a follow-up for a stale poll.
+        self._replies_due: dict[int, set[int]] = {}
         self._label_ids: dict[tuple[int, str], str] = {}
 
     # --- what the poll status reads (#401) -------------------------------------------
@@ -302,11 +310,22 @@ class GmailSender:
         return self._replies_every
 
     def replies_polled_at(self, user_id: int) -> datetime | None:
-        """When this process last started a reply poll of ``user_id`` that caught up (or is
-        still running); None before the first, or after one that stopped part way, which
-        the next tick retries. Read-only, like :meth:`drafts_polled_at`: this is the time
-        :meth:`reconcile` measures the next poll from."""
+        """When this process last started a reply poll of every armed mailbox of
+        ``user_id``; None before the first. Read-only, like :meth:`drafts_polled_at`: this
+        is the time :meth:`reconcile` measures the next full poll from. A mailbox in
+        :meth:`replies_due` is polled again sooner, alone."""
         return self._replies_polled.get(user_id)
+
+    def replies_due(self, user_id: int) -> frozenset[int]:
+        """The mailboxes the next tick polls again without waiting for the interval (#413):
+        one whose last poll stopped part way or failed, one that was not ready (it needs
+        signing in again), and one holding a follow-up because its replies are stale.
+        Read-only."""
+        return frozenset(self._replies_due.get(user_id, ()))
+
+    def _poll_soon(self, user_id: int, mailbox_id: int) -> None:
+        """Poll this one mailbox at the next tick, leaving the others on their interval."""
+        self._replies_due.setdefault(user_id, set()).add(mailbox_id)
 
     def drafts_polled_at(self, user_id: int) -> datetime | None:
         """When this process last ran ``user_id``'s drafts poll; None before the first.
@@ -353,7 +372,7 @@ class GmailSender:
         limit = replies.STALE_AFTER_POLLS * self._replies_every
         if polled is not None and self._clock() - polled <= limit:
             return None
-        self._replies_polled.pop(firing.user_id, None)  # poll on the next tick
+        self._poll_soon(firing.user_id, firing.mailbox_id)  # not the user's other mailboxes
         return "replies have not been polled recently; nothing was sent"
 
     # --- sending ---------------------------------------------------------------------
@@ -489,7 +508,8 @@ class GmailSender:
             # A reply (or a bounce notice) landed after the claim's reply check (P3-08):
             # nothing goes out, and the next tick's reply poll records it before the
             # retry is claimed, so the claim ends the enrollment instead.
-            self._replies_polled.pop(firing.user_id, None)
+            if firing.mailbox_id is not None:  # always, past _ready
+                self._poll_soon(firing.user_id, firing.mailbox_id)
             raise _NotSent(
                 "a message from the other side is in the thread; nothing was sent", retry=True
             )
@@ -626,14 +646,26 @@ class GmailSender:
                 [t for t in drafts if t.mailbox_id == mailbox_id],
                 verify=unverified[mailbox_id],
             )
-        last_replies = self._replies_polled.get(user_id)
-        if last_replies is None or now - last_replies >= self._replies_every:
+        self._poll_replies(factory, user_id, now)
+
+    def _poll_replies(self, factory: sessionmaker[Session], user_id: int, now: datetime) -> None:
+        """Every armed mailbox once an interval; between, only the mailboxes due again
+        (#413). A mailbox that stopped part way, or is not ready, is polled again alone at
+        the next tick, so it never makes the healthy ones poll every minute."""
+        last = self._replies_polled.get(user_id)
+        due = self._replies_due.get(user_id, set())
+        only: frozenset[int] | None = None
+        if last is None or now - last >= self._replies_every:
             self._replies_polled[user_id] = now
-            caught_up = replies.poll_replies(
-                factory, user_id, open_gmail=self._open, now=now, label=self._label_reply
-            )
-            if not caught_up:  # the rest waits for the next tick, not the next interval
-                self._replies_polled.pop(user_id, None)
+        elif due:
+            only = frozenset(due)
+        else:
+            return
+        polled = replies.poll_replies(
+            factory, user_id, open_gmail=self._open, now=now, label=self._label_reply, only=only
+        )
+        kept = set() if only is None else self._replies_due.get(user_id, set()) - only
+        self._replies_due[user_id] = kept | polled.retry
 
     def _label_reply(self, gmail: Gmail, mailbox_id: int, name: str, gmail_message_id: str) -> None:
         purpose = f"label a reply in mailbox {mailbox_id}"
