@@ -1579,6 +1579,30 @@
         "title": "ChangedJobsWithinDays",
         "type": "object"
       },
+      "CheckGroup": {
+        "enum": [
+          "gmail",
+          "linkedin"
+        ],
+        "title": "CheckGroup",
+        "type": "string"
+      },
+      "CheckState": {
+        "description": "Where a check stands. Only ``scheduled`` carries a next time.",
+        "enum": [
+          "scheduled",
+          "due",
+          "idle",
+          "paused",
+          "outside_hours",
+          "blocked",
+          "off",
+          "not_running",
+          "not_wired"
+        ],
+        "title": "CheckState",
+        "type": "string"
+      },
       "ConfirmationRejected": {
         "description": "The body of a bulk action whose confirmation token does not hold up.\n\n``409`` when the token expired (ask for the count again); ``422`` when it is\nunreadable, was issued to someone else, or is for another action or another\nselection.",
         "properties": {
@@ -7292,6 +7316,72 @@
         "title": "MailboxOut",
         "type": "object"
       },
+      "MailboxPollOut": {
+        "description": "One mailbox's reply poll, for the campaign page.",
+        "properties": {
+          "armed": {
+            "title": "Armed",
+            "type": "boolean"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "mailbox_id": {
+            "title": "Mailbox Id",
+            "type": "integer"
+          },
+          "next_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next At"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "replies_polled_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replies Polled At"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CheckState"
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "email",
+          "armed",
+          "state",
+          "replies_polled_at",
+          "next_at",
+          "reason"
+        ],
+        "title": "MailboxPollOut",
+        "type": "object"
+      },
       "MailboxProvider": {
         "description": "Who hosts the mailbox. Gmail only (ADR 0003).",
         "enum": [
@@ -8250,6 +8340,111 @@
           "last_name"
         ],
         "title": "PinOut",
+        "type": "object"
+      },
+      "PollCheckOut": {
+        "description": "One background check. ``next_at`` is set only while ``state`` is ``scheduled``.",
+        "properties": {
+          "group": {
+            "$ref": "#/components/schemas/CheckGroup"
+          },
+          "interval_minutes": {
+            "title": "Interval Minutes",
+            "type": "integer"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "last_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last At"
+          },
+          "next_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next At"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CheckState"
+          }
+        },
+        "required": [
+          "key",
+          "group",
+          "label",
+          "state",
+          "interval_minutes",
+          "last_at",
+          "next_at",
+          "reason"
+        ],
+        "title": "PollCheckOut",
+        "type": "object"
+      },
+      "PollStatusOut": {
+        "properties": {
+          "background_running": {
+            "title": "Background Running",
+            "type": "boolean"
+          },
+          "checked_at": {
+            "format": "date-time",
+            "title": "Checked At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PollCheckOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "mailboxes": {
+            "items": {
+              "$ref": "#/components/schemas/MailboxPollOut"
+            },
+            "title": "Mailboxes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "checked_at",
+          "background_running",
+          "items",
+          "mailboxes"
+        ],
+        "title": "PollStatusOut",
         "type": "object"
       },
       "PossibleDuplicateOut": {
@@ -19219,6 +19414,28 @@
         "summary": "Update My Position",
         "tags": [
           "positions"
+        ]
+      }
+    },
+    "/api/v1/poll-status": {
+      "get": {
+        "description": "Each check's last and next run. Read-only: it never triggers one.",
+        "operationId": "get_poll_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PollStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Poll Status",
+        "tags": [
+          "poll-status"
         ]
       }
     },

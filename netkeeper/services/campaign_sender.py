@@ -281,6 +281,21 @@ class GmailSender:
         self._replies_polled: dict[int, datetime] = {}
         self._label_ids: dict[tuple[int, str], str] = {}
 
+    # --- what the poll status reads (#401) -------------------------------------------
+
+    @property
+    def drafts_every(self) -> timedelta:
+        """How often the drafts poll runs, per user."""
+        return self._drafts_every
+
+    def drafts_polled_at(self, user_id: int) -> datetime | None:
+        """When this process last ran ``user_id``'s drafts poll; None before the first.
+
+        Read-only: the poll status (:mod:`netkeeper.services.poll_status`) reads it, and
+        nothing it does moves the next poll. Kept only in memory, so a restart clears it
+        and the next tick polls."""
+        return self._drafts_polled.get(user_id)
+
     # --- arming (#277) ----------------------------------------------------------------
 
     def armed(self, session: Session, user: User, mailbox_id: int) -> MailboxArm | None:

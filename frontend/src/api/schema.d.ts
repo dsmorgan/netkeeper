@@ -2577,6 +2577,26 @@ export interface paths {
         patch: operations["update_my_position"];
         trace?: never;
     };
+    "/api/v1/poll-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Poll Status
+         * @description Each check's last and next run. Read-only: it never triggers one.
+         */
+        get: operations["get_poll_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/posture": {
         parameters: {
             query?: never;
@@ -3752,6 +3772,17 @@ export interface components {
              */
             op: "changed_jobs_within_days";
         };
+        /**
+         * CheckGroup
+         * @enum {string}
+         */
+        CheckGroup: "gmail" | "linkedin";
+        /**
+         * CheckState
+         * @description Where a check stands. Only ``scheduled`` carries a next time.
+         * @enum {string}
+         */
+        CheckState: "scheduled" | "due" | "idle" | "paused" | "outside_hours" | "blocked" | "off" | "not_running" | "not_wired";
         /**
          * ConfirmationRejected
          * @description The body of a bulk action whose confirmation token does not hold up.
@@ -5498,6 +5529,25 @@ export interface components {
             updated_at: string;
         };
         /**
+         * MailboxPollOut
+         * @description One mailbox's reply poll, for the campaign page.
+         */
+        MailboxPollOut: {
+            /** Armed */
+            armed: boolean;
+            /** Email */
+            email: string;
+            /** Mailbox Id */
+            mailbox_id: number;
+            /** Next At */
+            next_at: string | null;
+            /** Reason */
+            reason: string | null;
+            /** Replies Polled At */
+            replies_polled_at: string | null;
+            state: components["schemas"]["CheckState"];
+        };
+        /**
          * MailboxProvider
          * @description Who hosts the mailbox. Gmail only (ADR 0003).
          * @enum {string}
@@ -5915,6 +5965,40 @@ export interface components {
             first_name: string | null;
             /** Last Name */
             last_name: string | null;
+        };
+        /**
+         * PollCheckOut
+         * @description One background check. ``next_at`` is set only while ``state`` is ``scheduled``.
+         */
+        PollCheckOut: {
+            group: components["schemas"]["CheckGroup"];
+            /** Interval Minutes */
+            interval_minutes: number;
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Last At */
+            last_at: string | null;
+            /** Next At */
+            next_at: string | null;
+            /** Reason */
+            reason: string | null;
+            state: components["schemas"]["CheckState"];
+        };
+        /** PollStatusOut */
+        PollStatusOut: {
+            /** Background Running */
+            background_running: boolean;
+            /**
+             * Checked At
+             * Format: date-time
+             */
+            checked_at: string;
+            /** Items */
+            items: components["schemas"]["PollCheckOut"][];
+            /** Mailboxes */
+            mailboxes: components["schemas"]["MailboxPollOut"][];
         };
         /**
          * PossibleDuplicateOut
@@ -12927,6 +13011,26 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    get_poll_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PollStatusOut"];
+                };
             };
         };
     };

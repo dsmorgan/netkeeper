@@ -9,6 +9,7 @@ import { Link } from '@tanstack/react-router'
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ErrorNote, LoadingNote } from '@/features/crm/controls'
+import { RepliesChecked } from '@/features/poll-status/replies-checked'
 
 import type { CampaignResults, DaySends, EnrollmentStatus } from './api'
 import { bucketSends, formatDay, formatRate, type SendsBucket } from './format'
@@ -18,9 +19,12 @@ export const ENROLLMENTS_ANCHOR = 'enrollments'
 
 export function ResultsCard({
   campaignId,
+  mailboxId = null,
   results,
 }: {
   campaignId: number
+  /** The campaign's mailbox, for when its replies were last checked; null for none. */
+  mailboxId?: number | null
   results: UseQueryResult<CampaignResults>
 }) {
   return (
@@ -41,6 +45,7 @@ export function ResultsCard({
         ) : (
           <>
             <Tiles campaignId={campaignId} results={results.data} />
+            <RepliesChecked mailboxId={mailboxId} />
             <SendsChart days={results.data.sends_per_day} timezone={results.data.timezone} />
           </>
         )}

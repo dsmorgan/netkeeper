@@ -34,6 +34,14 @@ describe('settings', () => {
         })
       }
       if (pathname === '/api/v1/mailboxes') return jsonResponse([])
+      if (pathname === '/api/v1/poll-status') {
+        return jsonResponse({
+          checked_at: '2026-09-24T10:00:00Z',
+          background_running: false,
+          items: [],
+          mailboxes: [],
+        })
+      }
       if (pathname === '/api/v1/settings/sending-hours') {
         return jsonResponse({
           enabled: true,
