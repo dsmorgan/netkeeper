@@ -239,6 +239,11 @@ class UnreadableCause(enum.StrEnum):
     CONTACT_INFO_LOST = "contact_info_lost"
     """The overlay answered, but the browser had no body to hand over (#197)."""
 
+    PROFILE_STATUS = "profile_status"
+    """The profile's page or screen answered a status that is neither Ok, NotFound, nor a
+    wall (a 500, a 410). Not an unreadable visit: it stops the run at once as
+    ``route_changed``, and is recorded as the visit that stopped it."""
+
     ID_MISMATCH = "id_mismatch"
     """The profile's own id is not the contact's URN (#190): read, not clicked, not written."""
 
@@ -404,7 +409,9 @@ class EnrichResult:
     tap's streamed copy instead (#207 review), and one per visit that kept a lazy
     card read from such a copy (#196 item 12). ``unreadable_visits`` is every visit
     that counted toward the unreadable limits, unreadable or id-mismatched, with its
-    fixed cause and the contact's reference, in order (#405).
+    fixed cause and the contact's reference, in order (#405). ``stopped_by`` is the
+    visit whose answer stopped the run at once as ``RouteChanged`` (not by the
+    unreadable limits), with its cause; ``None`` for any other stop.
     """
 
     reason: StopReason
@@ -422,6 +429,7 @@ class EnrichResult:
     lost: tuple[str, ...] = ()
     copied: tuple[str, ...] = ()
     unreadable_visits: tuple[UnreadableVisit, ...] = ()
+    stopped_by: UnreadableVisit | None = None
 
 
 # --- the source seam ---------------------------------------------------------
@@ -600,7 +608,10 @@ async def run_enrichment(
         )
 
     async def stop(
-        reason: StopReason, outcome: Outcome | None = None, final_url: str | None = None
+        reason: StopReason,
+        outcome: Outcome | None = None,
+        final_url: str | None = None,
+        stopped_by: UnreadableVisit | None = None,
     ) -> EnrichResult:
         await on_progress(progress(reason))
         log.info(
@@ -628,6 +639,7 @@ async def run_enrichment(
             lost=tuple(lost),
             copied=tuple(copied),
             unreadable_visits=tuple(unreadable_visits),
+            stopped_by=stopped_by,
         )
 
     for index, step in enumerate(plan.steps):
@@ -696,7 +708,15 @@ async def run_enrichment(
             # #405: every unreadable visit's cause, in fixed words, whatever it was.
             log.info("enrichment: visit %d was unreadable (%s)", visits, cause.value)
         elif failed is not None:
-            return await stop(StopReason.RESPONSE, failed.outcome, failed.final_url)
+            stopping = None
+            if failed.outcome is Outcome.ROUTE_CHANGED:
+                # #405: a route_changed stop at once, not by the unreadable limits: the
+                # run's record names the visit and why, as it does an unreadable one.
+                stopping = UnreadableVisit(
+                    visits, target.contact_ref, failed.cause or UnreadableCause.UNKNOWN
+                )
+                log.info("enrichment: visit %d stopped the run (%s)", visits, stopping.cause.value)
+            return await stop(StopReason.RESPONSE, failed.outcome, failed.final_url, stopping)
         elif mismatch:
             outcome = Outcome.OK
             mismatched += 1

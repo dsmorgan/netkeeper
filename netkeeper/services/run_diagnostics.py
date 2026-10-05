@@ -20,12 +20,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Final
 
 from sqlalchemy.orm import Session
 
-from netkeeper.models import Contact, SyncRun, User
-from netkeeper.scoping import scoped_contacts
+from netkeeper.models import Contact, SyncRun, SyncRunKind, User
+from netkeeper.scoping import scoped, scoped_contacts
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ REASON_TEXT: Final[Mapping[str, str]] = {
     "navigation_timed_out": "the profile never finished loading",
     "profile_screen_lost": "the profile's screen arrived with no readable body",
     "contact_info_lost": "the Contact info answer arrived with no readable body",
+    "profile_status": "the profile answered a status that stopped the run at once",
     "id_mismatch": "the profile's id is not the contact's; nothing saved",
     "unknown": "no cause was recorded",
 }
@@ -85,10 +87,31 @@ class LostAnswerReason:
 
 @dataclass(frozen=True, slots=True)
 class RunDiagnostics:
-    """A run's per-visit and per-answer reasons. Both empty for a run that has none."""
+    """A run's per-visit and per-answer reasons. Both empty for a run that has none.
+
+    ``stopped_by`` is the visit whose answer stopped the run at once as
+    ``route_changed`` (not by the unreadable limits), or ``None``.
+    """
 
     unreadable_visits: tuple[VisitReason, ...]
     lost_answers: tuple[LostAnswerReason, ...]
+    stopped_by: VisitReason | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RecurringReason:
+    """One contact and reason code across enrichment runs (``linkedin unreadable``)."""
+
+    contact_id: int
+    reason: str
+    reason_text: str
+    #: How many visits recorded it, and in which runs, oldest first.
+    visits: int
+    run_ids: tuple[int, ...]
+    last_seen: datetime
+    first_name: str | None
+    last_name: str | None
+    contact_exists: bool
 
 
 def reason_text(code: str) -> str:
@@ -108,15 +131,31 @@ def _record(run: SyncRun, key: str) -> list[Any]:
     return []
 
 
+def _visit(item: Any) -> tuple[int, int, str] | None:
+    if not isinstance(item, dict):
+        return None
+    visit, contact_id, reason = item.get("visit"), item.get("contact_id"), item.get("reason")
+    if isinstance(visit, int) and isinstance(contact_id, int) and isinstance(reason, str):
+        return visit, contact_id, reason
+    return None
+
+
 def _visits(run: SyncRun) -> list[tuple[int, int, str]]:
-    rows: list[tuple[int, int, str]] = []
-    for item in _record(run, "unreadable_visits"):
-        if not isinstance(item, dict):
-            continue
-        visit, contact_id, reason = item.get("visit"), item.get("contact_id"), item.get("reason")
-        if isinstance(visit, int) and isinstance(contact_id, int) and isinstance(reason, str):
-            rows.append((visit, contact_id, reason))
-    return rows
+    return [row for row in map(_visit, _record(run, "unreadable_visits")) if row is not None]
+
+
+def _stopped_by(run: SyncRun) -> tuple[int, int, str] | None:
+    counts = run.counts_json
+    return _visit(counts.get("stopped_by")) if isinstance(counts, dict) else None
+
+
+def _contacts(session: Session, user: User, ids: set[int]) -> dict[int, Contact]:
+    if not ids:
+        return {}
+    return {
+        contact.id: contact
+        for contact in session.scalars(scoped_contacts(user).where(Contact.id.in_(ids)))
+    }
 
 
 def _lost(run: SyncRun) -> tuple[LostAnswerReason, ...]:
@@ -137,27 +176,63 @@ def diagnose(session: Session, user: User, run: SyncRun) -> RunDiagnostics:
     through the scoping helper all the same.
     """
     visits = _visits(run)
-    ids = {contact_id for _, contact_id, _ in visits}
-    contacts: dict[int, Contact] = (
-        {
-            contact.id: contact
-            for contact in session.scalars(scoped_contacts(user).where(Contact.id.in_(ids)))
-        }
-        if ids
-        else {}
-    )
+    stopped = _stopped_by(run)
+    rows = [*visits, *([] if stopped is None else [stopped])]
+    contacts = _contacts(session, user, {contact_id for _, contact_id, _ in rows})
+
+    def named(visit: int, contact_id: int, reason: str) -> VisitReason:
+        contact = contacts.get(contact_id)
+        return VisitReason(
+            visit=visit,
+            contact_id=contact_id,
+            reason=reason,
+            reason_text=reason_text(reason),
+            first_name=None if contact is None else contact.first_name,
+            last_name=None if contact is None else contact.last_name,
+            contact_exists=contact is not None,
+        )
+
     return RunDiagnostics(
-        unreadable_visits=tuple(
-            VisitReason(
-                visit=visit,
+        unreadable_visits=tuple(named(*row) for row in visits),
+        lost_answers=_lost(run),
+        stopped_by=None if stopped is None else named(*stopped),
+    )
+
+
+def recurring(session: Session, user: User, *, since: datetime) -> list[RecurringReason]:
+    """Every recorded reason of ``user``'s enrichment runs started since ``since``, grouped
+    by contact and code: "is it the same contacts every morning?" in one read (#405).
+
+    Includes the visit that stopped a run at once. Most visits first, then the most
+    recent. Read in Python from each run's record rather than with a JSON table
+    function, so it reads the same on SQLite and PostgreSQL.
+    """
+    statement = (
+        scoped(user, SyncRun)
+        .where(SyncRun.kind == SyncRunKind.ENRICH, SyncRun.started_at >= since)
+        .order_by(SyncRun.started_at, SyncRun.id)
+    )
+    groups: dict[tuple[int, str], list[SyncRun]] = {}
+    for run in session.scalars(statement):
+        stopped = _stopped_by(run)
+        for _, contact_id, reason in [*_visits(run), *([] if stopped is None else [stopped])]:
+            groups.setdefault((contact_id, reason), []).append(run)
+    contacts = _contacts(session, user, {contact_id for contact_id, _ in groups})
+    found = []
+    for (contact_id, reason), seen in groups.items():
+        contact = contacts.get(contact_id)
+        found.append(
+            RecurringReason(
                 contact_id=contact_id,
                 reason=reason,
                 reason_text=reason_text(reason),
-                first_name=contacts[contact_id].first_name if contact_id in contacts else None,
-                last_name=contacts[contact_id].last_name if contact_id in contacts else None,
-                contact_exists=contact_id in contacts,
+                visits=len(seen),
+                run_ids=tuple(dict.fromkeys(run.id for run in seen)),
+                last_seen=seen[-1].started_at,
+                first_name=None if contact is None else contact.first_name,
+                last_name=None if contact is None else contact.last_name,
+                contact_exists=contact is not None,
             )
-            for visit, contact_id, reason in visits
-        ),
-        lost_answers=_lost(run),
-    )
+        )
+    found.sort(key=lambda item: (-item.visits, -item.last_seen.timestamp(), item.contact_id))
+    return found

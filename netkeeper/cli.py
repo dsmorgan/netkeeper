@@ -8,6 +8,7 @@ import getpass
 import json
 import logging
 import os
+import re
 import secrets
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -1398,7 +1399,72 @@ def _run_lines(session: Session, user: User, run: SyncRun) -> list[str]:
             ("START", "CAUSE", "THEN"),
             [(str(item.start), item.cause, item.ending or "-") for item in found.lost_answers],
         ).splitlines()
+    stopped = found.stopped_by
+    if stopped is not None:
+        name = _contact_name(stopped.first_name, stopped.last_name, exists=stopped.contact_exists)
+        lines += [
+            "",
+            f"stopped at once by the page's answer on visit {stopped.visit}"
+            f" (contact {stopped.contact_id}, {name}): {stopped.reason_text} ({stopped.reason})",
+        ]
+    elif run.stop_reason == "route_changed" and not found.unreadable_visits:
+        lines += ["", "no per-visit reasons were recorded for this run"]
     return lines
+
+
+_SINCE: Final = re.compile(r"^(\d+)([dh])$")
+
+
+def _since(text: str) -> timedelta:
+    """``14d`` or ``36h`` as a duration; anything else is a usage error."""
+    match = _SINCE.match(text.strip())
+    if match is None or int(match.group(1)) == 0:
+        raise typer.BadParameter("give a number of days or hours, like 14d or 36h")
+    amount = int(match.group(1))
+    return timedelta(days=amount) if match.group(2) == "d" else timedelta(hours=amount)
+
+
+@linkedin_app.command("unreadable")
+def linkedin_unreadable(
+    since: Annotated[
+        str, typer.Option(help="How far back to look, in days or hours: 14d, 36h.")
+    ] = "14d",
+) -> None:
+    """Group enrichment runs' unreadable visits by contact and reason. Reads only.
+
+    Every reason a run recorded (#405), including the visit that stopped a run at once,
+    so the contacts that fail run after run stand out.
+    """
+    window = _since(since)
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            found = run_diagnostics.recurring(session, user, since=datetime.now(UTC) - window)
+    finally:
+        engine.dispose()
+    if not found:
+        typer.echo(f"no unreadable visits recorded in the last {since.strip()}")
+        return
+    typer.echo(
+        _format_table(
+            ("CONTACT", "NAME", "REASON", "VISITS", "RUNS", "LAST (UTC)"),
+            [
+                (
+                    str(item.contact_id),
+                    _contact_name(item.first_name, item.last_name, exists=item.contact_exists),
+                    item.reason,
+                    str(item.visits),
+                    ",".join(str(run_id) for run_id in item.run_ids),
+                    f"{item.last_seen:%Y-%m-%d %H:%M}",
+                )
+                for item in found
+            ],
+        ),
+        nl=False,
+    )
 
 
 def _contact_name(first: str | None, last: str | None, *, exists: bool) -> str:

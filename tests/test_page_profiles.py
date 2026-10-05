@@ -73,7 +73,7 @@ from netkeeper.linkedin.observe import (
     ResponseRule,
 )
 from netkeeper.linkedin.pacing import ScrollPlan, ScrollStep, human_delay, plan_enrichment
-from netkeeper.linkedin.page_profiles import CLICK_REFUSAL_CAUSES, PageProfiles
+from netkeeper.linkedin.page_profiles import CLICK_REFUSAL_CAUSES, PageProfiles, _refusal_cause
 from netkeeper.linkedin.voyager import RouteChanged
 
 NOW = datetime(2026, 9, 24, 15, 0, tzinfo=UTC)
@@ -1487,6 +1487,13 @@ async def test_a_tap_may_only_narrow_its_observation(tapped: ResponseMatch) -> N
 # --- #405: each unreadable path has its own cause on the run's record ------------------------
 
 
+#: A document whose rehydrate-data script is there but not one array assignment.
+_BROKEN_REHYDRATION = (
+    '<!doctype html><html><body><script id="rehydrate-data">'
+    "window.__como_rehydration__ = 1; window.other = 2</script></body></html>"
+)
+
+
 def _cause_cases() -> list[Any]:
     card = experience_payload([Role("Right", "Right Co", None, "2020 - 2021")])
     cases: list[tuple[ProfilePage, UnreadableCause]] = [
@@ -1532,8 +1539,31 @@ def _cause_cases() -> list[Any]:
         ),
         (ProfilePage(PRIYA, screen_error=LOST), UnreadableCause.PROFILE_SCREEN_LOST),
         (ProfilePage(PRIYA, overlay_error=LOST), UnreadableCause.CONTACT_INFO_LOST),
+        # #415 review: each code's second call site, and the refusals end to end.
+        (
+            ProfilePage(PRIYA, document=_BROKEN_REHYDRATION),
+            UnreadableCause.PROFILE_SHAPE_UNKNOWN,
+        ),
+        (
+            ProfilePage(
+                PRIYA, goto_error=navigation_timeout(), landing="screen", screen_status=404
+            ),
+            UnreadableCause.PROFILE_SCREEN_STATUS,
+        ),
+        (
+            ProfilePage(PRIYA, redirect_location=f"{ORIGIN}/feed/"),
+            UnreadableCause.LANDED_OFF_PROFILE,
+        ),
+        (ProfilePage(PRIYA, overlay_status=302), UnreadableCause.OVERLAY_REDIRECTED),
+        (
+            ProfilePage(PRIYA, control_error=RuntimeError("the locator went stale")),
+            UnreadableCause.CONTACT_INFO_CONTROL_UNREADABLE,
+        ),
     ]
-    return [pytest.param(page, cause, id=cause.value) for page, cause in cases]
+    return [
+        pytest.param(page, cause, id=f"{cause.value}-{number}")
+        for number, (page, cause) in enumerate(cases)
+    ]
 
 
 @pytest.mark.parametrize(("page", "cause"), _cause_cases())
@@ -1578,3 +1608,62 @@ def test_every_click_refusal_the_browser_gives_has_its_own_cause() -> None:
     }
     for phrase, code in controls.items():
         assert CLICK_REFUSAL_CAUSES[phrase].value == code
+
+
+async def test_answers_that_are_none_of_them_the_screen_are_no_profile_screen() -> None:
+    """The landing reads at most MAX_LANDING_ANSWERS answers: when every one is another
+    page's, the visit is unreadable as ``no_profile_screen``, by the count, not the wait."""
+    stale = [Stale("GET", f"/in/{MATEO.slug}/", b"<html></html>") for _ in range(8)]
+    site = ProfileSite([ProfilePage(PRIYA, landing="shell"), ProfilePage(MATEO)], stale=stale)
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.result.unreadable_visits == (
+        UnreadableVisit(1, PRIYA.n, UnreadableCause.NO_PROFILE_SCREEN),
+    )
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        pytest.param(ProfilePage(PRIYA, landing="status:500"), id="landing"),
+        pytest.param(
+            ProfilePage(PRIYA, landing="status:410", goto_error=navigation_timeout()),
+            id="queued-before-a-timeout",
+        ),
+    ],
+)
+async def test_a_status_that_stops_the_run_at_once_is_recorded_as_the_stopping_visit(
+    page: ProfilePage,
+) -> None:
+    """#415 review: a 500 or a 410 on the profile is route_changed at once, not an
+    unreadable visit; the run still says which visit stopped it, and why."""
+    site = ProfileSite([page, ProfilePage(MATEO)])
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.result.reason is StopReason.RESPONSE
+    assert out.result.outcome is Outcome.ROUTE_CHANGED and out.harvests == []
+    assert out.result.unreadable_visits == ()
+    assert out.result.stopped_by == UnreadableVisit(1, PRIYA.n, UnreadableCause.PROFILE_STATUS)
+
+
+async def test_a_throttle_is_its_own_stop_reason_and_names_no_stopping_visit() -> None:
+    site = ProfileSite([ProfilePage(PRIYA, landing="status:429")])
+    out = await visit(site, [target(PRIYA)])
+    assert out.result.outcome is Outcome.THROTTLED and out.result.stopped_by is None
+
+
+def test_the_click_refusal_causes_are_pinned() -> None:
+    assert {phrase: cause.value for phrase, cause in CLICK_REFUSAL_CAUSES.items()} == {
+        "the tab is not on the profile": "left_profile",
+        "the tab left the profile before the click": "left_profile",
+        "the control could not be read": "contact_info_control_unreadable",
+        "no Contact info control on the page": "contact_info_control_missing",
+        "more than one Contact info control": "contact_info_control_not_alone",
+        "the control opens something else": "contact_info_control_elsewhere",
+        "the control could not be clicked": "contact_info_control_unclickable",
+    }
+
+
+@pytest.mark.parametrize("refusal", [None, "a refusal phrase nobody wrote yet"])
+def test_a_refusal_with_no_code_of_its_own_is_contact_info_not_clicked(
+    refusal: str | None,
+) -> None:
+    assert _refusal_cause(refusal) is UnreadableCause.CONTACT_INFO_NOT_CLICKED

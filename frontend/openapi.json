@@ -9224,7 +9224,7 @@
         "type": "object"
       },
       "RunDiagnosticsOut": {
-        "description": "Why a run's visits or answers could not be read (#405), nothing from the page.\nBoth lists are empty for a run that has none, or one recorded before #405.",
+        "description": "Why a run's visits or answers could not be read (#405), nothing from the page.\nBoth lists are empty for a run that has none, or one recorded before #405.\n``stopped_by`` is the visit whose answer stopped the run at once as\n``route_changed`` (a status no limit forgives), or null.",
         "properties": {
           "lost_answers": {
             "items": {
@@ -9232,6 +9232,16 @@
             },
             "title": "Lost Answers",
             "type": "array"
+          },
+          "stopped_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunVisitReasonOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "unreadable_visits": {
             "items": {
@@ -9243,7 +9253,8 @@
         },
         "required": [
           "unreadable_visits",
-          "lost_answers"
+          "lost_answers",
+          "stopped_by"
         ],
         "title": "RunDiagnosticsOut",
         "type": "object"
@@ -9280,7 +9291,7 @@
         "type": "object"
       },
       "RunOut": {
-        "description": "One run: what it is, how far it got, and how it ended. Counts only, never names.\n\n``planned``/``completed`` are an enrichment plan's size and progress.\n``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.\n``resumed_by`` is the id of the run that already took over this one's\nremaining plan, or null when it has not been (and so still may be, spec 9.9).\n``stop_reason_text`` is ``stop_reason`` in plain words (\"outside active\nhours\" for ``inactive``, #213), or null while the run is running.\n``pause_requested`` is true while a running enrichment is stopping to pause\n(#324); it ends ``aborted`` with ``stop_reason`` ``paused``, and resumable.",
+        "description": "One run: what it is, how far it got, and how it ended. Never a name, slug, or URN:\n``progress`` and ``counts`` hold numbers, reason words, and an enrichment's per-visit\nreason record (contact ids and fixed codes, #405).\n\n``planned``/``completed`` are an enrichment plan's size and progress.\n``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.\n``resumed_by`` is the id of the run that already took over this one's\nremaining plan, or null when it has not been (and so still may be, spec 9.9).\n``stop_reason_text`` is ``stop_reason`` in plain words (\"outside active\nhours\" for ``inactive``, #213), or null while the run is running.\n``pause_requested`` is true while a running enrichment is stopping to pause\n(#324); it ends ``aborted`` with ``stop_reason`` ``paused``, and resumable.",
         "properties": {
           "aging_refused": {
             "anyOf": [

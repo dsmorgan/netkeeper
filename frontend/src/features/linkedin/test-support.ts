@@ -214,7 +214,7 @@ export function backend(handlers: Record<string, Handler>, calls: Call[] = []) {
     }
     if (/^\/api\/v1\/linkedin\/runs\/\d+\/diagnostics$/.test(url.pathname)) {
       // #405: a run with nothing unreadable, unless a test says otherwise.
-      return jsonResponse({ unreadable_visits: [], lost_answers: [] })
+      return jsonResponse({ unreadable_visits: [], lost_answers: [], stopped_by: null })
     }
     if (url.pathname === '/api/v1/contacts/query') {
       return jsonResponse({ items: [], total: 0, describe: 'no matches' })

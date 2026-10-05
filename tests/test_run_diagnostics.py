@@ -8,7 +8,7 @@ recorded directly: what the runner writes is ``tests/test_enrichment.py``'s.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -212,8 +212,108 @@ async def test_the_api_answers_the_runs_reasons(
             }
         ],
         "lost_answers": [],
+        "stopped_by": None,
     }
     assert missing.status_code == 404
+
+
+async def test_another_users_run_is_not_found(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    factory = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        other = factories.make_user(session)
+        theirs = factories.make_contact(session, other, first_name="Secret")
+        run_id = _run(
+            session, other, counts={"unreadable_visits": [_visit(1, theirs.id, "unknown")]}
+        ).id
+    answer = await client.get(f"/api/v1/linkedin/runs/{run_id}/diagnostics")
+    assert answer.status_code == 404 and "Secret" not in answer.text
+
+
+def test_the_visit_that_stopped_a_run_at_once_reads_back(writer: Session) -> None:
+    session = writer
+    user = factories.make_user(session)
+    ada = factories.make_contact(session, user, first_name="Ada", last_name="Fake")
+    run = _run(
+        session,
+        user,
+        counts={"unreadable_visits": [], "stopped_by": _visit(2, ada.id, "profile_status")},
+    )
+    found = run_diagnostics.diagnose(session, user, run)
+    assert found.unreadable_visits == ()
+    assert found.stopped_by is not None
+    assert (found.stopped_by.visit, found.stopped_by.reason, found.stopped_by.first_name) == (
+        2,
+        "profile_status",
+        "Ada",
+    )
+
+
+@pytest.mark.parametrize("stored", [None, "x", {"visit": 1}, []])
+def test_a_stopped_by_in_an_unknown_shape_reads_as_none(writer: Session, stored: Any) -> None:
+    user = factories.make_user(writer)
+    run = _run(writer, user, counts={"stopped_by": stored})
+    assert run_diagnostics.diagnose(writer, user, run).stopped_by is None
+
+
+def _run_at(session: Session, user: User, at: datetime, counts: dict[str, Any], **kind: Any) -> int:
+    run = runs.create_run(
+        session, user, kind.get("kind", SyncRunKind.ENRICH), trigger=SyncRunTrigger.MANUAL, now=at
+    )
+    runs.finish_run(session, user, run.id, status=SyncRunStatus.ABORTED, now=at, counts=counts)
+    return run.id
+
+
+def test_recurring_groups_reasons_by_contact_and_code_across_runs(writer: Session) -> None:
+    session = writer
+    user = factories.make_user(session)
+    other = factories.make_user(session)
+    ada = factories.make_contact(session, user, first_name="Ada", last_name="Fake")
+    bo = factories.make_contact(session, user, first_name="Bo")
+    old = _run_at(
+        session, user, NOW - timedelta(days=20), {"unreadable_visits": [_visit(1, ada.id, "x")]}
+    )
+    first = _run_at(
+        session,
+        user,
+        NOW - timedelta(days=2),
+        {
+            "unreadable_visits": [
+                _visit(1, ada.id, "overlay_never_answered"),
+                _visit(4, bo.id, "id_mismatch"),
+            ]
+        },
+    )
+    second = _run_at(
+        session,
+        user,
+        NOW - timedelta(days=1),
+        {
+            "unreadable_visits": [_visit(2, ada.id, "overlay_never_answered")],
+            "stopped_by": _visit(3, bo.id, "profile_status"),
+        },
+    )
+    _run_at(  # another user's runs and a sync's lost answers are never read here
+        session, other, NOW, {"unreadable_visits": [_visit(1, ada.id, "overlay_never_answered")]}
+    )
+    _run_at(
+        session,
+        user,
+        NOW,
+        {"lost": [{"start": 0, "cause": "c"}]},
+        kind=SyncRunKind.CONNECTIONS_FULL,
+    )
+
+    found = run_diagnostics.recurring(session, user, since=NOW - timedelta(days=14))
+
+    assert [(r.contact_id, r.reason, r.visits, r.run_ids) for r in found] == [
+        (ada.id, "overlay_never_answered", 2, (first, second)),
+        (bo.id, "profile_status", 1, (second,)),
+        (bo.id, "id_mismatch", 1, (first,)),
+    ]
+    assert found[0].first_name == "Ada" and found[0].last_seen == NOW - timedelta(days=1)
+    assert old not in {run_id for r in found for run_id in r.run_ids}
 
 
 # --- the CLI ----------------------------------------------------------------------------------
@@ -257,6 +357,70 @@ def test_linkedin_run_prints_each_visits_reason(cli_db: sessionmaker[Session]) -
     assert table[2].split()[:3] == ["5", str(gone_id), "(deleted)"]
     # The list is its own table, never a cell of the field table.
     assert not any(line.startswith("unreadable visits ") for line in lines)
+
+
+def test_linkedin_run_says_which_visit_stopped_a_run_at_once(
+    cli_db: sessionmaker[Session],
+) -> None:
+    with session_scope(cli_db, write=True) as session:
+        user = ensure_local_user(session, settings=Settings())
+        ada = factories.make_contact(session, user, first_name="Ada", last_name="Fake")
+        stopped = _run(
+            session,
+            user,
+            counts={"unreadable_visits": [], "stopped_by": _visit(2, ada.id, "profile_status")},
+        ).id
+        bare = _run(session, user, counts={"planned": 3}).id
+        ada_id = ada.id
+
+    shown = CliRunner().invoke(cli, ["linkedin", "run", str(stopped)])
+    assert shown.exit_code == 0, shown.output
+    assert (
+        f"stopped at once by the page's answer on visit 2 (contact {ada_id}, Ada Fake):"
+        " the profile answered a status that stopped the run at once (profile_status)"
+    ) in shown.output
+    old = CliRunner().invoke(cli, ["linkedin", "run", str(bare)])
+    assert "no per-visit reasons were recorded for this run" in old.output
+
+
+def test_linkedin_unreadable_groups_reasons_across_runs(cli_db: sessionmaker[Session]) -> None:
+    now = datetime.now(UTC)
+    with session_scope(cli_db, write=True) as session:
+        user = ensure_local_user(session, settings=Settings())
+        ada = factories.make_contact(session, user, first_name="Ada", last_name="Fake")
+        visits = {"unreadable_visits": [_visit(1, ada.id, "overlay_never_answered")]}
+        first = _run_at(session, user, now - timedelta(days=2), visits)
+        second = _run_at(session, user, now - timedelta(days=1), visits)
+        _run_at(session, user, now - timedelta(days=30), visits)
+        ada_id = ada.id
+
+    result = CliRunner().invoke(cli, ["linkedin", "unreadable", "--since", "14d"])
+
+    assert result.exit_code == 0, result.output
+    header, row = result.output.splitlines()
+    assert header.split() == ["CONTACT", "NAME", "REASON", "VISITS", "RUNS", "LAST", "(UTC)"]
+    assert row.split()[:6] == [
+        str(ada_id),
+        "Ada",
+        "Fake",
+        "overlay_never_answered",
+        "2",
+        f"{first},{second}",
+    ]
+
+
+@pytest.mark.parametrize("since", ["14", "two weeks", "0d", "-3d"])
+def test_linkedin_unreadable_refuses_a_window_it_cannot_read(
+    cli_db: sessionmaker[Session], since: str
+) -> None:
+    result = CliRunner().invoke(cli, ["linkedin", "unreadable", "--since", since])
+    assert result.exit_code == 2 and "like 14d or 36h" in result.output
+
+
+def test_linkedin_unreadable_with_nothing_recorded(cli_db: sessionmaker[Session]) -> None:
+    result = CliRunner().invoke(cli, ["linkedin", "unreadable", "--since", "36h"])
+    assert result.exit_code == 0
+    assert result.output.strip() == "no unreadable visits recorded in the last 36h"
 
 
 def test_linkedin_run_prints_a_syncs_lost_answers(cli_db: sessionmaker[Session]) -> None:

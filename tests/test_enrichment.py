@@ -989,6 +989,64 @@ async def test_a_run_that_dies_keeps_the_reasons_it_had_recorded(
     assert (visit.first_name, visit.last_name) == (people[0].first, people[0].last)
 
 
+async def test_an_unreadable_visits_reason_is_kept_even_when_its_write_fails(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#415 review: the reason is on the run before the harvest is written, so a write
+    that ends the run by exception does not take the reason with it."""
+    from netkeeper.crm import apply as mapping
+
+    people = _people(2)
+    user_id, ids = _setup(session_factory, people)
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("the harvest could not be written")
+
+    monkeypatch.setattr(mapping, "apply_harvest", broken)
+    with pytest.raises(RuntimeError, match="harvest could not"):
+        await _enrich(session_factory, user_id, FakeBrowser.of(people, script={1: _NO_ANSWER}))
+
+    died = _last_run(session_factory, user_id)
+    assert died.progress_json is not None
+    assert died.progress_json["unreadable_visits"] == [
+        {"visit": 1, "contact_id": ids[101], "reason": "overlay_never_answered"}
+    ]
+
+
+async def test_a_route_changed_stop_at_once_names_the_visit_that_stopped_it(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#415 review: a status no limit forgives stops the run before any harvest; the run
+    still names the visit and its cause, so its record is never just empty."""
+    people = _people(3)
+    user_id, ids = _setup(session_factory, people)
+    status = Scripted(Outcome.ROUTE_CHANGED, cause=UnreadableCause.PROFILE_STATUS)
+    browser = FakeBrowser.of(people, script={2: status})
+
+    report = await _enrich(session_factory, user_id, browser)
+
+    assert report.result.outcome is Outcome.ROUTE_CHANGED
+    run = _last_run(session_factory, user_id)
+    assert run.stop_reason == "route_changed" and run.counts_json is not None
+    assert run.counts_json["unreadable_visits"] == []
+    assert run.counts_json["stopped_by"] == {
+        "visit": 2,
+        "contact_id": ids[102],
+        "reason": "profile_status",
+    }
+
+
+async def test_a_run_stopped_by_the_limits_names_no_stopping_visit(
+    session_factory: sessionmaker[Session],
+) -> None:
+    people = _people(4)
+    user_id, _ = _setup(session_factory, people)
+    browser = FakeBrowser.of(people, script={3: _NO_CONTROL, 5: _NO_ANSWER})
+    await _enrich(session_factory, user_id, browser)
+    run = _last_run(session_factory, user_id)
+    assert run.counts_json is not None and run.counts_json["stopped_by"] is None
+
+
 async def test_a_harvest_and_its_completion_mark_commit_together(
     session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
