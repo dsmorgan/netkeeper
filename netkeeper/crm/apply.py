@@ -737,7 +737,8 @@ class HarvestCounts:
     unreadable: int = 0
     snapshots: int = 0
     #: Applied harvests left due again: Contact info read from a streamed copy that
-    #: held no email and no phone (#207 review).
+    #: held no email and no phone (#207 review), or a profile saved without Contact
+    #: info because its answer's body was lost (#405).
     kept_due: int = 0
 
     def add(self, result: HarvestResult) -> None:
@@ -782,7 +783,10 @@ def apply_harvest(
     list already gives. An ``Ok`` harvest without contact info (the job clicks
     **Contact info** only on a profile whose id is the contact's, #190) writes
     nothing: a mismatch is :attr:`HarvestResult.MISMATCH`, and a matching one,
-    which the job never hands over, is :attr:`HarvestResult.UNREADABLE`.
+    which the job never hands over, is :attr:`HarvestResult.UNREADABLE` -- except a
+    harvest whose Contact info answer was lost (``contact_info_lost``, #405): its
+    profile is written as any other, with no contact info provided, so nothing known
+    is taken away, and the contact stays due (below).
 
     **NotFound.** A harvest that found no profile adds to the contact's streak;
     at :data:`NOT_FOUND_GONE_AFTER` across at least :data:`NOT_FOUND_GONE_SPAN`
@@ -797,6 +801,8 @@ def apply_harvest(
     visited again after :data:`~netkeeper.services.enrich_plan.ENRICH_RETRY_AFTER`
     (7 days), not after the stale-day schedule. Someone who shares nothing and whose
     overlay is always read from a copy is revisited weekly that way (#196 item 13).
+    A harvest whose Contact info answer was lost (#405) stays due the same way: its
+    Contact info is still unknown, and the next visit after that week reads it.
     An applied
     harvest does **not** clear ``li_disconnected_at``: a profile that can be
     looked up is not proof of a connection, and only a sync that sees the contact
@@ -833,7 +839,12 @@ def apply_harvest(
         session.flush()
         counts.add(HarvestResult.MISMATCH)
         return HarvestResult.MISMATCH
-    if info is None:
+    if harvest.contact_info_lost:
+        # #405: the overlay answered, and Chrome kept no body for it. The profile read
+        # whole is written; Contact info provides nothing, so nothing is removed, and
+        # the contact stays due (below) for a later visit to read it.
+        info = ContactInfo()
+    elif info is None:
         # The job clicks Contact info only on a profile whose id is the contact's, so a
         # harvest without it for a matching URN is not one the job makes. A visit is
         # written whole or not at all: nothing but the attempt.
@@ -863,7 +874,15 @@ def apply_harvest(
         counts.add(HarvestResult.CONFLICT)
         return HarvestResult.CONFLICT
     counts.snapshots += len(contact.snapshots) - before
-    if harvest.contact_info_from_copy and not info.emails and not info.phones:
+    if harvest.contact_info_lost:
+        log.info(
+            "enrichment: contact %d of user %d kept due: its profile was saved, and its"
+            " Contact info answer was lost",
+            contact.id,
+            user.id,
+        )
+        counts.kept_due += 1
+    elif harvest.contact_info_from_copy and not info.emails and not info.phones:
         # #207 review: the overlay came from the body tap's streamed copy, and it
         # holds no address and no number. The copy passed every check, but a copy cut
         # short can look like a person who shares nothing: what it had is written,

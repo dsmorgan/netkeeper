@@ -81,6 +81,9 @@ MAX_REMEMBERED_ENDS: Final = 256
 #: How long a failed read waits for the body tap's streamed copy to end (#200).
 STREAMED_WAIT_S: Final = 2.0
 
+#: :attr:`ReadDiagnostics.streamed_miss` for an observation that has no body tap.
+NO_TAP: Final = "no body tap"
+
 
 class ObservationFailed(RuntimeError):
     """The observation itself broke: a response was dropped, or the tab it listened to went away.
@@ -267,6 +270,9 @@ class ReadDiagnostics:
     read, ``failed_after_ms`` to its failure. ``reads_in_flight`` is how many other
     body reads of this observation were under way when this one started.
     ``streamed_bytes`` is the size of the tap's streamed copy, ``None`` without one.
+    ``streamed_miss`` is, without one, why (#405): the tap's fixed words
+    (:data:`~netkeeper.linkedin.body_tap.MISS_NOT_MATCHED` and the rest), or
+    :data:`NO_TAP` for an observation without a tap.
     """
 
     from_service_worker: bool | None
@@ -280,6 +286,7 @@ class ReadDiagnostics:
     failed_after_ms: int
     reads_in_flight: int
     streamed_bytes: int | None = None
+    streamed_miss: str | None = None
 
     def describe(self) -> str:
         """One line of ``key=value`` pairs: fixed words and numbers only."""
@@ -295,6 +302,7 @@ class ReadDiagnostics:
             f" read_after_ms={self.read_after_ms} failed_after_ms={self.failed_after_ms}"
             f" reads_in_flight={self.reads_in_flight}"
             f" streamed_bytes={'none' if self.streamed_bytes is None else self.streamed_bytes}"
+            f" streamed_miss={'none' if self.streamed_miss is None else self.streamed_miss!r}"
         )
 
 
@@ -487,10 +495,12 @@ class Observation:
             log.debug("observation: a response body could not be read (%s)", cause)
             failure = FAILURE_UNREADABLE
             failed = loop.time()
+            miss: str | None = NO_TAP
             if self._tap is not None:
                 streamed = await self._tap.take(
                     method, response.url, request_body, wait_s=STREAMED_WAIT_S
                 )
+                miss = self._tap.last_miss if streamed is None else None
             diagnostics = self._diagnose(
                 response,
                 status,
@@ -498,6 +508,7 @@ class Observation:
                 failed_after_ms=_ms(failed - arrived),
                 reads_in_flight=in_flight,
                 streamed_bytes=None if streamed is None else len(streamed),
+                streamed_miss=miss,
             )
             self.unreadable.append(diagnostics)
         else:
@@ -530,6 +541,7 @@ class Observation:
         failed_after_ms: int,
         reads_in_flight: int,
         streamed_bytes: int | None = None,
+        streamed_miss: str | None = None,
     ) -> ReadDiagnostics:
         """The fixed facts about a read that failed (#200). Reads only; fixed words out."""
         headers = _safe(lambda: response.headers)
@@ -549,6 +561,7 @@ class Observation:
             failed_after_ms=failed_after_ms,
             reads_in_flight=reads_in_flight,
             streamed_bytes=streamed_bytes,
+            streamed_miss=streamed_miss,
         )
 
     def summary(self) -> str:

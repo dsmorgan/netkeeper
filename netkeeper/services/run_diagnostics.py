@@ -56,6 +56,10 @@ REASON_TEXT: Final[Mapping[str, str]] = {
     "navigation_timed_out": "the profile never finished loading",
     "profile_screen_lost": "the profile's screen arrived with no readable body",
     "contact_info_lost": "the Contact info answer arrived with no readable body",
+    "contact_info_deferred": (
+        "the Contact info answer arrived with no readable body; the profile was saved,"
+        " and Contact info is read on a later visit (not counted as unreadable)"
+    ),
     "profile_status": "the profile answered a status that stopped the run at once",
     "id_mismatch": "the profile's id is not the contact's; nothing saved",
     "unknown": "no cause was recorded",

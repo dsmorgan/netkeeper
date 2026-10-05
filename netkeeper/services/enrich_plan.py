@@ -43,7 +43,9 @@ shares no email and no phone, and whose overlay answer is always aborted and rea
 from a copy, is therefore visited every 7 days rather than every
 ``enrich_stale_days`` (#196 item 13). That is bounded -- one visit a week, inside
 the run's budget like any other -- and ends the first time the overlay's own body
-reads. A pin overrides the tiers and the wait, never the eligibility.
+reads. A harvest saved without Contact info because the overlay's body was lost
+(#405) is kept due the same way, and waits the same week before its next visit. A
+pin overrides the tiers and the wait, never the eligibility.
 
 **Pins (spec 9.6).** At most :data:`MAX_PINS`, stored in ``settings_kv`` per
 account. A pin is removed when a run finishes with that contact (harvested or

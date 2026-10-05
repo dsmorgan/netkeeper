@@ -28,7 +28,7 @@ from netkeeper.crm.identity import IncomingContact, Matched, merge
 from netkeeper.crm.provenance import set_manual_field
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
-from netkeeper.linkedin.enrich import ProfileHarvest
+from netkeeper.linkedin.enrich import ProfileHarvest, UnreadableCause
 from netkeeper.linkedin.voyager import ContactInfo
 from netkeeper.models import (
     Contact,
@@ -995,4 +995,67 @@ def test_a_harvest_without_contact_info_cannot_claim_a_copy() -> None:
             details=details_of(PRIYA),
             contact_info=None,
             contact_info_from_copy=True,
+        )
+
+
+# --- #405: a profile whose Contact info answer was lost ------------------------------------
+
+
+def _info_lost(contact: Contact, profile: Profile) -> ProfileHarvest:
+    return ProfileHarvest(
+        contact_ref=contact.id,
+        requested_public_id=profile.slug,
+        outcome=Outcome.OK,
+        observed_at=NOW,
+        details=details_of(profile),
+        unreadable_cause=UnreadableCause.CONTACT_INFO_DEFERRED,
+        contact_info_lost=True,
+    )
+
+
+def test_a_lost_contact_info_writes_the_profile_and_keeps_the_contact_due(
+    writer: Session, user: User
+) -> None:
+    """The profile read whole is written; Contact info stays unknown, nothing stored is
+    removed, and the contact is not marked enriched, so a later visit reads it."""
+    contact = _stored(writer, user, PRIYA, enrich_priority=5)
+    writer.add(ContactEmail(user_id=user.id, contact_id=contact.id, email="kept@example.test"))
+    writer.flush()
+    counts = HarvestCounts()
+    result = apply_harvest(writer, user, _info_lost(contact, PRIYA), counts)
+    assert result is HarvestResult.APPLIED
+    assert contact.headline == details_of(PRIYA).headline
+    assert [e.email for e in contact.emails] == ["kept@example.test"]
+    assert (contact.enrich_priority, contact.last_enriched_at) == (5, None)
+    assert contact.li_enrich_attempted_at == NOW
+    assert (counts.applied, counts.kept_due, counts.unreadable) == (1, 1, 0)
+
+
+def test_a_lost_contact_info_under_another_urn_writes_nothing(writer: Session, user: User) -> None:
+    contact = _stored(writer, user, PRIYA, li_urn=MATEO.urn)
+    result = apply_harvest(writer, user, _info_lost(contact, PRIYA))
+    assert result is HarvestResult.MISMATCH and contact.headline is None
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"contact_info_lost": True},  # without its cause
+        {"unreadable_cause": UnreadableCause.CONTACT_INFO_DEFERRED},  # without the flag
+        {
+            "contact_info_lost": True,
+            "unreadable_cause": UnreadableCause.CONTACT_INFO_DEFERRED,
+            "contact_info": ContactInfo(),
+        },
+    ],
+)
+def test_a_lost_contact_info_harvest_is_well_formed(fields: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match="lost Contact info"):
+        ProfileHarvest(
+            contact_ref=1,
+            requested_public_id="x",
+            outcome=Outcome.OK,
+            observed_at=NOW,
+            details=details_of(PRIYA),
+            **fields,
         )

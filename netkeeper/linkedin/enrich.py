@@ -72,11 +72,23 @@ one browser run's navigation, its scroll, its observation of what the page
 loads, and its one click. ``netkeeper rehearse`` builds the same class against
 the loopback replica, so a rehearsal is this loop, not a copy of it.
 
-**An answer whose body cannot be read** (#197) -- the profile's screen or the
-Contact info overlay arrived, but the browser had no body to hand over -- is an
-unreadable visit, counted toward the same two limits, with the answer and a fixed
-cause in :attr:`EnrichResult.lost` for the run's note. A wall on the tab still stops
-the run as that wall.
+**An answer whose body cannot be read** (#197) -- the profile's screen arrived, but
+the browser had no body to hand over -- is an unreadable visit, counted toward the
+same two limits, with the answer and a fixed cause in :attr:`EnrichResult.lost` for
+the run's note. A wall on the tab still stops the run as that wall.
+
+**A Contact info answer whose body was lost is not a changed route** (#405). The
+profile read whole, the click went out, and the overlay answered ``200``; Chrome
+just kept no body for it, and the body tap had no whole copy. That says nothing
+about the page's shape, so it is a *soft* failure: the harvest carries the profile
+without contact info (:attr:`ProfileHarvest.contact_info_lost`), the core writes the
+profile and leaves the contact due so a later run reads Contact info again, and the
+visit is recorded (:attr:`UnreadableCause.CONTACT_INFO_DEFERRED`, a line in
+:attr:`EnrichResult.lost`) without counting toward the unreadable limits. It neither
+adds to nor clears the unreadable streak. Nothing is clicked again on that visit.
+A systemic loss still stops the run, as ``answer_lost`` rather than ``route_changed``:
+:data:`MAX_CONTACT_INFO_LOST_IN_A_ROW` lost overlays in a row, or more than half of
+the run's overlays once it has clicked :data:`CONTACT_INFO_LOST_SHARE_AFTER` times.
 
 **When the mechanism itself breaks.** A source raises when there is nothing to
 classify at all: the run's tab went away (``BrowserUnavailable``), or the
@@ -143,6 +155,11 @@ class StopReason(enum.StrEnum):
     """An answer classified as something other than ``Ok``, a per-contact
     ``NotFound``, or an unreadable profile; see ``EnrichResult.outcome``."""
 
+    ANSWER_LOST = "answer_lost"
+    """Too many Contact info answers arrived with no body the browser could hand over
+    (#405): :data:`MAX_CONTACT_INFO_LOST_IN_A_ROW` in a row, or more than half of the
+    run's overlays after :data:`CONTACT_INFO_LOST_SHARE_AFTER` clicks."""
+
 
 #: The pause a person takes between reaching the top of a profile and clicking
 #: **Contact info**: a second or two, with no distraction tail. Spec 9.5 has no
@@ -161,6 +178,19 @@ MAX_UNREADABLE_IN_A_ROW: Final = 2
 #: on its first profile, which is exactly the one unusual person the in-a-row
 #: rule exists to forgive.
 MAX_UNREADABLE_PER_RUN: Final = 3
+
+#: Contact info answers lost in a row (#405) that stop the run as ``answer_lost``.
+#: One lost overlay is Chrome keeping no body for one answer, about one in seven on
+#: live runs; five in a row is the mechanism failing, not chance. Only visits that
+#: clicked count: a successful overlay read clears the streak, and a visit that
+#: clicked nothing leaves it where it was.
+MAX_CONTACT_INFO_LOST_IN_A_ROW: Final = 5
+
+#: The clicks a run makes before the share rule below applies (#405). Once a run has
+#: clicked this many times, more than half of its overlays lost stops it as
+#: ``answer_lost``: a loss that comes and goes never trips the in-a-row rule, and
+#: without this a run could spend its visits saving profiles with no contact info.
+CONTACT_INFO_LOST_SHARE_AFTER: Final = 6
 
 #: The reasons a gate may give for refusing a visit.
 GATE_REASONS: Final = frozenset({StopReason.BUDGET, StopReason.CANCELLED, StopReason.INACTIVE})
@@ -237,7 +267,15 @@ class UnreadableCause(enum.StrEnum):
     """The profile's screen arrived, but the browser had no body to hand over (#197)."""
 
     CONTACT_INFO_LOST = "contact_info_lost"
-    """The overlay answered, but the browser had no body to hand over (#197)."""
+    """The overlay answered, but the browser had no body to hand over (#197). What a
+    source answers; since #405 the job records such a visit as
+    :attr:`CONTACT_INFO_DEFERRED`, and runs before it hold this code as an
+    unreadable visit."""
+
+    CONTACT_INFO_DEFERRED = "contact_info_deferred"
+    """The overlay's body was lost (:attr:`CONTACT_INFO_LOST`), so the profile was saved
+    without contact info and the contact stays due (#405). Recorded, but not counted
+    toward the unreadable limits."""
 
     PROFILE_STATUS = "profile_status"
     """The profile's page or screen answered a status that is neither Ok, NotFound, nor a
@@ -256,7 +294,9 @@ class UnreadableVisit:
     """One visit that counted toward the unreadable limits, for the run's record (#405).
 
     ``visit`` is the visit's number in this run, from 1. ``contact_ref`` is the core's
-    own reference for the contact (its id), never anything from the page.
+    own reference for the contact (its id), never anything from the page. A visit whose
+    Contact info was deferred (:attr:`UnreadableCause.CONTACT_INFO_DEFERRED`, #405) is
+    recorded the same way, though it does not count toward the limits.
     """
 
     visit: int
@@ -341,6 +381,10 @@ class ProfileHarvest:
     copy passed every check, but the core may still trust a thin one less.
     ``unreadable_cause`` says why a ``RouteChanged`` harvest could not be read, or is
     :attr:`UnreadableCause.ID_MISMATCH` on an ``Ok`` harvest under another id (#405).
+    ``contact_info_lost`` marks an ``Ok`` harvest whose profile was read whole and whose
+    Contact info answer arrived with no body (#405): it carries no contact info, its
+    cause is :attr:`UnreadableCause.CONTACT_INFO_DEFERRED`, and the core writes the
+    profile and leaves the contact due.
     """
 
     contact_ref: int
@@ -351,10 +395,18 @@ class ProfileHarvest:
     contact_info: ContactInfo | None = None
     contact_info_from_copy: bool = False
     unreadable_cause: UnreadableCause | None = None
+    contact_info_lost: bool = False
 
     def __post_init__(self) -> None:
         if self.outcome is Outcome.NOT_FOUND and self.unreadable_cause is not None:
             raise ValueError("a NotFound harvest has no unreadable cause")
+        deferred = self.unreadable_cause is UnreadableCause.CONTACT_INFO_DEFERRED
+        if self.contact_info_lost != deferred:
+            raise ValueError("a lost Contact info and its deferred cause go together")
+        if self.contact_info_lost and (
+            self.outcome is not Outcome.OK or self.contact_info is not None
+        ):
+            raise ValueError("a lost Contact info is an Ok harvest without contact info")
         if self.outcome is Outcome.OK:
             if self.details is None:
                 raise ValueError("an Ok harvest carries the profile's details")
@@ -376,7 +428,9 @@ class ProgressEvent:
     Counts only: no names, no slugs, nothing a log or a browser tab should not
     hold. ``planned`` is how many visits the run set out to make. ``harvested``
     counts the profiles read whole for their contact; a profile under another id is
-    ``mismatched`` instead, since nothing of it is written.
+    ``mismatched`` instead, since nothing of it is written. ``contact_info_lost``
+    counts the harvested ones saved without Contact info because its answer's body
+    was lost (#405).
     """
 
     planned: int
@@ -386,6 +440,7 @@ class ProgressEvent:
     stopped: StopReason | None = None
     unreadable: int = 0
     mismatched: int = 0
+    contact_info_lost: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,8 +458,11 @@ class EnrichResult:
     per visit in order, ``None`` for a visit that clicked nothing; ``clicks``
     how many clicks the run asked for, never more than one per visit;
     ``mismatched`` how many profiles answered under another id than the contact's;
-    ``lost`` one fixed line per unreadable visit whose answer's body the browser
-    could not hand over (#197), naming the visit by its number in this run; and
+    ``lost`` one fixed line per visit whose answer's body the browser could not hand
+    over (#197), naming the visit by its number in this run: an unreadable one, or one
+    whose Contact info was deferred (#405); ``contact_info_lost`` how many visits
+    deferred their Contact info that way, which the unreadable limits do not count;
+    and
     ``copied`` one fixed line per visit whose Contact info was read from the body
     tap's streamed copy instead (#207 review), and one per visit that kept a lazy
     card read from such a copy (#196 item 12). ``unreadable_visits`` is every visit
@@ -430,6 +488,7 @@ class EnrichResult:
     copied: tuple[str, ...] = ()
     unreadable_visits: tuple[UnreadableVisit, ...] = ()
     stopped_by: UnreadableVisit | None = None
+    contact_info_lost: int = 0
 
 
 # --- the source seam ---------------------------------------------------------
@@ -595,6 +654,8 @@ async def run_enrichment(
     copied: list[str] = []
     unreadable_visits: list[UnreadableVisit] = []
     visits = harvested = not_found = unreadable = unreadable_in_a_row = clicks = mismatched = 0
+    # #405: Contact info answers lost, and lost in a row among the visits that clicked.
+    info_lost = info_lost_in_a_row = 0
 
     def progress(stopped: StopReason | None = None) -> ProgressEvent:
         return ProgressEvent(
@@ -605,6 +666,7 @@ async def run_enrichment(
             stopped=stopped,
             unreadable=unreadable,
             mismatched=mismatched,
+            contact_info_lost=info_lost,
         )
 
     async def stop(
@@ -640,6 +702,7 @@ async def run_enrichment(
             copied=tuple(copied),
             unreadable_visits=tuple(unreadable_visits),
             stopped_by=stopped_by,
+            contact_info_lost=info_lost,
         )
 
     for index, step in enumerate(plan.steps):
@@ -662,6 +725,7 @@ async def run_enrichment(
         details: Answer[ProfileDetails] | None = None
         info: Answer[ContactInfo] | None = None
         mismatch = False
+        deferred = False
         if page.outcome is Outcome.OK:
             await source.scroll(step.scroll)
             details = await source.read_profile(slug)
@@ -688,7 +752,15 @@ async def run_enrichment(
                     pauses[-1] = pause
                     clicks += 1
                     info = await source.read_contact_info(details.value, back=back, pause_s=pause)
-                    answers.append(info)
+                    if _contact_info_lost(info):
+                        # #405: the overlay answered and Chrome kept no body. Not the
+                        # route: the profile is saved without it (below), and nothing
+                        # is clicked again.
+                        deferred = True
+                    else:
+                        answers.append(info)
+                        if info.outcome is Outcome.OK:
+                            info_lost_in_a_row = 0
         failed = next((a for a in answers if a.outcome is not Outcome.OK), None)
         cause: UnreadableCause | None = None
         if failed is not None and failed.outcome is Outcome.NOT_FOUND:
@@ -722,6 +794,21 @@ async def run_enrichment(
             mismatched += 1
             unreadable_in_a_row += 1
             cause = UnreadableCause.ID_MISMATCH
+        elif deferred:
+            # #405: harvested without contact info. Neither adds to the unreadable
+            # streak nor clears it: the profile read, but the overlay did not.
+            assert info is not None and info.lost is not None
+            outcome = Outcome.OK
+            harvested += 1
+            info_lost += 1
+            info_lost_in_a_row += 1
+            cause = UnreadableCause.CONTACT_INFO_DEFERRED
+            lost.append(f"visit {visits}: {info.lost}; the profile was saved without it")
+            log.info(
+                "enrichment: visit %d saved the profile without Contact info: %s",
+                visits,
+                info.lost,
+            )
         else:
             outcome = Outcome.OK
             harvested += 1
@@ -737,6 +824,7 @@ async def run_enrichment(
                 contact_info=None if info is None else info.value,
                 contact_info_from_copy=info is not None and info.from_copy,
                 unreadable_cause=cause,
+                contact_info_lost=deferred,
             )
             if details.from_copy:
                 # #196 item 12: noted only; the harvest is applied as any other.
@@ -763,7 +851,32 @@ async def run_enrichment(
             last = failed if failed is not None else details
             assert last is not None
             return await stop(StopReason.RESPONSE, Outcome.ROUTE_CHANGED, last.final_url)
+        if deferred and (
+            info_lost_in_a_row >= MAX_CONTACT_INFO_LOST_IN_A_ROW
+            or (clicks >= CONTACT_INFO_LOST_SHARE_AFTER and 2 * info_lost > clicks)
+        ):
+            # #405: lost overlays this often are the mechanism failing, not one body.
+            log.warning(
+                "enrichment: %d of %d Contact info answers lost (%d in a row); stopping",
+                info_lost,
+                clicks,
+                info_lost_in_a_row,
+            )
+            return await stop(StopReason.ANSWER_LOST)
 
     if planned < len(spec.targets):
         return await stop(StopReason.VISIT_BUDGET)
     return await stop(StopReason.END_OF_PLAN)
+
+
+def _contact_info_lost(info: Answer[ContactInfo]) -> bool:
+    """Whether ``info`` is a Contact info answer whose body was lost (#405): unparsed,
+    ``RouteChanged``, with the cause :attr:`UnreadableCause.CONTACT_INFO_LOST` and the
+    fixed words of what was lost. A wall the tab moved to is the source's answer
+    instead, and stops the run as before."""
+    return (
+        info.outcome is Outcome.ROUTE_CHANGED
+        and info.unparsed
+        and info.cause is UnreadableCause.CONTACT_INFO_LOST
+        and info.lost is not None
+    )

@@ -36,7 +36,10 @@ logic, only what the job may do and what happens after it stops:
   in ``progress_json.unreadable_visits`` as the run goes, so a run that ends by
   exception keeps them, and in ``counts_json.unreadable_visits`` when it stops.
   A visit whose answer stopped the run at once as ``route_changed`` (a 500 on the
-  profile, say) is in ``counts_json.stopped_by`` the same way.
+  profile, say) is in ``counts_json.stopped_by`` the same way. A visit that saved
+  the profile without Contact info because the overlay's body was lost is recorded
+  there too, as ``contact_info_deferred``, though it counts toward no limit; too
+  many of those stop the run as ``answer_lost`` (#405).
 * **The stopping response.** ``Throttled`` or ``Checkpoint`` raises heat;
   ``Checkpoint`` or ``LoggedOut`` sets the session flag (spec 9.7). The run is
   recorded ``completed`` when every target was visited and ``aborted``
@@ -154,6 +157,7 @@ class EnrichRunReport:
             "unreadable": self.result.unreadable,
             "mismatched": self.result.mismatched,
             "lost": len(self.result.lost),
+            "contact_info_lost": self.result.contact_info_lost,
             "copied": len(self.result.copied),
             "skipped": self.skipped,
             "visit_budget": self.visit_budget,
@@ -464,6 +468,7 @@ async def enrich_contacts(
                         "not_found": event.not_found,
                         "unreadable": event.unreadable,
                         "mismatched": event.mismatched,
+                        "contact_info_lost": event.contact_info_lost,
                         "stopped": None if event.stopped is None else event.stopped.value,
                         "unreadable_visits": visit_records(tuple(unreadable_seen)),
                     },

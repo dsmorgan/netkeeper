@@ -268,6 +268,8 @@ async def test_a_body_lost_after_its_request_failed_says_so_in_fixed_words() -> 
     assert "request=failed (aborted)" in line and "service_worker=no" in line
     assert "fake-slug" not in line and "linkedin" not in line
     assert observation.unreadable == [diagnostics]
+    # #405: an observation without a tap says so.
+    assert diagnostics.streamed_miss == observe.NO_TAP and "streamed_miss='no body tap'" in line
 
 
 async def test_a_finished_request_and_one_with_no_event_are_told_apart() -> None:
@@ -419,13 +421,16 @@ class _Tap:
         self.copies = copies
         self.calls: list[tuple[str, str, str | None]] = []
         self.closed = False
+        self.last_miss: str | None = None
 
     async def take(
         self, method: str, url: str, post_data: str | None, *, wait_s: float
     ) -> bytes | None:
         self.calls.append(("take", method, post_data))
         assert wait_s == observe.STREAMED_WAIT_S
-        return self.copies.pop(0) if self.copies else None
+        copy = self.copies.pop(0) if self.copies else None
+        self.last_miss = "never matched" if copy is None else None
+        return copy
 
     def discard(self, method: str, url: str, post_data: str | None) -> None:
         self.calls.append(("discard", method, post_data))
@@ -464,6 +469,9 @@ async def test_without_a_copy_the_diagnostics_say_none() -> None:
     kept = await observation.next(1.0)
     assert kept is not None and kept.streamed is None and kept.diagnostics is not None
     assert "streamed_bytes=none" in kept.diagnostics.describe()
+    # #405: and why the tap had none, in its fixed words.
+    assert kept.diagnostics.streamed_miss == "never matched"
+    assert "streamed_miss='never matched'" in kept.diagnostics.describe()
 
 
 async def test_a_redirect_keeps_its_location_and_reads_no_body() -> None:

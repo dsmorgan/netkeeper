@@ -58,6 +58,15 @@ ABORTED_BY_PAGE: Final = "net::ERR_ABORTED"
 #: The most answers a tap holds at once; the oldest is dropped past it.
 MAX_STREAMS: Final = 32
 
+#: Why :meth:`BodyTap.take` had no copy to hand over, in fixed words (#405), for the
+#: read's diagnostics: the next lost answer then says which of these it was.
+MISS_NOT_MATCHED: Final = "never matched"
+MISS_NOT_STREAMED: Final = "Chrome did not stream it"
+MISS_NOT_STARTED: Final = "the stream did not start in time"
+MISS_NOT_ENDED: Final = "the stream did not end in time"
+MISS_FAILED: Final = "the stream ended by a failure"
+MISS_TOO_LARGE: Final = "the copy grew past the body limit"
+
 #: Asks Chrome to stream one answer (``Network.streamResourceContent``) and returns
 #: its parameters: ``bufferedData``, what had already arrived, base64-encoded.
 StreamStart = Callable[[str], Awaitable[Mapping[str, Any]]]
@@ -116,6 +125,9 @@ class BodyTap:
         self._closed = False
         #: How many streamed copies were handed to a caller whose read had failed.
         self.handed = 0
+        #: Why the last :meth:`take` handed nothing over (one of the ``MISS_`` words),
+        #: or ``None`` when it handed a copy (#405).
+        self.last_miss: str | None = None
 
     def handlers(self) -> tuple[tuple[str, Callable[[Mapping[str, Any]], None]], ...]:
         """Each CDP event a tap listens to, with its handler."""
@@ -230,13 +242,15 @@ class BodyTap:
         """
         request_id = self._oldest((method.upper(), url, post_data))
         if request_id is None:
+            self.last_miss = MISS_NOT_MATCHED
             return None
         entry = self._streams.pop(request_id)
         with contextlib.suppress(TimeoutError):
             async with asyncio.timeout(wait_s):
                 await entry.started.wait()
                 await entry.ended.wait()
-        if not (entry.streaming and entry.ended.is_set() and entry.whole) or entry.too_large:
+        self.last_miss = _miss(entry)
+        if self.last_miss is not None:
             return None
         self.handed += 1
         return bytes(entry.data)
@@ -267,6 +281,21 @@ class BodyTap:
                 await self._detach()
             except Exception as exc:
                 log.debug("body tap: detaching failed (%s)", type(exc).__name__)
+
+
+def _miss(entry: _Stream) -> str | None:
+    """Why ``entry`` has no copy to hand over, in fixed words, or ``None`` when it has one."""
+    if entry.too_large:
+        return MISS_TOO_LARGE
+    if not entry.started.is_set():
+        return MISS_NOT_STARTED
+    if not entry.streaming:
+        return MISS_NOT_STREAMED
+    if not entry.ended.is_set():
+        return MISS_NOT_ENDED
+    if not entry.whole:
+        return MISS_FAILED
+    return None
 
 
 def _decode(data: object) -> bytes:
