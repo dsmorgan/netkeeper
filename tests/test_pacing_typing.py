@@ -753,3 +753,48 @@ def test_no_text_of_linkers_and_consonants_makes_the_plan_raise_a_bare_value_err
         planned += 1
         _assert_typed_as_segmented(text, plan)
     assert planned > 1000
+
+
+def test_neither_repr_nor_str_of_a_step_or_plan_shows_its_line() -> None:
+    text = "secret words \u0915\u1cf5\u0915 here"
+    plan = typing_plan(text, random.Random(0))
+    for shown in (repr(plan), str(plan), *(repr(step) for step in plan)):
+        assert "secret" not in shown
+        assert "words" not in shown
+
+
+def test_no_line_of_a_message_stays_cached_after_planning() -> None:
+    typing_plan("secret words here", random.Random(0))
+    assert pacing._cluster_spans.cache_info().currsize == 0
+    with pytest.raises(UnsupportedCharacter):
+        typing_plan("secret\u200bwords", random.Random(0))
+    assert pacing._cluster_spans.cache_info().currsize == 0
+
+
+def test_the_cached_cluster_spans_are_read_only() -> None:
+    spans = pacing._cluster_spans("ab")
+    with pytest.raises(TypeError):
+        spans[0] = 2  # type: ignore[index]
+    pacing._cluster_spans.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("line", "offset"), [(b"ab", 1), ("ab", True), ("ab", 1.0), ("ab", "1"), (None, 1)]
+)
+def test_a_steps_line_and_offset_must_be_a_str_and_an_int(line: object, offset: object) -> None:
+    with pytest.raises(ValueError):
+        TypeStep(chunk="b", delay_before_s=0.1, newline=False, line=line, offset=offset)  # type: ignore[arg-type]
+
+
+def test_a_plan_that_would_not_type_the_body_back_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = pacing._located_units
+
+    def dropping_one(text: str) -> list[tuple[str, str, int]]:
+        return real(text)[1:]
+
+    monkeypatch.setattr(pacing, "_located_units", dropping_one)
+    with pytest.raises(pacing.TypingPlanMismatch) as refused:
+        typing_plan("secret body", random.Random(0))
+    assert "secret" not in str(refused.value)
