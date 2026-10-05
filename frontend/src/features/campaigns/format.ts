@@ -45,6 +45,10 @@ export const MODE_LABELS: Record<StepMode, string> = {
   auto_send: 'Auto-send',
 }
 
+/** Why auto-send is off by default, shown with the mode whenever it is offered (ADR 0004). */
+export const AUTO_SEND_RISK =
+  'Auto-send has netkeeper send LinkedIn messages itself instead of prefilling them for you to send. An automated send is the action LinkedIn restricts hardest, so it is off by default (ADR 0004).'
+
 export const CONDITION_LABELS: Record<StepCondition, string> = {
   always: 'Always',
   no_reply: 'Only if no reply',

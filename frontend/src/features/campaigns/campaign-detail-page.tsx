@@ -21,6 +21,8 @@ import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Callout, EmptyState, ErrorNote, LoadingNote } from '@/features/crm/controls'
 import { listsQuery } from '@/features/crm/api'
+import { readyQuery } from '@/features/linkedin-steps/api'
+import { LinkedInStepsSection } from '@/features/linkedin-steps/linkedin-steps-section'
 import { sendingHoursQuery } from '@/features/settings/api'
 import { stepTimeWarning } from '@/features/settings/sending-hours'
 
@@ -102,6 +104,7 @@ export function CampaignDetailPage({
   }
   const data = campaign.data
   const reviewable = data.status === 'draft' || data.status === 'reviewing'
+  const onLinkedIn = data.steps.some((step) => step.channel === 'linkedin')
 
   return (
     <div className="flex max-w-5xl flex-col gap-4">
@@ -110,6 +113,7 @@ export function CampaignDetailPage({
         <ResultsCard campaignId={data.id} mailboxId={data.mailbox_id} results={results} />
       )}
       <StepsCard campaign={data} results={results.data} />
+      {onLinkedIn && !reviewable && <LinkedInStepsSection campaignId={data.id} />}
       {reviewable && <AudienceCard campaign={data} />}
       {reviewable && <ReviewPanel campaign={data} />}
       <EnrollmentsCard campaignId={data.id} status={status} onStatus={onStatus} />
@@ -443,6 +447,8 @@ function StepsCard({
   const [editing, setEditing] = useState<number | null>(null)
   const editable = TIMING_EDITABLE.has(campaign.status)
   const byStep = new Map(results?.steps.map((r) => [r.step_id, r]))
+  const onLinkedIn = campaign.steps.some((step) => step.channel === 'linkedin')
+  const ready = useQuery({ ...readyQuery(campaign.id), enabled: onLinkedIn })
   return (
     <Card>
       <CardHeader>
@@ -500,6 +506,7 @@ function StepsCard({
                   campaign={campaign}
                   step={step}
                   results={byStep.get(step.id)}
+                  ready={ready.data?.by_step[String(step.position)] ?? (ready.isSuccess ? 0 : null)}
                   editable={editable}
                   editing={editing === step.id}
                   onEdit={(on) => setEditing(on ? step.id : null)}
@@ -517,6 +524,7 @@ function StepRow({
   campaign,
   step,
   results,
+  ready = null,
   editable,
   editing,
   onEdit,
@@ -525,6 +533,8 @@ function StepRow({
   step: Step
   /** Undefined while the results load, or when they could not. */
   results: StepResults | undefined
+  /** A LinkedIn step's count ready to prefill; null while it loads. */
+  ready?: number | null
   editable: boolean
   editing: boolean
   onEdit: (on: boolean) => void
@@ -545,7 +555,10 @@ function StepRow({
           {timingText(step)}, {CONDITION_LABELS[step.condition].toLowerCase()}
           {step.same_thread && ', same thread'}
         </td>
-        <td className="py-2 pr-3 text-muted-foreground">{MODE_LABELS[step.mode]}</td>
+        <td className="py-2 pr-3 text-muted-foreground">
+          {MODE_LABELS[step.mode]}
+          {step.channel === 'linkedin' && <LinkedInStepCounts step={step} ready={ready} />}
+        </td>
         <td className="py-2 pr-3 tabular-nums">{step.fired}</td>
         <td className="py-2 pr-3 tabular-nums">{step.sent}</td>
         <td className="py-2 pr-3 tabular-nums">{results?.replied ?? '—'}</td>
@@ -572,6 +585,25 @@ function StepRow({
         </tr>
       )}
     </>
+  )
+}
+
+/** A LinkedIn step's ready, prefilled, sent, and stale counts (#383). */
+function LinkedInStepCounts({ step, ready }: { step: Step; ready: number | null }) {
+  const count = (status: string) => step.outbound[status] ?? 0
+  const parts: [string, number | null][] = [
+    ['ready', ready],
+    ['prefilled', count('prefilled')],
+    ['sent', step.sent],
+    ['stale', count('stale')],
+  ]
+  return (
+    <span
+      aria-label={`Step ${step.position} LinkedIn counts`}
+      className="block text-xs tabular-nums"
+    >
+      {parts.map(([label, n]) => `${n ?? '…'} ${label}`).join(' · ')}
+    </span>
   )
 }
 

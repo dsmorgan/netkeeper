@@ -98,7 +98,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import Select, and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -252,19 +252,10 @@ class ReadyPrefill:
     held_until: datetime | None
 
 
-def ready_to_prefill(
-    session: Session,
-    user: User,
-    *,
-    now: datetime,
-    settings: Settings,
-    limit: int,
-    offset: int = 0,
-) -> tuple[list[ReadyPrefill], int]:
-    """Due enrollments whose next step is on LinkedIn, oldest due first, and how many.
-
-    The tick's own selection (an ``active`` enrollment of an ``active`` campaign whose
-    start has come, due by ``now``), so the two never drift. Read-only."""
+def _ready_statement(
+    user: User, now: datetime, campaign_id: int | None
+) -> Select[tuple[Enrollment]]:
+    """The tick's selection, narrowed to LinkedIn steps (and one campaign's, if given)."""
     statement = (
         engine._selected(user, now)
         .join(Contact, Contact.id == Enrollment.contact_id)
@@ -274,6 +265,42 @@ def ready_to_prefill(
             CampaignStep.channel == TemplateChannel.LINKEDIN,
         )
     )
+    if campaign_id is not None:
+        statement = statement.where(Enrollment.campaign_id == campaign_id)
+    return statement
+
+
+def ready_by_step(
+    session: Session, user: User, *, now: datetime, campaign_id: int
+) -> dict[int, int]:
+    """How many of one campaign's LinkedIn steps are ready to prefill, by step position:
+    the campaign page's per-step count (#383). The same selection as
+    :func:`ready_to_prefill`, counted rather than paged. Read-only."""
+    rows = session.execute(
+        _ready_statement(user, now, campaign_id)
+        .with_only_columns(CampaignStep.position, func.count(Enrollment.id))
+        .group_by(CampaignStep.position)
+        .order_by(None)
+    ).tuples()
+    return {position: n for position, n in rows}
+
+
+def ready_to_prefill(
+    session: Session,
+    user: User,
+    *,
+    now: datetime,
+    settings: Settings,
+    limit: int,
+    offset: int = 0,
+    campaign_id: int | None = None,
+) -> tuple[list[ReadyPrefill], int]:
+    """Due enrollments whose next step is on LinkedIn, oldest due first, and how many.
+
+    The tick's own selection (an ``active`` enrollment of an ``active`` campaign whose
+    start has come, due by ``now``), so the two never drift. ``campaign_id`` keeps one
+    campaign's (the campaign page's queue, #383). Read-only."""
+    statement = _ready_statement(user, now, campaign_id)
     total = session.scalar(statement.with_only_columns(func.count(Enrollment.id)).order_by(None))
     rows = session.execute(
         statement.add_columns(Campaign, CampaignStep, Contact)

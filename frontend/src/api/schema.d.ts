@@ -203,6 +203,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/campaigns/linkedin/options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Options
+         * @description Whether ``auto_send`` may be chosen for a LinkedIn step: the config flag.
+         */
+        get: operations["get_linkedin_step_options"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/campaigns/linkedin/prefill": {
         parameters: {
             query?: never;
@@ -1923,6 +1943,28 @@ export interface paths {
          *     ``409``, as is heat that was never raised or is already cleared.
          */
         post: operations["clear_linkedin_heat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/inbox/acknowledge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Acknowledge Inbox First Poll
+         * @description You checked older LinkedIn replies by hand: clear the posture warning that the first
+         *     inbox poll could not read back far enough. ``netkeeper linkedin inbox-acknowledge``.
+         *     Touches no browser and visits nothing.
+         */
+        post: operations["acknowledge_linkedin_inbox_first_poll"];
         delete?: never;
         options?: never;
         head?: never;
@@ -5193,6 +5235,11 @@ export interface components {
              */
             since: string;
         };
+        /** InboxAcknowledgedOut */
+        InboxAcknowledgedOut: {
+            /** Cleared */
+            cleared: boolean;
+        };
         /** InboxItemOut */
         InboxItemOut: {
             /** Campaign Id */
@@ -5212,6 +5259,8 @@ export interface components {
             /** Id */
             id: number;
             kind: components["schemas"]["InboxKind"];
+            /** Li Conversation Urn */
+            li_conversation_urn: string | null;
             /** Received At */
             received_at: string | null;
             /** Snippet */
@@ -5936,6 +5985,14 @@ export interface components {
             /** Authorization Url */
             authorization_url: string;
         };
+        /**
+         * OptionsOut
+         * @description What the step builder needs to know about LinkedIn steps (#383).
+         */
+        OptionsOut: {
+            /** Auto Send */
+            auto_send: boolean;
+        };
         /** Or */
         "Or-Input": {
             /** Children */
@@ -6246,6 +6303,13 @@ export interface components {
         };
         /** ReadyPage */
         ReadyPage: {
+            /**
+             * By Step
+             * @default {}
+             */
+            by_step: {
+                [key: string]: number;
+            };
             /** Items */
             items: components["schemas"]["ReadyOut"][];
             /** Total */
@@ -6909,6 +6973,13 @@ export interface components {
             /** Id */
             id: number;
             mode: components["schemas"]["StepMode"];
+            /**
+             * Outbound
+             * @default {}
+             */
+            outbound: {
+                [key: string]: number;
+            };
             /** Position */
             position: number;
             /** Same Thread */
@@ -8204,6 +8275,26 @@ export interface operations {
             };
         };
     };
+    get_linkedin_step_options: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OptionsOut"];
+                };
+            };
+        };
+    };
     prefill_linkedin_step: {
         parameters: {
             query?: never;
@@ -8267,6 +8358,8 @@ export interface operations {
                 limit?: number;
                 /** @description Items to skip. */
                 offset?: number;
+                /** @description Only this campaign's. */
+                campaign_id?: number | null;
             };
             header?: never;
             path?: never;
@@ -11802,6 +11895,26 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    acknowledge_linkedin_inbox_first_poll: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InboxAcknowledgedOut"];
+                };
             };
         };
     };

@@ -34,6 +34,8 @@ built on:
 * ``GET /linkedin/status``: the page's banner in one read.
 * ``POST /linkedin/session-flag/clear`` (with ``confirm: true`` and the flag the
   person saw): ``netkeeper linkedin clear-flag``, with its refusals (#181).
+* ``POST /linkedin/inbox/acknowledge``: ``netkeeper linkedin inbox-acknowledge``: clear
+  the posture warning that the first inbox poll could not read back far enough (#383).
 * ``GET /linkedin/browser``: ``netkeeper browser launch``'s instructions, as data.
   Read-only and built from config alone; it never attaches (spec 9.9, CLAUDE.md).
 * ``GET /linkedin/browser/health``: what the last preflight or run recorded about
@@ -49,8 +51,10 @@ from __future__ import annotations
 from typing import Annotated, Final
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from netkeeper.config import LinkedInSettings
+from netkeeper.crm.inbox_apply import clear_short_first_poll
 from netkeeper.models import Contact, SyncRun, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.models.base import utcnow
 from netkeeper.paths import data_dir
@@ -667,6 +671,19 @@ def clear_session_flag_route(
     except FlagClearRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _status_out(request, session, user)
+
+
+class InboxAcknowledgedOut(BaseModel):
+    cleared: bool
+    """False when there was nothing to acknowledge: no first poll fell short."""
+
+
+@router.post("/inbox/acknowledge", operation_id="acknowledge_linkedin_inbox_first_poll")
+def acknowledge_inbox_first_poll(user: CurrentUser, session: SessionDep) -> InboxAcknowledgedOut:
+    """You checked older LinkedIn replies by hand: clear the posture warning that the first
+    inbox poll could not read back far enough. ``netkeeper linkedin inbox-acknowledge``.
+    Touches no browser and visits nothing."""
+    return InboxAcknowledgedOut(cleared=clear_short_first_poll(session, user))
 
 
 def _status_out(request: Request, session: SessionDep, user: User) -> LinkedInStatusOut:

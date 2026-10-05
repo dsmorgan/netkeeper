@@ -42,9 +42,9 @@ export type BrowserHealth = JsonOf<
 
 /** The run kinds the worker can actually run (`RUNNABLE_KINDS`, `netkeeper/services/runs.py`).
  *
- * `message_send` has no runner yet (spec 9.4), and the API answers a start for it
- * with `422`. `inbox` has a runner (P4-08) but no page source until P4-01, so a
- * poll can only fail. The Start dialog offers neither.
+ * `message_send` is started only by a prefill (the LinkedIn queue), and the API
+ * answers a start for it here with `422`. `inbox` has its own button, **Check inbox
+ * now** (`inbox-check-card.tsx`). The Start dialog offers neither.
  */
 export const RUNNABLE_KINDS: readonly RunKind[] = [
   'connections_full',
@@ -57,13 +57,22 @@ export const RUN_KIND_LABELS: Record<RunKind, string> = {
   connections_incremental: 'Incremental connections sync',
   enrich: 'Enrichment',
   inbox: 'Inbox poll',
-  message_send: 'Message send',
+  message_send: 'LinkedIn prefill',
 }
 
 export const RUN_TRIGGER_LABELS: Record<RunTrigger, string> = {
   manual: 'Manual',
   scheduled: 'Scheduled',
 }
+
+/** Every run kind, for the runs filter: the inbox poll and the prefill included (#383). */
+export const RUN_KINDS: readonly RunKind[] = [
+  'connections_full',
+  'connections_incremental',
+  'enrich',
+  'inbox',
+  'message_send',
+]
 
 export const RUN_STATUS_LABELS: Record<RunStatus, string> = {
   running: 'Running',

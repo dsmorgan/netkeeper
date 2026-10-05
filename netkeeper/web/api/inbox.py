@@ -42,6 +42,9 @@ class InboxItemOut(BaseModel):
     enrollment_status: EnrollmentStatus
     channel: TemplateChannel
     """Where it arrived: ``email`` (Gmail) or ``linkedin`` (the inbox poll, P4-02)."""
+    li_conversation_urn: str | None
+    """A LinkedIn item's conversation, for a plain link to the thread (#383); ``null``
+    for email, or when the poll did not know the conversation."""
     subject: str | None
     """An email's subject; ``null`` for a LinkedIn message, which has none."""
     snippet: str | None
@@ -75,6 +78,9 @@ def _out(item: service.InboxItem) -> InboxItemOut:
         enrollment_id=m.enrollment_id,
         enrollment_status=item.enrollment_status,
         channel=m.channel,
+        li_conversation_urn=(
+            m.li_conversation_urn if m.channel is TemplateChannel.LINKEDIN else None
+        ),
         subject=m.subject,
         snippet=m.snippet if item.kind is not InboxKind.BOUNCE else None,
         received_at=item.received_at,

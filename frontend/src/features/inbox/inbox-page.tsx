@@ -11,6 +11,7 @@ import { EnrollmentStatusBadge } from '@/features/campaigns/badges'
 import { formatWhen } from '@/features/campaigns/format'
 import { contactsKeys } from '@/features/contacts/api'
 import { EmptyState, ErrorNote, LoadingNote } from '@/features/crm/controls'
+import { threadUrl } from '@/features/linkedin-steps/format'
 import { cn } from '@/lib/utils'
 
 import {
@@ -34,6 +35,21 @@ const KIND_CLASSES: Record<InboxKind, string> = {
   reply: 'bg-sky-500/15 text-sky-700 dark:text-sky-300',
   unsubscribe: 'bg-amber-500/15 text-amber-700 dark:text-amber-300',
   bounce: 'bg-destructive/10 text-destructive',
+}
+
+function ChannelBadge({ channel }: { channel: InboxItem['channel'] }) {
+  return (
+    <span
+      className={cn(
+        'inline-flex h-5 shrink-0 items-center rounded-4xl px-2 text-xs font-medium whitespace-nowrap',
+        channel === 'linkedin'
+          ? 'bg-indigo-500/15 text-indigo-700 dark:text-indigo-300'
+          : 'bg-muted text-muted-foreground',
+      )}
+    >
+      {channel === 'linkedin' ? 'LinkedIn' : 'Email'}
+    </span>
+  )
 }
 
 function KindBadge({ kind }: { kind: InboxKind }) {
@@ -127,9 +143,8 @@ export function InboxPage({ enrollment }: { enrollment?: number }) {
   return (
     <div className="flex max-w-5xl flex-col gap-4">
       <p className="text-sm text-muted-foreground">
-        Replies, unsubscribes and bounces the campaigns detected, by email and on LinkedIn. Only the
-        subject and a snippet are stored; open the thread in Gmail or the conversation on LinkedIn
-        to read the rest.
+        Replies, unsubscribes and bounces the campaigns detected, by email and on LinkedIn. Only an
+        email&apos;s subject and a snippet are stored; each item says where to read the rest.
       </p>
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <Select
@@ -262,10 +277,11 @@ function InboxRow({ item }: { item: InboxItem }) {
 
   return (
     <li
-      aria-label={`${KIND_LABELS[item.kind]} from ${item.contact_name || 'Unnamed contact'}`}
+      aria-label={`${KIND_LABELS[item.kind]} from ${item.contact_name || 'Unnamed contact'}${item.channel === 'linkedin' ? ' on LinkedIn' : ''}`}
       className="flex flex-col gap-1.5 border-t border-border/60 py-3 first:border-t-0"
     >
       <div className="flex flex-wrap items-center gap-2">
+        <ChannelBadge channel={item.channel} />
         <KindBadge kind={item.kind} />
         <Link
           to="/contacts/$contactId"
@@ -287,11 +303,17 @@ function InboxRow({ item }: { item: InboxItem }) {
       </div>
       <p className="font-medium">
         {item.kind === 'bounce' ? 'Bounced: ' : ''}
+        {/* A LinkedIn message has no subject: it is named for what it is. */}
         {item.channel === 'linkedin' ? 'LinkedIn message' : (item.subject ?? '(no subject)')}
       </p>
       {/* Plain text: React escapes it, and nothing here renders HTML. */}
       {item.snippet !== null && item.snippet !== '' && (
         <p className="text-muted-foreground">{item.snippet}</p>
+      )}
+      {item.channel === 'email' ? (
+        <p className="text-xs text-muted-foreground">Open the thread in Gmail to read the rest.</p>
+      ) : (
+        <LinkedInThreadLink urn={item.li_conversation_urn} />
       )}
       <div className="flex flex-wrap items-center gap-2">
         <Button
@@ -346,5 +368,32 @@ function InboxRow({ item }: { item: InboxItem }) {
         </form>
       )}
     </li>
+  )
+}
+
+/**
+ * A plain link to the conversation on LinkedIn, built from the stored URN. The page
+ * never calls LinkedIn: the person opens it.
+ */
+function LinkedInThreadLink({ urn }: { urn: string | null }) {
+  const href = threadUrl(urn)
+  if (href === null) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Open LinkedIn messaging to read the rest; the conversation was not recorded.
+      </p>
+    )
+  }
+  return (
+    <p className="text-xs">
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="underline underline-offset-4"
+      >
+        Open the conversation on LinkedIn
+      </a>
+    </p>
   )
 }

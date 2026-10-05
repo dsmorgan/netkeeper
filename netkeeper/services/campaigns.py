@@ -471,6 +471,9 @@ class StepStatus:
     """Outbound messages of the step, whatever became of them."""
     sent: int
     """Those that went out: ``sent``, or ``bounced`` after they were sent (#350)."""
+    by_status: dict[MessageStatus, int] = field(default_factory=dict)
+    """The step's outbound messages by status: a LinkedIn step's prefilled, sent and
+    stale counts (#383)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,6 +512,7 @@ def campaign_status(
         )
     )
     outbound: Counter[tuple[int, bool]] = Counter()
+    by_status: dict[int, dict[MessageStatus, int]] = {}
     for step_id, status, n in session.execute(
         scoped(user, Message)
         .with_only_columns(Message.step_id, Message.status, func.count(Message.id))
@@ -520,6 +524,7 @@ def campaign_status(
     ):
         if step_id is not None:
             outbound[step_id, False] += n
+            by_status.setdefault(step_id, {})[status] = n
             if status in (MessageStatus.SENT, MessageStatus.BOUNCED):
                 outbound[step_id, True] += n
     step_rows = []
@@ -532,6 +537,7 @@ def campaign_status(
                 template.version,
                 outbound[step.id, False],
                 outbound[step.id, True],
+                by_status.get(step.id, {}),
             )
         )
     next_at = None

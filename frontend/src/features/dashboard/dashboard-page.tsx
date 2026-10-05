@@ -5,6 +5,7 @@ import { listsQuery } from '@/features/crm/api'
 import { useEventStreamStatus } from '@/features/events/event-stream-context'
 import { useServerEvent } from '@/features/events/use-server-event'
 import { linkedinKeys } from '@/features/linkedin/api'
+import { LinkedInStepsSection } from '@/features/linkedin-steps/linkedin-steps-section'
 import { cn } from '@/lib/utils'
 
 import { openImportsQuery, statsQuery } from './api'
@@ -121,6 +122,9 @@ export function DashboardPage() {
       <section aria-label="At a glance" className="grid gap-3 sm:grid-cols-2">
         <div className="sm:col-span-2">
           <LiveRunCard />
+        </div>
+        <div className="flex flex-col gap-3 sm:col-span-2">
+          <LinkedInStepsSection />
         </div>
         <NextSendsCard />
         <NextLinkedInRunCard />

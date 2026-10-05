@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { jsonResponse } from '@/test/fetch'
@@ -210,5 +210,78 @@ describe('SSE updates (spec 14.1, this item’s "done when"): no reload, no poll
     await new Promise((resolve) => setTimeout(resolve, 50))
 
     expect(calls.every((call) => call.method === 'GET')).toBe(true)
+  })
+})
+
+describe('the inbox poll and the prefill on the LinkedIn page (#383)', () => {
+  it('Check inbox now starts a manual inbox poll and says how it ended, in plain words', async () => {
+    let inboxRun = run({ id: 61, kind: 'inbox', status: 'running' })
+    const { calls, source } = renderLinkedInPage({
+      'POST /api/v1/linkedin/runs': () => jsonResponse({ run_id: 61, task_id: 't' }, 202),
+      'GET /api/v1/linkedin/runs/61': () => jsonResponse(inboxRun),
+    })
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Check inbox now' }))
+
+    expect(await screen.findByText('Checking the LinkedIn inbox…')).toBeVisible()
+    const started = calls.filter((c) => c.method === 'POST' && c.path === '/api/v1/linkedin/runs')
+    expect(started.map((c) => c.body)).toEqual([{ kind: 'inbox', max_visits: null }])
+
+    inboxRun = run({
+      id: 61,
+      kind: 'inbox',
+      status: 'failed',
+      stop_reason: 'no_source',
+      stop_reason_text: 'the inbox page source is not built yet',
+    })
+    act(() => source.emit('run.finished', { run_id: 61, status: 'failed' }))
+
+    expect(
+      await screen.findByText(/The inbox check stopped: the inbox page source is not built yet/),
+    ).toBeVisible()
+  })
+
+  it('shows a refused inbox check', async () => {
+    renderLinkedInPage({
+      'POST /api/v1/linkedin/runs': () => jsonResponse({ detail: 'a run is already running' }, 409),
+    })
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Check inbox now' }))
+
+    expect(
+      await screen.findByText(/The inbox check did not start: a run is already running/),
+    ).toBeVisible()
+  })
+
+  it('names the inbox and prefill runs, and their stop reasons, in plain words', async () => {
+    renderLinkedInPage({
+      'GET /api/v1/linkedin/runs': () =>
+        jsonResponse(
+          runPage([
+            run({
+              id: 2,
+              kind: 'message_send',
+              status: 'failed',
+              stop_reason: 'composer_not_found',
+              stop_reason_text: 'the message box did not open',
+            }),
+            run({
+              id: 1,
+              kind: 'inbox',
+              status: 'completed',
+              stop_reason: 'end_of_inbox',
+              stop_reason_text: 'read every new conversation',
+            }),
+          ]),
+        ),
+    })
+
+    expect(await screen.findByRole('button', { name: 'LinkedIn prefill' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Inbox poll' })).toBeVisible()
+    expect(screen.getByText('the message box did not open')).toBeVisible()
+    expect(screen.getByText('read every new conversation')).toBeVisible()
+    const filter = screen.getByLabelText('Filter by kind')
+    expect(within(filter).getByRole('option', { name: 'Inbox poll' })).toBeInTheDocument()
+    expect(within(filter).getByRole('option', { name: 'LinkedIn prefill' })).toBeInTheDocument()
   })
 })

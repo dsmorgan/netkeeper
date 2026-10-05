@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useId, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -6,7 +6,13 @@ import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/
 import { renderInlineMarkdown } from '@/lib/inline-markdown'
 import { cn } from '@/lib/utils'
 
-import { postureQuery, type Protection } from './api'
+import {
+  LINKEDIN_REPLY_POLL_ROW,
+  MANUAL_SENDS_ROW,
+  acknowledgeInboxFirstPoll,
+  postureQuery,
+  type Protection,
+} from './api'
 
 const STATUS_CLASSES: Record<string, string> = {
   on: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
@@ -50,6 +56,8 @@ export function PostureSection() {
         {posture.isError && <p role="alert">{message(posture.error)}</p>}
         {posture.isSuccess && (
           <>
+            <ManualSends rows={posture.data.protections} />
+            <ReplyPollAcknowledge rows={posture.data.protections} />
             {/* Below `sm` a table has no room for a Detail column at all: a fixed
                 width just wraps prose one character per line rather than making
                 it any narrower (review179r2 measured a 31,093px-tall page from
@@ -124,6 +132,81 @@ export function PostureSection() {
         )}
       </CardContent>
     </Card>
+  )
+}
+
+/**
+ * ADR 0004's "manual linkedin sends" row, shown first (#383): auto-send off, in
+ * plain words; on, highlighted as a warning with the backend's own warning text.
+ */
+function ManualSends({ rows }: { rows: readonly Protection[] }) {
+  const row = rows.find((r) => r.name === MANUAL_SENDS_ROW)
+  if (row === undefined) return null
+  const autoSendOn = row.status !== 'on'
+  return (
+    <div
+      role={autoSendOn ? 'alert' : 'note'}
+      aria-label="Manual LinkedIn sends"
+      data-auto-send={autoSendOn ? 'on' : 'off'}
+      className={cn(
+        'rounded-lg border-2 p-3',
+        autoSendOn
+          ? 'border-destructive bg-destructive/10'
+          : 'border-emerald-600/50 bg-emerald-500/10',
+      )}
+    >
+      <p className="flex flex-wrap items-center gap-2 font-medium">
+        Manual LinkedIn sends <StatusBadge status={row.status} />
+        <span>{autoSendOn ? 'Auto-send is ON.' : 'Auto-send is off.'}</span>
+      </p>
+      {autoSendOn ? (
+        <ul className="mt-1 space-y-1 text-destructive">
+          {row.warnings.map((warning) => (
+            <li key={warning}>{renderInlineMarkdown(warning)}</li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-muted-foreground">
+          netkeeper prefills each LinkedIn message for you to send yourself; it never sends one.
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The warning that the first LinkedIn inbox poll could not read back far enough, and
+ * **Acknowledge** for it (#383): `netkeeper linkedin inbox-acknowledge`, without the CLI.
+ */
+function ReplyPollAcknowledge({ rows }: { rows: readonly Protection[] }) {
+  const queryClient = useQueryClient()
+  const acknowledge = useMutation({
+    mutationFn: acknowledgeInboxFirstPoll,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: postureQuery.queryKey }),
+  })
+  const row = rows.find((r) => r.name === LINKEDIN_REPLY_POLL_ROW && r.warnings.length > 0)
+  if (row === undefined) return null
+  return (
+    <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+      <p className="font-medium">LinkedIn replies to check by hand</p>
+      <ul className="mt-1 space-y-1">
+        {row.warnings.map((warning) => (
+          <li key={warning}>{renderInlineMarkdown(warning)}</li>
+        ))}
+      </ul>
+      <p className="mt-1 text-muted-foreground">
+        Once you have checked the older LinkedIn replies yourself, acknowledge it here.
+      </p>
+      <Button
+        size="sm"
+        className="mt-2"
+        disabled={acknowledge.isPending}
+        onClick={() => acknowledge.mutate()}
+      >
+        Acknowledge
+      </Button>
+      {acknowledge.isError && <p role="alert">{message(acknowledge.error)}</p>}
+    </div>
   )
 }
 
