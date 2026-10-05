@@ -9224,7 +9224,7 @@
         "type": "object"
       },
       "RunDiagnosticsOut": {
-        "description": "Why a run's visits or answers could not be read (#405), nothing from the page.\nBoth lists are empty for a run that has none, or one recorded before #405.\n``stopped_by`` is the visit whose answer stopped the run at once as\n``route_changed`` (a status no limit forgives), or null.",
+        "description": "Why a run's visits or answers could not be read (#405), nothing from the page.\nBoth lists are empty for a run that has none, or one recorded before #405.\n``stopped_by`` is the visit whose answer stopped the run at once as\n``route_changed`` (a status no limit forgives): one item, or none.",
         "properties": {
           "lost_answers": {
             "items": {
@@ -9234,14 +9234,11 @@
             "type": "array"
           },
           "stopped_by": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RunVisitReasonOut"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "items": {
+              "$ref": "#/components/schemas/RunVisitReasonOut"
+            },
+            "title": "Stopped By",
+            "type": "array"
           },
           "unreadable_visits": {
             "items": {

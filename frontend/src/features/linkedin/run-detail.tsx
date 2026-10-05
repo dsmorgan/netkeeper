@@ -118,7 +118,7 @@ export function RunDetail({
         {data.status !== 'running' && (
           <FieldList title="Counts" fields={formatFields(data.counts)} />
         )}
-        <RunReasons runId={runId} marker={marker} stopReason={data.stop_reason} />
+        <RunReasons runId={runId} marker={marker} stopReason={data.stop_reason} kind={data.kind} />
 
         <div className="flex flex-wrap gap-2">
           {data.status === 'running' && (

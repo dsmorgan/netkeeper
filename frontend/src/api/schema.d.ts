@@ -6363,12 +6363,13 @@ export interface components {
          * @description Why a run's visits or answers could not be read (#405), nothing from the page.
          *     Both lists are empty for a run that has none, or one recorded before #405.
          *     ``stopped_by`` is the visit whose answer stopped the run at once as
-         *     ``route_changed`` (a status no limit forgives), or null.
+         *     ``route_changed`` (a status no limit forgives): one item, or none.
          */
         RunDiagnosticsOut: {
             /** Lost Answers */
             lost_answers: components["schemas"]["RunLostAnswerOut"][];
-            stopped_by: components["schemas"]["RunVisitReasonOut"] | null;
+            /** Stopped By */
+            stopped_by: components["schemas"]["RunVisitReasonOut"][];
             /** Unreadable Visits */
             unreadable_visits: components["schemas"]["RunVisitReasonOut"][];
         };

@@ -28,6 +28,7 @@ from netkeeper.models import (
     DoNotSendReason,
     ImportRun,
     InteractionKind,
+    JsonValue,
     ListKind,
     MessageDirection,
     MessageStatus,
@@ -442,6 +443,33 @@ def _seed_run_contacts(session: Session, user: User) -> int:
     return 2
 
 
+def _seed_run_diagnostics(session: Session, user: User) -> int:
+    """An aborted enrichment of ``user``: two unreadable visits on its contacts, and the
+    visit that stopped it at once (#405)."""
+    run = runs.create_run(
+        session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=SEED_AT
+    )
+    contacts = [factories.make_contact(session, user).id for _ in range(3)]
+    visits: list[JsonValue] = [
+        {"visit": number + 1, "contact_id": contacts[number], "reason": "x"} for number in (0, 1)
+    ]
+    stopped: JsonValue = {"visit": 3, "contact_id": contacts[2], "reason": "profile_status"}
+    runs.finish_run(
+        session,
+        user,
+        run.id,
+        status=SyncRunStatus.ABORTED,
+        now=SEED_AT,
+        counts={"unreadable_visits": visits, "stopped_by": stopped},
+    )
+    return 3
+
+
+def diagnostics_count(body: Any) -> int:
+    """Item count of a run's diagnostics: every visit and answer it names."""
+    return len(body["unreadable_visits"]) + len(body["lost_answers"]) + len(body["stopped_by"])
+
+
 def _own_run(session: Session, user: User) -> dict[str, str]:
     """``run_id`` of the user's newest run; the placeholder points nowhere when they
     have none, which the endpoint answers ``404``."""
@@ -651,6 +679,12 @@ REGISTRY: list[ListEndpoint] = [
         f"{API_PREFIX}/linkedin/runs/{{run_id}}/contacts",
         _seed_run_contacts,
         paged_count,
+        path_params=_own_run,
+    ),
+    ListEndpoint(
+        f"{API_PREFIX}/linkedin/runs/{{run_id}}/diagnostics",
+        _seed_run_diagnostics,
+        diagnostics_count,
         path_params=_own_run,
     ),
     ListEndpoint(f"{API_PREFIX}/linkedin/pins", _seed_pins, array_count),

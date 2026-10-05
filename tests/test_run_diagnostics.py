@@ -212,7 +212,7 @@ async def test_the_api_answers_the_runs_reasons(
             }
         ],
         "lost_answers": [],
-        "stopped_by": None,
+        "stopped_by": [],
     }
     assert missing.status_code == 404
 
@@ -407,6 +407,30 @@ def test_linkedin_unreadable_groups_reasons_across_runs(cli_db: sessionmaker[Ses
         "2",
         f"{first},{second}",
     ]
+
+
+@pytest.mark.parametrize("since", ["3651d", "87601h", "999999d", "99999999999d"])
+def test_linkedin_unreadable_refuses_a_window_past_ten_years(
+    cli_db: sessionmaker[Session], since: str
+) -> None:
+    result = CliRunner().invoke(cli, ["linkedin", "unreadable", "--since", since])
+    assert result.exit_code == 2 and "at most 3650d" in result.output
+
+
+def test_linkedin_unreadable_takes_ten_years(cli_db: sessionmaker[Session]) -> None:
+    result = CliRunner().invoke(cli, ["linkedin", "unreadable", "--since", "3650d"])
+    assert result.exit_code == 0, result.output
+
+
+def test_a_sync_stopped_route_changed_says_nothing_about_visits(
+    cli_db: sessionmaker[Session],
+) -> None:
+    with session_scope(cli_db, write=True) as session:
+        user = ensure_local_user(session, settings=Settings())
+        sync = _run(session, user, kind=SyncRunKind.CONNECTIONS_FULL, counts={"pages": 2}).id
+    shown = CliRunner().invoke(cli, ["linkedin", "run", str(sync)])
+    assert shown.exit_code == 0, shown.output
+    assert "per-visit" not in shown.output
 
 
 @pytest.mark.parametrize("since", ["14", "two weeks", "0d", "-3d"])

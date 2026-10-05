@@ -3,7 +3,7 @@ import { Link } from '@tanstack/react-router'
 import { useEffect, useRef } from 'react'
 
 import { linkedinKeys, runDiagnosticsQuery } from './api'
-import type { RunVisitReason } from './types'
+import type { RunKind, RunVisitReason } from './types'
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : 'The run’s reasons are unavailable.'
@@ -28,10 +28,12 @@ export function RunReasons({
   runId,
   marker,
   stopReason = null,
+  kind = null,
 }: {
   runId: number
   marker: string
   stopReason?: string | null
+  kind?: RunKind | null
 }) {
   const queryClient = useQueryClient()
   const reasons = useQuery(runDiagnosticsQuery(runId))
@@ -46,16 +48,18 @@ export function RunReasons({
   if (reasons.isPending) return null
   if (reasons.isError) return <p role="alert">{message(reasons.error)}</p>
 
-  const { unreadable_visits: visits, lost_answers: lost, stopped_by: stopped } = reasons.data
+  const { unreadable_visits: visits, lost_answers: lost } = reasons.data
+  const stopped = reasons.data.stopped_by[0] ?? null
   // A route_changed stop always says why: by the visits below, by the one answer that
   // stopped it at once, or, for a run recorded before #405, that nothing was kept.
-  const unexplained = stopReason === 'route_changed' && visits.length === 0 && stopped === null
+  const unexplained =
+    kind === 'enrich' && stopReason === 'route_changed' && visits.length === 0 && stopped === null
   if (visits.length === 0 && lost.length === 0 && stopped === null && !unexplained) return null
 
   return (
     <div className="space-y-3">
       {stopped !== null && (
-        <p role="status" className="rounded-lg bg-amber-500/10 px-3 py-2">
+        <p className="rounded-lg bg-amber-500/10 px-3 py-2">
           Stopped at once by the page’s answer on visit {stopped.visit} (
           {stopped.contact_exists ? (
             <Link
