@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.crm.inbox_apply import NewInbound
 from netkeeper.db import session_scope
 from netkeeper.models import (
     EnrollmentStatus,
@@ -23,6 +24,7 @@ from netkeeper.models import (
     UserKind,
 )
 from netkeeper.scoping import unscoped
+from netkeeper.services.campaign_replies import record_linkedin_reply
 
 CSRF = {"X-Netkeeper-Client": "1"}
 
@@ -256,3 +258,53 @@ async def test_mark_handled_refuses_what_is_not_an_inbox_item_of_the_users(
             unscoped(select(Message).where(Message.id == seed["foreign"]))
         ).one()
         assert foreign.handled_at is None
+
+
+async def test_a_detected_linkedin_reply_reaches_the_inbox_with_its_link(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """#383 against #381's real rows: a reply the LinkedIn poll recorded carries its channel
+    and conversation; one read back with no known conversation carries none."""
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = session.scalars(select(User).where(User.kind == UserKind.LOCAL)).one()
+        campaign = factories.make_campaign(session, user, channels=(TemplateChannel.LINKEDIN,))
+        known, unknown = (
+            factories.make_enrollment(session, campaign, factories.make_contact(session, user))
+            for _ in range(2)
+        )
+        for enrollment, conversation, day in (
+            (known, "urn:li:msg_conversation:INVENTEDREAL", 3),
+            (unknown, None, 4),
+        ):
+            assert record_linkedin_reply(
+                session,
+                user,
+                enrollment.id,
+                NewInbound(
+                    contact_id=enrollment.contact_id,
+                    interaction_id=0,
+                    conversation_urn=conversation,
+                    message_urn=f"urn:li:msg_message:INVENTED{day}",
+                    at=_at(day),
+                    snippet="Glad you wrote",
+                ),
+            )
+        known_id, unknown_id = known.id, unknown.id
+
+    items = (await client.get("/api/v1/inbox")).json()["items"]
+    by_enrollment = {item["enrollment_id"]: item for item in items}
+    assert {
+        e: (i["kind"], i["channel"], i["subject"], i["snippet"], i["li_conversation_urn"])
+        for e, i in by_enrollment.items()
+    } == {
+        known_id: (
+            "reply",
+            "linkedin",
+            None,
+            "Glad you wrote",
+            "urn:li:msg_conversation:INVENTEDREAL",
+        ),
+        unknown_id: ("reply", "linkedin", None, "Glad you wrote", None),
+    }
+    assert by_enrollment[known_id]["enrollment_status"] == "replied"
