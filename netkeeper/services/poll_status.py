@@ -11,7 +11,9 @@ store, never by running one:
   polls, so the check is ``due``. A ready mailbox the sender polls again sooner,
   alone (:meth:`GmailSender.replies_due`: its poll stopped part way, or it holds a
   follow-up), is ``due`` too, and so is the check; the others keep their time
-  (#413). Without ``serve``
+  (#413). An ``ok`` mailbox the sender could not open (a locked Keychain) is
+  ``blocked`` with that reason, and the check names it, rather than ``due`` at every
+  tick. Without ``serve``
   there is no next poll, and the last one is read from the armed mailboxes'
   ``replies_polled_at``: the oldest, or none while one was never polled. An armed
   mailbox that needs signing in again is named in the check's reason; it blocks
@@ -41,8 +43,8 @@ to a browser.
 from __future__ import annotations
 
 import enum
-from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Final
 
@@ -74,6 +76,7 @@ from netkeeper.services.linkedin_accounts import (
     scheduled_runs_armed,
 )
 from netkeeper.services.linkedin_session import session_flag
+from netkeeper.services.mailboxes import REASON_KEYCHAIN_UNAVAILABLE
 from netkeeper.services.scheduled_runs import INBOX_RUN_KIND, RUN_KIND
 from netkeeper.services.scheduler import (
     DEFAULT_SCHEDULES,
@@ -187,6 +190,8 @@ class Serving:
     """The running sender's reply interval; None reads ``[campaigns] reply_poll_minutes``."""
     replies_due: frozenset[int] = frozenset()
     """Mailboxes the running sender polls again at the next tick, alone (#413)."""
+    replies_not_ready: Mapping[int, str] = field(default_factory=dict)
+    """Mailboxes the running sender's last poll could not open, with the code (#413)."""
     drafts_polled_at: datetime | None = None
     drafts_every: timedelta = DRAFTS_POLL_EVERY
 
@@ -246,6 +251,8 @@ def _mailbox_poll(
         )
     elif mailbox.status is not MailboxStatus.OK:
         state, reason = CheckState.BLOCKED, _needs_sign_in([mailbox])
+    elif (code := serving.replies_not_ready.get(mailbox.id)) is not None:
+        state, reason = CheckState.BLOCKED, _cannot_open(mailbox, code)
     elif mailbox.id in serving.replies_due:
         state = CheckState.DUE
     else:
@@ -265,6 +272,16 @@ def _needs_sign_in(mailboxes: Sequence[Mailbox]) -> str:
     names = ", ".join(m.email for m in mailboxes)
     verb = "needs" if len(mailboxes) == 1 else "need"
     return f"{names} {verb} you to sign in to Gmail again (Settings, Gmail)"
+
+
+def _cannot_open(mailbox: Mailbox, code: str) -> str:
+    """An ``ok`` mailbox the sender could not open (#413): most often a locked Keychain."""
+    if code == REASON_KEYCHAIN_UNAVAILABLE:
+        return (
+            f"The Keychain is locked, so netkeeper can't read {mailbox.email};"
+            " unlock it and the next minute's check reads it"
+        )
+    return f"netkeeper can't open {mailbox.email} ({code}); see Settings, Gmail"
 
 
 def _gmail_gate(mailboxes: Sequence[Mailbox], serving: Serving) -> tuple[CheckState, str] | None:
@@ -302,7 +319,13 @@ def _gmail_replies(
     if gate is not None:
         return replace(base, state=gate[0], reason=gate[1], last_at=_stored_last(polls))
     stuck = [m for m in mailboxes if m.arm is not None and m.status is not MailboxStatus.OK]
-    reason = None if not stuck else _needs_sign_in(stuck)
+    reasons = [_needs_sign_in(stuck)] if stuck else []
+    reasons += [
+        p.reason
+        for p in polls
+        if p.state is CheckState.BLOCKED and p.mailbox_id in serving.replies_not_ready and p.reason
+    ]
+    reason = "; ".join(reasons) or None
     state, next_at = _next(serving.replies_polled_at, every, now)
     if any(p.state is CheckState.DUE for p in polls):  # one ready mailbox is due again
         state, next_at = CheckState.DUE, None
