@@ -380,12 +380,12 @@ class GmailSender:
             return _not_sent(firing, str(exc)) if exc.retry else _failed(firing, str(exc))
         except ComposeError as exc:
             return _failed(firing, f"the message could not be built: {exc}")
-        label_id = self._label_id(gmail, firing, purpose)
         if self._replied(firing):
             # A reply on any channel (the LinkedIn inbox poll writes in its own session)
-            # landed after the claim's reply check: nothing goes out, and the retry's
-            # claim reads the reply and ends the enrollment (#416 review).
+            # landed after the claim's reply check: nothing goes out, no label is made,
+            # and the retry's claim reads the reply and ends the enrollment (#416 review).
             return _not_sent(firing, "a reply arrived after the claim; nothing was sent")
+        label_id = self._label_id(gmail, firing, purpose)
         draft_id: str | None = None
         try:
             if firing.mode is StepMode.DRAFT:
