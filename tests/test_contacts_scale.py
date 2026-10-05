@@ -218,6 +218,34 @@ async def test_a_page_is_a_fixed_number_of_queries(
     )
 
 
+async def test_the_unfiltered_count_costs_one_query_more(
+    client: httpx.AsyncClient, crowd: int, bare_engine: Engine
+) -> None:
+    """``count_unfiltered`` (#402) adds the one count it asks for, and nothing per row."""
+    body = {**PAGE, "count_unfiltered": True}
+    await _timed(client, body)
+    statements: list[str] = []
+
+    @event.listens_for(bare_engine, "before_cursor_execute")
+    def record(*args: Any) -> None:
+        statement: str = args[2]
+        if not statement.startswith(("BEGIN", "COMMIT", "ROLLBACK", "PRAGMA")):
+            statements.append(statement)
+
+    try:
+        _, page = await _timed(client, body)
+    finally:
+        event.remove(bare_engine, "before_cursor_execute", record)
+
+    assert len(page["items"]) == 50
+    assert page["unfiltered_total"] == CONTACTS
+    selects = [statement for statement in statements if statement.lstrip().startswith("SELECT")]
+    assert len(selects) <= 6, (
+        f"{len(selects)} selects for one page of 50 with its unfiltered count: the page's "
+        f"five and the second count is the budget. {selects}"
+    )
+
+
 async def test_the_worst_page_is_still_under_the_budget(
     client: httpx.AsyncClient, crowd: int
 ) -> None:

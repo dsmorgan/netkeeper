@@ -264,6 +264,33 @@ describe('contacts table', () => {
     expect(lastQuery(seen)).not.toHaveProperty('count_unfiltered')
   })
 
+  it('never announces the last filter’s count beside the new filter’s chips', async () => {
+    let answer: (response: Response) => void = () => undefined
+    mockApi((request, body) => {
+      const { pathname } = new URL(request.url)
+      if (pathname !== '/api/v1/contacts/query') return undefined
+      if (JSON.stringify(body).includes('grebe')) {
+        return new Promise<Response>((resolve) => (answer = resolve))
+      }
+      return jsonResponse({ ...page(3), unfiltered_total: 87 })
+    })
+    const { router } = await renderApp('/contacts?q=ferry')
+    await screen.findByText('Bo Quill')
+    const status = () => screen.getByText(/filtered by:/, { selector: '[role="status"]' })
+    expect(status()).toHaveTextContent('Showing 3 of 87 · filtered by: “ferry”')
+
+    fireEvent.change(screen.getByLabelText('Search contacts'), { target: { value: 'grebe' } })
+    await waitFor(() => expect(router.state.location.searchStr).toContain('grebe'))
+    // The table keeps the old rows while it waits; the summary says nothing yet.
+    expect(await screen.findByRole('button', { name: 'Remove “grebe”' })).toBeVisible()
+    expect(screen.queryByText(/Showing 3 of 87/)).toBeNull()
+
+    answer(jsonResponse({ ...page(1), unfiltered_total: 87 }))
+    await waitFor(() =>
+      expect(status()).toHaveTextContent('Showing 1 of 87 · filtered by: “grebe”'),
+    )
+  })
+
   it('offers to clear the filters when nothing matches them', async () => {
     serveTable({ ...contactPage([], 0, 'contacts matching “nobody”'), unfiltered_total: 87 })
     const { router } = await renderApp('/contacts?q=nobody')

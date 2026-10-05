@@ -848,7 +848,7 @@ function EnrollmentsCard({
         </form>
         <FilterSummary
           shown={rows.data?.total}
-          total={everyone.data?.total}
+          total={everyone.isError ? null : everyone.data?.total}
           chips={chips}
           onClear={clearAll}
           returnFocusTo={searchBox}

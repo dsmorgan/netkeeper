@@ -345,22 +345,34 @@ describe('campaign detail', () => {
       }
       return jsonResponse({ ...ENROLLMENTS, total: 87 })
     }
+    const calls: Call[] = []
+    const counts = () =>
+      calls.filter(
+        (c) => c.path === '/api/v1/campaigns/5/enrollments' && c.query.get('limit') === '1',
+      )
     mockFetch(
       campaignBackend(
         { campaign: campaign({ status: 'active' }), review: review() },
         { 'GET /api/v1/campaigns/5/enrollments': enrollments },
+        calls,
       ),
     )
     await renderApp('/campaigns/5')
     await screen.findByRole('link', { name: 'Tobias Marrowbone' })
-    // Nothing narrows the list yet, so nothing says it does.
+    // Nothing narrows the list yet, so nothing says it does, or asks for "of N".
     expect(screen.queryByRole('list', { name: 'Active filters' })).toBeNull()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(counts()).toEqual([])
 
     fireEvent.change(screen.getByLabelText('Find an enrollment'), { target: { value: 'acme' } })
     fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'replied' } })
     fireEvent.click(screen.getByRole('button', { name: 'Find' }))
 
     await waitFor(() => expect(screen.getByText(/Showing 1 of 87 · filtered by:/)).toBeVisible())
+    // The whole count is the unfiltered list, one row of it.
+    expect(counts().at(-1)?.query.has('q')).toBe(true)
+    expect(counts().at(-1)?.query.get('q')).toBe('')
+    expect(counts().at(-1)?.query.has('status')).toBe(false)
     const chips = within(screen.getByRole('list', { name: 'Active filters' }))
     expect(chips.getAllByRole('button').map((chip) => chip.textContent)).toEqual([
       '“acme”',
