@@ -54,6 +54,7 @@ describe('campaign results', () => {
     expect(card.getByRole('img', { name: /6 over 3 days, at most 4 in a day/ })).toBeVisible()
     expect(card.getByText('Jun 3')).toBeVisible()
     expect(card.getByText('Jun 5')).toBeVisible()
+    expect(card.getByText(/Replies you send from your own mailbox aren't counted\./)).toBeVisible()
   })
 
   it('says so when nothing has been sent yet', async () => {

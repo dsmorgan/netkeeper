@@ -151,6 +151,7 @@ describe('review flow', () => {
     expect(sends.getByText(/never goes to a contact/)).toBeVisible()
     expect(sends.getByText(/Armed for drafts, the test is a draft in your Drafts/)).toBeVisible()
     expect(sends.queryByText(/must be armed for send/)).toBeNull()
+    expect(sends.getByText(/reply from a different Gmail account/)).toBeVisible()
 
     fireEvent.click(sends.getByRole('button', { name: 'Send a test of step 1' }))
     const refusal = await sends.findByRole('alert')

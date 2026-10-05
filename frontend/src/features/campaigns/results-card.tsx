@@ -29,7 +29,8 @@ export function ResultsCard({
         <CardTitle level={2}>Results</CardTitle>
         <CardDescription>
           Sent counts every message that went out, bounced ones included. A reply or opt-out counts
-          against the last step sent before it; a bounce, against the step that bounced.
+          against the last step sent before it; a bounce, against the step that bounced. Replies you
+          send from your own mailbox aren&apos;t counted.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4 text-sm">
