@@ -2220,3 +2220,96 @@ def test_a_linkedin_answer_polled_before_the_draft_was_seen_sent_is_its_reply(
         MessageDirection.IN,
         TemplateChannel.LINKEDIN,
     )
+
+
+def _give_urn(mail: Mail, enrollment_id: int, urn: str) -> None:
+    def give(session: Session) -> None:
+        enrollment = get_scoped(session, mail.user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        contact = get_scoped(session, mail.user, Contact, enrollment.contact_id)
+        assert contact is not None
+        contact.li_urn = urn
+
+    mail.write(give)
+
+
+def test_a_linkedin_reply_between_the_claim_and_the_send_stops_the_send(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#416 review, S3: the LinkedIn poll records an answer after step 2's claim read no
+    reply and before Gmail is asked to send it. Nothing goes out; the retry's claim ends
+    the enrollment."""
+    urn = profile_urn("ada")
+    answer: list[Callable[[], None]] = []
+
+    def opener(user_id: int, mailbox_id: int) -> Any:
+        while answer:
+            answer.pop()()
+        return mail.gmail
+
+    mail = make_mail(
+        session_factory,
+        modes=(StepMode.SEND, StepMode.SEND),
+        same_thread=(False, False),
+        opener=opener,
+    )
+    enrollment_id = mail.enroll()
+    _give_urn(mail, enrollment_id, urn)
+    [(_, first)] = mail.tick().fired
+    assert first.at is not None
+    due = mail.enrollment(enrollment_id).next_action_at
+    assert due is not None
+
+    def mark_polled(session: Session) -> None:
+        mailbox = get_scoped(session, mail.user, Mailbox, mail.mailbox.id)
+        assert mailbox is not None
+        mailbox.replies_polled_at = due  # replies are not stale: step 2 may go
+
+    mail.write(mark_polled)
+    reply = conversation("one", urn, [inbox_message(1, sender=urn, at=due - timedelta(hours=1))])
+    answer.append(
+        lambda: mail.write(
+            lambda s: inbox_apply.apply_delta(s, mail.user, inbox_delta(reply), polled_at=due)
+        )
+    )
+    result = mail.tick(due)
+
+    [(_, outcome)] = result.fired
+    assert outcome.outcome is SendOutcome.NOT_SENT
+    assert len(mail.gmail.sent()) == 1  # step 1 only
+    assert mail.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
+    assert mail.enrollment(enrollment_id).next_action_at is None
+    assert not mail.tick(due + timedelta(hours=3)).fired
+
+
+def test_a_failing_catch_up_never_takes_back_the_settle(
+    drafts: Mail, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#416 review, N3: Gmail sent the draft; that stands even if the LinkedIn catch-up
+    fails, and the failure is logged by its type."""
+
+    def broken(session: Session, user: User, enrollment_id: int, **kwargs: Any) -> int:
+        # Half done, then a failure: the savepoint takes the half back, too.
+        enrollment = get_scoped(session, user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        enrollment.status = EnrollmentStatus.REPLIED
+        session.flush()
+        raise RuntimeError("an invented failure")
+
+    monkeypatch.setattr(sender_module.replies, "catch_up_linkedin_replies", broken)
+    enrollment_id = drafts.enroll()
+    drafts.tick()
+    [draft_id] = drafts.gmail.drafts()
+    sent_at = NOW + timedelta(hours=1)
+    drafts.gmail.send_draft(draft_id, at=sent_at)
+    drafts.tick(sent_at + timedelta(hours=1))
+
+    [message] = drafts.messages(enrollment_id)
+    assert (message.status, message.sent_at) == (MessageStatus.SENT, sent_at)
+    enrollment = drafts.enrollment(enrollment_id)
+    assert (enrollment.status, enrollment.next_action_at) == (
+        EnrollmentStatus.ACTIVE,
+        follow_up(sent_at),
+    )
+    assert "recording earlier LinkedIn replies failed (RuntimeError)" in caplog.text
+    assert "an invented failure" not in caplog.text
