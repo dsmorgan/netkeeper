@@ -393,6 +393,32 @@ describe('campaign detail', () => {
     expect(screen.getByLabelText('Find an enrollment')).toHaveValue('')
   })
 
+  it('still says how many enrollments match when the whole count fails', async () => {
+    mockFetch(
+      campaignBackend(
+        { campaign: campaign({ status: 'active' }), review: review() },
+        {
+          'GET /api/v1/campaigns/5/enrollments': (call) =>
+            call.query.get('limit') === '1'
+              ? jsonResponse({ detail: 'the database is locked' }, 500)
+              : call.query.get('q') === 'tobias'
+                ? jsonResponse({ total: 1, items: [ENROLLMENTS.items[1]] })
+                : jsonResponse(ENROLLMENTS),
+        },
+      ),
+    )
+    await renderApp('/campaigns/5')
+    fireEvent.change(await screen.findByLabelText('Find an enrollment'), {
+      target: { value: 'tobias' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Find' }))
+    await waitFor(() =>
+      expect(screen.getByText(/filtered by:/, { selector: '[role="status"]' })).toHaveTextContent(
+        /^Showing 1 · filtered by:/,
+      ),
+    )
+  })
+
   it('says no enrollment matches the filters, not that there are none', async () => {
     mockFetch(
       campaignBackend(
