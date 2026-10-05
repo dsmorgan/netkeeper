@@ -783,6 +783,9 @@ def test_one_sent_message_confirms_one_prefill(session_factory: sessionmaker[Ses
     world.apply(thread, polled_at=NOW + timedelta(hours=1))
     assert world.message(older).status is MessageStatus.SENT
     assert world.message(newer).status is MessageStatus.STALE
+    # A later poll: the send already belongs to the older prefill, so not to this one too.
+    world.apply(polled_at=NOW + timedelta(hours=2))
+    assert world.message(newer).status is MessageStatus.STALE
 
 
 # --- the runner and the simulation -------------------------------------------------------
@@ -1116,3 +1119,82 @@ def test_a_linkedin_claim_refuses_after_a_reply_even_if_revived(
     )
     assert not claim.claimed
     assert world.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
+
+
+# --- after the re-review (#416) ----------------------------------------------------------
+
+
+def test_a_message_sent_by_hand_just_before_the_claim_confirms_nothing(
+    linkedin_first: World,
+) -> None:
+    """Within CONFIRM_SKEW of ``prefilled_at``, but before the claim: not the prefill."""
+    world = linkedin_first
+    enrollment_id = world.enroll()
+    message_id = world.prefill(enrollment_id)  # claimed and prefilled at NOW
+    manual, _ = you_sent(ADA, NOW - timedelta(seconds=10))
+    world.apply(manual, polled_at=NOW + timedelta(hours=1))
+    assert world.message(message_id).status is MessageStatus.PREFILLED
+    assert world.enrollment(enrollment_id).next_action_at is None
+
+
+@pytest.mark.parametrize(
+    ("after", "confirmed"),
+    [
+        (timedelta(days=3, seconds=-1), True),
+        (timedelta(days=3), False),
+        (timedelta(days=20), False),
+    ],
+)
+def test_a_discarded_prefill_is_confirmed_only_within_three_days(
+    linkedin_first: World, after: timedelta, confirmed: bool
+) -> None:
+    """A discard means "I won't send it": a message much later is not the prefill."""
+    world = linkedin_first
+    enrollment_id = world.enroll()
+    message_id = world.prefill(enrollment_id)
+    _discard(world, message_id, NOW + timedelta(minutes=1))
+    due_before = world.enrollment(enrollment_id).next_action_at
+    thread, _ = you_sent(ADA, NOW + after)
+    world.apply(thread, polled_at=NOW + after + timedelta(hours=1))
+    status = world.message(message_id).status
+    if confirmed:
+        assert status is MessageStatus.SENT
+    else:
+        assert status is MessageStatus.DISCARDED
+        assert world.enrollment(enrollment_id).next_action_at == due_before
+
+
+def test_a_stale_prefill_has_no_such_bound(linkedin_first: World) -> None:
+    world = linkedin_first
+    enrollment_id = world.enroll()
+    message_id = world.prefill(enrollment_id)
+    world.tick(NOW + timedelta(days=3))
+    thread, _ = you_sent(ADA, NOW + timedelta(days=20))
+    world.apply(thread, polled_at=NOW + timedelta(days=20, hours=1))
+    assert world.message(message_id).status is MessageStatus.SENT
+
+
+def test_a_stored_send_with_two_known_conversations_does_not_confirm_a_known_one(
+    linkedin_first: World,
+) -> None:
+    """The prefill learned its conversation; a send an earlier poll stored, for a contact
+    with two conversations, is in an unknown one, so it confirms nothing."""
+    world = linkedin_first
+    enrollment_id = world.enroll()
+    message_id, run_id = _claim_only(world, enrollment_id)
+    old, _ = you_sent(ADA, NOW - timedelta(days=30), name="two")
+    world.apply(old, polled_at=NOW - timedelta(days=29))
+    prefilled_at = NOW + timedelta(minutes=2)
+    thread, _ = you_sent(ADA, prefilled_at - timedelta(seconds=10))
+    world.apply(thread, polled_at=NOW + timedelta(minutes=1, seconds=55))
+
+    def run(session: Session, user: User) -> None:
+        outcome = MessageOutcome(MessageOutcomeKind.PREFILLED, "fixed words", CONVERSATION, 12)
+        assert record_prefill_outcome(
+            session, user, message_id, outcome, settings=world.settings, now=prefilled_at
+        )
+        runs.finish_run(session, user, run_id, status=SyncRunStatus.COMPLETED, now=prefilled_at)
+
+    world.write(run)
+    world.apply(polled_at=NOW + timedelta(hours=1))
+    assert world.message(message_id).status is MessageStatus.PREFILLED

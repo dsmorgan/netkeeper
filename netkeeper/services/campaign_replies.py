@@ -131,6 +131,7 @@ from netkeeper.models import Message as MessageRow
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped, get_scoped_contact, not_self, scoped
 from netkeeper.services import campaign_engine as engine
+from netkeeper.services.campaign_engine import PREFILL_STALE_AFTER
 
 log = logging.getLogger(__name__)
 
@@ -917,7 +918,9 @@ def confirm_linkedin_sends(
     is confirmed by the first message you sent the contact, recorded by the poll and
     not yet any campaign message's (an ``li_out`` interaction with a URN and no
     ``message_id``), dated no earlier than :data:`CONFIRM_SKEW` before its
-    ``prefilled_at``, whatever its text: you may edit it before sending. When the prefill
+    ``prefilled_at`` and never before its claim (``scheduled_at``), whatever its text
+    (a discarded one only up to :data:`~netkeeper.services.campaign_engine.PREFILL_STALE_AFTER`
+    after ``prefilled_at``): you may edit it before sending. When the prefill
     learned its conversation, the sent message must be in it. ``outbound`` is this
     poll's new messages: they give the exact time and conversation; one recorded by an
     earlier poll (``prefilled_at`` stamped after it, a "check now") confirms as well.
@@ -983,7 +986,18 @@ def confirm_linkedin_sends(
     confirmed: list[int] = []
     for message, contact_id in waiting:
         assert message.prefilled_at is not None
+        # Never before the claim: a message you sent by hand just before it is not the
+        # prefill, whatever the skew allows (#416 re-review).
         earliest = message.prefilled_at - CONFIRM_SKEW
+        if message.scheduled_at is not None:
+            earliest = max(earliest, message.scheduled_at)
+        # A discarded prefill is the person's "I won't send it": only a send within
+        # PREFILL_STALE_AFTER of the prefill is taken as it, not a message weeks later.
+        latest = (
+            message.prefilled_at + PREFILL_STALE_AFTER
+            if message.status is MessageStatus.DISCARDED
+            else None
+        )
         sent = next(
             (
                 i
@@ -991,6 +1005,7 @@ def confirm_linkedin_sends(
                 if i.id not in used
                 and i.contact_id == contact_id
                 and sent_at(i) >= earliest
+                and (latest is None or sent_at(i) < latest)
                 and message.li_conversation_urn in (None, conversation_of(i))
             ),
             None,
