@@ -104,7 +104,9 @@ export function CampaignDetailPage({
   return (
     <div className="flex max-w-5xl flex-col gap-4">
       <Overview campaign={data} />
-      {!reviewable && <ResultsCard campaignId={data.id} results={results} />}
+      {!reviewable && (
+        <ResultsCard campaignId={data.id} mailboxId={data.mailbox_id} results={results} />
+      )}
       <StepsCard campaign={data} results={results.data} />
       {reviewable && <AudienceCard campaign={data} />}
       {reviewable && <ReviewPanel campaign={data} />}

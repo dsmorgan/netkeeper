@@ -3,6 +3,7 @@ import { Menu } from 'lucide-react'
 import type { RefObject } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { PollStatusHeader } from '@/features/poll-status/poll-status-header'
 
 import { BackendHealth } from './backend-health'
 import { sectionLabel } from './nav'
@@ -34,7 +35,10 @@ export function TopBar({ menuButtonRef, navId, navOpen, onToggleNav }: TopBarPro
         </Button>
         <h1 className="truncate font-medium">{sectionLabel(pathname)}</h1>
       </div>
-      <BackendHealth />
+      <div className="flex min-w-0 items-center gap-3">
+        <PollStatusHeader />
+        <BackendHealth />
+      </div>
     </header>
   )
 }

@@ -313,6 +313,37 @@ def _seed_mailboxes(session: Session, user: User) -> int:
     return 2
 
 
+def _seed_poll_status(session: Session, user: User) -> int:
+    """One armed mailbox polled for replies, and one completed enrichment (#401).
+
+    Each user's mailbox, its reply poll, and its last LinkedIn run are their own:
+    :func:`poll_status_count` counts the mailboxes and every check with a last run.
+    The mailbox is armed and polled, so the Gmail replies check has a last run too.
+    """
+    mailbox = mailbox_service.connect(
+        session, user, f"poll{user.id}@example.com", f"rt-poll-{user.id}", daily_cap=80
+    )
+    mailbox.armed_at = SEED_AT
+    mailbox.replies_polled_at = SEED_AT
+    run = runs.create_run(
+        session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=SEED_AT
+    )
+    runs.finish_run(session, user, run.id, status=SyncRunStatus.COMPLETED, now=SEED_AT)
+    session.flush()
+    return 3  # the mailbox, the Gmail replies check's last run, the enrichment's
+
+
+def poll_status_count(body: Any) -> int:
+    """``GET /poll-status``: its mailboxes, and its checks that have a last run.
+
+    The checks themselves are the same list for every user, so their count alone
+    would say nothing about isolation; what each one last saw is the user's own."""
+    mailboxes = body["mailboxes"]
+    items = body["items"]
+    assert isinstance(mailboxes, list) and isinstance(items, list)
+    return len(mailboxes) + sum(1 for item in items if item["last_at"] is not None)
+
+
 def _seed_templates(session: Session, user: User) -> int:
     """Two templates, one of them in its second version: the older version is not listed.
 
@@ -637,4 +668,5 @@ REGISTRY: list[ListEndpoint] = [
     ListEndpoint(f"{API_PREFIX}/campaigns/linkedin/ready", _seed_linkedin_ready, paged_count),
     ListEndpoint(f"{API_PREFIX}/campaigns/linkedin/waiting", _seed_linkedin_waiting, paged_count),
     ListEndpoint(f"{API_PREFIX}/dashboard/changed-jobs", _seed_changed_jobs, paged_count),
+    ListEndpoint(f"{API_PREFIX}/poll-status", _seed_poll_status, poll_status_count),
 ]
