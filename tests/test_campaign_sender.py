@@ -19,6 +19,9 @@ from typing import Any
 import factories
 import pytest
 from campaign_fakes import ARMED_FOR_SEND, NOW, SETTINGS, make_mailbox
+from inbox_fakes import conversation, profile_urn
+from inbox_fakes import delta as inbox_delta
+from inbox_fakes import message as inbox_message
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns import schedule
@@ -34,15 +37,18 @@ from netkeeper.campaigns.gmail import (
 )
 from netkeeper.campaigns.gmail_fake import FakeGmail
 from netkeeper.config import CampaignSettings
+from netkeeper.crm import inbox_apply
 from netkeeper.crm.contacts import merge_contacts
 from netkeeper.db import session_scope
 from netkeeper.models import (
     Campaign,
+    Contact,
     Enrollment,
     EnrollmentStatus,
     Mailbox,
     MailboxArm,
     Message,
+    MessageDirection,
     MessageStatus,
     StepMode,
     Template,
@@ -2172,3 +2178,45 @@ def test_the_first_draft_found_by_its_message_id_verifies_the_mailbox(drafts: Ma
         mailbox = mailbox_service.get_mailbox(session, user, drafts.mailbox.id)
         mailbox_service.arm(session, user, mailbox, MailboxArm.SEND, by="test", now=NOW)
         assert mailbox.arm is MailboxArm.SEND
+
+
+def test_a_linkedin_answer_polled_before_the_draft_was_seen_sent_is_its_reply(
+    drafts: Mail,
+) -> None:
+    """P4-02 (#381): the LinkedIn poll recorded the answer while the enrollment had nothing
+    sent; the drafts poll then sees the draft sent, and the answer becomes the reply before
+    the follow-up it just scheduled can fire."""
+    enrollment_id = drafts.enroll()
+    urn = profile_urn("ada")
+
+    def give_urn(session: Session) -> None:
+        enrollment = get_scoped(session, drafts.user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        contact = get_scoped(session, drafts.user, Contact, enrollment.contact_id)
+        assert contact is not None
+        contact.li_urn = urn
+
+    drafts.write(give_urn)
+    drafts.tick()
+    [draft_id] = drafts.gmail.drafts()
+    sent_at = NOW + timedelta(hours=1)
+    drafts.gmail.send_draft(draft_id, at=sent_at)
+    answer = conversation(
+        "one", urn, [inbox_message(1, sender=urn, at=sent_at + timedelta(minutes=30))]
+    )
+    drafts.write(
+        lambda s: inbox_apply.apply_delta(
+            s, drafts.user, inbox_delta(answer), polled_at=sent_at + timedelta(minutes=40)
+        )
+    )
+    assert drafts.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
+
+    drafts.tick(sent_at + timedelta(hours=1))  # the drafts poll sees it sent
+    enrollment = drafts.enrollment(enrollment_id)
+    assert (enrollment.status, enrollment.next_action_at) == (EnrollmentStatus.REPLIED, None)
+    [out, reply] = drafts.messages(enrollment_id)
+    assert (out.status, reply.direction, reply.channel) == (
+        MessageStatus.SENT,
+        MessageDirection.IN,
+        TemplateChannel.LINKEDIN,
+    )

@@ -134,7 +134,15 @@ from netkeeper.campaigns.gmail import (
 )
 from netkeeper.config import Settings
 from netkeeper.db import session_scope
-from netkeeper.models import Mailbox, MailboxArm, MessageStatus, StepMode, TemplateChannel, User
+from netkeeper.models import (
+    Mailbox,
+    MailboxArm,
+    MessageStatus,
+    StepMode,
+    TemplateChannel,
+    User,
+)
+from netkeeper.models import Message as MessageRow
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped
 from netkeeper.services import campaign_engine as engine
@@ -695,15 +703,21 @@ class _Reconcile:
         if found.sent:
             at = engine.seen_sent_at(tracked, ref.internal_date)
             self.write(
-                lambda s, u: engine.settle_sent(
+                lambda s, u: _settled_sent(
                     s,
                     u,
-                    settings,
-                    tracked.message_id,
-                    expect=(MessageStatus.SCHEDULED,),
-                    at=at,
-                    gmail_message_id=ref.id,
-                    gmail_thread_id=ref.thread_id,
+                    engine.settle_sent(
+                        s,
+                        u,
+                        settings,
+                        tracked.message_id,
+                        expect=(MessageStatus.SCHEDULED,),
+                        at=at,
+                        gmail_message_id=ref.id,
+                        gmail_thread_id=ref.thread_id,
+                    ),
+                    tracked,
+                    now=self.now,
                 )
             )
             self.label(gmail, tracked, ref.id, purpose)
@@ -796,15 +810,21 @@ class _Reconcile:
             return
         settings, at = self.settings, engine.seen_sent_at(tracked, sent.internal_date)
         self.write(
-            lambda s, u: engine.settle_sent(
+            lambda s, u: _settled_sent(
                 s,
                 u,
-                settings,
-                tracked.message_id,
-                expect=(MessageStatus.DRAFTED,),
-                at=at,
-                gmail_message_id=sent.id,
-                gmail_thread_id=sent.thread_id,
+                engine.settle_sent(
+                    s,
+                    u,
+                    settings,
+                    tracked.message_id,
+                    expect=(MessageStatus.DRAFTED,),
+                    at=at,
+                    gmail_message_id=sent.id,
+                    gmail_thread_id=sent.thread_id,
+                ),
+                tracked,
+                now=self.now,
             )
         )
         self.label(gmail, tracked, sent.id, purpose)
@@ -912,3 +932,17 @@ def _not_sent(firing: Firing, reason: str) -> SendResult:
 def _failed(firing: Firing, reason: str) -> SendResult:
     log.warning("message %d not sent: %s", firing.message_id, reason)
     return SendResult(SendOutcome.FAILED, error=reason)
+
+
+def _settled_sent(
+    session: Session, user: User, settled: bool, tracked: Tracked, *, now: datetime
+) -> None:
+    """After Gmail showed a message sent: an answer the LinkedIn inbox poll recorded
+    before this send was known is the enrollment's reply (P4-02, #381), recorded before
+    the next claim can fire the step this just scheduled."""
+    if not settled:
+        return
+    # A merge may have moved the message to another enrollment meanwhile: follow it.
+    message = get_scoped(session, user, MessageRow, tracked.message_id)
+    if message is not None:
+        replies.catch_up_linkedin_replies(session, user, message.enrollment_id, now=now)

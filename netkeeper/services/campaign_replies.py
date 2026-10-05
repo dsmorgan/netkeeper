@@ -77,7 +77,10 @@ contact). Two things follow, in this order:
   snippet, never more), linked to the poll's ``li_in`` interaction, and a live
   enrollment becomes ``replied``, or ``opted_out`` when the snippet holds one of
   :data:`UNSUBSCRIBE_PHRASES`. A completed enrollment's reply is recorded and it
-  stays ``completed``. An enrollment with nothing sent yet has no reply.
+  stays ``completed``. An enrollment with nothing sent yet has no reply. When a send
+  becomes known after the poll recorded the answer to it (a prefill confirmed by a
+  later poll, a Gmail draft seen sent later), :func:`catch_up_linkedin_replies`
+  records that answer then.
 
 Recording is idempotent per enrollment and message URN. No snippet reaches a log.
 """
@@ -99,7 +102,7 @@ from netkeeper.campaigns.compose import campaign_label
 from netkeeper.campaigns.gmail import Gmail, GmailError, GmailNotFound, History, Message
 from netkeeper.config import Settings
 from netkeeper.crm import do_not_send
-from netkeeper.crm.inbox_apply import InboxNews, NewInbound, NewOutbound
+from netkeeper.crm.inbox_apply import SUMMARY_PREFIX, InboxNews, NewInbound, NewOutbound
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import is_writer, session_scope
 from netkeeper.models import (
@@ -116,6 +119,7 @@ from netkeeper.models import (
     EnrollmentStatus,
     Interaction,
     InteractionKind,
+    LiConversation,
     Mailbox,
     MessageDirection,
     MessageStatus,
@@ -954,6 +958,83 @@ def confirm_linkedin_sends(
     return confirmed
 
 
+def catch_up_linkedin_replies(
+    session: Session, user: User, enrollment_id: int, *, now: datetime
+) -> int:
+    """Record a LinkedIn reply the poll saw before the enrollment's first send was known.
+
+    The reply hook reads only the messages new to a poll, and an enrollment with
+    nothing sent has no reply then. But a send can become known after the message
+    that answers it was polled: a prefill confirmed by a later poll than the reply's
+    (a conversation whose thread was not opened), or a Gmail draft the drafts poll
+    sees sent after the LinkedIn poll recorded the answer. Whoever learns of the send
+    calls this, in the same writer session, before the next claim can fire: every
+    ``li_in`` interaction the poll recorded (one with a message URN) from the contact,
+    dated after the enrollment's first send, is that enrollment's reply. Interaction
+    times are whole seconds, so one in the send's own second counts: a stray reply
+    costs a follow-up, a missed one sends to someone who answered. Returns how many it
+    recorded. Needs a writer session."""
+    enrollment = get_scoped(session, user, Enrollment, enrollment_id)
+    if enrollment is None:
+        return 0
+    first_sent_at = next(
+        (
+            first
+            for watched, first in linkedin_watches(session, user, enrollment.contact_id, now=now)
+            if watched.id == enrollment.id
+        ),
+        None,
+    )
+    if first_sent_at is None:
+        return 0
+    polled = session.scalars(
+        scoped(user, Interaction)
+        .where(
+            Interaction.contact_id == enrollment.contact_id,
+            Interaction.kind == InteractionKind.LI_IN,
+            Interaction.external_id.is_not(None),
+            Interaction.at >= first_sent_at.replace(microsecond=0),
+        )
+        .order_by(Interaction.at, Interaction.id)
+    ).all()
+    if not polled:
+        return 0
+    conversation = session.scalar(
+        scoped(user, LiConversation)
+        .with_only_columns(LiConversation.conversation_urn)
+        .where(LiConversation.contact_id == enrollment.contact_id)
+        .order_by(LiConversation.last_activity_at.desc(), LiConversation.id.desc())
+        .limit(1)
+    )
+    recorded = 0
+    for interaction in polled:
+        assert interaction.external_id is not None
+        inbound = NewInbound(
+            contact_id=enrollment.contact_id,
+            interaction_id=interaction.id,
+            conversation_urn=conversation or "",
+            message_urn=interaction.external_id,
+            at=interaction.at,
+            snippet=_polled_snippet(interaction.summary),
+        )
+        if record_linkedin_reply(session, user, enrollment.id, inbound):
+            recorded += 1
+    if recorded:
+        log.info("enrollment %d: %d earlier LinkedIn replies recorded", enrollment.id, recorded)
+    return recorded
+
+
+def _polled_snippet(summary: str | None) -> str:
+    """The snippet of a polled message's summary (``LinkedIn message: <snippet>``)."""
+    text = summary or ""
+    prefix = f"{SUMMARY_PREFIX}: "
+    if text.startswith(prefix):
+        text = text[len(prefix) :]
+    elif text == SUMMARY_PREFIX:
+        text = ""
+    return text[:MESSAGE_SNIPPET_MAX_LENGTH]
+
+
 def apply_linkedin_news(session: Session, user: User, news: InboxNews) -> None:
     """The inbox poll's reply hook (:data:`netkeeper.crm.inbox_apply.REPLY_HANDLERS`).
 
@@ -966,7 +1047,12 @@ def apply_linkedin_news(session: Session, user: User, news: InboxNews) -> None:
     if not is_writer(session):
         raise RuntimeError("recording LinkedIn replies needs a writer session")
     settings = news.settings if news.settings is not None else Settings()
-    confirm_linkedin_sends(session, user, news.outbound, settings=settings, now=news.polled_at)
+    for message_id in confirm_linkedin_sends(
+        session, user, news.outbound, settings=settings, now=news.polled_at
+    ):
+        confirmed = get_scoped(session, user, MessageRow, message_id)
+        if confirmed is not None:
+            catch_up_linkedin_replies(session, user, confirmed.enrollment_id, now=news.polled_at)
     for inbound in news.inbound:
         for enrollment, first_sent_at in linkedin_watches(
             session, user, inbound.contact_id, now=news.polled_at

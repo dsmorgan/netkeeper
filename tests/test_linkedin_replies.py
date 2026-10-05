@@ -12,7 +12,7 @@ import asyncio
 import itertools
 import logging
 import random
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -687,6 +687,43 @@ def test_a_send_then_a_reply_in_one_poll_ends_the_enrollment_replied(
     assert (enrollment.status, enrollment.next_action_at) == (EnrollmentStatus.REPLIED, None)
 
 
+def test_a_reply_polled_before_the_send_was_seen_still_ends_the_enrollment(
+    linkedin_first: World,
+) -> None:
+    """The poll that first saw the answer did not load the sent message (a thread not
+    opened), so nothing was sent yet. The poll that then confirms the send records the
+    earlier answer as the reply before the next step can fire."""
+    world = linkedin_first
+    enrollment_id = world.enroll()
+    message_id = world.prefill(enrollment_id)
+    world.apply(
+        said(ADA, NOW + timedelta(minutes=30), "stop messaging please"),
+        polled_at=NOW + timedelta(hours=1),
+    )
+    assert world.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
+
+    thread, _ = you_sent(ADA, NOW + timedelta(minutes=5))
+    world.apply(thread, polled_at=NOW + timedelta(hours=4))
+    assert world.message(message_id).status is MessageStatus.SENT
+    enrollment = world.enrollment(enrollment_id)
+    assert (enrollment.status, enrollment.next_action_at) == (EnrollmentStatus.OPTED_OUT, None)
+    [reply] = world.inbound(enrollment_id)
+    assert (reply.snippet, reply.asks_unsubscribe) == ("stop messaging please", True)
+    assert reply.li_conversation_urn == CONVERSATION
+    assert world.interaction(reply.li_message_urn or "").message_id == reply.id
+
+
+def test_catching_up_ignores_what_came_before_the_first_send(linkedin_first: World) -> None:
+    world = linkedin_first
+    enrollment_id = world.enroll()
+    world.apply(said(ADA, NOW - timedelta(days=1)), polled_at=NOW - timedelta(hours=20))
+    world.prefill(enrollment_id)
+    thread, _ = you_sent(ADA, NOW + timedelta(minutes=5))
+    world.apply(thread, polled_at=NOW + timedelta(hours=1))
+    assert world.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
+    assert world.inbound(enrollment_id) == []
+
+
 def test_an_archived_sent_message_the_poll_adopts_confirms_the_prefill(
     linkedin_first: World,
 ) -> None:
@@ -783,7 +820,7 @@ def _statuses(factory: sessionmaker[Session], user_id: int) -> dict[int, Enrollm
 
 def _outbound(
     factory: sessionmaker[Session], user_id: int
-) -> dict[int, Sequence[tuple[TemplateChannel, MessageStatus]]]:
+) -> dict[int, list[tuple[TemplateChannel, MessageStatus]]]:
     with session_scope(factory) as session:
         user = session.get_one(User, user_id)
         found: dict[int, list[tuple[TemplateChannel, MessageStatus]]] = {}
