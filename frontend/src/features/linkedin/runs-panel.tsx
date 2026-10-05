@@ -23,7 +23,11 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : 'Runs are unavailable.'
 }
 
-/** Every run, newest first, filterable by kind and status; a row opens its detail (spec 14.1). */
+/**
+ * Every run, newest first, filterable by kind and status; a row opens its detail
+ * (spec 14.1). The Run column is the id `netkeeper linkedin run <id>` takes (#405).
+ * The whole row is the click target; the kind is also a button, for the keyboard.
+ */
 export function RunsPanel({
   selectedRunId,
   onSelect,
@@ -105,6 +109,9 @@ export function RunsPanel({
               <thead className="text-muted-foreground">
                 <tr>
                   <th scope="col" className="py-1 pr-3 font-medium">
+                    Run
+                  </th>
+                  <th scope="col" className="py-1 pr-3 font-medium">
                     Kind
                   </th>
                   <th scope="col" className="py-1 pr-3 font-medium">
@@ -126,16 +133,21 @@ export function RunsPanel({
                   <tr
                     key={item.id}
                     className={cn(
-                      'border-t border-border/60',
+                      'cursor-pointer border-t border-border/60 hover:bg-muted/40',
                       item.id === selectedRunId && 'bg-muted/60',
                     )}
+                    onClick={() => onSelect(item.id)}
                   >
+                    <td className="py-2 pr-3 text-muted-foreground tabular-nums">{item.id}</td>
                     <th scope="row" className="py-2 pr-3 font-normal">
                       <button
                         type="button"
                         className="underline underline-offset-4"
                         aria-current={item.id === selectedRunId ? 'true' : undefined}
-                        onClick={() => onSelect(item.id)}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          onSelect(item.id)
+                        }}
                       >
                         {RUN_KIND_LABELS[item.kind]}
                       </button>

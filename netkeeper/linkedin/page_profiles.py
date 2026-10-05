@@ -87,7 +87,7 @@ import asyncio
 import json
 import logging
 import random
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Final, cast
 from urllib.parse import quote, urljoin, urlsplit
 
@@ -98,7 +98,7 @@ from netkeeper.linkedin.browser import (
     is_navigation_timeout,
 )
 from netkeeper.linkedin.classify import Outcome, classify
-from netkeeper.linkedin.enrich import LINKEDIN_ORIGIN, Answer, masked
+from netkeeper.linkedin.enrich import LINKEDIN_ORIGIN, Answer, UnreadableCause, masked
 from netkeeper.linkedin.flagship import (
     CONTACT_DETAILS_SCREEN_ID,
     NAVIGATION_PATH,
@@ -285,7 +285,12 @@ class PageProfiles:
             details = parse_profile(self._screen, kept, slug=self._slug)
         except RouteChanged:
             log.warning("enrichment: the profile answered in a shape the parser does not know")
-            return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
+            return Answer(
+                Outcome.ROUTE_CHANGED,
+                self._url,
+                unparsed=True,
+                cause=UnreadableCause.PROFILE_SHAPE_UNKNOWN,
+            )
         # #196 item 12: a lazy card read from a copy is only noted, as the overlay's
         # is. Positions are upserted and never removed, and the copy passed the same
         # whole-answer checks; keeping the contact due would only add visits.
@@ -322,7 +327,9 @@ class PageProfiles:
             if wall is not None:
                 self._stopped = wall
                 return _as(wall)
-            return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
+            return Answer(
+                Outcome.ROUTE_CHANGED, self._url, unparsed=True, cause=_refusal_cause(click.refusal)
+            )
         info = await self._read_overlay()
         if info.outcome is Outcome.ROUTE_CHANGED and info.unparsed:
             # An overlay that did not come, or did not read, may be a wall the click
@@ -347,7 +354,12 @@ class PageProfiles:
                 if self._lost_screen is not None:
                     return self._screen_lost()
                 log.warning("enrichment: the profile page loaded, but no profile screen arrived")
-                return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
+                return Answer(
+                    Outcome.ROUTE_CHANGED,
+                    self._url,
+                    unparsed=True,
+                    cause=UnreadableCause.NO_PROFILE_SCREEN,
+                )
             path = _path(response.url)
             if path in (_path(COMPONENT_PATH), _path(NAVIGATION_PATH)):
                 # Before this profile's screen, a lazy card can only be the last page's,
@@ -374,7 +386,12 @@ class PageProfiles:
                     return Answer(Outcome.NOT_FOUND, masked(response.url))
                 # The screen request's 404 is not a missing profile by anything the
                 # capture showed: unreadable, never NotFound by guess.
-                return Answer(Outcome.ROUTE_CHANGED, masked(response.url), unparsed=True)
+                return Answer(
+                    Outcome.ROUTE_CHANGED,
+                    masked(response.url),
+                    unparsed=True,
+                    cause=UnreadableCause.PROFILE_SCREEN_STATUS,
+                )
             outcome = _status_outcome(response)
             if outcome is not Outcome.OK:
                 return Answer(outcome, masked(response.url))
@@ -391,7 +408,12 @@ class PageProfiles:
                 try:
                     payload = rehydration_payload(response.text() or "", endpoint=PROFILE_ENDPOINT)
                 except RouteChanged:
-                    return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
+                    return Answer(
+                        Outcome.ROUTE_CHANGED,
+                        self._url,
+                        unparsed=True,
+                        cause=UnreadableCause.PROFILE_SHAPE_UNKNOWN,
+                    )
                 if payload is None:
                     # No screen in the document: a page that fetches it next, or a wall
                     # served in place. The HTML is never searched for wall paths (#188
@@ -405,13 +427,20 @@ class PageProfiles:
                 # The tab is on a profile nobody asked for, and no redirect the page
                 # received led there: a stale tab, or a page that moved by itself.
                 log.warning("enrichment: the tab is on a profile no redirect led to")
-                return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
+                return Answer(
+                    Outcome.ROUTE_CHANGED,
+                    self._url,
+                    unparsed=True,
+                    cause=UnreadableCause.UNEXPECTED_PROFILE,
+                )
             self._screen = payload
             return Answer(Outcome.OK, self._url)
         if self._lost_screen is not None:
             return self._screen_lost()
         log.warning("enrichment: %d answers arrived, none the profile screen", answers)
-        return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
+        return Answer(
+            Outcome.ROUTE_CHANGED, self._url, unparsed=True, cause=UnreadableCause.NO_PROFILE_SCREEN
+        )
 
     async def _navigation_timed_out(self) -> Answer[None]:
         """The profile's navigation never finished loading (#197): an unreadable visit.
@@ -444,7 +473,13 @@ class PageProfiles:
             return said
         lost = f"the profile could not be opened ({NAVIGATION_TIMED_OUT})"
         log.info("enrichment: %s", lost)
-        return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True, lost=lost)
+        return Answer(
+            Outcome.ROUTE_CHANGED,
+            self._url,
+            unparsed=True,
+            lost=lost,
+            cause=UnreadableCause.NAVIGATION_TIMED_OUT,
+        )
 
     async def _queued_answers(self, tab: str | None) -> Answer[None] | None:
         """What the answers already queued for this visit say, read without waiting.
@@ -481,7 +516,12 @@ class PageProfiles:
                         blocked = (
                             Answer(Outcome.NOT_FOUND, masked(response.url))
                             if response.method == "GET"
-                            else Answer(Outcome.ROUTE_CHANGED, masked(response.url), unparsed=True)
+                            else Answer(
+                                Outcome.ROUTE_CHANGED,
+                                masked(response.url),
+                                unparsed=True,
+                                cause=UnreadableCause.PROFILE_SCREEN_STATUS,
+                            )
                         )
                     else:
                         outcome = _status_outcome(response)
@@ -501,7 +541,13 @@ class PageProfiles:
         wall = self._wall(self._page.url)
         if wall is not None:
             return wall
-        return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True, lost=self._lost_screen)
+        return Answer(
+            Outcome.ROUTE_CHANGED,
+            self._url,
+            unparsed=True,
+            lost=self._lost_screen,
+            cause=UnreadableCause.PROFILE_SCREEN_LOST,
+        )
 
     def _redirect(self, response: ObservedResponse) -> Answer[None] | None:
         """A redirect: a wall is that wall, another profile is followed, else unreadable.
@@ -523,7 +569,12 @@ class PageProfiles:
                 log.info("enrichment: skipped a redirect that another page received")
             return None  # a renamed profile: the tab's own url says where it landed
         log.warning("enrichment: the profile redirected somewhere that is not a profile")
-        return Answer(Outcome.ROUTE_CHANGED, masked(target), unparsed=True)
+        return Answer(
+            Outcome.ROUTE_CHANGED,
+            masked(target),
+            unparsed=True,
+            cause=UnreadableCause.LANDED_OFF_PROFILE,
+        )
 
     def _in_chain(self, slug: str | None) -> bool:
         """Whether ``slug`` is the profile asked for, or one this visit's redirects led to."""
@@ -583,7 +634,12 @@ class PageProfiles:
             return None
         if len(self._components) >= MAX_COMPONENTS:
             log.warning("enrichment: more lazy cards than a profile loads; unreadable")
-            return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
+            return Answer(
+                Outcome.ROUTE_CHANGED,
+                self._url,
+                unparsed=True,
+                cause=UnreadableCause.TOO_MANY_LAZY_CARDS,
+            )
         self._components.append((body, response.request_body, response.body is None))
         return None
 
@@ -596,7 +652,12 @@ class PageProfiles:
             response = await observation.next(max(deadline - loop.time(), 0.0))
             if response is None:
                 log.warning("enrichment: the Contact info overlay never answered")
-                return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
+                return Answer(
+                    Outcome.ROUTE_CHANGED,
+                    self._url,
+                    unparsed=True,
+                    cause=UnreadableCause.OVERLAY_NEVER_ANSWERED,
+                )
             if _path(response.url) != _path(NAVIGATION_PATH):
                 blocked = (
                     self._take_other(response)
@@ -611,20 +672,35 @@ class PageProfiles:
                 continue  # another navigation the page made: not the overlay
             if request.vanity_name is None or not same_slug(request.vanity_name, self._slug):
                 log.warning("enrichment: the page asked for another profile's overlay")
-                return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
+                return Answer(
+                    Outcome.ROUTE_CHANGED,
+                    self._url,
+                    unparsed=True,
+                    cause=UnreadableCause.OVERLAY_OTHER_PROFILE,
+                )
             if response.failure == FAILURE_REDIRECT:
                 target = urljoin(response.url, response.location or "")
                 outcome = classify(response.status, masked(target), "")
                 if outcome in (Outcome.CHECKPOINT, Outcome.LOGGED_OUT):
                     return Answer(outcome, masked(target))
-                return Answer(Outcome.ROUTE_CHANGED, masked(target), unparsed=True)
+                return Answer(
+                    Outcome.ROUTE_CHANGED,
+                    masked(target),
+                    unparsed=True,
+                    cause=UnreadableCause.OVERLAY_REDIRECTED,
+                )
             outcome = _status_outcome(response)
             if outcome in _STOPPING:
                 return Answer(outcome, masked(response.url))
             if outcome is not Outcome.OK:
                 # Never NotFound by guess: nothing captured says how a missing
                 # profile's overlay answers.
-                return Answer(Outcome.ROUTE_CHANGED, masked(response.url), unparsed=True)
+                return Answer(
+                    Outcome.ROUTE_CHANGED,
+                    masked(response.url),
+                    unparsed=True,
+                    cause=UnreadableCause.OVERLAY_STATUS,
+                )
             body = response.body
             if body is None:
                 # #197: the overlay answered, but its body could not be handed over.
@@ -635,7 +711,13 @@ class PageProfiles:
                 body = _whole_copy(response, endpoint=CONTACT_INFO_ENDPOINT)
                 if body is None:
                     log.info("enrichment: %s; not clicking again", lost)
-                    return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True, lost=lost)
+                    return Answer(
+                        Outcome.ROUTE_CHANGED,
+                        self._url,
+                        unparsed=True,
+                        lost=lost,
+                        cause=UnreadableCause.CONTACT_INFO_LOST,
+                    )
                 log.info(
                     "enrichment: read the Contact info answer from the copy streamed as it"
                     " arrived (%d bytes)",
@@ -645,7 +727,12 @@ class PageProfiles:
                 info = parse_contact_info(body, slug=self._slug)
             except RouteChanged:
                 log.warning("enrichment: the overlay answered in a shape the parser does not know")
-                return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
+                return Answer(
+                    Outcome.ROUTE_CHANGED,
+                    self._url,
+                    unparsed=True,
+                    cause=UnreadableCause.CONTACT_INFO_SHAPE_UNKNOWN,
+                )
             return Answer(Outcome.OK, self._url, info, from_copy=response.body is None)
 
     # --- the tab ----------------------------------------------------------------------
@@ -666,7 +753,12 @@ class PageProfiles:
         slug = profile_slug(urlsplit(url).path) if self._on_origin(url) else None
         if slug is None:
             log.warning("enrichment: the tab landed somewhere that is not a profile")
-            return Answer(Outcome.ROUTE_CHANGED, masked(url), unparsed=True)
+            return Answer(
+                Outcome.ROUTE_CHANGED,
+                masked(url),
+                unparsed=True,
+                cause=UnreadableCause.LANDED_OFF_PROFILE,
+            )
         self._slug = slug
         self._path = urlsplit(url).path
         return None
@@ -679,7 +771,12 @@ class PageProfiles:
         slug = profile_slug(urlsplit(url).path) if self._on_origin(url) else None
         if slug is None or not same_slug(slug, self._slug):
             log.warning("enrichment: the tab left the profile during the visit")
-            return Answer(Outcome.ROUTE_CHANGED, masked(url), unparsed=True)
+            return Answer(
+                Outcome.ROUTE_CHANGED,
+                masked(url),
+                unparsed=True,
+                cause=UnreadableCause.LEFT_PROFILE,
+            )
         return None
 
     def _wall(self, url: str) -> Answer[None] | None:
@@ -718,7 +815,34 @@ class PageProfiles:
 
 def _as[T](answer: Answer[None]) -> Answer[T]:
     """A visit's stop, as the answer to whichever step asked."""
-    return Answer(answer.outcome, answer.final_url, unparsed=answer.unparsed, lost=answer.lost)
+    return Answer(
+        answer.outcome,
+        answer.final_url,
+        unparsed=answer.unparsed,
+        lost=answer.lost,
+        cause=answer.cause,
+    )
+
+
+#: Each fixed refusal :meth:`BrowserRun.click_contact_info` gives, as its cause (#405).
+#: A refusal not listed here is recorded as ``contact_info_not_clicked``; the test
+#: suite pins that every refusal the browser module can give is listed.
+CLICK_REFUSAL_CAUSES: Final[Mapping[str, UnreadableCause]] = {
+    "the tab is not on the profile": UnreadableCause.LEFT_PROFILE,
+    "the tab left the profile before the click": UnreadableCause.LEFT_PROFILE,
+    "the control could not be read": UnreadableCause.CONTACT_INFO_CONTROL_UNREADABLE,
+    "no Contact info control on the page": UnreadableCause.CONTACT_INFO_CONTROL_MISSING,
+    "more than one Contact info control": UnreadableCause.CONTACT_INFO_CONTROL_NOT_ALONE,
+    "the control opens something else": UnreadableCause.CONTACT_INFO_CONTROL_ELSEWHERE,
+    "the control could not be clicked": UnreadableCause.CONTACT_INFO_CONTROL_UNCLICKABLE,
+}
+
+
+def _refusal_cause(refusal: str | None) -> UnreadableCause:
+    """The cause for a Contact info click that was refused (#405)."""
+    if refusal is None:
+        return UnreadableCause.CONTACT_INFO_NOT_CLICKED
+    return CLICK_REFUSAL_CAUSES.get(refusal, UnreadableCause.CONTACT_INFO_NOT_CLICKED)
 
 
 def _status_outcome(response: ObservedResponse) -> Outcome:

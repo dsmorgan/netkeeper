@@ -9223,6 +9223,62 @@
         "title": "RunContactsOut",
         "type": "object"
       },
+      "RunDiagnosticsOut": {
+        "description": "Why a run's visits or answers could not be read (#405), nothing from the page.\nBoth lists are empty for a run that has none, or one recorded before #405.",
+        "properties": {
+          "lost_answers": {
+            "items": {
+              "$ref": "#/components/schemas/RunLostAnswerOut"
+            },
+            "title": "Lost Answers",
+            "type": "array"
+          },
+          "unreadable_visits": {
+            "items": {
+              "$ref": "#/components/schemas/RunVisitReasonOut"
+            },
+            "title": "Unreadable Visits",
+            "type": "array"
+          }
+        },
+        "required": [
+          "unreadable_visits",
+          "lost_answers"
+        ],
+        "title": "RunDiagnosticsOut",
+        "type": "object"
+      },
+      "RunLostAnswerOut": {
+        "description": "One answer a connections run lost (#200): the list offset, a fixed cause, and\nhow the run went on, ``None`` for a run recorded before that was kept.",
+        "properties": {
+          "cause": {
+            "title": "Cause",
+            "type": "string"
+          },
+          "ending": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ending"
+          },
+          "start": {
+            "title": "Start",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "cause",
+          "ending"
+        ],
+        "title": "RunLostAnswerOut",
+        "type": "object"
+      },
       "RunOut": {
         "description": "One run: what it is, how far it got, and how it ended. Counts only, never names.\n\n``planned``/``completed`` are an enrichment plan's size and progress.\n``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.\n``resumed_by`` is the id of the run that already took over this one's\nremaining plan, or null when it has not been (and so still may be, spec 9.9).\n``stop_reason_text`` is ``stop_reason`` in plain words (\"outside active\nhours\" for ``inactive``, #213), or null while the run is running.\n``pause_requested`` is true while a running enrichment is stopping to pause\n(#324); it ends ``aborted`` with ``stop_reason`` ``paused``, and resumable.",
         "properties": {
@@ -9501,6 +9557,64 @@
           "kind"
         ],
         "title": "RunStartIn",
+        "type": "object"
+      },
+      "RunVisitReasonOut": {
+        "description": "One enrichment visit that counted toward the unreadable limits (#405).\n\n``visit`` is its number in the run, from 1; ``reason`` a fixed code and\n``reason_text`` the same in plain words. The name is the contact's in\nnetkeeper, ``None`` for a contact deleted since (``contact_exists`` false).",
+        "properties": {
+          "contact_exists": {
+            "title": "Contact Exists",
+            "type": "boolean"
+          },
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "reason_text": {
+            "title": "Reason Text",
+            "type": "string"
+          },
+          "visit": {
+            "title": "Visit",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "visit",
+          "contact_id",
+          "contact_exists",
+          "first_name",
+          "last_name",
+          "reason",
+          "reason_text"
+        ],
+        "title": "RunVisitReasonOut",
         "type": "object"
       },
       "SavedViewCreate": {
@@ -18236,6 +18350,52 @@
           }
         },
         "summary": "List Run Contacts",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/runs/{run_id}/diagnostics": {
+      "get": {
+        "description": "Why the run's visits or answers could not be read, in order (#405).",
+        "operationId": "get_linkedin_run_diagnostics",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDiagnosticsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No run"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Run Diagnostics",
         "tags": [
           "linkedin"
         ]

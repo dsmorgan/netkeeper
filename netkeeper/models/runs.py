@@ -29,7 +29,10 @@ Columns beyond spec 8.4's list, each read by something:
   a token, a body, or a slug.
 
 ``progress_json`` and ``counts_json`` hold counts only, as the extractor's
-progress events do: no names, no URNs, no slugs.
+progress events do: no names, no URNs, no slugs. The one exception is a record of
+netkeeper's own ids with fixed reason codes: an enrichment's ``unreadable_visits``
+(visit number, contact id, reason code; #405) and a connections sync's ``lost``
+(list offset, fixed cause).
 """
 
 from __future__ import annotations

@@ -67,6 +67,7 @@ API_PATHS = {
     "/api/v1/linkedin/runs/{run_id}/pause",
     "/api/v1/linkedin/runs/{run_id}/resume",
     "/api/v1/linkedin/runs/{run_id}/contacts",
+    "/api/v1/linkedin/runs/{run_id}/diagnostics",
     "/api/v1/linkedin/budget",
     "/api/v1/linkedin/heat",
     "/api/v1/linkedin/heat/clear",

@@ -2045,6 +2045,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/linkedin/runs/{run_id}/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Run Diagnostics
+         * @description Why the run's visits or answers could not be read, in order (#405).
+         */
+        get: operations["get_linkedin_run_diagnostics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/linkedin/runs/{run_id}/pause": {
         parameters: {
             query?: never;
@@ -6339,6 +6359,30 @@ export interface components {
             items: components["schemas"]["RunContactOut"][];
         };
         /**
+         * RunDiagnosticsOut
+         * @description Why a run's visits or answers could not be read (#405), nothing from the page.
+         *     Both lists are empty for a run that has none, or one recorded before #405.
+         */
+        RunDiagnosticsOut: {
+            /** Lost Answers */
+            lost_answers: components["schemas"]["RunLostAnswerOut"][];
+            /** Unreadable Visits */
+            unreadable_visits: components["schemas"]["RunVisitReasonOut"][];
+        };
+        /**
+         * RunLostAnswerOut
+         * @description One answer a connections run lost (#200): the list offset, a fixed cause, and
+         *     how the run went on, ``None`` for a run recorded before that was kept.
+         */
+        RunLostAnswerOut: {
+            /** Cause */
+            cause: string;
+            /** Ending */
+            ending: string | null;
+            /** Start */
+            start: number;
+        };
+        /**
          * RunOut
          * @description One run: what it is, how far it got, and how it ended. Counts only, never names.
          *
@@ -6419,6 +6463,30 @@ export interface components {
             kind: components["schemas"]["SyncRunKind"];
             /** Max Visits */
             max_visits?: number | null;
+        };
+        /**
+         * RunVisitReasonOut
+         * @description One enrichment visit that counted toward the unreadable limits (#405).
+         *
+         *     ``visit`` is its number in the run, from 1; ``reason`` a fixed code and
+         *     ``reason_text`` the same in plain words. The name is the contact's in
+         *     netkeeper, ``None`` for a contact deleted since (``contact_exists`` false).
+         */
+        RunVisitReasonOut: {
+            /** Contact Exists */
+            contact_exists: boolean;
+            /** Contact Id */
+            contact_id: number;
+            /** First Name */
+            first_name: string | null;
+            /** Last Name */
+            last_name: string | null;
+            /** Reason */
+            reason: string;
+            /** Reason Text */
+            reason_text: string;
+            /** Visit */
+            visit: number;
         };
         /** SavedViewCreate */
         SavedViewCreate: {
@@ -11964,6 +12032,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RunContactsOut"];
+                };
+            };
+            /** @description No run */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_linkedin_run_diagnostics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunDiagnosticsOut"];
                 };
             };
             /** @description No run */

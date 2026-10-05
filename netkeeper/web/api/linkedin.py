@@ -19,6 +19,8 @@ built on:
 * ``POST /linkedin/runs/{id}/resume``: an aborted enrichment's remaining plan,
   as a new run, never re-planned.
 * ``GET /linkedin/runs/{id}/contacts``: the last few contacts the run touched.
+* ``GET /linkedin/runs/{id}/diagnostics``: why its visits or answers could not be
+  read, as fixed reason codes with each contact's id and name (#405).
 * ``GET /linkedin/budget``, ``GET /linkedin/heat``: the counters and the heat
   level, as ``netkeeper posture`` reads them.
 * ``POST /linkedin/heat/clear`` (with ``confirm: true`` and the ``last_raised_at``
@@ -53,7 +55,7 @@ from netkeeper.models import Contact, SyncRun, SyncRunKind, SyncRunStatus, SyncR
 from netkeeper.models.base import utcnow
 from netkeeper.paths import data_dir
 from netkeeper.scoping import get_scoped_contact, scoped_contacts
-from netkeeper.services import budgets, enrich_plan, run_contacts, runs
+from netkeeper.services import budgets, enrich_plan, run_contacts, run_diagnostics, runs
 from netkeeper.services import heat as heat_rows
 from netkeeper.services import posture as posture_service
 from netkeeper.services.browser_launch import (
@@ -99,10 +101,13 @@ from netkeeper.web.schemas import (
     RunAccepted,
     RunContactOut,
     RunContactsOut,
+    RunDiagnosticsOut,
+    RunLostAnswerOut,
     RunOut,
     RunPage,
     RunResumeIn,
     RunStartIn,
+    RunVisitReasonOut,
     ScheduleArmIn,
     ScheduledJobOut,
     ScheduleOut,
@@ -299,6 +304,38 @@ def list_run_contacts(run_id: int, user: CurrentUser, session: SessionDep) -> Ru
             )
             for item in run_contacts.recent(session, user, run)
         ]
+    )
+
+
+@router.get(
+    "/runs/{run_id}/diagnostics",
+    operation_id="get_linkedin_run_diagnostics",
+    responses={404: {"description": "No run"}},
+)
+def get_run_diagnostics(run_id: int, user: CurrentUser, session: SessionDep) -> RunDiagnosticsOut:
+    """Why the run's visits or answers could not be read, in order (#405)."""
+    try:
+        run = runs.get_run(session, user, run_id)
+    except runs.RunNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    found = run_diagnostics.diagnose(session, user, run)
+    return RunDiagnosticsOut(
+        unreadable_visits=[
+            RunVisitReasonOut(
+                visit=item.visit,
+                contact_id=item.contact_id,
+                contact_exists=item.contact_exists,
+                first_name=item.first_name,
+                last_name=item.last_name,
+                reason=item.reason,
+                reason_text=item.reason_text,
+            )
+            for item in found.unreadable_visits
+        ],
+        lost_answers=[
+            RunLostAnswerOut(start=item.start, cause=item.cause, ending=item.ending)
+            for item in found.lost_answers
+        ],
     )
 
 

@@ -16,6 +16,9 @@ export type RunPage = JsonOf<paths['/api/v1/linkedin/runs']['get']['responses'][
 export type RunAccepted = JsonOf<paths['/api/v1/linkedin/runs']['post']['responses'][202]>
 export type RunContact = components['schemas']['RunContactOut']
 export type RunContacts = components['schemas']['RunContactsOut']
+export type RunDiagnostics = components['schemas']['RunDiagnosticsOut']
+export type RunVisitReason = components['schemas']['RunVisitReasonOut']
+export type RunLostAnswer = components['schemas']['RunLostAnswerOut']
 
 export type Budget = components['schemas']['BudgetOut']
 export type PeriodBudget = components['schemas']['PeriodBudgetOut']
@@ -55,6 +58,11 @@ export const RUN_KIND_LABELS: Record<RunKind, string> = {
   enrich: 'Enrichment',
   inbox: 'Inbox poll',
   message_send: 'Message send',
+}
+
+export const RUN_TRIGGER_LABELS: Record<RunTrigger, string> = {
+  manual: 'Manual',
+  scheduled: 'Scheduled',
 }
 
 export const RUN_STATUS_LABELS: Record<RunStatus, string> = {

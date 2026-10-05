@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -9,7 +9,8 @@ import { cn } from '@/lib/utils'
 import { budgetQuery, cancelRun, linkedinKeys, resumeRun, runQuery } from './api'
 import { formatFields, formatWhen, RUN_STATUS_CLASSES, stopReasonLabel, type Field } from './fields'
 import { ProfileViewNotice } from './profile-view-notice'
-import { RUN_KIND_LABELS, RUN_STATUS_LABELS } from './types'
+import { RunReasons } from './run-reasons'
+import { RUN_KIND_LABELS, RUN_STATUS_LABELS, RUN_TRIGGER_LABELS } from './types'
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -38,6 +39,13 @@ export function RunDetail({
   const budget = useQuery(budgetQuery)
   const queryClient = useQueryClient()
   const [resuming, setResuming] = useState(false)
+  const card = useRef<HTMLDivElement>(null)
+
+  // Opened from a row of the runs list, the detail sits below it: bring it into view
+  // (#405). jsdom has no scrollIntoView, hence the optional call.
+  useEffect(() => {
+    card.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
+  }, [runId, run.isSuccess])
 
   const cancel = useMutation({
     mutationFn: () => cancelRun(runId),
@@ -71,11 +79,17 @@ export function RunDetail({
     data.completed !== null &&
     data.completed < data.planned
 
+  const counted = data.status === 'running' ? data.progress : data.counts
+  const marker = `${String(counted?.unreadable ?? 0)}/${String(counted?.mismatched ?? 0)}`
+
   return (
-    <Card size="sm">
+    <Card size="sm" ref={card} role="region" aria-label={`Run ${data.id}`}>
       <CardHeader>
         <CardTitle level={2} className="flex items-center gap-2">
           {RUN_KIND_LABELS[data.kind]}
+          <span className="text-sm font-normal text-muted-foreground tabular-nums">
+            Run {data.id}
+          </span>
           <span
             className={cn(
               'inline-flex h-5 shrink-0 items-center rounded-4xl px-2 text-xs font-medium',
@@ -86,7 +100,7 @@ export function RunDetail({
           </span>
         </CardTitle>
         <CardDescription>
-          Started {formatWhen(data.started_at)}
+          {RUN_TRIGGER_LABELS[data.trigger]} · started {formatWhen(data.started_at)}
           {data.completed_at !== null && ` · ended ${formatWhen(data.completed_at)}`}
         </CardDescription>
       </CardHeader>
@@ -111,6 +125,7 @@ export function RunDetail({
         {data.status !== 'running' && (
           <FieldList title="Counts" fields={formatFields(data.counts)} />
         )}
+        <RunReasons runId={runId} marker={marker} />
 
         <div className="flex flex-wrap gap-2">
           {data.status === 'running' && (

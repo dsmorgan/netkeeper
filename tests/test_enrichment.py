@@ -39,7 +39,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.config import BudgetSettings, LinkedInSettings, Settings
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
-from netkeeper.linkedin.enrich import StopReason
+from netkeeper.linkedin.enrich import StopReason, UnreadableCause
 from netkeeper.linkedin.pacing import plan_enrichment
 from netkeeper.models import (
     Contact,
@@ -51,7 +51,7 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.scoping import get_scoped
-from netkeeper.services import budgets, enrich_plan, runs
+from netkeeper.services import budgets, enrich_plan, run_diagnostics, runs
 from netkeeper.services import heat as heat_service
 from netkeeper.services.budgets import ActionClass
 from netkeeper.services.enrichment import (
@@ -918,6 +918,75 @@ async def test_two_unreadable_profiles_in_a_row_abort_without_heat_or_flag(
     assert (report.heat_raised, report.session_flagged) == (False, False)
     plan = _plan(session_factory, user_id, report)
     assert plan.status == "aborted" and len(plan.completed) == 3
+
+
+# --- #405: each unreadable visit's reason is kept on the run -----------------------------------
+
+_NO_CONTROL = Scripted(
+    Outcome.ROUTE_CHANGED, unparsed=True, cause=UnreadableCause.CONTACT_INFO_CONTROL_MISSING
+)
+_NO_ANSWER = Scripted(
+    Outcome.ROUTE_CHANGED, unparsed=True, cause=UnreadableCause.OVERLAY_NEVER_ANSWERED
+)
+
+
+async def test_the_run_keeps_each_unreadable_visits_reason_and_contact(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Mateo's Contact info control is missing (read 3, his overlay), Hana's overlay
+    never answers (read 5): two in a row stop the run, and both reasons are on it."""
+    people = _people(4)
+    user_id, ids = _setup(session_factory, people)
+    browser = FakeBrowser.of(people, script={3: _NO_CONTROL, 5: _NO_ANSWER})
+
+    report = await _enrich(session_factory, user_id, browser)
+
+    assert report.result.outcome is Outcome.ROUTE_CHANGED
+    expected = [
+        {"visit": 2, "contact_id": ids[102], "reason": "contact_info_control_missing"},
+        {"visit": 3, "contact_id": ids[103], "reason": "overlay_never_answered"},
+    ]
+    run = _last_run(session_factory, user_id)
+    assert run.counts_json is not None and run.counts_json["unreadable_visits"] == expected
+    assert run.progress_json is not None and run.progress_json["unreadable_visits"] == expected
+    # Nothing from the page: no slug, no URN, no name anywhere in either record.
+    stored = f"{run.counts_json} {run.progress_json} {run.notes}"
+    for person in people:
+        assert person.slug not in stored and person.urn not in stored
+        assert person.first not in stored and person.last not in stored
+
+
+async def test_a_run_that_dies_keeps_the_reasons_it_had_recorded(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The record is written as the run goes, so a run ended by exception still says
+    why its earlier visits could not be read, and the detail view reads it from there."""
+    from netkeeper.linkedin.observe import ObservationFailed
+
+    people = _people(4)
+    user_id, ids = _setup(session_factory, people)
+    browser = FakeBrowser.of(people, script={0: _NO_ANSWER})
+
+    def plumbing_breaks(kind: str, value: object) -> None:
+        if kind == "details" and browser.kinds().count("details") == 3:
+            raise ObservationFailed("a matching response was dropped")
+
+    browser.on_event = plumbing_breaks
+    with pytest.raises(ObservationFailed):
+        await _enrich(session_factory, user_id, browser)
+
+    died = _last_run(session_factory, user_id)
+    assert died.counts_json is None
+    found = _read(
+        session_factory,
+        user_id,
+        lambda s, u: run_diagnostics.diagnose(s, u, runs.get_run(s, u, died.id)),
+    )
+    assert [(v.visit, v.contact_id, v.reason) for v in found.unreadable_visits] == [
+        (1, ids[101], "overlay_never_answered")
+    ]
+    (visit,) = found.unreadable_visits
+    assert (visit.first_name, visit.last_name) == (people[0].first, people[0].last)
 
 
 async def test_a_harvest_and_its_completion_mark_commit_together(

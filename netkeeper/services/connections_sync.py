@@ -177,7 +177,10 @@ class SyncRunReport:
             "outcome": None if self.result.outcome is None else self.result.outcome.value,
             "heat_raised": self.heat_raised,
             "session_flagged": self.session_flagged,
-            "lost": [{"start": lost.start, "cause": lost.cause} for lost in self.result.losses],
+            "lost": [
+                {"start": lost.start, "cause": lost.cause, "ending": lost.ending}
+                for lost in self.result.losses
+            ],
         }
 
 
