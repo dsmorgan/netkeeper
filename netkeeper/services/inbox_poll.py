@@ -42,7 +42,7 @@ from typing import Final
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.config import LinkedInSettings
+from netkeeper.config import LinkedInSettings, Settings
 from netkeeper.crm import inbox_apply
 from netkeeper.db import off_loop, session_scope
 from netkeeper.linkedin.classify import Outcome
@@ -164,9 +164,13 @@ async def poll_inbox(
     settings: LinkedInSettings,
     run_id: int | None = None,
     clock: Clock = _utcnow,
+    campaign_settings: Settings | None = None,
 ) -> InboxPollReport:
     """Run inbox poll ``run_id`` through ``source``, apply what it read, and record how it
     ended. See the module docstring.
+
+    ``campaign_settings`` go to the reply hook (P4-02): a prefilled message seen sent
+    schedules its enrollment's next step with them. ``None``: the built-in defaults.
 
     ``run_id`` is a ``running`` inbox run (``services.runs.create_run``); ``None``
     records a new manual one first. ``SessionFlagged`` and ``HeatSkipped`` propagate
@@ -248,7 +252,9 @@ async def poll_inbox(
         try:
             with session_scope(factory, write=True) as session:
                 user = _load_user(session, user_id)
-                counts = inbox_apply.apply_delta(session, user, delta, polled_at=clock())
+                counts = inbox_apply.apply_delta(
+                    session, user, delta, polled_at=clock(), settings=campaign_settings
+                )
                 notes: tuple[str, ...] = ()
                 if reason == FIRST_SHORT and since is not None:
                     inbox_apply.record_short_first_poll(session, user, since)

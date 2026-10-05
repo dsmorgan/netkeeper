@@ -64,8 +64,9 @@ export function InboxPage({ enrollment }: { enrollment?: number }) {
   return (
     <div className="flex max-w-5xl flex-col gap-4">
       <p className="text-sm text-muted-foreground">
-        Replies, unsubscribes and bounces the campaigns detected. Only the subject and a snippet are
-        stored; open the thread in Gmail to read the rest.
+        Replies, unsubscribes and bounces the campaigns detected, by email and on LinkedIn. Only the
+        subject and a snippet are stored; open the thread in Gmail or the conversation on LinkedIn
+        to read the rest.
       </p>
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <Select
@@ -209,7 +210,7 @@ function InboxRow({ item }: { item: InboxItem }) {
       </div>
       <p className="font-medium">
         {item.kind === 'bounce' ? 'Bounced: ' : ''}
-        {item.subject ?? '(no subject)'}
+        {item.channel === 'linkedin' ? 'LinkedIn message' : (item.subject ?? '(no subject)')}
       </p>
       {/* Plain text: React escapes it, and nothing here renders HTML. */}
       {item.snippet !== null && item.snippet !== '' && (

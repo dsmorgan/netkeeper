@@ -29,13 +29,18 @@ the poll adopts the matching row instead, writing the URN into its
 archive import counts polled rows the other way (``crm/archive.py``). Archive
 invitation rows are not messages and take part in neither.
 
-**Message text** goes into the interaction's summary and nowhere else: not a
-log line, not a count, not an exception message.
+**Message text** goes into the interaction's summary, and to the reply hook,
+which stores an inbound campaign reply's snippet on its message row; nowhere
+else: not a log line, not a count, not an exception message.
 
 **The reply hook.** After the rows are written, every handler in
-:data:`REPLY_HANDLERS` is called with the new inbound messages, in the same
-writer session. The list is empty until P4-02 (#381) adds the handler that
-reads a reply into a campaign.
+:data:`REPLY_HANDLERS` is called with an :class:`InboxNews`: the messages new to
+this poll, inbound and outbound (written now, or archive rows it adopted), in the
+same writer session. The first handler is the campaigns' (P4-02, #381,
+:func:`netkeeper.services.campaign_replies.apply_linkedin_news`): an outbound
+message confirms a ``prefilled`` or ``stale`` campaign message sent, and an inbound
+one is a reply to the contact's watched enrollments. Since it runs in the apply's
+writer session, the engine's next claim sees what it wrote.
 """
 
 from __future__ import annotations
@@ -49,6 +54,7 @@ from typing import Final
 from sqlalchemy import Select, or_
 from sqlalchemy.orm import Session
 
+from netkeeper.config import Settings
 from netkeeper.crm.interactions import add_interaction, summary_is_invitation
 from netkeeper.db import is_writer
 from netkeeper.linkedin.inbox import (
@@ -56,6 +62,7 @@ from netkeeper.linkedin.inbox import (
     SNIPPET_MAX,
     InboxConversation,
     InboxDelta,
+    InboxMessage,
 )
 from netkeeper.models import (
     Campaign,
@@ -92,13 +99,46 @@ _POLLED_KINDS: Final = (InteractionKind.LI_IN, InteractionKind.LI_OUT)
 
 @dataclass(frozen=True, slots=True)
 class NewInbound:
-    """One inbound message new to the poll: written now, or an archive row it adopted. No text."""
+    """One inbound message new to the poll: written now, or an archive row it adopted.
+
+    ``at`` is the message's time as the page gave it (the interaction's is truncated to
+    whole seconds). ``snippet`` is at most :data:`SNIPPET_MAX` characters and is left out
+    of the ``repr``: never log it.
+    """
 
     contact_id: int
     interaction_id: int
     conversation_urn: str
     message_urn: str
     at: datetime
+    snippet: str = field(default="", repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class NewOutbound:
+    """One message you sent, new to the poll: written now, or an archive row it adopted.
+
+    No text: what confirms a prefilled campaign message sent is when it went, not what
+    it says (P4-02, #381). ``at`` is the message's time as the page gave it.
+    """
+
+    contact_id: int
+    interaction_id: int
+    conversation_urn: str
+    message_urn: str
+    at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class InboxNews:
+    """What the reply hook gets from one applied delta: its new messages, oldest first,
+    the poll's time, and the settings a confirmed send schedules the next step with
+    (``None``: the built-in defaults)."""
+
+    inbound: tuple[NewInbound, ...]
+    outbound: tuple[NewOutbound, ...]
+    polled_at: datetime
+    settings: Settings | None = None
 
 
 @dataclass(slots=True)
@@ -112,6 +152,7 @@ class InboxCounts:
     skipped_other: int = 0
     messages_new: int = 0
     new_inbound: list[NewInbound] = field(default_factory=list)
+    new_outbound: list[NewOutbound] = field(default_factory=list)
 
     def counts(self) -> dict[str, int]:
         return {
@@ -124,11 +165,22 @@ class InboxCounts:
         }
 
 
-ReplyHandler = Callable[[Session, User, tuple[NewInbound, ...]], None]
+ReplyHandler = Callable[[Session, User, InboxNews], None]
 
-#: Called after every applied delta with its new inbound messages, in the same writer
-#: session. Empty until P4-02 (#381) appends its handler.
-REPLY_HANDLERS: Final[list[ReplyHandler]] = []
+
+def campaign_replies_handler(session: Session, user: User, news: InboxNews) -> None:
+    """The campaigns' handler (P4-02, #381): confirms prefilled sends, records replies."""
+    # Imported here: campaign_replies imports this module, and reaches the campaign
+    # engine, which this module must not load just to be imported.
+    from netkeeper.services.campaign_replies import apply_linkedin_news
+
+    apply_linkedin_news(session, user, news)
+
+
+#: Called after every applied delta with its new messages, in the same writer session.
+#: The campaigns' handler is always first: a reply that is not recorded is a follow-up
+#: sent to someone who answered.
+REPLY_HANDLERS: Final[list[ReplyHandler]] = [campaign_replies_handler]
 
 
 # --- what the poll asks before it reads ---------------------------------------------
@@ -289,13 +341,19 @@ def threads_to_open(session: Session, user: User) -> frozenset[str]:
 
 
 def apply_delta(
-    session: Session, user: User, delta: InboxDelta, *, polled_at: datetime
+    session: Session,
+    user: User,
+    delta: InboxDelta,
+    *,
+    polled_at: datetime,
+    settings: Settings | None = None,
 ) -> InboxCounts:
     """Write ``delta`` for ``user`` and return what it did. See the module docstring.
 
-    Needs a writer session. Idempotent: applying the same delta again writes no
-    interaction and leaves the conversation rows as they were, apart from
-    ``polled_at``.
+    ``settings`` go to the reply hook, which schedules a confirmed send's next step
+    with them (``None``: the built-in defaults). Needs a writer session. Idempotent:
+    applying the same delta again writes no interaction and leaves the conversation
+    rows as they were, apart from ``polled_at``.
     """
     if not is_writer(session):
         raise RuntimeError(
@@ -317,7 +375,7 @@ def apply_delta(
     counts.ignored_unknown = len(one_to_one) - len(matched)
     counts.matched = len(matched)
     if not matched:
-        _call_reply_handlers(session, user, counts)
+        _call_reply_handlers(session, user, counts, polled_at=polled_at, settings=settings)
         return counts
     known_ids = _known_external_ids(
         session, user, {m.message_urn for c, _ in matched for m in c.messages}
@@ -337,16 +395,7 @@ def apply_delta(
                 # URN, and an inbound one still reaches the reply hook (#388 review, S2).
                 adopted.external_id = message.message_urn
                 session.flush()
-                if not message.outbound:
-                    counts.new_inbound.append(
-                        NewInbound(
-                            contact_id=contact_id,
-                            interaction_id=adopted.id,
-                            conversation_urn=conversation.conversation_urn,
-                            message_urn=message.message_urn,
-                            at=at,
-                        )
-                    )
+                _note_new(counts, contact_id, adopted.id, conversation, message)
                 continue
             interaction = add_interaction(
                 session,
@@ -359,16 +408,7 @@ def apply_delta(
                 external_id=message.message_urn,
             )
             counts.messages_new += 1
-            if not message.outbound:
-                counts.new_inbound.append(
-                    NewInbound(
-                        contact_id=contact_id,
-                        interaction_id=interaction.id,
-                        conversation_urn=conversation.conversation_urn,
-                        message_urn=message.message_urn,
-                        at=at,
-                    )
-                )
+            _note_new(counts, contact_id, interaction.id, conversation, message)
     log.info(
         "inbox: %d conversations read, %d matched, %d ignored, %d new messages",
         counts.conversations_read,
@@ -376,8 +416,40 @@ def apply_delta(
         counts.ignored_unknown,
         counts.messages_new,
     )
-    _call_reply_handlers(session, user, counts)
+    _call_reply_handlers(session, user, counts, polled_at=polled_at, settings=settings)
     return counts
+
+
+def _note_new(
+    counts: InboxCounts,
+    contact_id: int,
+    interaction_id: int,
+    conversation: InboxConversation,
+    message: InboxMessage,
+) -> None:
+    """Hand a message new to the poll to the reply hook: an adopted archive row too, so
+    an inbound one is still a reply and an outbound one still confirms a send (#388)."""
+    if message.outbound:
+        counts.new_outbound.append(
+            NewOutbound(
+                contact_id=contact_id,
+                interaction_id=interaction_id,
+                conversation_urn=conversation.conversation_urn,
+                message_urn=message.message_urn,
+                at=message.at,
+            )
+        )
+        return
+    counts.new_inbound.append(
+        NewInbound(
+            contact_id=contact_id,
+            interaction_id=interaction_id,
+            conversation_urn=conversation.conversation_urn,
+            message_urn=message.message_urn,
+            at=message.at,
+            snippet=message.text_snippet,
+        )
+    )
 
 
 def summary(snippet: str) -> str:
@@ -494,7 +566,19 @@ class _ArchiveLedger:
         return rows.pop(0) if rows else None
 
 
-def _call_reply_handlers(session: Session, user: User, counts: InboxCounts) -> None:
-    new = tuple(counts.new_inbound)
+def _call_reply_handlers(
+    session: Session,
+    user: User,
+    counts: InboxCounts,
+    *,
+    polled_at: datetime,
+    settings: Settings | None,
+) -> None:
+    news = InboxNews(
+        inbound=tuple(sorted(counts.new_inbound, key=lambda n: (n.at, n.message_urn))),
+        outbound=tuple(sorted(counts.new_outbound, key=lambda n: (n.at, n.message_urn))),
+        polled_at=polled_at,
+        settings=settings,
+    )
     for handler in REPLY_HANDLERS:
-        handler(session, user, new)
+        handler(session, user, news)

@@ -6238,6 +6238,9 @@
             "title": "Campaign Name",
             "type": "string"
           },
+          "channel": {
+            "$ref": "#/components/schemas/TemplateChannel"
+          },
           "contact_id": {
             "title": "Contact Id",
             "type": "integer"
@@ -6316,6 +6319,7 @@
           "campaign_name",
           "enrollment_id",
           "enrollment_status",
+          "channel",
           "subject",
           "snippet",
           "received_at",
