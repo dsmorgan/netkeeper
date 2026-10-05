@@ -185,10 +185,13 @@ function ReplyPollAcknowledge({ rows }: { rows: readonly Protection[] }) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: postureQuery.queryKey }),
   })
   const row = rows.find((r) => r.key === FIRST_POLL_SHORT_KEY && r.warnings.length > 0)
-  if (acknowledge.data === false) {
-    return <p role="status">Nothing to acknowledge: no first LinkedIn inbox poll fell short.</p>
+  if (row === undefined) {
+    // Only right after an Acknowledge that found nothing; a row that comes back later
+    // shows its button again.
+    return acknowledge.data === false ? (
+      <p role="status">Nothing to acknowledge: no first LinkedIn inbox poll fell short.</p>
+    ) : null
   }
-  if (row === undefined) return null
   return (
     <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
       <p className="font-medium">LinkedIn replies to check by hand</p>

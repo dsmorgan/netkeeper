@@ -363,11 +363,15 @@ describe('PostureSection: LinkedIn sends and the first inbox poll (#383)', () =>
     expect(screen.getByRole('button', { name: 'Acknowledge' })).toBeVisible()
   })
 
-  it('says so when there was nothing to acknowledge', async () => {
+  function renderAck(rowsAfter: Posture['protections']) {
+    let posture = withRows([MANUAL_ON, SHORT_POLL])
     mockFetch((request) => {
       const { pathname } = new URL(request.url)
-      if (pathname === '/api/v1/posture') return jsonResponse(withRows([MANUAL_ON, SHORT_POLL]))
-      if (pathname === '/api/v1/linkedin/inbox/acknowledge') return jsonResponse({ cleared: false })
+      if (pathname === '/api/v1/posture') return jsonResponse(posture)
+      if (pathname === '/api/v1/linkedin/inbox/acknowledge') {
+        posture = withRows(rowsAfter)
+        return jsonResponse({ cleared: false })
+      }
       return jsonResponse({ detail: 'no fake' }, 404)
     })
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -376,10 +380,25 @@ describe('PostureSection: LinkedIn sends and the first inbox poll (#383)', () =>
         <PostureSection />
       </QueryClientProvider>,
     )
+  }
+
+  it('says so when there was nothing to acknowledge (cleared elsewhere meanwhile)', async () => {
+    renderAck([MANUAL_ON])
 
     fireEvent.click(await screen.findByRole('button', { name: 'Acknowledge' }))
 
     expect(await screen.findByText(/Nothing to acknowledge/)).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Acknowledge' })).toBeNull()
+  })
+
+  it('keeps the warning and its button while the row still stands', async () => {
+    renderAck([MANUAL_ON, SHORT_POLL])
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Acknowledge' }))
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Acknowledge' })).toBeEnabled())
+    expect(screen.getByText('LinkedIn replies to check by hand')).toBeVisible()
+    expect(screen.queryByText(/Nothing to acknowledge/)).toBeNull()
   })
 
   it('offers no Acknowledge button while no first poll fell short', async () => {

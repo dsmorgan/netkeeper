@@ -100,10 +100,11 @@ export function usePrefillRun(): PrefillRun {
 
 /**
  * Whether the run a button started is still going (or not read back yet), so the
- * button stays off until it ends. False with no run.
+ * button stays off until it ends. False with no run, or when the run can't be read.
  */
 export function useRunGoing(runId: number | null): boolean {
   const run = useQuery({ ...runQuery(runId ?? 0), enabled: runId !== null })
   if (runId === null) return false
-  return !run.isSuccess || run.data.status === 'running'
+  // An unreadable run frees the button: the backend's one-run rule still guards.
+  return run.isPending || run.data?.status === 'running'
 }

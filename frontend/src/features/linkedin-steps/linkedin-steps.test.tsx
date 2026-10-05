@@ -481,6 +481,21 @@ describe('waiting for you', () => {
     expect(screen.getByRole('button', { name: 'Prefill Rosalind Quillfeather' })).toBeDisabled()
   })
 
+  it('frees "I sent it, check now" when the check run cannot be read', async () => {
+    renderSection({
+      'GET /api/v1/campaigns/linkedin/waiting': () => jsonResponse(waitingPage([waitingItem()])),
+      'POST /api/v1/campaigns/linkedin/messages/71/check': () =>
+        jsonResponse({ run_id: 91, task_id: 't' }, 202),
+      'GET /api/v1/linkedin/runs/91': () => jsonResponse({ detail: 'boom' }, 500),
+    })
+
+    const button = await screen.findByRole('button', { name: 'I sent it, check now' })
+    fireEvent.click(button)
+
+    await screen.findByText(/Checking your LinkedIn inbox/) // the check started
+    await waitFor(() => expect(button).toBeEnabled())
+  })
+
   it('keeps "I sent it, check now" off while the check it started runs', async () => {
     let checkRun = run({ id: 91, kind: 'inbox', status: 'running' })
     const { calls, source } = renderSection({
