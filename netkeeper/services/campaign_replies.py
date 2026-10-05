@@ -90,7 +90,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from email.utils import parseaddr
@@ -394,11 +394,13 @@ class Bounce:
 @dataclass(frozen=True, slots=True)
 class PollResult:
     """What one mailbox's poll found; ``history_id`` to store (None: leave it), and
-    whether it read everything up to now (``caught_up``)."""
+    whether it read everything up to now (``caught_up``). Not caught up, ``failed`` says
+    a Gmail read failed, rather than the read budget running out (#413)."""
 
     found: list[Reply | Bounce]
     history_id: int | None
     caught_up: bool
+    failed: bool = False
 
 
 @dataclass
@@ -432,6 +434,7 @@ class _Poll:
         before the first message not read, so nothing unread is ever skipped."""
         messages: list[Message] = []
         stop: int | None = None
+        failed = False
         reads = 0
         for index, ref in enumerate(history.messages_added):
             if ref.id in self.seen:
@@ -446,7 +449,7 @@ class _Poll:
                 pass
             except GmailError as exc:
                 log.warning("mailbox %d: a read failed (%s)", self.work.mailbox_id, exc.code)
-                stop = index
+                stop, failed = index, True
                 break
             self.seen.add(ref.id)
         found = self.classify(messages)
@@ -456,7 +459,10 @@ class _Poll:
         if len(history.record_ids) == len(history.messages_added):
             resume = history.record_ids[stop] - 1
         return PollResult(
-            found, resume if resume is not None and resume > start else None, caught_up=False
+            found,
+            resume if resume is not None and resume > start else None,
+            caught_up=False,
+            failed=failed,
         )
 
     def read(self, ids: Iterable[str]) -> list[Message]:
@@ -718,21 +724,27 @@ Labeler = Callable[[Gmail, int, str, str], None]
 
 @dataclass(frozen=True, slots=True)
 class RepliesPolled:
-    """What one :func:`poll_replies` left for the next tick (#413). Both sets hold only
-    mailboxes with something to watch: one with nothing is caught up without a call."""
+    """What one :func:`poll_replies` did, per mailbox, for the sender's next tick (#413).
+    A mailbox with nothing to watch is caught up without a Gmail call."""
 
+    caught_up: frozenset[int] = frozenset()
+    """Mailboxes that read everything up to now (their ``replies_polled_at`` is now)."""
     behind: frozenset[int] = frozenset()
-    """Mailboxes whose poll stopped part way or failed: the next tick polls them again."""
-    not_ready: frozenset[int] = frozenset()
+    """Mailboxes that stopped at the read budget (:data:`POLL_MAX_READS`): the next tick
+    reads on."""
+    failed: frozenset[int] = frozenset()
+    """Mailboxes whose poll failed (a Gmail error, part way or before any read). The
+    sender polls them again after a backoff."""
+    not_ready: Mapping[int, str] = field(default_factory=dict)
     """Mailboxes that could not be opened (:class:`MailboxNotReady`: they need signing
-    in again, or a secret is missing). Skipped without a Gmail call. Their
-    ``replies_polled_at`` stays where it was, so their follow-ups that start a new
+    in again, or the Keychain is locked), with its code. Skipped without a Gmail call.
+    Their ``replies_polled_at`` stays where it was, so their follow-ups that start a new
     conversation stay held, and the sender tries them again, alone, at the next tick."""
 
     @property
     def retry(self) -> frozenset[int]:
-        """Every mailbox the next tick polls again, without waiting for the interval."""
-        return self.behind | self.not_ready
+        """Every mailbox to poll again before the interval: each that did not catch up."""
+        return self.behind | self.failed | frozenset(self.not_ready)
 
 
 def poll_replies(
@@ -745,10 +757,9 @@ def poll_replies(
     only: Collection[int] | None = None,
 ) -> RepliesPolled:
     """One poll of every armed mailbox of the user (the module), or of those in ``only``.
-    Blocking. Says which mailboxes the next tick should poll again: one that stopped part
-    way or failed, and one that is not ready (#413). A mailbox that is not ready is
-    skipped, not counted against the others, so it never makes the healthy ones poll
-    again before their interval.
+    Blocking. Says how each mailbox it looked at ended (:class:`RepliesPolled`). A
+    mailbox that is not ready is skipped, not counted against the others, so it never
+    makes the healthy ones poll again before their interval (#413).
 
     A mailbox with nothing to watch gets no Gmail call: it is caught up by definition.
     ``replies_polled_at`` is set only for a mailbox that caught up, and it is what
@@ -761,8 +772,16 @@ def poll_replies(
         work = reply_work(session, user, now=now)
     if only is not None:
         work = [mailbox for mailbox in work if mailbox.mailbox_id in only]
+    caught_up: set[int] = set()
     behind: set[int] = set()
-    not_ready: set[int] = set()
+    failed: set[int] = set()
+    not_ready: dict[int, str] = {}
+
+    def outcome() -> RepliesPolled:
+        return RepliesPolled(
+            frozenset(caught_up), frozenset(behind), frozenset(failed), dict(not_ready)
+        )
+
     for mailbox in work:
         gmail: Gmail | None = None
         if not mailbox.watches:
@@ -774,20 +793,22 @@ def poll_replies(
                 result = _Poll(gmail, mailbox, purpose).run()
             except MailboxNotReady as exc:  # skipped: it holds its own sends (#413)
                 log.info("mailbox %d: the reply poll skips it (%s)", mailbox.mailbox_id, exc.code)
-                not_ready.add(mailbox.mailbox_id)
+                not_ready[mailbox.mailbox_id] = exc.code
                 continue
             except Exception as exc:  # the next poll reads the same messages again
                 code = exc.code if isinstance(exc, GmailError) else type(exc).__name__
                 log.warning("mailbox %d: the reply poll waits (%s)", mailbox.mailbox_id, code)
-                behind.add(mailbox.mailbox_id)
+                failed.add(mailbox.mailbox_id)
                 continue
-        if not result.caught_up:
-            behind.add(mailbox.mailbox_id)
+        if result.caught_up:
+            caught_up.add(mailbox.mailbox_id)
+        else:
+            (failed if result.failed else behind).add(mailbox.mailbox_id)
         new: list[Reply | Bounce] = []
         with session_scope(factory, write=True) as session:
             user = session.get(User, user_id)
             if user is None:
-                return RepliesPolled(frozenset(behind), frozenset(not_ready))
+                return outcome()
             for item in result.found:
                 done = (
                     record_reply(session, user, item)
@@ -801,7 +822,7 @@ def poll_replies(
             for item in new:
                 if isinstance(item, Reply):
                     label(gmail, mailbox.mailbox_id, item.label, item.message.id)
-    return RepliesPolled(frozenset(behind), frozenset(not_ready))
+    return outcome()
 
 
 # --- LinkedIn (P4-02, #381) --------------------------------------------------------------

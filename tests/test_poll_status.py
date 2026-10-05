@@ -364,6 +364,30 @@ def test_a_mailbox_needing_sign_in_stays_named_and_leaves_the_others_scheduled(
     assert "stuck@example.test" in status.mailboxes[1].reason
 
 
+def test_a_mailbox_with_a_locked_keychain_says_so_instead_of_due(world: World) -> None:
+    """#413: an ``ok`` mailbox the sender cannot open is retried at every tick; it is
+    blocked with the reason, not ``due`` forever, and the check names it."""
+    for session, user in world.write():
+        _mailbox(session, user, polled=NOW, email="ok@example.test")
+        locked = _mailbox(session, user, polled=NOW, email="locked@example.test").id
+    gate = NOW - timedelta(minutes=1)
+    serving = replace(
+        _serving(replies=gate),
+        replies_due=frozenset({locked}),
+        replies_not_ready={locked: "keychain_unavailable"},
+    )
+
+    status = world.status(serving=serving)
+
+    assert [p.state for p in status.mailboxes] == [S.SCHEDULED, S.BLOCKED]
+    assert status.mailboxes[1].reason == (
+        "The Keychain is locked, so netkeeper can't read locked@example.test;"
+        " unlock it and the next minute's check reads it"
+    )
+    assert status.checks[0].state is S.SCHEDULED
+    assert status.checks[0].reason == status.mailboxes[1].reason
+
+
 def test_a_ready_mailbox_due_again_is_due_alone(world: World) -> None:
     """A mailbox whose poll stopped part way is polled again at the next tick (#413): it
     and the check are due; the other mailbox keeps its time."""
@@ -651,6 +675,10 @@ async def test_endpoint_reads_the_mailboxes_the_sender_polls_again(
     by_key = {item["key"]: item for item in body["items"]}
     assert by_key["gmail_replies"]["state"] == "due"
     assert [m["state"] for m in body["mailboxes"]] == ["due", "scheduled"]
+
+    sender._replies_not_ready[user_id] = {again: "keychain_unavailable"}
+    body = (await client.get("/api/v1/poll-status")).json()
+    assert [m["state"] for m in body["mailboxes"]] == ["blocked", "scheduled"]
     assert sender.replies_due(user_id) == frozenset({again})
 
 

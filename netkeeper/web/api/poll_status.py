@@ -76,6 +76,7 @@ def _serving(request: Request, user_id: int) -> service.Serving:
         replies_polled_at=None if gmail is None else gmail.replies_polled_at(user_id),
         replies_every=None if gmail is None else gmail.replies_every,
         replies_due=frozenset() if gmail is None else gmail.replies_due(user_id),
+        replies_not_ready={} if gmail is None else gmail.replies_not_ready(user_id),
         drafts_polled_at=None if gmail is None else gmail.drafts_polled_at(user_id),
         drafts_every=DRAFTS_POLL_EVERY if gmail is None else gmail.drafts_every,
     )

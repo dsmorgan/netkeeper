@@ -78,6 +78,7 @@ STATUS_EVENT: Final = "mailbox.status"
 REASON_TOKEN_MISSING: Final = "token_missing"  # noqa: S105 - a status code
 REASON_CLIENT_MISSING: Final = "client_missing"
 REASON_DISCONNECTED: Final = "disconnected"
+REASON_KEYCHAIN_UNAVAILABLE: Final = "keychain_unavailable"  # not stored: the mailbox stays ok
 
 
 class ArmRefused(RuntimeError):
@@ -237,6 +238,10 @@ def connect(
         session.add(mailbox)
         session.flush()
         mailbox.keychain_ref = token_name(mailbox.id)
+    if mailbox.status is not MailboxStatus.OK:
+        # Signed in again after a gap (#413): a reply may have come meanwhile, so its
+        # follow-ups that start a new conversation wait for a poll that catches up.
+        mailbox.replies_polled_at = None
     mailbox.status = MailboxStatus.OK
     mailbox.status_reason = None
     mailbox.checked_at = now or utcnow()
@@ -579,7 +584,7 @@ def open_gmail(
         token = keychain.get_secret(user_id, ref)
     except keychain.KeychainUnavailable as exc:
         # Nothing is known about the grant, so nothing is marked (as in a check).
-        raise MailboxNotReady(mailbox_id, "keychain_unavailable") from exc
+        raise MailboxNotReady(mailbox_id, REASON_KEYCHAIN_UNAVAILABLE) from exc
     if client is None:
         mark(REASON_CLIENT_MISSING)
         raise MailboxNotReady(mailbox_id, REASON_CLIENT_MISSING)

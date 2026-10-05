@@ -76,11 +76,13 @@ Each tick, before anything is chosen, :meth:`GmailSender.reconcile` looks up wha
   :func:`netkeeper.services.campaign_replies.poll_replies`. A ``same_thread``
   follow-up whose thread holds a message from the other side since the first
   step sends nothing (``not_sent``) and asks for a poll on the next tick.
-  Every armed mailbox is polled once an interval; one that stopped part way, was
-  not ready (it needs signing in again), or holds a follow-up because its replies
-  are stale is polled again alone at the next tick, never the others with it
-  (#413). A mailbox not ready keeps its old ``replies_polled_at``, so its own
-  new conversations stay held until a poll of it catches up.
+  Every armed mailbox is polled once an interval; one that stopped at the read
+  budget, was not ready (it needs signing in again, or the Keychain is locked), or
+  holds a follow-up because its replies are stale is polled again alone at the next
+  tick, never the others with it (#413). One whose poll failed is polled again alone
+  after :data:`REPLY_BACKOFF_FIRST`, doubling up to the interval. A mailbox seen not
+  ready keeps its old ``replies_polled_at`` and holds its own new conversations until
+  a poll of it catches up after it is ready again, however recent its last good poll.
 
 Arming (#277)
 -------------
@@ -114,7 +116,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Final
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -158,6 +160,11 @@ from netkeeper.services.campaign_engine import Firing, SendOutcome, SendResult, 
 from netkeeper.services.mailboxes import MailboxNotFound, MailboxNotReady, open_gmail
 
 log = logging.getLogger(__name__)
+
+REPLY_BACKOFF_FIRST: Final = timedelta(minutes=1)
+"""After a mailbox's reply poll fails, the wait before it is polled again alone (#413). It
+doubles with each failure in a row, up to the reply interval, and starts over once a poll
+of it reads. It only delays reads: the stale-replies hold still guards the sends."""
 
 DRAFTS_POLL_EVERY: Final = timedelta(minutes=10)
 """How often the drafts poll (and the discarded-draft pass) looks at Gmail, per user.
@@ -292,9 +299,18 @@ class GmailSender:
         self._drafts_polled: dict[int, datetime] = {}
         self._replies_every = replies_every
         self._replies_polled: dict[int, datetime] = {}
-        # Mailboxes the next tick polls again before the interval, per user (#413): one
-        # that stopped part way, is not ready, or holds a follow-up for a stale poll.
+        # Per user, the reply poll's per-mailbox state (#413). In memory, like the gate
+        # above: a restart's first tick polls every mailbox anyway.
+        # Mailboxes polled again before the interval: one that did not catch up, or that
+        # holds a follow-up because its replies are stale.
         self._replies_due: dict[int, set[int]] = {}
+        # A mailbox whose poll failed: how many times in a row, and when to try again.
+        self._replies_backoff: dict[tuple[int, int], tuple[int, datetime]] = {}
+        # Mailboxes the last poll of them could not open, with the code (the poll status).
+        self._replies_not_ready: dict[int, dict[int, str]] = {}
+        # Mailboxes seen not ready whose poll has not caught up since: their follow-ups
+        # that start a new conversation wait for it, however recent the last good poll.
+        self._replies_catch_up: dict[int, set[int]] = {}
         self._label_ids: dict[tuple[int, str], str] = {}
 
     # --- what the poll status reads (#401) -------------------------------------------
@@ -317,11 +333,16 @@ class GmailSender:
         return self._replies_polled.get(user_id)
 
     def replies_due(self, user_id: int) -> frozenset[int]:
-        """The mailboxes the next tick polls again without waiting for the interval (#413):
-        one whose last poll stopped part way or failed, one that was not ready (it needs
-        signing in again), and one holding a follow-up because its replies are stale.
-        Read-only."""
+        """The mailboxes polled again without waiting for the interval (#413): one whose
+        last poll stopped at the read budget or failed (after a backoff), one that was not
+        ready (it needs signing in again), and one holding a follow-up because its replies
+        are stale. Read-only."""
         return frozenset(self._replies_due.get(user_id, ()))
+
+    def replies_not_ready(self, user_id: int) -> Mapping[int, str]:
+        """The mailboxes the last poll of them could not open, with the reason code
+        (``keychain_unavailable``, ``reauth_required``, ...). Read-only."""
+        return dict(self._replies_not_ready.get(user_id, {}))
 
     def _poll_soon(self, user_id: int, mailbox_id: int) -> None:
         """Poll this one mailbox at the next tick, leaving the others on their interval."""
@@ -363,6 +384,10 @@ class GmailSender:
             return None
         if firing.same_thread and firing.thread_id is not None:
             return None
+        if firing.mailbox_id in self._replies_catch_up.get(firing.user_id, ()):
+            # Not ready since its last good poll (#413): a reply may have come meanwhile.
+            self._poll_soon(firing.user_id, firing.mailbox_id)
+            return "replies have not been read since the mailbox was ready again; nothing was sent"
         with session_scope(self._factory) as session:
             user = session.get(User, firing.user_id)
             mailbox = (
@@ -657,15 +682,48 @@ class GmailSender:
         only: frozenset[int] | None = None
         if last is None or now - last >= self._replies_every:
             self._replies_polled[user_id] = now
-        elif due:
-            only = frozenset(due)
         else:
-            return
+            only = frozenset(m for m in due if self._retry_at(user_id, m) <= now)
+            if not only:
+                return
         polled = replies.poll_replies(
             factory, user_id, open_gmail=self._open, now=now, label=self._label_reply, only=only
         )
-        kept = set() if only is None else self._replies_due.get(user_id, set()) - only
-        self._replies_due[user_id] = kept | polled.retry
+        # A due mailbox still in its backoff was not polled: it stays due.
+        waiting = set() if only is None else due - only
+        self._replies_due[user_id] = waiting | polled.retry
+        self._settle(user_id, polled, only=only, now=now)
+
+    def _retry_at(self, user_id: int, mailbox_id: int) -> datetime:
+        backoff = self._replies_backoff.get((user_id, mailbox_id))
+        return datetime.min.replace(tzinfo=UTC) if backoff is None else backoff[1]
+
+    def _settle(
+        self,
+        user_id: int,
+        polled: replies.RepliesPolled,
+        *,
+        only: frozenset[int] | None,
+        now: datetime,
+    ) -> None:
+        """Record how each polled mailbox ended (#413): a failed one backs off 1, 2, 4, ...
+        minutes, never longer than the interval, and starts over once one reads; one not
+        ready must catch up before it starts a new conversation again."""
+        for mailbox_id in polled.failed:
+            failures = self._replies_backoff.get((user_id, mailbox_id), (0, now))[0] + 1
+            # The full poll each interval reads it anyway; the cap keeps the next due time
+            # honest.
+            wait = min(REPLY_BACKOFF_FIRST * 2 ** min(failures - 1, 16), self._replies_every)
+            self._replies_backoff[(user_id, mailbox_id)] = (failures, now + wait)
+        for mailbox_id in polled.caught_up | polled.behind:
+            self._replies_backoff.pop((user_id, mailbox_id), None)
+        not_ready = self._replies_not_ready.setdefault(user_id, {})
+        for mailbox_id in [m for m in not_ready if only is None or m in only]:
+            del not_ready[mailbox_id]
+        not_ready.update(polled.not_ready)
+        catch_up = self._replies_catch_up.setdefault(user_id, set())
+        catch_up |= set(polled.not_ready)
+        catch_up -= polled.caught_up
 
     def _label_reply(self, gmail: Gmail, mailbox_id: int, name: str, gmail_message_id: str) -> None:
         purpose = f"label a reply in mailbox {mailbox_id}"

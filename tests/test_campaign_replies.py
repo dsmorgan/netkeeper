@@ -46,6 +46,7 @@ from netkeeper.models import (
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import campaign_replies as replies
 from netkeeper.services import campaigns as campaign_service
+from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.campaign_engine import (
     RECONCILE_SEARCH_EVERY,
     REVIEW_GATE,
@@ -1093,6 +1094,8 @@ def test_in_simulate_a_reply_ends_the_enrollment_before_the_follow_up_fires(
 
 GRACE = "grace@example.test"
 INTERVAL = timedelta(minutes=10)
+HELD_STALE = "replies have not been polled recently; nothing was sent"
+HELD_CATCH_UP = "replies have not been read since the mailbox was ready again; nothing was sent"
 
 
 @dataclass
@@ -1125,6 +1128,14 @@ class TwoBoxes:
             mailbox = get_scoped(session, self.mail.user, Mailbox, self.reauth_id)
             assert mailbox is not None
             mailbox.status = status
+
+        self.mail.write(change)
+
+    def set_polled_at(self, at: datetime) -> None:
+        def change(session: Session) -> None:
+            mailbox = get_scoped(session, self.mail.user, Mailbox, self.reauth_id)
+            assert mailbox is not None
+            mailbox.replies_polled_at = at
 
         self.mail.write(change)
 
@@ -1229,7 +1240,7 @@ def test_a_mailbox_not_ready_leaves_the_others_on_their_interval(two: TwoBoxes, 
     assert len(two.reauth_gmail.sent()) == 1
     if how == "locked":  # claimed again after each retry wait, and held each time
         assert held
-        assert set(held) == {"replies have not been polled recently; nothing was sent"}
+        assert set(held) == {HELD_CATCH_UP}
     else:
         assert held == []
     assert two.reauth_gmail.calls == []
@@ -1286,8 +1297,217 @@ def test_after_signing_in_again_a_follow_up_waits_for_a_poll_that_catches_up(
     [outcome] = [o for f, o in mail.tick(due).fired if f.enrollment_id == stuck]
 
     assert outcome.outcome is SendOutcome.NOT_SENT
-    assert outcome.error == "replies have not been polled recently; nothing was sent"
+    assert outcome.error == HELD_CATCH_UP
     assert len(two.reauth_gmail.sent()) == 1
-    mail.tick(due + timedelta(minutes=1))  # polled again at once: the reply ends it
+    mail.tick(due + timedelta(minutes=1))  # polled again a minute on: the reply ends it
     assert mail.enrollment(stuck).status is EnrollmentStatus.REPLIED
     assert len(two.reauth_gmail.sent()) == 1
+
+
+def test_signing_in_again_soon_still_waits_for_a_poll_that_catches_up(two: TwoBoxes) -> None:
+    """#420 review: the mailbox signs in again within STALE_AFTER_POLLS intervals of its
+    last good poll, and the first poll after fails. Its last good poll is recent enough
+    for the stale rule, but a reply came while it was not ready: the follow-up that
+    starts a new conversation waits for a poll of it that catches up."""
+    mail = two.mail
+    _, stuck = start_both(two)
+    due = NOW + WEEK + INTERVAL  # step 2 is due on both
+    mail.tick(due - timedelta(minutes=15))  # a full poll reads both
+    assert two.polled_at(two.reauth_id) == due - timedelta(minutes=15)
+    two.needs_sign_in(True)
+    mail.tick(due - timedelta(minutes=5))  # the next full poll finds it not ready
+    two.reauth_gmail.reply(
+        MessageRef(two.reauth_gmail.sent()[0].id, two.reauth_gmail.sent()[0].thread_id),
+        sender=GRACE,
+        at=due - timedelta(minutes=4),
+    )
+    two.needs_sign_in(False)
+    two.reauth_gmail.fail_next("history.list", GmailTransient("down", code="unavailable"))
+
+    [outcome] = [o for f, o in mail.tick(due).fired if f.enrollment_id == stuck]
+
+    # The stale rule alone would let it go: the last good poll is 15 minutes old.
+    assert due - two.polled_at(two.reauth_id) <= replies.STALE_AFTER_POLLS * INTERVAL  # type: ignore[operator]
+    assert outcome.outcome is SendOutcome.NOT_SENT
+    assert outcome.error == HELD_CATCH_UP
+    assert len(two.reauth_gmail.sent()) == 1
+    mail.tick(due + timedelta(minutes=1))  # the backoff's first retry reads the reply
+    assert mail.enrollment(stuck).status is EnrollmentStatus.REPLIED
+    assert len(two.reauth_gmail.sent()) == 1
+
+
+def test_signing_in_again_clears_the_last_poll_so_a_restart_holds_too(
+    session_factory: sessionmaker[Session], memory_keyring: object
+) -> None:
+    """The in-memory hold above is gone after a restart, and a running sender may never see
+    the mailbox not ready (it signs in again between two polls). Signing in again clears
+    ``replies_polled_at``, so the stale rule holds the follow-up until a poll catches up."""
+    mail = make_mail(session_factory, modes=(StepMode.SEND,) * 2, same_thread=(False, False))
+    mail.sender = poller(mail, every=INTERVAL)
+    enrollment_id = mail.enroll(ADA)
+    mail.tick(NOW)
+    due = NOW + WEEK
+    mail.tick(due - timedelta(minutes=5))  # a good poll, recent enough for the stale rule
+    set_mailbox(mail, status=MailboxStatus.REAUTH_REQUIRED, status_reason="invalid_grant")
+    mail.gmail.reply(first_sent(mail), sender=ADA, at=due - timedelta(minutes=4))
+
+    def sign_in(session: Session) -> None:
+        mailbox_service.connect(
+            session, user_of(mail, session), "me@example.com", "rt", daily_cap=80
+        )
+
+    mail.write(sign_in)
+    assert mail.read(lambda s: mailbox_of(mail, s).replies_polled_at) is None
+    mail.sender = poller(mail, every=INTERVAL)  # serve restarted
+    mail.gmail.fail_next("history.list", GmailTransient("down", code="unavailable"))
+
+    [(_, outcome)] = mail.tick(due).fired
+
+    assert outcome.outcome is SendOutcome.NOT_SENT
+    assert outcome.error == HELD_STALE
+    assert len(mail.gmail.sent()) == 1
+    mail.tick(due + timedelta(minutes=1))
+    assert mail.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
+    assert len(mail.gmail.sent()) == 1
+
+
+def test_signing_in_while_ok_keeps_the_last_poll(
+    session_factory: sessionmaker[Session], memory_keyring: object
+) -> None:
+    mail = make_mail(session_factory)
+    set_mailbox(mail, replies_polled_at=NOW)
+
+    def sign_in(session: Session) -> None:
+        mailbox_service.connect(
+            session, user_of(mail, session), "me@example.com", "rt", daily_cap=80
+        )
+
+    mail.write(sign_in)
+    assert mail.read(lambda s: mailbox_of(mail, s).replies_polled_at) == NOW
+
+
+def test_a_failing_mailbox_backs_off_and_starts_over_once_it_reads(two: TwoBoxes) -> None:
+    """A mailbox whose poll keeps failing is retried after 1, 2, 4, ... minutes, never
+    longer than the interval, not at every tick; a poll that reads starts it over."""
+    mail = two.mail
+    start_both(two)
+    mail.gmail.calls.clear()
+    for _ in range(5):
+        two.reauth_gmail.fail_next("history.list", GmailTransient("down", code="unavailable"))
+    polled: list[int] = []
+    for minute in range(20, 41):  # 21 ticks
+        before = two.polls(two.reauth_gmail)
+        mail.tick(NOW + timedelta(minutes=minute))
+        if two.polls(two.reauth_gmail) > before:
+            polled.append(minute)
+    # Fails at 20 (the full poll), 21 (+1), 23 (+2), 27 (+4) and 30 (the full poll, which
+    # sets the wait to the 10-minute cap); reads at 40.
+    assert polled == [20, 21, 23, 27, 30, 40]
+    assert two.polled_at(two.reauth_id) == NOW + timedelta(minutes=40)
+    assert two.polls(mail.gmail) == 3  # the healthy one: 20, 30, 40
+
+    two.reauth_gmail.fail_next("history.list", GmailTransient("down", code="unavailable"))
+    polled.clear()
+    for minute in range(41, 53):
+        before = two.polls(two.reauth_gmail)
+        mail.tick(NOW + timedelta(minutes=minute))
+        if two.polls(two.reauth_gmail) > before:
+            polled.append(minute)
+    assert polled == [50, 51]  # the wait starts over at one minute
+    assert two.polled_at(two.reauth_id) == NOW + timedelta(minutes=51)
+
+
+def test_a_stale_follow_up_asks_for_a_poll_of_its_mailbox_alone(two: TwoBoxes) -> None:
+    """A ready mailbox whose last complete poll is old while the user's poll timer is fresh
+    (it was just armed, say): its held follow-up asks for a poll of it at the next tick,
+    not of the user's other mailboxes."""
+    mail = two.mail
+    _, other = start_both(two)
+    due = NOW + WEEK + INTERVAL  # step 2 is due on both
+    mail.tick(due - timedelta(minutes=1))  # the full poll; the next is at due + 9 min
+    two.set_polled_at(due - timedelta(days=2))
+    held_at: datetime | None = None
+    for minute in range(0, 6):  # sends are spaced apart: the other's comes within minutes
+        at = due + timedelta(minutes=minute)
+        if [o for f, o in mail.tick(at).fired if f.enrollment_id == other]:
+            held_at = at
+            break
+    assert held_at is not None
+    assert mail.enrollment(other).status is EnrollmentStatus.ACTIVE
+    assert len(two.reauth_gmail.sent()) == 1
+    mail.gmail.calls.clear()
+
+    mail.tick(held_at + timedelta(minutes=1))
+
+    assert two.polled_at(two.reauth_id) == held_at + timedelta(minutes=1)
+    assert two.polls(mail.gmail) == 0
+
+
+def test_a_failed_read_backs_off_too(two: TwoBoxes) -> None:
+    """A poll that stops at a failed read, not the budget, waits like a failed poll."""
+    mail = two.mail
+    start_both(two)
+    two.reauth_gmail.deliver(fresh_email("n@example.test", "News", "x"))
+    for _ in range(3):
+        two.reauth_gmail.fail_next("messages.get", GmailTransient("down", code="unavailable"))
+    polled: list[int] = []
+    for minute in range(20, 30):
+        before = two.polls(two.reauth_gmail)
+        mail.tick(NOW + timedelta(minutes=minute))
+        if two.polls(two.reauth_gmail) > before:
+            polled.append(minute)
+    assert polled == [20, 21, 23, 27]
+    assert two.polled_at(two.reauth_id) == NOW + timedelta(minutes=27)
+
+
+def test_once_caught_up_after_signing_in_a_follow_up_goes(two: TwoBoxes) -> None:
+    """The hold after signing in again ends with the first poll that catches up."""
+    mail = two.mail
+    _, stuck = start_both(two)
+    two.needs_sign_in(True)
+    due = NOW + WEEK + INTERVAL  # step 2 is due on both
+    for minute in range(0, 5):  # the full poll finds it not ready; its step 2 waits
+        mail.tick(due + timedelta(minutes=minute))
+    assert len(two.reauth_gmail.sent()) == 1
+    two.needs_sign_in(False)
+
+    mail.tick(due + timedelta(minutes=5))  # the poll catches up, then step 2 is claimed
+
+    assert two.polled_at(two.reauth_id) == due + timedelta(minutes=5)
+    assert len(two.reauth_gmail.sent()) == 2
+    assert mail.enrollment(stuck).status is EnrollmentStatus.COMPLETED
+
+
+def test_a_mailbox_waiting_out_its_backoff_stays_due(
+    two: TwoBoxes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Polling another due mailbox meanwhile leaves the waiting one due."""
+    mail, sender = two.mail, two.mail.sender
+    assert isinstance(sender, GmailSender)
+    healthy, stuck = mail.mailbox.id, two.reauth_id
+    script = iter(
+        [
+            replies.RepliesPolled(failed=frozenset({stuck}), behind=frozenset({healthy})),
+            replies.RepliesPolled(failed=frozenset({stuck}), behind=frozenset({healthy})),
+            replies.RepliesPolled(caught_up=frozenset({healthy})),
+        ]
+    )
+    asked: list[frozenset[int] | None] = []
+
+    def poll(*args: object, only: frozenset[int] | None, **kwargs: object) -> object:
+        asked.append(only)
+        return next(script)
+
+    monkeypatch.setattr(replies, "poll_replies", poll)
+    for minute in range(3):
+        sender._poll_replies(mail.factory, mail.user.id, NOW + timedelta(minutes=minute))
+
+    # The full poll, both a minute later, then the healthy one while the other waits.
+    assert asked == [None, frozenset({healthy, stuck}), frozenset({healthy})]
+    assert sender.replies_due(mail.user.id) == frozenset({stuck})
+
+
+def test_the_reply_backoff_starts_at_one_minute() -> None:
+    from netkeeper.services import campaign_sender
+
+    assert timedelta(minutes=1) == campaign_sender.REPLY_BACKOFF_FIRST
