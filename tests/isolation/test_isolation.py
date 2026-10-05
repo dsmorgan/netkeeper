@@ -43,6 +43,7 @@ from .registry import (
     REGISTRY,
     ListEndpoint,
     _seed_linkedin_ready,
+    _seed_linkedin_waiting,
     seed_contacts,
 )
 
@@ -318,3 +319,24 @@ async def test_one_campaigns_linkedin_queue_is_isolated(running_app: FastAPI) ->
     assert (mine["total"], mine["by_step"]) == (2, {"1": 2})
     theirs = await _get(running_app, b_id, path)
     assert theirs == {"items": [], "total": 0, "by_step": {}}
+
+
+async def test_one_campaigns_linkedin_waiting_list_is_isolated(running_app: FastAPI) -> None:
+    """#383: ``GET /campaigns/linkedin/waiting?campaign_id=`` with another user's campaign
+    answers nothing."""
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        a = User(kind=UserKind.HOSTED, display_name="A")
+        b = User(kind=UserKind.HOSTED, display_name="B")
+        session.add_all([a, b])
+        session.flush()
+        _seed_linkedin_waiting(session, a)
+        _seed_linkedin_waiting(session, b)
+        campaign_id = session.scalars(scoped(a, Campaign)).one().id
+        a_id, b_id = a.id, b.id
+
+    path = f"/campaigns/linkedin/waiting?campaign_id={campaign_id}"
+    mine = await _get(running_app, a_id, path)
+    assert mine["total"] == 2
+    assert {item["campaign_id"] for item in mine["items"]} == {campaign_id}
+    assert await _get(running_app, b_id, path) == {"items": [], "total": 0}
