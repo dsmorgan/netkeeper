@@ -16,6 +16,7 @@ import random
 import statistics
 
 import pytest
+import regex
 
 from netkeeper.linkedin import pacing
 from netkeeper.linkedin.pacing import (
@@ -643,3 +644,112 @@ def test_profile_edges_that_are_allowed() -> None:
 def test_an_empty_body_is_an_empty_plan() -> None:
     assert typing_plan("", random.Random(0)) == ()
     assert plan_duration(()) == 0
+
+
+# --- clusters whose end depends on the text before them (#411) ----------------------
+
+# A Unicode 17 linker between two consonants. From regex 2026.9.29 on, the linker
+# joins the consonant after it only when a consonant comes before it, so the middle
+# cluster changes with its context: in U+0915 U+1CF5 U+0915 it is U+1CF5 U+0915, yet
+# U+1CF5 U+0915 alone is two clusters. Before that release, each is a cluster alone.
+_CONTEXT_DEPENDENT = {
+    "vedic_jihvamuliya": "\u0915\u1cf5\u0915",  # ka, U+1CF5, ka
+    "vedic_upadhmaniya": "\u0915\u1cf6\u0915",  # ka, U+1CF6, ka
+    "zanabazar_cluster_initial_ra": "\U00011a0b\U00011a3a\U00011a0b",  # ka, U+11A3A, ka
+}
+_GRAPHEMES = regex.compile(r"\X")
+
+
+def _assert_typed_as_segmented(text: str, plan: tuple[TypeStep, ...]) -> None:
+    """The plan types each line's clusters exactly as segmenting the whole line gives them."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    expected: list[str | None] = []
+    for index, line in enumerate(lines):
+        if index:
+            expected.append(None)
+        expected.extend(_GRAPHEMES.findall(line))
+    assert [None if step.newline else step.chunk for step in plan] == expected
+
+
+@pytest.mark.parametrize("cluster", _CONTEXT_DEPENDENT.values(), ids=_CONTEXT_DEPENDENT.keys())
+def test_a_linker_between_consonants_is_typed_as_the_text_segments_it(cluster: str) -> None:
+    text = f"Hi {cluster} ok"
+    for seed in range(5):
+        plan = typing_plan(text, random.Random(seed))
+        assert "".join(step.chunk for step in plan) == text
+        _assert_typed_as_segmented(text, plan)
+    # The middle step is whatever segmenting the whole text makes it, under either
+    # regex release: U+1CF5 then U+0915, or the one cluster U+1CF5 U+0915.
+    found = list(_GRAPHEMES.finditer(text))
+    for match in found:
+        step = TypeStep(
+            chunk=match.group(), delay_before_s=0.1, newline=False, line=text, offset=match.start()
+        )
+        assert step.chunk == match.group()
+
+
+@pytest.mark.parametrize("cluster", _CONTEXT_DEPENDENT.values(), ids=_CONTEXT_DEPENDENT.keys())
+def test_a_context_dependent_cluster_is_one_step_only_in_its_context(cluster: str) -> None:
+    tail = cluster[1:]  # the linker and the consonant after it
+    if len(_GRAPHEMES.findall(cluster)) != 2:
+        pytest.skip("this regex release has no context-dependent cluster here")
+    # Under a release that joins them in context, the pair is one step there...
+    TypeStep(chunk=tail, delay_before_s=0.1, newline=False, line=cluster, offset=1)
+    # ...but on its own line it is two clusters, and no step types two.
+    with pytest.raises(ValueError, match="exactly one grapheme cluster"):
+        TypeStep(chunk=tail, delay_before_s=0.1, newline=False)
+    with pytest.raises(ValueError, match="exactly one grapheme cluster"):
+        TypeStep(chunk=tail, delay_before_s=0.1, newline=False, line=" " + tail, offset=1)
+
+
+@pytest.mark.parametrize(
+    ("chunk", "line", "offset"),
+    [
+        ("ab", "ab", 0),  # two clusters in their line
+        ("a", "ab", 1),  # not what the line holds at that offset
+        ("b", "ab", 5),  # an offset past the line
+        ("b", "ab", -1),  # a negative offset
+        ("e", _E_ACUTE, 0),  # only part of a cluster
+        ("\u0301", "e\u0301", 1),  # starts inside a cluster
+        ("", "ab", 0),  # empty
+    ],
+)
+def test_a_step_with_a_line_still_types_exactly_one_cluster_of_it(
+    chunk: str, line: str, offset: int
+) -> None:
+    with pytest.raises(ValueError):
+        TypeStep(chunk=chunk, delay_before_s=0.1, newline=False, line=line, offset=offset)
+
+
+def test_the_line_and_offset_are_not_part_of_a_steps_identity_or_repr() -> None:
+    alone = TypeStep(chunk="b", delay_before_s=0.1, newline=False)
+    placed = TypeStep(chunk="b", delay_before_s=0.1, newline=False, line="secret ab", offset=8)
+    assert alone == placed
+    assert "secret" not in repr(placed)
+
+
+# Consonants, linkers (the Unicode 17 ones and the viramas GB9c already knew), marks,
+# joiners, regional indicators, emoji, spaces, and newlines: every way a cluster's end
+# can lean on what comes before it.
+_CONTEXT_ALPHABET = [
+    *("\u0915", "\u0916", "\u0924", "\u1cf5", "\u1cf6", "\u094d", "\u093f"),  # Devanagari
+    *("\U00011a0b", "\U00011a0c", "\U00011a3a", "\U00011a47", "\U00011a33"),  # Zanabazar
+    *("\u0995", "\u09cd", "\u1780", "\u17d2", "\u0e01", "\u0e3a"),  # Bengali, Khmer, Thai
+    *("a", " ", ".", "\u0301", "\u200d", "\u200c", "\ufe0f"),
+    *("\U0001f1f5", "\U0001f1f9", "\U0001f600", "\U0001f468", "\U0001f3fd"),
+    *("\n", "\r\n", "\u200b"),  # newlines, and one untypable character
+]
+
+
+def test_no_text_of_linkers_and_consonants_makes_the_plan_raise_a_bare_value_error() -> None:
+    rng = random.Random(411)
+    planned = 0
+    for _ in range(3000):
+        text = "".join(rng.choice(_CONTEXT_ALPHABET) for _ in range(rng.randint(1, 12)))
+        try:
+            plan = typing_plan(text, random.Random(0), allow_newlines=True)
+        except UnsupportedCharacter:
+            continue  # a zero-width space, or two variation selectors on one cluster
+        planned += 1
+        _assert_typed_as_segmented(text, plan)
+    assert planned > 1000

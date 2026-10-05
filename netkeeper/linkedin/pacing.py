@@ -24,10 +24,11 @@ a real minute ever passing.
 
 from __future__ import annotations
 
+import functools
 import math
 import random
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Final
 from zoneinfo import ZoneInfo
@@ -886,11 +887,22 @@ class TypeStep:
     ``newline=True`` has an empty chunk, and the replay presses Shift+Enter for it,
     never a bare Enter. The constructor refuses any other shape, a cluster
     :func:`is_untypable_cluster` refuses, and a delay that is negative or not finite.
+
+    Where a cluster ends can depend on the text before it. With Unicode 17's data, a
+    linker such as U+1CF5 joins the consonant after it only when a consonant comes
+    before it too: U+0915 U+1CF5 U+0915 splits into U+0915 and the cluster U+1CF5
+    U+0915, yet U+1CF5 U+0915 on its own splits in two. So ``chunk`` is checked
+    where it was segmented: ``line`` is the line of the body it came from (the text
+    between newlines) and ``offset`` is where in ``line`` it starts. With the default
+    empty ``line``, the chunk is checked as a line of its own. Neither field is part
+    of the step's repr or equality.
     """
 
     chunk: str
     delay_before_s: float
     newline: bool
+    line: str = field(default="", repr=False, compare=False)
+    offset: int = field(default=0, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.delay_before_s) or self.delay_before_s < 0:
@@ -899,7 +911,7 @@ class TypeStep:
             if self.chunk:
                 raise ValueError("a newline step has an empty chunk")
             return
-        if len(_GRAPHEME_RE.findall(self.chunk)) != 1:
+        if not _is_one_cluster_in(self.chunk, self.line or self.chunk, self.offset):
             raise ValueError("a typing step types exactly one grapheme cluster")
         if is_untypable_cluster(self.chunk):
             raise ValueError("a typing step never types a cluster is_untypable_cluster refuses")
@@ -915,6 +927,24 @@ class TypeStep:
         if self.newline:
             return False
         return not (len(self.chunk) == 1 and 0x20 <= ord(self.chunk) <= 0x7E)
+
+
+def _is_one_cluster_in(chunk: str, line: str, offset: int) -> bool:
+    """Whether ``chunk`` is non-empty and is, at ``offset``, one whole grapheme cluster
+    of ``line`` as segmenting all of ``line`` finds it."""
+    return (
+        bool(chunk)
+        and line.startswith(chunk, offset)
+        and (_cluster_spans(line).get(offset) == offset + len(chunk))
+    )
+
+
+@functools.lru_cache(maxsize=4)
+def _cluster_spans(line: str) -> dict[int, int]:
+    """Where each grapheme cluster of ``line`` starts, mapped to where it ends.
+
+    Cached, because a plan builds one step per cluster of the same line."""
+    return {found.start(): found.end() for found in _GRAPHEME_RE.finditer(line)}
 
 
 TypingPlan = tuple[TypeStep, ...]
@@ -933,17 +963,28 @@ def typing_length_warning(text: str) -> bool:
     return len(text) > TYPING_WARN_CHARS
 
 
-def _units(text: str) -> list[str]:
-    """``text`` as typing units: one grapheme cluster each, and ``"\\n"`` for each
-    newline (CR, LF, or CRLF as one). Any other line break stays a unit of its own, for
-    :func:`typing_plan` to refuse. No validation here."""
-    units: list[str] = []
+def _located_units(text: str) -> list[tuple[str, str, int]]:
+    """``text`` as typing units, each with the line it came from and its offset there.
+
+    A unit is one grapheme cluster, or ``"\\n"`` for each newline (CR, LF, or CRLF as
+    one), which has an empty line. Each line is segmented whole, so a cluster whose
+    end depends on the text before it (see :class:`TypeStep`) comes out as it does in
+    context. Any other line break stays a unit of its own, for :func:`typing_plan` to
+    refuse. No validation here."""
+    units: list[tuple[str, str, int]] = []
     for index, piece in enumerate(_NEWLINE_RE.split(text)):
         if index % 2:
-            units.append("\n")
+            units.append(("\n", "", 0))
         elif piece:
-            units.extend(_GRAPHEME_RE.findall(piece))
+            units.extend(
+                (found.group(), piece, found.start()) for found in _GRAPHEME_RE.finditer(piece)
+            )
     return units
+
+
+def _units(text: str) -> list[str]:
+    """``text`` as typing units: :func:`_located_units` without the locations."""
+    return [unit for unit, _line, _offset in _located_units(text)]
 
 
 def _extras(units: list[str]) -> list[str | None]:
@@ -1052,7 +1093,8 @@ def _typing_plan_unclamped(
     Private, for statistical tests that need plans longer than any real message.
     Nothing outside the tests may call it.
     """
-    units = _units(text)
+    located = _located_units(text)
+    units = [unit for unit, _line, _offset in located]
     for position, unit in enumerate(units):
         if unit == "\n":
             if not allow_newlines:
@@ -1075,7 +1117,7 @@ def _typing_plan_unclamped(
         "word": profile.word_extra_median_s,
         "sentence": profile.sentence_extra_median_s,
     }
-    for unit, extra in zip(units, _extras(units), strict=True):
+    for (unit, line, offset), extra in zip(located, _extras(units), strict=True):
         delay = rng.lognormvariate(math.log(profile.char_median_s), profile.char_sigma)
         if extra is not None:
             delay += rng.lognormvariate(math.log(extra_medians[extra]), profile.extra_sigma)
@@ -1085,7 +1127,9 @@ def _typing_plan_unclamped(
         if unit == "\n":
             steps.append(TypeStep(chunk="", delay_before_s=delay, newline=True))
         else:
-            steps.append(TypeStep(chunk=unit, delay_before_s=delay, newline=False))
+            steps.append(
+                TypeStep(chunk=unit, delay_before_s=delay, newline=False, line=line, offset=offset)
+            )
 
     plan: TypingPlan = tuple(steps)
     duration = plan_duration(plan)

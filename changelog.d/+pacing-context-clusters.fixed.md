@@ -1,0 +1,1 @@
+A LinkedIn message with a Unicode 17 linker between two consonants (U+1CF5 or U+1CF6 in Devanagari, U+11A3A in Zanabazar Square) no longer stops the typing plan with an unexplained error once the `regex` package carries Unicode 17 data. Each character group is typed as it appears in the whole line, and lint and the typing plan still agree on what can be typed.
