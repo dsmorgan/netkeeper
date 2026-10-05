@@ -57,6 +57,21 @@ const EMAIL_MODES: StepMode[] = ['draft', 'send']
 const LINKEDIN_MODES: StepMode[] = ['prefill']
 const LINKEDIN_MODES_WITH_AUTO: StepMode[] = ['prefill', 'auto_send']
 
+function modesFor(channel: TemplateOut['channel'] | null, autoSend: boolean): StepMode[] {
+  if (channel !== 'linkedin') return EMAIL_MODES
+  return autoSend ? LINKEDIN_MODES_WITH_AUTO : LINKEDIN_MODES
+}
+
+/** The step's mode as offered: its choice if still offered, else the first one offered. */
+function modeOf(
+  step: StepDraft,
+  channel: TemplateOut['channel'] | null,
+  autoSend: boolean,
+): StepMode {
+  const modes = modesFor(channel, autoSend)
+  return step.mode !== null && modes.includes(step.mode) ? step.mode : (modes[0] as StepMode)
+}
+
 function channelOf(step: StepDraft, templates: readonly TemplateOut[]) {
   return templates.find((t) => t.id === step.templateId)?.channel ?? null
 }
@@ -115,7 +130,8 @@ export function CampaignBuilderPage() {
     mutationFn: () => {
       const body: StepIn[] = steps.map((s, index) => {
         const channel = channelOf(s, templateRows)
-        const mode = s.mode ?? (channel === 'linkedin' ? 'prefill' : 'draft')
+        // What the Mode select shows, so what you see is what is saved.
+        const mode = modeOf(s, channel, autoSend)
         return {
           template_id: s.templateId as number,
           delay_days: s.delayDays,
@@ -211,13 +227,8 @@ export function CampaignBuilderPage() {
           <ol className="flex flex-col gap-3">
             {steps.map((step, index) => {
               const channel = channelOf(step, templateRows)
-              const modes =
-                channel === 'linkedin'
-                  ? autoSend
-                    ? LINKEDIN_MODES_WITH_AUTO
-                    : LINKEDIN_MODES
-                  : EMAIL_MODES
-              const mode = step.mode !== null && modes.includes(step.mode) ? step.mode : modes[0]
+              const modes = modesFor(channel, autoSend)
+              const mode = modeOf(step, channel, autoSend)
               const lint = templateRows.find((t) => t.id === step.templateId)?.lint ?? []
               const threadable = channel === 'email' && hasEarlierEmail(steps, index, templateRows)
               const n = index + 1

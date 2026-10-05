@@ -221,9 +221,13 @@ describe('the inbox poll and the prefill on the LinkedIn page (#383)', () => {
       'GET /api/v1/linkedin/runs/61': () => jsonResponse(inboxRun),
     })
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Check inbox now' }))
+    const button = await screen.findByRole('button', { name: 'Check inbox now' })
+    fireEvent.click(button)
 
     expect(await screen.findByText('Checking the LinkedIn inbox…')).toBeVisible()
+    // Off while its poll runs: one click, one poll.
+    expect(button).toBeDisabled()
+    fireEvent.click(button)
     const started = calls.filter((c) => c.method === 'POST' && c.path === '/api/v1/linkedin/runs')
     expect(started.map((c) => c.body)).toEqual([{ kind: 'inbox', max_visits: null }])
 
@@ -239,6 +243,7 @@ describe('the inbox poll and the prefill on the LinkedIn page (#383)', () => {
     expect(
       await screen.findByText(/The inbox check stopped: the inbox page source is not built yet/),
     ).toBeVisible()
+    expect(button).toBeEnabled()
   })
 
   it('shows a refused inbox check', async () => {

@@ -67,7 +67,7 @@ function fail(status: number, body: unknown, fallback: string): never {
 export const linkedinStepKeys = {
   all: ['linkedin-steps'] as const,
   ready: (campaignId: number | null) => [...linkedinStepKeys.all, 'ready', campaignId] as const,
-  waiting: () => [...linkedinStepKeys.all, 'waiting'] as const,
+  waiting: (campaignId: number | null) => [...linkedinStepKeys.all, 'waiting', campaignId] as const,
   options: () => [...linkedinStepKeys.all, 'options'] as const,
 }
 
@@ -91,18 +91,25 @@ export function readyQuery(campaignId: number | null = null) {
   })
 }
 
-/** Prefilled, stale, and interrupted LinkedIn messages: each waits for you. */
-export const waitingQuery = queryOptions({
-  queryKey: linkedinStepKeys.waiting(),
-  queryFn: async ({ signal }): Promise<WaitingPage> => {
-    const { data, error, response } = await api.GET('/api/v1/campaigns/linkedin/waiting', {
-      params: { query: { limit: QUEUE_PAGE } },
-      signal,
-    })
-    if (data === undefined) fail(response.status, error, 'could not load what waits for you')
-    return data
-  },
-})
+/**
+ * Prefilled, stale, and interrupted LinkedIn messages: each waits for you. Every
+ * campaign's by default: the one-open-prefill rule is per user, not per campaign.
+ */
+export function waitingQuery(campaignId: number | null = null) {
+  return queryOptions({
+    queryKey: linkedinStepKeys.waiting(campaignId),
+    queryFn: async ({ signal }): Promise<WaitingPage> => {
+      const { data, error, response } = await api.GET('/api/v1/campaigns/linkedin/waiting', {
+        params: {
+          query: { limit: QUEUE_PAGE, ...(campaignId === null ? {} : { campaign_id: campaignId }) },
+        },
+        signal,
+      })
+      if (data === undefined) fail(response.status, error, 'could not load what waits for you')
+      return data
+    },
+  })
+}
 
 /** Whether a LinkedIn step may be `auto_send`: the config flag, off by default. */
 export const stepOptionsQuery = queryOptions({

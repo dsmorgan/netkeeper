@@ -474,7 +474,11 @@ async def test_acknowledge_clears_the_first_polls_warning(
         record_short_first_poll(session, _local(session), short_of)
 
     posture = (await client.get("/api/v1/posture")).json()
-    assert any(row["name"] == "linkedin reply poll" for row in posture["protections"])
+    [row] = [r for r in posture["protections"] if r["key"] == "linkedin_first_poll_short"]
+    assert row["name"] == "linkedin reply poll"
+    assert "click Acknowledge in Settings, Posture" in row["warnings"][0]
+    [manual] = [r for r in posture["protections"] if r["key"] == "manual_linkedin_sends"]
+    assert (manual["name"], manual["status"]) == ("manual linkedin sends", "on")
 
     response = await client.post(INBOX_ACK_URL, headers=HEADERS)
     assert response.status_code == 200
@@ -482,7 +486,7 @@ async def test_acknowledge_clears_the_first_polls_warning(
     with session_scope(running_app.state.session_factory) as session:
         assert short_first_poll(session, _local(session)) is None
     posture = (await client.get("/api/v1/posture")).json()
-    assert all(row["name"] != "linkedin reply poll" for row in posture["protections"])
+    assert all(row["key"] != "linkedin_first_poll_short" for row in posture["protections"])
 
     again = await client.post(INBOX_ACK_URL, headers=HEADERS)
     assert again.json() == {"cleared": False}

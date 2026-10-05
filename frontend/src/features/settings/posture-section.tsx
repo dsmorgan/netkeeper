@@ -7,8 +7,8 @@ import { renderInlineMarkdown } from '@/lib/inline-markdown'
 import { cn } from '@/lib/utils'
 
 import {
-  LINKEDIN_REPLY_POLL_ROW,
-  MANUAL_SENDS_ROW,
+  FIRST_POLL_SHORT_KEY,
+  MANUAL_SENDS_KEY,
   acknowledgeInboxFirstPoll,
   postureQuery,
   type Protection,
@@ -140,7 +140,7 @@ export function PostureSection() {
  * plain words; on, highlighted as a warning with the backend's own warning text.
  */
 function ManualSends({ rows }: { rows: readonly Protection[] }) {
-  const row = rows.find((r) => r.name === MANUAL_SENDS_ROW)
+  const row = rows.find((r) => r.key === MANUAL_SENDS_KEY)
   if (row === undefined) return null
   const autoSendOn = row.status !== 'on'
   return (
@@ -184,7 +184,10 @@ function ReplyPollAcknowledge({ rows }: { rows: readonly Protection[] }) {
     mutationFn: acknowledgeInboxFirstPoll,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: postureQuery.queryKey }),
   })
-  const row = rows.find((r) => r.name === LINKEDIN_REPLY_POLL_ROW && r.warnings.length > 0)
+  const row = rows.find((r) => r.key === FIRST_POLL_SHORT_KEY && r.warnings.length > 0)
+  if (acknowledge.data === false) {
+    return <p role="status">Nothing to acknowledge: no first LinkedIn inbox poll fell short.</p>
+  }
   if (row === undefined) return null
   return (
     <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">

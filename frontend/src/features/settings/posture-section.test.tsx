@@ -268,6 +268,7 @@ describe('PostureSection', () => {
 describe('PostureSection: LinkedIn sends and the first inbox poll (#383)', () => {
   const MANUAL_ON = {
     name: 'manual linkedin sends',
+    key: 'manual_linkedin_sends',
     status: 'on',
     value: 'auto-send off (ADR 0004)',
     summary: 'auto-send off (ADR 0004)',
@@ -283,6 +284,7 @@ describe('PostureSection: LinkedIn sends and the first inbox poll (#383)', () =>
     ' replies by hand, then run `netkeeper linkedin inbox-acknowledge`'
   const SHORT_POLL = {
     name: 'linkedin reply poll',
+    key: 'linkedin_first_poll_short',
     status: 'off',
     value: 'the first poll fell short of 2030-01-02',
     summary: 'the first poll fell short of 2030-01-02',
@@ -348,6 +350,36 @@ describe('PostureSection: LinkedIn sends and the first inbox poll (#383)', () =>
     await waitFor(() => expect(screen.queryByText('LinkedIn replies to check by hand')).toBeNull())
     expect(posted).toHaveLength(1)
     expect(posted[0]?.headers.get('X-Netkeeper-Client')).toBe('1')
+  })
+
+  it('finds the rows by key, not by name', async () => {
+    renderSection(
+      withRows([
+        { ...MANUAL_ON, name: 'renamed sends row' },
+        { ...SHORT_POLL, name: 'renamed poll row' },
+      ]),
+    )
+    expect(await screen.findByRole('note', { name: 'Manual LinkedIn sends' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Acknowledge' })).toBeVisible()
+  })
+
+  it('says so when there was nothing to acknowledge', async () => {
+    mockFetch((request) => {
+      const { pathname } = new URL(request.url)
+      if (pathname === '/api/v1/posture') return jsonResponse(withRows([MANUAL_ON, SHORT_POLL]))
+      if (pathname === '/api/v1/linkedin/inbox/acknowledge') return jsonResponse({ cleared: false })
+      return jsonResponse({ detail: 'no fake' }, 404)
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <PostureSection />
+      </QueryClientProvider>,
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Acknowledge' }))
+
+    expect(await screen.findByText(/Nothing to acknowledge/)).toBeVisible()
   })
 
   it('offers no Acknowledge button while no first poll fell short', async () => {

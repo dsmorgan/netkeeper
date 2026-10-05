@@ -3,6 +3,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 
+import { useRunGoing } from '@/features/linkedin-steps/use-prefill-run'
+
 import { linkedinKeys, runQuery, startRun } from './api'
 import { stopReasonLabel } from './fields'
 
@@ -27,6 +29,9 @@ export function InboxCheckCard({ onStarted }: { onStarted: (runId: number) => vo
     },
   })
 
+  // Off while the poll it started runs: one click, one poll.
+  const checking = useRunGoing(start.data?.run_id ?? null)
+
   return (
     <Card size="sm">
       <CardHeader>
@@ -37,7 +42,7 @@ export function InboxCheckCard({ onStarted }: { onStarted: (runId: number) => vo
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2 text-sm">
-        <Button disabled={start.isPending} onClick={() => start.mutate()}>
+        <Button disabled={start.isPending || checking} onClick={() => start.mutate()}>
           {start.isPending ? 'Starting…' : 'Check inbox now'}
         </Button>
         {start.isSuccess && <InboxRunOutcome runId={start.data.run_id} />}

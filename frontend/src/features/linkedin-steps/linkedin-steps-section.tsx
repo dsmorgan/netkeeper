@@ -52,7 +52,7 @@ import {
   waitingState,
   type WaitingState,
 } from './format'
-import { usePrefillRun, type PrefillRun } from './use-prefill-run'
+import { usePrefillRun, useRunGoing, type PrefillRun } from './use-prefill-run'
 
 /** The queue and the waiting list together: one campaign's when `campaignId` is given. */
 export function LinkedInStepsSection({ campaignId }: { campaignId?: number }) {
@@ -75,9 +75,23 @@ function useInvalidateSteps() {
 
 function AutoSendBadge() {
   const options = useQuery(stepOptionsQuery)
-  if (!options.isSuccess) return null
+  if (options.isPending) return null
+  if (options.isError) {
+    return (
+      <p className="flex flex-wrap items-center gap-2">
+        <Badge variant="outline">Auto-send: unknown</Badge>
+        <span className="text-muted-foreground">
+          netkeeper could not read the setting; Settings, Posture shows it.
+        </span>
+      </p>
+    )
+  }
+  // A standing setting, not an event: a highlighted note, never an alert.
   return options.data.auto_send ? (
-    <p role="alert" className="flex flex-wrap items-center gap-2 text-destructive">
+    <p
+      role="note"
+      className="flex flex-wrap items-center gap-2 rounded-md border border-destructive/50 bg-destructive/10 px-2 py-1 text-destructive"
+    >
       <Badge variant="destructive">Auto-send on</Badge>
       netkeeper sends LinkedIn messages itself. See Settings, Posture.
     </p>
@@ -93,7 +107,8 @@ function AutoSendBadge() {
 
 export function LinkedInQueueCard({ campaignId, run }: { campaignId?: number; run: PrefillRun }) {
   const ready = useQuery(readyQuery(campaignId ?? null))
-  const waiting = useQuery(waitingQuery)
+  // Every campaign's: one open prefill anywhere holds the slot.
+  const waiting = useQuery(waitingQuery())
   const invalidate = useInvalidateSteps()
   const queryClient = useQueryClient()
 
@@ -242,11 +257,27 @@ function ReadyRow({
   )
 }
 
-/** Why a prefill was not started, and that nothing was typed. */
+/** The statuses that mean the backend answered and claimed nothing (no run, no typing). */
+const REFUSED_STATUSES = new Set([404, 409, 503])
+
+/**
+ * Why a prefill did not start. Only an answer the backend gave (404, 409, 503) proves
+ * nothing was typed; any other failure (the network, a timeout, a 5xx) leaves it
+ * unknown, so it says to look before trying again.
+ */
 function Refused({ error, onDismiss }: { error: unknown; onDismiss: () => void }) {
-  const refusal = error instanceof LinkedInStepError ? error.refusal : null
+  const answered = error instanceof LinkedInStepError && REFUSED_STATUSES.has(error.status)
+  const refusal = answered ? error.refusal : null
   return (
-    <Callout tone="warning" title="Not prefilled. Nothing was typed in Chrome.">
+    <Callout
+      tone="warning"
+      role="alert"
+      title={
+        answered
+          ? 'Not prefilled. Nothing was typed in Chrome.'
+          : 'The prefill request failed. Check Waiting for you and the LinkedIn page before you try again.'
+      }
+    >
       {refusal !== null ? (
         <>
           <ul className="list-disc pl-5">
@@ -304,11 +335,9 @@ const STATE_TEXT: Record<WaitingState, string> = {
 }
 
 export function WaitingForYouCard({ campaignId }: { campaignId?: number }) {
-  const waiting = useQuery(waitingQuery)
+  const waiting = useQuery(waitingQuery(campaignId ?? null))
   const now = new Date()
-  const items = (waiting.data?.items ?? []).filter(
-    (item) => campaignId === undefined || item.campaign_id === campaignId,
-  )
+  const items = waiting.data?.items ?? []
   return (
     <Card>
       <CardHeader>
@@ -356,6 +385,7 @@ function WaitingRow({
   const invalidate = useInvalidateSteps()
   const [confirming, setConfirming] = useState(false)
   const check = useMutation({ mutationFn: () => checkSent(item.message_id) })
+  const checking = useRunGoing(check.data?.run_id ?? null)
   const drop = useMutation({
     mutationFn: () => discard(item.message_id),
     onSuccess: () => {
@@ -406,7 +436,7 @@ function WaitingRow({
       <p>{STATE_TEXT[state]}</p>
       <div className="flex flex-wrap items-center gap-2">
         {state !== 'interrupted' && (
-          <Button size="sm" disabled={check.isPending} onClick={() => check.mutate()}>
+          <Button size="sm" disabled={check.isPending || checking} onClick={() => check.mutate()}>
             I sent it, check now
           </Button>
         )}

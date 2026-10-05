@@ -826,11 +826,12 @@ class WaitingPrefill:
 
 
 def waiting_for_you(
-    session: Session, user: User, *, limit: int, offset: int = 0
+    session: Session, user: User, *, limit: int, offset: int = 0, campaign_id: int | None = None
 ) -> tuple[list[WaitingPrefill], int]:
     """``prefilled``, ``stale`` and interrupted LinkedIn messages (claimed, their run not
-    running), oldest first, and how many. An interrupted one blocks every later prefill
-    (one open at a time) until the person discards it. Read-only."""
+    running), oldest first, and how many; one campaign's with ``campaign_id`` (#383). An
+    interrupted one blocks every later prefill (one open at a time) until the person
+    discards it. Read-only."""
     run_running = and_(
         SyncRun.id == Message.sync_run_id,
         SyncRun.user_id == user.id,
@@ -855,6 +856,8 @@ def waiting_for_you(
             ),
         )
     )
+    if campaign_id is not None:
+        statement = statement.where(Enrollment.campaign_id == campaign_id)
     total = session.scalar(statement.with_only_columns(func.count(Message.id)).order_by(None))
     rows = session.execute(
         statement.add_columns(Enrollment, Campaign, Contact)
