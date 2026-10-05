@@ -64,16 +64,20 @@ run as ``answer_lost``. If the body tap breaks for good, every scheduled
 enrichment run would still make five to seven clicks and stop, forever.
 :data:`CONTACT_INFO_THRESHOLD` consecutive enrichment runs, by hand or by
 schedule, ending ``answer_lost`` (the only way enrichment ends ``answer_lost``
-is those caps) trip it, and the scheduler (and the worker's second check) then
-skip every scheduled enrichment fire as ``"contact_info_breaker"``. Connections
-runs are never skipped for it, and it never skips enrichment for a connections
+is those caps), or reaching their own end after two or more clicks with every
+one lost (a small budget never reaches the caps; #424 review), trip it, and
+the scheduler (and the worker's second check) then skip every scheduled
+enrichment fire as ``"contact_info_breaker"``. Connections runs are never
+skipped for it, and it never skips enrichment for a connections
 streak: the two read different endpoints. The streak clears when an enrichment
-run reaches its own end (``end_of_plan`` or ``visit_budget``) after reading at
-least one Contact info answer that was not lost (:func:`record_contact_info`),
+run reaches its own end (``end_of_plan`` or ``visit_budget``) after reading and
+parsing at least one Contact info answer (:func:`record_contact_info`),
 whatever its trigger, so a manual run that reads Contact info again clears it;
 :func:`reset` clears it with the others. Every other ending (a budget stop, a
-cancel, the window closing, a route change, a run that clicked nothing or lost
-every overlay it clicked) leaves the count where it was.
+cancel, the window closing, a response, a run that read nothing and lost fewer
+than two overlays) leaves the count where it was. The runner decides which of
+these a run is (``services.enrichment.contact_info_lost_again`` and
+``contact_info_read_again``); this module only counts.
 
 Persisted like :mod:`netkeeper.services.heat`: a ``settings_kv`` row keyed by
 account id, read and written through a session and a ``User`` -- the
@@ -301,12 +305,13 @@ def record_contact_info(
     """Record one enrichment run's outcome on the Contact info breaker (#424). Needs a
     writer session.
 
-    ``answer_lost`` (the run's ``stop_reason`` was ``answer_lost``: the Contact info
-    caps stopped it) extends the streak by one. ``clean_end`` (the run reached its own
-    end, ``end_of_plan`` or ``visit_budget``, and read at least one Contact info
-    answer that was not lost) clears it, whatever the trigger: that is how a manual
-    run shows the overlay can be read again. Neither leaves the count where it was,
-    and a corrupt row stays as it is (still read as tripped).
+    ``answer_lost`` (the Contact info caps stopped the run, or it reached its own end
+    with two or more clicks and every one lost) extends the streak by one.
+    ``clean_end`` (the run reached its own end, ``end_of_plan`` or ``visit_budget``,
+    and read and parsed at least one Contact info answer) clears it, whatever the
+    trigger: that is how a manual run shows the overlay can be read again. Neither
+    leaves the count where it was, and a corrupt row stays as it is (still read as
+    tripped).
     """
     _require_writer(session, "route_breaker.record_contact_info")
     if answer_lost and clean_end:

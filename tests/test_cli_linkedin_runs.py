@@ -703,12 +703,12 @@ def _contact_info_count(factory: sessionmaker[Session], account_id: int) -> int:
 def test_schedule_status_shows_the_contact_info_breaker(cli_db: sessionmaker[Session]) -> None:
     runner = CliRunner()
     clear = runner.invoke(cli, ["linkedin", "schedule", "status"]).output
-    assert "Contact info breaker: 0 of 3 answer_lost enrich runs in a row" in clear
+    assert "Contact info breaker: 0 of 3 Contact-info-lost enrich runs in a row" in clear
 
     _lose_contact_info(cli_db, 3)
     tripped = runner.invoke(cli, ["linkedin", "schedule", "status"]).output
     assert (
-        "Contact info breaker: tripped, 3 of 3 answer_lost enrich runs in a row;"
+        "Contact info breaker: tripped, 3 of 3 Contact-info-lost enrich runs in a row;"
         " scheduled enrichment runs are skipped (`netkeeper linkedin schedule reset-breaker`)"
     ) in tripped
 
@@ -732,7 +732,7 @@ def test_reset_breaker_clears_the_contact_info_breaker(cli_db: sessionmaker[Sess
     runner = CliRunner()
     declined = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="n\n")
     assert declined.exit_code == 1
-    assert "3 `answer_lost` enrich" in declined.output
+    assert "3 Contact-info-lost enrich" in declined.output
     assert "enrichment runs will be allowed to fire again" in declined.output
     assert _contact_info_count(cli_db, account_id) == 3
 
@@ -749,6 +749,6 @@ def test_reset_breaker_clears_a_corrupt_contact_info_row(cli_db: sessionmaker[Se
         set_setting(session, user, f"linkedin.contact_info_breaker.{account_id}", "garbage")
     result = CliRunner().invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="y\n")
     assert result.exit_code == 0, result.output
-    assert "answer_lost enrich unreadable" in result.output
+    assert "Contact-info-lost enrich unreadable" in result.output
     with session_scope(cli_db) as session:
         assert not route_breaker.contact_info_tripped(session, _user(session), account_id)

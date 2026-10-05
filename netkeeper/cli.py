@@ -1671,7 +1671,9 @@ def linkedin_schedule_status(ctx: typer.Context) -> None:
     typer.echo(_streak_line("route-changed breaker", "route_changed", route))
     for kind, streak in lost.items():
         typer.echo(_streak_line("answer-lost limit", "answer_lost", streak, kind=kind))
-    typer.echo(_streak_line("Contact info breaker", "answer_lost", info, kind=SyncRunKind.ENRICH))
+    typer.echo(
+        _streak_line("Contact info breaker", "Contact-info-lost", info, kind=SyncRunKind.ENRICH)
+    )
 
 
 def _streak_line(
@@ -1828,8 +1830,9 @@ def linkedin_schedule_reset_breaker(
     every count. A manual run of that kind that completes with nothing lost
     clears its kind's count too.
 
-    Three enrichment runs in a row ending `answer_lost` (too many Contact info
-    answers lost) trip the Contact info breaker (#424), which skips scheduled
+    Three enrichment runs in a row that lose their Contact info answers (stopped
+    `answer_lost`, or every one of two or more lost) trip the Contact info breaker
+    (#424), which skips scheduled
     enrichment runs; this clears it too. A manual enrichment run (`netkeeper
     linkedin enrich`) that reaches its end and reads Contact info clears it the
     same way.
@@ -1870,9 +1873,9 @@ def linkedin_schedule_reset_breaker(
                     else f"answer_lost {kind.value} unreadable"
                     for kind, s in lost.items()
                 ),
-                f"{info.count} `answer_lost` enrich"
+                f"{info.count} Contact-info-lost enrich"
                 if info.readable
-                else "answer_lost enrich unreadable",
+                else "Contact-info-lost enrich unreadable",
             ]
         )
         question = (
