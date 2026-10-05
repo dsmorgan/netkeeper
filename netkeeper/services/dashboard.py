@@ -106,7 +106,7 @@ def changed_jobs(
         statement.add_columns(latest.c.noticed_at)
         .order_by(latest.c.noticed_at.desc(), Contact.id)
         .limit(limit)
-    ).tuples()
+    )
     return [ChangedJob(contact=contact, noticed_at=at) for contact, at in rows], total or 0
 
 

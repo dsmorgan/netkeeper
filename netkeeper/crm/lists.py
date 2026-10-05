@@ -525,7 +525,7 @@ def remove_member(session: Session, user: User, list_id: int, contact_id: int) -
     return True
 
 
-def _static_members_base(user: User, row: ContactList) -> Select[tuple[Contact]]:
+def _static_members_base(user: User, row: ContactList) -> Select[Contact]:
     """The live contacts explicitly in static list ``row``: joined to their membership row.
 
     "Live" matches what every smart list means by it by default

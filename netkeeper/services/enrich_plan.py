@@ -119,7 +119,7 @@ class PlanFinished(ValueError):
 # --- who may be visited -------------------------------------------------------
 
 
-def _eligible(user: User) -> Select[tuple[Contact]]:
+def _eligible(user: User) -> Select[Contact]:
     return scoped_contacts(user).where(
         Contact.merged_into_id.is_(None),
         Contact.archived_at.is_(None),

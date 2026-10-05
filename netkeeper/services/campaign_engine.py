@@ -1195,7 +1195,7 @@ def _next_step_join(user: User) -> ColumnElement[bool]:
     )
 
 
-def _selectable(user: User) -> Select[tuple[Enrollment]]:
+def _selectable(user: User) -> Select[Enrollment]:
     """Enrollments the tick selects when their due time comes, whenever that is.
 
     The one definition of what the tick fires, with the due time left open:
@@ -1222,7 +1222,7 @@ def _not_on_linkedin() -> ColumnElement[bool]:
     return or_(CampaignStep.id.is_(None), CampaignStep.channel != TemplateChannel.LINKEDIN)
 
 
-def _selected(user: User, now: datetime) -> Select[tuple[Enrollment]]:
+def _selected(user: User, now: datetime) -> Select[Enrollment]:
     """Due enrollments, selected on status (#242 review), never on the due time alone,
     of a campaign whose scheduled start has come (#338)."""
     return _selectable(user).where(
@@ -1261,7 +1261,7 @@ def _due(
         statement.order_by(Enrollment.next_action_at, Enrollment.id)
         .limit(PAGE_SIZE)
         .execution_options(populate_existing=True)
-    ).tuples()
+    )
     return list(rows)
 
 
@@ -1356,7 +1356,7 @@ def upcoming(
         statement.add_columns(Campaign, CampaignStep, Contact)
         .order_by(Enrollment.next_action_at, Enrollment.id)
         .limit(limit)
-    ).tuples()
+    )
     fires = [
         UpcomingFire(
             enrollment=enrollment,
@@ -2131,7 +2131,7 @@ def _thread_known(session: Session, user: User, message: Message) -> frozenset[s
 
 
 def _tracked(
-    session: Session, user: User, statement: Select[tuple[Message]], *, with_thread: bool
+    session: Session, user: User, statement: Select[Message], *, with_thread: bool
 ) -> tuple[Tracked, ...]:
     rows = session.execute(
         statement.add_columns(Mailbox, Campaign.name, CampaignStep.mode)
@@ -2151,7 +2151,7 @@ def _tracked(
         )
         .order_by(Message.id)
         .execution_options(populate_existing=True)
-    ).tuples()
+    )
     found: list[Tracked] = []
     for message, mailbox, campaign_name, mode in rows:
         try:

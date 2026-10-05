@@ -611,22 +611,18 @@ def simulate_schedule(
         )
         with session_scope(factory) as session:
             user = session.get_one(User, user_id)
-            fired = (
-                session.execute(
-                    scoped(user, Message)
-                    .with_only_columns(
-                        Message.scheduled_at, CampaignStep.position, Message.enrollment_id
-                    )
-                    .join(CampaignStep, CampaignStep.id == Message.step_id)
-                    .where(
-                        CampaignStep.user_id == user.id,
-                        Message.direction == MessageDirection.OUT,
-                    )
-                    .order_by(Message.scheduled_at)
+            fired = session.execute(
+                scoped(user, Message)
+                .with_only_columns(
+                    Message.scheduled_at, CampaignStep.position, Message.enrollment_id
                 )
-                .tuples()
-                .all()
-            )
+                .join(CampaignStep, CampaignStep.id == Message.step_id)
+                .where(
+                    CampaignStep.user_id == user.id,
+                    Message.direction == MessageDirection.OUT,
+                )
+                .order_by(Message.scheduled_at)
+            ).all()
     width = len(shape.steps)
     by_day: dict[date, list[int]] = {}
     per_step = [0] * width

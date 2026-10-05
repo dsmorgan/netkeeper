@@ -167,5 +167,5 @@ def reasons(session: Session, user: User, addresses: Iterable[str]) -> dict[str,
         scoped(user, DoNotSendAddress)
         .with_only_columns(DoNotSendAddress.email, DoNotSendAddress.reason)
         .where(DoNotSendAddress.email.in_(wanted))
-    ).tuples()
+    )
     return {email: reason for email, reason in rows}

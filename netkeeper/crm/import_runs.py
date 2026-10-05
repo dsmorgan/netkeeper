@@ -1588,13 +1588,13 @@ def _messaged(session: Session, user: User, contact_ids: Iterable[int]) -> tuple
             scoped(user, Enrollment)
             .with_only_columns(Enrollment.id, Enrollment.contact_id)
             .where(Enrollment.contact_id.in_(ids))
-        ).tuples()
+        )
     }
     rows = session.execute(
         scoped(user, Message)
         .with_only_columns(Message.contact_id, Message.enrollment_id)
         .where(or_(Message.contact_id.in_(ids), Message.enrollment_id.in_(sorted(enrolled))))
-    ).tuples()
+    )
     created = set(ids)
     named: set[int] = set()
     messages = 0

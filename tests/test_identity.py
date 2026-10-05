@@ -53,6 +53,7 @@ from netkeeper.models import (
     CONTACT_CHILDREN,
     Contact,
     ContactAlias,
+    ContactChild,
     ContactEmail,
     ContactLink,
     ContactMet,
@@ -556,7 +557,13 @@ def test_apply_new_creates_a_contact_with_provenance_and_children(
     assert [(p.title, p.company, p.is_current) for p in contact.positions] == [
         ("CTO", "Acme", True)
     ]
-    for child in [*contact.emails, *contact.phones, *contact.links, *contact.positions]:
+    children: list[ContactChild] = [
+        *contact.emails,
+        *contact.phones,
+        *contact.links,
+        *contact.positions,
+    ]
+    for child in children:
         assert (child.user_id, child.source, child.observed_at) == (
             alice.id,
             ContactSource.ARCHIVE,
@@ -858,7 +865,13 @@ def test_child_upsert_is_idempotent_and_keeps_is_primary(
         source=ContactSource.CSV,
     )
     contact.links.append(ContactLink(user_id=alice.id, url="https://a.test"))
-    for child in [*contact.emails, *contact.phones, *contact.positions, *contact.links]:
+    children: list[ContactChild] = [
+        *contact.emails,
+        *contact.phones,
+        *contact.positions,
+        *contact.links,
+    ]
+    for child in children:
         child.observed_at = EARLIER
     writer.flush()
     row = incoming(

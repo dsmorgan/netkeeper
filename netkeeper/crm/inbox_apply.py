@@ -49,7 +49,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Final
+from typing import Final, cast
 
 from sqlalchemy import Select, or_
 from sqlalchemy.orm import Session
@@ -187,7 +187,7 @@ REPLY_HANDLERS: Final[list[ReplyHandler]] = [campaign_replies_handler]
 # --- what the poll asks before it reads ---------------------------------------------
 
 
-def _live_enrollment_contacts(user: User) -> Select[tuple[Contact]]:
+def _live_enrollment_contacts(user: User) -> Select[Contact]:
     """Contacts with a LinkedIn URN in a live enrollment of a running campaign.
 
     Never the self contact (#342): :func:`~netkeeper.scoping.scoped_contacts` leaves it out.
@@ -273,7 +273,8 @@ def first_live_outreach(session: Session, user: User, *, now: datetime) -> datet
     live_ids = set(session.scalars(live))
     by_enrollment: dict[int, list[datetime]] = {}
     for enrollment_id, sent_at in sent:
-        by_enrollment.setdefault(enrollment_id, []).append(sent_at)
+        # The query filters out a NULL sent_at.
+        by_enrollment.setdefault(enrollment_id, []).append(cast("datetime", sent_at))
     watched = [
         min(times)
         for enrollment_id, times in by_enrollment.items()

@@ -162,7 +162,7 @@ def campaign_results(
             Message.step_id.is_not(None),
         )
         .order_by(Message.sent_at, Message.id)
-    ).tuples():
+    ):
         assert sent_at is not None and step_id is not None
         sends[enrollment_id].append(_Send(sent_at, step_id))
         if status is MessageStatus.BOUNCED:
@@ -175,7 +175,7 @@ def campaign_results(
         scoped(user, Enrollment)
         .with_only_columns(Enrollment.id, Enrollment.replied_at)
         .where(Enrollment.campaign_id == campaign.id, Enrollment.replied_at.is_not(None))
-    ).tuples():
+    ):
         assert replied_at is not None
         step_id = _attribute(sends.get(enrollment_id, []), replied_at)
         if step_id is not None:
@@ -196,7 +196,7 @@ def campaign_results(
             Message.sent_at.is_not(None),
         )
         .order_by(Message.sent_at, Message.id)
-    ).tuples():
+    ):
         assert received_at is not None
         first_opt_out.setdefault(enrollment_id, received_at)
     opted_out: Counter[int] = Counter()

@@ -58,7 +58,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
-    ids = list(bind.scalars(sa.select(_contacts.c.id).where(_contacts.c.is_self.is_(sa.true()))))
+    ids: list[int] = list(
+        bind.scalars(sa.select(_contacts.c.id).where(_contacts.c.is_self.is_(sa.true())))
+    )
     if ids:
         metadata = sa.MetaData()
         metadata.reflect(bind)
@@ -85,7 +87,7 @@ def _delete_rows(
                 pointing = sa.and_(pointing, other.c.id.not_in(ids))
             if rule == "CASCADE":
                 if "id" in other.c:
-                    child_ids = list(bind.scalars(sa.select(other.c.id).where(pointing)))
+                    child_ids: list[int] = list(bind.scalars(sa.select(other.c.id).where(pointing)))
                     if child_ids:
                         _delete_rows(bind, metadata, other, child_ids)
                 else:

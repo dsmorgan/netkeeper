@@ -671,7 +671,7 @@ def _bounced_elsewhere(session: Session, user: User, sendable: Mapping[int, str]
             ContactEmail.email.in_(sorted(set(sendable.values()))),
             ContactEmail.status.in_(UNSENDABLE_EMAIL_STATUSES),
         )
-    ).tuples()
+    )
     holders: dict[str, set[int]] = {}
     for address, holder in rows:
         holders.setdefault(address, set()).add(holder)
@@ -729,7 +729,7 @@ def _address_holders(
             ContactEmail.email.in_(sorted(set(sendable.values()))),
         )
     )
-    return list(session.execute(statement).tuples())
+    return list(session.execute(statement))
 
 
 def _other_campaigns(
@@ -764,7 +764,7 @@ def _other_enrollments(
     )
     if campaign_id is not None:
         statement = statement.where(Enrollment.campaign_id != campaign_id)
-    return list(session.execute(statement).tuples())
+    return list(session.execute(statement))
 
 
 def _last_outbound(
@@ -784,7 +784,7 @@ def _last_outbound(
             message, and_(message.id == Interaction.message_id, message.user_id == user.id)
         ).where(or_(message.id.is_(None), message.enrollment_id != enrollment_id))
     newest: dict[int, datetime] = {}
-    for contact_id, at in session.execute(interactions).tuples():
+    for contact_id, at in session.execute(interactions):
         newest[contact_id] = at
     messages = (
         scoped(user, Message)
@@ -798,7 +798,7 @@ def _last_outbound(
     )
     if enrollment_id is not None:
         messages = messages.where(Message.enrollment_id != enrollment_id)
-    for contact_id, sent_at in session.execute(messages).tuples():
+    for contact_id, sent_at in session.execute(messages):
         if sent_at is not None and (contact_id not in newest or sent_at > newest[contact_id]):
             newest[contact_id] = sent_at
     return newest

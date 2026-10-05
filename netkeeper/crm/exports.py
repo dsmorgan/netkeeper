@@ -191,7 +191,7 @@ def _contacts_statement(
     *,
     now: datetime,
     extra_where: ColumnElement[bool] | None = None,
-) -> Select[tuple[Contact]]:
+) -> Select[Contact]:
     """The statement :func:`_iter_contacts` pages: ``tree`` compiled, sorted, children eager.
 
     Reuses :func:`compile_filter` and :func:`apply_sort` from the filter
@@ -219,7 +219,7 @@ def _contacts_statement(
     )
 
 
-def _iter_contacts(session: Session, base: Select[tuple[Contact]]) -> Iterator[Contact]:
+def _iter_contacts(session: Session, base: Select[Contact]) -> Iterator[Contact]:
     """Every contact ``base`` selects, fetched in bounded batches.
 
     Each batch is its own complete, closed query (a ``LIMIT``/``OFFSET`` page,
@@ -915,7 +915,7 @@ def _holds_an_opted_out_address(user: User) -> ColumnElement[bool]:
 
 def _render(
     session: Session,
-    base: Select[tuple[Contact]],
+    base: Select[Contact],
     *,
     user: User,
     preset: ExportPreset,

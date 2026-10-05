@@ -97,7 +97,9 @@ def upgrade() -> None:
 
     connection = op.get_bind()
     now = datetime.now(UTC).replace(tzinfo=None)  # stored naive UTC, as UTCDateTime does
-    user_ids = connection.execute(sa.text("SELECT id FROM users ORDER BY id")).scalars().all()
+    user_ids: Sequence[int] = (
+        connection.execute(sa.text("SELECT id FROM users ORDER BY id")).scalars().all()
+    )
     for user_id in user_ids:
         connection.execute(
             sa.text(
@@ -106,7 +108,7 @@ def upgrade() -> None:
             ).bindparams(sa.bindparam("now", type_=sa.DateTime())),
             {"user_id": user_id, "label": _DEFAULT_LABEL, "now": now},
         )
-        account_id = connection.execute(
+        account_id: int = connection.execute(
             sa.text("SELECT id FROM linkedin_accounts WHERE user_id = :user_id AND label = :label"),
             {"user_id": user_id, "label": _DEFAULT_LABEL},
         ).scalar_one()

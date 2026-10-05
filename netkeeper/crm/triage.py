@@ -1603,7 +1603,7 @@ def _contacts_by_id(session: Session, user: User, ids: Sequence[int]) -> dict[in
     return found
 
 
-def _locked(statement: Select[tuple[Contact]]) -> Select[tuple[Contact]]:
+def _locked(statement: Select[Contact]) -> Select[Contact]:
     """``statement`` as a read that a triage write goes on to act on (#222).
 
     The row locks keep a merge, an archive, or another decision from landing
@@ -1618,14 +1618,14 @@ def _locked(statement: Select[tuple[Contact]]) -> Select[tuple[Contact]]:
 
 def _queue(
     user: User, states: Sequence[ContactMet], *, decided_by: MetSource | None = None
-) -> Select[tuple[Contact]]:
+) -> Select[Contact]:
     """``scoped_contacts(user)`` narrowed to the live contacts in ``states``."""
     return scoped_contacts(user).where(*_queue_where(states, decided_by))
 
 
 def _queue_count(
     user: User, states: Sequence[ContactMet], *, decided_by: MetSource | None = None
-) -> Select[tuple[int]]:
+) -> Select[int]:
     return scoped_contacts_count(user).where(*_queue_where(states, decided_by))
 
 
@@ -1653,7 +1653,7 @@ def _queue_where(
 # carries the scope mark for the guard.
 
 
-def _message_senders(user: User) -> Select[tuple[int]]:
+def _message_senders(user: User) -> Select[int]:
     """The ids of the contacts with at least one real message, either direction."""
     return select(Interaction.contact_id).where(
         Interaction.user_id == user.id,

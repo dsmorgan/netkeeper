@@ -274,7 +274,7 @@ def ready_to_prefill(
         .order_by(Enrollment.next_action_at, Enrollment.id)
         .offset(offset)
         .limit(min(limit, READY_PAGE_MAX))
-    ).tuples()
+    )
     hours = engine.hours_for(session, user)
     slots: schedule.Suggested | None = None
     with contextlib.suppress(schedule.ScheduleError):
@@ -813,7 +813,7 @@ def waiting_for_you(
         .order_by(Message.id)
         .offset(offset)
         .limit(min(limit, READY_PAGE_MAX))
-    ).tuples()
+    )
     return [WaitingPrefill(*row) for row in rows], total or 0
 
 
