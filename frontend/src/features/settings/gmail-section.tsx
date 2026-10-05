@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
+import { pollStatusKeys } from '@/features/poll-status/api'
 import {
   ARM_LABEL,
   armMailbox,
@@ -56,7 +57,12 @@ export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
   const [disconnecting, setDisconnecting] = useState<Mailbox | null>(null)
   const [arming, setArming] = useState<{ mailbox: Mailbox; mode: MailboxArm } | null>(null)
 
-  const refresh = () => queryClient.invalidateQueries({ queryKey: mailboxKeys.all })
+  // Arming, disarming, and disconnecting change what the header's poll status says.
+  const refresh = () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: mailboxKeys.all }),
+      queryClient.invalidateQueries({ queryKey: pollStatusKeys.all }),
+    ])
 
   const connect = useMutation({
     mutationFn: startAuthorization,

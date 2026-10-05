@@ -47,7 +47,7 @@ export function PollStatusHeader() {
 
   return (
     <Popover>
-      <PopoverTrigger className="flex min-w-0 items-center gap-2 rounded-md px-1.5 py-0.5 text-left text-xs text-muted-foreground outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring">
+      <PopoverTrigger className="flex min-w-0 items-center justify-center gap-2 rounded-md max-sm:min-h-8 max-sm:min-w-8 px-1.5 py-0.5 text-left text-xs text-muted-foreground outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring">
         <Clock className="size-4 shrink-0" aria-hidden="true" />
         <span className="sr-only">Background checks: </span>
         <span className="flex min-w-0 flex-col leading-tight max-sm:sr-only">

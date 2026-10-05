@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
+import { pollStatusKeys } from '@/features/poll-status/api'
 import { jsonResponse, mockFetch } from '@/test/fetch'
 
 import { ScheduleCard } from './schedule-card'
@@ -235,7 +236,7 @@ describe('ScheduleCard', () => {
   it('pauses and unpauses an armed schedule without disarming it (#324)', async () => {
     let paused = false
     const calls: Call[] = []
-    renderCard(
+    const { queryClient } = renderCard(
       {
         'GET /api/v1/linkedin/schedule': () =>
           jsonResponse(
@@ -259,8 +260,11 @@ describe('ScheduleCard', () => {
       calls,
     )
 
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
     fireEvent.click(await screen.findByRole('button', { name: 'Pause schedule' }))
     expect(await screen.findByText(/no new scheduled run starts/)).toBeInTheDocument()
+    // The header's poll status says "paused" without waiting for its minute (#401).
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: pollStatusKeys.all })
     // Still armed: pausing is not disarming, and no confirmation was needed.
     expect(screen.getByRole('button', { name: 'Disarm' })).toBeInTheDocument()
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()

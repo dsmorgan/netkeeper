@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
+import { pollStatusKeys } from '@/features/poll-status/api'
 import { cn } from '@/lib/utils'
 
 import { budgetQuery, clearHeat, heatQuery, linkedinKeys, statusQuery } from './api'
@@ -144,6 +145,7 @@ export function HeatPanel() {
       // Heat shrinks today's visit budget and trips the banner's heat skip.
       void queryClient.invalidateQueries({ queryKey: linkedinKeys.budget() })
       void queryClient.invalidateQueries({ queryKey: linkedinKeys.status() })
+      void queryClient.invalidateQueries({ queryKey: pollStatusKeys.all })
       setAsking(false)
     },
     // A refusal means heat is not what this panel shows any more; reread it.

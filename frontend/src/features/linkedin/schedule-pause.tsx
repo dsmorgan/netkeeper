@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 
 import { Button } from '@/components/ui/button'
+import { pollStatusKeys } from '@/features/poll-status/api'
 
 import { linkedinKeys, pauseSchedule, unpauseSchedule } from './api'
 import { formatWhen } from './fields'
@@ -23,6 +24,7 @@ export function SchedulePause({ schedule }: { schedule: Schedule }) {
   const onSuccess = (data: Schedule) => {
     queryClient.setQueryData(linkedinKeys.schedule(), data)
     void queryClient.invalidateQueries({ queryKey: linkedinKeys.status() })
+    void queryClient.invalidateQueries({ queryKey: pollStatusKeys.all })
   }
   const pause = useMutation({ mutationFn: pauseSchedule, onSuccess })
   const unpause = useMutation({ mutationFn: unpauseSchedule, onSuccess })

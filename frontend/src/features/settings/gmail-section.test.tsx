@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { navigation } from '@/features/mailboxes/api'
 import { mailbox, renderWithBackend, status } from '@/features/mailboxes/test-support'
+import { pollStatusKeys } from '@/features/poll-status/api'
 import { resetFakeEventSource } from '@/test/fake-event-source'
 import { jsonResponse } from '@/test/fetch'
 
@@ -168,12 +169,13 @@ describe('GmailSection', () => {
       armed_at: '2026-09-27T12:00:00Z',
       armed_by: 'web (user 1)',
     })
-    const { calls } = renderSection(() => current, {
+    const { calls, queryClient } = renderSection(() => current, {
       'POST /api/v1/mailboxes/3/arm': () => {
         current = status({ mailboxes: [armed] })
         return jsonResponse(armed)
       },
     })
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
     const item = (await screen.findByText('sender@example.com')).closest('li') as HTMLElement
     expect(within(item).getByText('not armed')).toBeInTheDocument()
     expect(within(item).queryByRole('button', { name: 'Disarm' })).not.toBeInTheDocument()
@@ -191,6 +193,8 @@ describe('GmailSection', () => {
     })
     expect(screen.getByText(/by web \(user 1\)/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Disarm' })).toBeEnabled()
+    // The header's poll status changes too: replies are checked now (#401).
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: pollStatusKeys.all })
   })
 
   it('waits for a draft found by its Message-ID before it can arm to send', async () => {

@@ -133,7 +133,11 @@ describe('format', () => {
   })
 
   it('says each interval in its own unit', () => {
+    expect(everyText(0)).toBe('every minute')
+    expect(everyText(1)).toBe('every minute')
     expect(everyText(10)).toBe('every 10 min')
+    expect(everyText(90)).toBe('every 90 min')
+    expect(everyText(2880 + 60)).toBe('every 49 h')
     expect(everyText(180)).toBe('every 3 h')
     expect(everyText(1440)).toBe('every day')
     expect(everyText(10080)).toBe('every 7 days')

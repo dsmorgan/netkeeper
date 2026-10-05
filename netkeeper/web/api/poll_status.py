@@ -11,6 +11,7 @@ answers its state and a reason instead of a time.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 from fastapi import APIRouter, Request
@@ -34,11 +35,13 @@ class PollCheckOut(BaseModel):
     state: service.CheckState
     interval_minutes: int
     last_at: datetime | None
-    """When it last ran to the end: the last completed LinkedIn run of its kind, the
-    oldest armed mailbox's last full reply poll, this process's last drafts poll."""
+    """When it last ran: the last completed LinkedIn run of its kind, this process's
+    last reply poll that caught up (without ``serve``, the oldest armed mailbox's), this
+    process's last drafts poll."""
     next_at: datetime | None
     reason: str | None
-    """Why there is no next time, in a sentence; null while ``scheduled`` or ``due``."""
+    """Why there is no next time, in a sentence. A running Gmail reply check may carry
+    one too, naming an armed mailbox it cannot read."""
 
 
 class MailboxPollOut(BaseModel):
@@ -70,6 +73,8 @@ def _serving(request: Request, user_id: int) -> service.Serving:
     return service.Serving(
         scheduler=request.app.state.scheduler is not None,
         campaign_engine=engine is not None,
+        replies_polled_at=None if gmail is None else gmail.replies_polled_at(user_id),
+        replies_every=None if gmail is None else gmail.replies_every,
         drafts_polled_at=None if gmail is None else gmail.drafts_polled_at(user_id),
         drafts_every=DRAFTS_POLL_EVERY if gmail is None else gmail.drafts_every,
     )
@@ -91,7 +96,7 @@ def get_poll_status(request: Request, user: CurrentUser, session: SessionDep) ->
                 group=check.group,
                 label=check.label,
                 state=check.state,
-                interval_minutes=int(check.interval.total_seconds() // 60),
+                interval_minutes=max(1, math.ceil(check.interval.total_seconds() / 60)),
                 last_at=check.last_at,
                 next_at=check.next_at,
                 reason=check.reason,

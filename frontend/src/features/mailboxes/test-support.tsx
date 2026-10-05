@@ -93,5 +93,5 @@ export function renderWithBackend(
       </EventStreamContext>
     </QueryClientProvider>,
   )
-  return { ...utils, calls, source }
+  return { ...utils, calls, source, queryClient }
 }

@@ -5,27 +5,34 @@ is the background checks ``netkeeper serve`` runs, read from what they already
 store, never by running one:
 
 - **Gmail replies** (spec 11.7): every ``[campaigns] reply_poll_minutes``, in the
-  campaign tick, for every armed mailbox. ``mailboxes.replies_polled_at`` is when
-  a poll last read everything up to then, so the next one is that plus the
-  interval. A poll that stopped part way leaves it old, and the tick tries again
-  each minute: the check is then ``due``. A restart polls on its first tick, which
-  is never later than the time shown.
+  campaign tick, for every armed mailbox. Last and next come from one source, the
+  running sender's own gate (:meth:`GmailSender.replies_polled_at`): the next poll
+  is that plus the sender's interval, and with none (a fresh start, or a poll that
+  stopped part way) the next tick polls, so the check is ``due``. Without ``serve``
+  there is no next poll, and the last one is read from the armed mailboxes'
+  ``replies_polled_at``: the oldest, or none while one was never polled. An armed
+  mailbox that needs signing in again is named in the check's reason; it blocks
+  the check only when every armed mailbox does.
 - **Gmail drafts** (spec 11.5): every :data:`~netkeeper.services.campaign_sender.DRAFTS_POLL_EVERY`,
   only while a campaign draft waits in an armed mailbox. Its last run is kept only
   in the running sender's memory (:meth:`GmailSender.drafts_polled_at`).
 - **LinkedIn**: each kind the scheduler serves, from its stored due time
   (:func:`~netkeeper.services.scheduler.stored_due`), and its last completed run.
   The gates are the scheduler's own, in its order: disarmed, paused, the session
-  flag, heat, the connections breakers; then active hours, which the manual-run
-  check words (:func:`~netkeeper.services.runs.refuse_if_outside_active_hours`).
+  flag, heat, the connections breakers. Then active hours, which the scheduler does
+  not check at fire time (it snaps every due time into the window), so they come
+  last; the manual-run check words them
+  (:func:`~netkeeper.services.runs.refuse_if_outside_active_hours`).
 - **LinkedIn inbox**: until a page source is wired (P4-01, #380) the scheduler does
   not serve it, and it is ``not_wired``: never shown as running.
 
 The campaign engine's one-minute tick is left out on purpose: it is not a check.
 
 A check that cannot run says why instead of giving a time: ``next_at`` is set only
-for a ``scheduled`` check. No function here writes, calls Gmail, or attaches to a
-browser.
+for a ``scheduled`` check. Gmail and LinkedIn check their gates in one order:
+``serve`` not running, then turned off (disarmed, not connected), then paused
+(LinkedIn only), then blocked. No function here writes, calls Gmail, or attaches
+to a browser.
 """
 
 from __future__ import annotations
@@ -54,6 +61,7 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.scoping import scoped
+from netkeeper.services import campaign_review as review
 from netkeeper.services import heat as heat_service
 from netkeeper.services import route_breaker, runs
 from netkeeper.services.campaign_sender import DRAFTS_POLL_EVERY
@@ -78,7 +86,9 @@ class CheckState(enum.StrEnum):
     SCHEDULED = "scheduled"
     """It runs at ``next_at``."""
     DUE = "due"
-    """Its time has come: it runs at the next tick or heartbeat, within a minute."""
+    """Its time has come, and it runs soon: a Gmail poll at the next minute tick, a
+    LinkedIn kind at the next heartbeat, or, overdue by a whole interval (the
+    machine slept), as a catch-up 5 to 20 minutes after the scheduler notices."""
     IDLE = "idle"
     """It would run, but has nothing to look at (no draft waiting, nothing scheduled)."""
     PAUSED = "paused"
@@ -139,7 +149,8 @@ class Check:
     last_at: datetime | None = None
     next_at: datetime | None = None
     reason: str | None = None
-    """Why it is not ``scheduled``, in a sentence; None when it is."""
+    """Why it has no next time, in a sentence. A ``scheduled`` or ``due`` Gmail reply
+    check may carry one too: an armed mailbox it cannot read."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +179,9 @@ class Serving:
 
     scheduler: bool = False
     campaign_engine: bool = False
+    replies_polled_at: datetime | None = None
+    replies_every: timedelta | None = None
+    """The running sender's reply interval; None reads ``[campaigns] reply_poll_minutes``."""
     drafts_polled_at: datetime | None = None
     drafts_every: timedelta = DRAFTS_POLL_EVERY
 
@@ -176,13 +190,15 @@ def poll_status(
     session: Session, user: User, *, now: datetime, settings: Settings, serving: Serving
 ) -> PollStatus:
     """Every check's last and next run for ``user``. Read-only; runs nothing."""
-    reply_every = timedelta(minutes=max(settings.campaigns.reply_poll_minutes, 1))
+    reply_every = serving.replies_every or timedelta(
+        minutes=max(settings.campaigns.reply_poll_minutes, 1)
+    )
     mailboxes = list(session.scalars(scoped(user, Mailbox).order_by(Mailbox.id)))
     polls = tuple(
         _mailbox_poll(mailbox, now=now, every=reply_every, serving=serving) for mailbox in mailboxes
     )
     checks = [
-        _gmail_replies(mailboxes, polls, every=reply_every, serving=serving),
+        _gmail_replies(mailboxes, polls, now=now, every=reply_every, serving=serving),
         _gmail_drafts(session, user, mailboxes, now=now, serving=serving),
         *_linkedin(session, user, now=now, settings=settings, serving=serving),
     ]
@@ -208,11 +224,15 @@ def _next(
 def _mailbox_poll(
     mailbox: Mailbox, *, now: datetime, every: timedelta, serving: Serving
 ) -> MailboxPoll:
+    """One mailbox, gated like the check. Its next poll is the user's: the sender polls
+    every armed mailbox together."""
     armed = mailbox.arm is not None
     state: CheckState
     next_at: datetime | None = None
     reason: str | None = None
-    if mailbox.status is MailboxStatus.DISABLED:
+    if not serving.campaign_engine:
+        state, reason = CheckState.NOT_RUNNING, NOT_SERVING
+    elif mailbox.status is MailboxStatus.DISABLED:
         state, reason = CheckState.OFF, f"{mailbox.email} is disconnected"
     elif not armed:
         state, reason = (
@@ -220,14 +240,9 @@ def _mailbox_poll(
             f"{mailbox.email} is disarmed, so its replies aren't checked",
         )
     elif mailbox.status is not MailboxStatus.OK:
-        state, reason = (
-            CheckState.BLOCKED,
-            f"{mailbox.email} needs you to sign in to Gmail again",
-        )
-    elif not serving.campaign_engine:
-        state, reason = CheckState.NOT_RUNNING, NOT_SERVING
+        state, reason = CheckState.BLOCKED, _needs_sign_in([mailbox])
     else:
-        state, next_at = _next(mailbox.replies_polled_at, every, now)
+        state, next_at = _next(serving.replies_polled_at, every, now)
     return MailboxPoll(
         mailbox_id=mailbox.id,
         email=mailbox.email,
@@ -239,17 +254,24 @@ def _mailbox_poll(
     )
 
 
+def _needs_sign_in(mailboxes: Sequence[Mailbox]) -> str:
+    names = ", ".join(m.email for m in mailboxes)
+    verb = "needs" if len(mailboxes) == 1 else "need"
+    return f"{names} {verb} you to sign in to Gmail again (Settings, Gmail)"
+
+
 def _gmail_gate(mailboxes: Sequence[Mailbox], serving: Serving) -> tuple[CheckState, str] | None:
-    """Why no Gmail poll runs at all, or None when one can."""
+    """Why no Gmail poll runs at all, or None when one can. The LinkedIn order: not
+    running, off, blocked."""
+    if not serving.campaign_engine:
+        return CheckState.NOT_RUNNING, NOT_SERVING
     armed = [m for m in mailboxes if m.arm is not None]
     if not armed:
         if all(m.status is MailboxStatus.DISABLED for m in mailboxes):
             return CheckState.OFF, "Gmail isn't connected"
         return CheckState.OFF, "No mailbox is armed, so netkeeper doesn't read Gmail"
-    if not serving.campaign_engine:
-        return CheckState.NOT_RUNNING, NOT_SERVING
     if all(m.status is not MailboxStatus.OK for m in armed):
-        return CheckState.BLOCKED, "Gmail needs you to sign in again (Settings, Gmail)"
+        return CheckState.BLOCKED, _needs_sign_in(armed)
     return None
 
 
@@ -257,33 +279,36 @@ def _gmail_replies(
     mailboxes: Sequence[Mailbox],
     polls: Sequence[MailboxPoll],
     *,
+    now: datetime,
     every: timedelta,
     serving: Serving,
 ) -> Check:
-    """The armed mailboxes' reply poll, read conservatively: the oldest poll is the
-    last one, and the check is due while any mailbox's poll is."""
-    armed = [p.replies_polled_at for p in polls if p.armed]
-    last = min((at for at in armed if at is not None), default=None)
-    if None in armed:
-        last = None  # a mailbox never polled: its replies are not checked yet
+    """The reply poll, from the running sender's gate (the module)."""
     base = Check(
         key=GMAIL_REPLIES,
         group=CheckGroup.GMAIL,
         label=LABELS[GMAIL_REPLIES],
         state=CheckState.DUE,
         interval=every,
-        last_at=last,
     )
     gate = _gmail_gate(mailboxes, serving)
-    running = [p for p in polls if p.state in (CheckState.DUE, CheckState.SCHEDULED)]
-    if gate is not None or not running:
-        state, reason = gate or (CheckState.OFF, "No mailbox is armed")
-        return replace(base, state=state, reason=reason)
-    next_times = [p.next_at for p in running]
-    if any(at is None for at in next_times):
-        return replace(base, state=CheckState.DUE)
-    soonest = min(at for at in next_times if at is not None)
-    return replace(base, state=CheckState.SCHEDULED, next_at=soonest)
+    if gate is not None:
+        return replace(base, state=gate[0], reason=gate[1], last_at=_stored_last(polls))
+    stuck = [m for m in mailboxes if m.arm is not None and m.status is not MailboxStatus.OK]
+    reason = None if not stuck else _needs_sign_in(stuck)
+    state, next_at = _next(serving.replies_polled_at, every, now)
+    return replace(
+        base, state=state, last_at=serving.replies_polled_at, next_at=next_at, reason=reason
+    )
+
+
+def _stored_last(polls: Sequence[MailboxPoll]) -> datetime | None:
+    """Without a running sender, the last poll the armed mailboxes recorded: the oldest,
+    or None while one was never polled."""
+    armed = [p.replies_polled_at for p in polls if p.armed]
+    if not armed or None in armed:
+        return None
+    return min(at for at in armed if at is not None)
 
 
 def _waiting_drafts(session: Session, user: User, mailbox_ids: Sequence[int]) -> int:
@@ -323,9 +348,10 @@ def _gmail_drafts(
     if gate is not None:
         return replace(base, state=gate[0], reason=gate[1])
     ready = [m.id for m in mailboxes if m.arm is not None and m.status is MailboxStatus.OK]
-    if _waiting_drafts(session, user, ready) == 0:
+    test_drafts = [c for c in review.test_drafts_to_verify(session, user) if c.mailbox_id in ready]
+    if _waiting_drafts(session, user, ready) == 0 and not test_drafts:
         return replace(
-            base, state=CheckState.IDLE, reason="No campaign draft is waiting to be sent"
+            base, state=CheckState.IDLE, reason="No draft is waiting to be sent or checked"
         )
     state, next_at = _next(serving.drafts_polled_at, every, now)
     return replace(base, state=state, next_at=next_at)
@@ -372,6 +398,8 @@ def _linkedin(
         blocked = gate
         if blocked is None and account is not None and kind in _CONNECTIONS_KINDS:
             blocked = _breaker(session, user, account.id)
+        if blocked is None:
+            blocked = _outside_hours(settings, now=now)
         if blocked is not None:
             checks.append(replace(base, state=blocked[0], reason=blocked[1]))
             continue
@@ -401,7 +429,8 @@ def _linkedin_gate(
     settings: Settings,
     serving: Serving,
 ) -> tuple[CheckState, str] | None:
-    """What stops every scheduled LinkedIn kind, in the scheduler's order; None when nothing."""
+    """What stops every scheduled LinkedIn kind, in the scheduler's order; None when nothing.
+    The connections breakers (per kind) and active hours follow, in :func:`_linkedin`."""
     if not serving.scheduler:
         return CheckState.NOT_RUNNING, NOT_SERVING
     if account_id is None or not scheduled_runs_armed(session, user, account_id):
@@ -417,6 +446,11 @@ def _linkedin_gate(
         session, user, account_id, now=now, settings=settings.linkedin.heat
     ):
         return CheckState.BLOCKED, "LinkedIn heat is high, so scheduled runs wait until it cools"
+    return None
+
+
+def _outside_hours(settings: Settings, *, now: datetime) -> tuple[CheckState, str] | None:
+    """Last: the scheduler never fires outside the window, since it snaps due times into it."""
     try:
         runs.refuse_if_outside_active_hours(settings.linkedin, now=now)
     except (runs.OutsideActiveHours, runs.RunError) as exc:
