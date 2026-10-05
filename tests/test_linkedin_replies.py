@@ -1174,11 +1174,13 @@ def test_a_stale_prefill_has_no_such_bound(linkedin_first: World) -> None:
     assert world.message(message_id).status is MessageStatus.SENT
 
 
+@pytest.mark.parametrize("known", [CONVERSATION, "urn:li:msg_conversation:INVENTEDTWO"])
 def test_a_stored_send_with_two_known_conversations_does_not_confirm_a_known_one(
-    linkedin_first: World,
+    linkedin_first: World, known: str
 ) -> None:
     """The prefill learned its conversation; a send an earlier poll stored, for a contact
-    with two conversations, is in an unknown one, so it confirms nothing."""
+    with two conversations, is in an unknown one, so it confirms nothing. Each of the
+    two in turn, so a guess between them fails whatever the set order."""
     world = linkedin_first
     enrollment_id = world.enroll()
     message_id, run_id = _claim_only(world, enrollment_id)
@@ -1189,7 +1191,7 @@ def test_a_stored_send_with_two_known_conversations_does_not_confirm_a_known_one
     world.apply(thread, polled_at=NOW + timedelta(minutes=1, seconds=55))
 
     def run(session: Session, user: User) -> None:
-        outcome = MessageOutcome(MessageOutcomeKind.PREFILLED, "fixed words", CONVERSATION, 12)
+        outcome = MessageOutcome(MessageOutcomeKind.PREFILLED, "fixed words", known, 12)
         assert record_prefill_outcome(
             session, user, message_id, outcome, settings=world.settings, now=prefilled_at
         )
