@@ -16,6 +16,6 @@ export const Route = createFileRoute('/inbox')({
 
 function Inbox() {
   const { enrollment } = Route.useSearch()
-  // Keyed so following "every enrollment" starts the filters afresh.
-  return <InboxPage key={enrollment ?? 'all'} enrollment={enrollment} />
+  // Not keyed by enrollment: removing that chip keeps the other filters (#402).
+  return <InboxPage enrollment={enrollment} />
 }

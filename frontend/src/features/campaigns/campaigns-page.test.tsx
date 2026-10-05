@@ -7,6 +7,7 @@ import { renderApp } from '@/test/render'
 import { mailbox } from '@/features/mailboxes/test-support'
 
 import {
+  ENROLLMENTS,
   MAILBOX,
   STEPS,
   campaign,
@@ -325,10 +326,86 @@ describe('campaign detail', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Find' }))
 
     await waitFor(() => {
-      const last = calls.filter((c) => c.path === '/api/v1/campaigns/5/enrollments').at(-1)
+      // Not the one-row count the filter summary asks for ("of N").
+      const last = calls
+        .filter((c) => c.path === '/api/v1/campaigns/5/enrollments' && c.query.get('limit') !== '1')
+        .at(-1)
       expect(last?.query.get('q')).toBe('tobias')
       expect(last?.query.get('status')).toBe('replied')
     })
+  })
+
+  it('shows what narrows the enrollments, how many of how many, and clears it', async () => {
+    const enrollments = (call: Call) => {
+      const q = call.query.get('q') ?? ''
+      const status = call.query.get('status')
+      if (q === 'nobody') return jsonResponse({ total: 0, items: [] })
+      if (q !== '' || status !== null) {
+        return jsonResponse({ total: 1, items: [ENROLLMENTS.items[1]] })
+      }
+      return jsonResponse({ ...ENROLLMENTS, total: 87 })
+    }
+    mockFetch(
+      campaignBackend(
+        { campaign: campaign({ status: 'active' }), review: review() },
+        { 'GET /api/v1/campaigns/5/enrollments': enrollments },
+      ),
+    )
+    await renderApp('/campaigns/5')
+    await screen.findByRole('link', { name: 'Tobias Marrowbone' })
+    // Nothing narrows the list yet, so nothing says it does.
+    expect(screen.queryByRole('list', { name: 'Active filters' })).toBeNull()
+
+    fireEvent.change(screen.getByLabelText('Find an enrollment'), { target: { value: 'acme' } })
+    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'replied' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Find' }))
+
+    await waitFor(() => expect(screen.getByText(/Showing 1 of 87 · filtered by:/)).toBeVisible())
+    const chips = within(screen.getByRole('list', { name: 'Active filters' }))
+    expect(chips.getAllByRole('button').map((chip) => chip.textContent)).toEqual([
+      '“acme”',
+      'status: replied',
+    ])
+
+    // One chip removes one filter.
+    fireEvent.click(chips.getByRole('button', { name: 'Remove status: replied' }))
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Remove status: replied' })).toBeNull(),
+    )
+    expect(screen.getByLabelText('Status')).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Remove “acme”' })).toBeVisible()
+
+    // Clear takes the rest, and the box with it.
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Active filters' })).toBeNull())
+    expect(screen.getByLabelText('Find an enrollment')).toHaveValue('')
+  })
+
+  it('says no enrollment matches the filters, not that there are none', async () => {
+    mockFetch(
+      campaignBackend(
+        { campaign: campaign({ status: 'active' }), review: review() },
+        {
+          'GET /api/v1/campaigns/5/enrollments': (call) =>
+            call.query.get('q') === 'nobody'
+              ? jsonResponse({ total: 0, items: [] })
+              : jsonResponse(ENROLLMENTS),
+        },
+      ),
+    )
+    await renderApp('/campaigns/5')
+    fireEvent.change(await screen.findByLabelText('Find an enrollment'), {
+      target: { value: 'nobody' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Find' }))
+
+    expect(await screen.findByText('No enrollments match these filters')).toBeVisible()
+    expect(screen.queryByText('No enrollments.')).toBeNull()
+    await waitFor(() => expect(screen.getByText(/Showing 0 of 2 · filtered by:/)).toBeVisible())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }))
+    expect(await screen.findByRole('link', { name: 'Tobias Marrowbone' })).toBeVisible()
+    expect(screen.getByLabelText('Find an enrollment')).toHaveFocus()
   })
 
   it('says so for a campaign that does not exist', async () => {

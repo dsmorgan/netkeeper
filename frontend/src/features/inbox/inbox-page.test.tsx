@@ -152,10 +152,54 @@ describe('inbox', () => {
     fireEvent.change(screen.getByLabelText('Show'), { target: { value: 'all' } })
 
     await waitFor(() => {
-      const last = calls.filter((c) => c.path === '/api/v1/inbox').at(-1)
+      // Not the unfiltered count the filter summary asks for ("of N"), which has no kind.
+      const last = calls.filter((c) => c.path === '/api/v1/inbox' && c.query.has('kind')).at(-1)
       expect(last?.query.get('kind')).toBe('bounce')
       expect(last?.query.has('handled')).toBe(false)
     })
+  })
+
+  it('shows the kind filter as a chip, with how many of how many', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/inbox': (call) =>
+          call.query.get('kind') === 'bounce'
+            ? jsonResponse({ total: 1, unhandled: 3, items: [PAGE.items[2]] })
+            : jsonResponse(PAGE),
+      }),
+    )
+    await renderApp('/inbox')
+    await screen.findByRole('listitem', { name: /^Reply from Tobias/ })
+    expect(screen.queryByRole('list', { name: 'Active filters' })).toBeNull()
+
+    fireEvent.change(screen.getByLabelText('Kind'), { target: { value: 'bounce' } })
+    await waitFor(() => expect(screen.getByText(/Showing 1 of 3 · filtered by:/)).toBeVisible())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove kind: bounce' }))
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Active filters' })).toBeNull())
+    expect(screen.getByLabelText('Kind')).toHaveValue('')
+    // The last chip gone, the focus goes back to the filter it came from.
+    await waitFor(() => expect(screen.getByLabelText('Kind')).toHaveFocus())
+  })
+
+  it('says nothing matches the filters, not that the inbox is empty', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/inbox': (call) =>
+          call.query.get('kind') === 'unsubscribe'
+            ? jsonResponse({ total: 0, unhandled: 3, items: [] })
+            : jsonResponse(PAGE),
+      }),
+    )
+    await renderApp('/inbox')
+    await screen.findByRole('listitem', { name: /^Reply from Tobias/ })
+
+    fireEvent.change(screen.getByLabelText('Kind'), { target: { value: 'unsubscribe' } })
+    expect(await screen.findByText('Nothing matches these filters')).toBeVisible()
+    expect(screen.queryByText('Nothing to handle')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }))
+    expect(await screen.findByRole('listitem', { name: /^Reply from Tobias/ })).toBeVisible()
   })
 
   it('marks an item handled, then reloads the list', async () => {
@@ -207,15 +251,20 @@ describe('inbox', () => {
   it("narrows to one enrollment's messages from the campaign page's link", async () => {
     const calls: Call[] = []
     mockFetch(inbox(PAGE, calls))
-    await renderApp('/inbox?enrollment=302')
+    const { router } = await renderApp('/inbox?enrollment=302')
     await screen.findByRole('listitem', { name: /^Reply from Tobias/ })
 
     const listed = calls.find((c) => c.path === '/api/v1/inbox')
     expect(listed?.query.get('enrollment_id')).toBe('302')
     expect(listed?.query.has('handled')).toBe(false)
-    expect(screen.getByRole('link', { name: 'Show every enrollment' })).toHaveAttribute(
-      'href',
-      '/inbox',
+    // The enrollment is a filter like any other: a chip that names whose it is.
+    const chip = screen.getByRole('button', {
+      name: 'Remove enrollment: Tobias Marrowbone in Spring hello',
+    })
+    fireEvent.click(chip)
+    await waitFor(() => expect(router.state.location.searchStr).toBe(''))
+    await waitFor(() =>
+      expect(screen.queryByRole('list', { name: 'Active filters' })).not.toBeInTheDocument(),
     )
   })
 })

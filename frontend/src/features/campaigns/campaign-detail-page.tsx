@@ -9,15 +9,17 @@
  */
 import { Link, useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 
 import { Facts } from '@/components/facts'
+import { FilterSummary, type FilterChip } from '@/components/filter-summary'
+import { quoted } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
-import { Callout, ErrorNote, LoadingNote } from '@/features/crm/controls'
+import { Callout, EmptyState, ErrorNote, LoadingNote } from '@/features/crm/controls'
 import { listsQuery } from '@/features/crm/api'
 import { sendingHoursQuery } from '@/features/settings/api'
 import { stepTimeWarning } from '@/features/settings/sending-hours'
@@ -773,6 +775,35 @@ function EnrollmentsCard({
     setOffset(0)
   }
   const rows = useQuery(enrollmentsQuery(campaignId, search, status, offset))
+  const filtered = search !== '' || status !== ''
+  // The campaign's whole count, for "12 of 87": one row of the unfiltered list.
+  const everyone = useQuery({
+    ...enrollmentsQuery(campaignId, '', '', 0, 1),
+    enabled: filtered && rows.isSuccess,
+  })
+  const searchBox = useRef<HTMLInputElement>(null)
+
+  function clearSearch() {
+    setQ('')
+    setSearch('')
+    setOffset(0)
+  }
+  function clearAll() {
+    clearSearch()
+    onStatus('')
+  }
+  const chips: FilterChip[] = []
+  if (search !== '') chips.push({ key: 'q', label: quoted(search), onRemove: clearSearch })
+  if (status !== '') {
+    chips.push({
+      key: 'status',
+      label: `status: ${ENROLLMENT_STATUS_LABELS[status].toLowerCase()}`,
+      onRemove: () => {
+        setOffset(0)
+        onStatus('')
+      },
+    })
+  }
 
   return (
     <Card id={ENROLLMENTS_ANCHOR} tabIndex={-1} className="scroll-mt-4 outline-none">
@@ -789,6 +820,7 @@ function EnrollmentsCard({
           }}
         >
           <Input
+            ref={searchBox}
             aria-label="Find an enrollment"
             placeholder="Name or address"
             value={q}
@@ -814,10 +846,31 @@ function EnrollmentsCard({
             Find
           </Button>
         </form>
+        <FilterSummary
+          shown={rows.data?.total}
+          total={everyone.data?.total}
+          chips={chips}
+          onClear={clearAll}
+          returnFocusTo={searchBox}
+        />
         {rows.isPending ? (
           <LoadingNote label="Loading the enrollments…" />
         ) : rows.isError ? (
           <ErrorNote label="The enrollments are unavailable." error={rows.error} />
+        ) : rows.data.total === 0 && filtered ? (
+          <EmptyState title="No enrollments match these filters">
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-2"
+              onClick={() => {
+                clearAll()
+                searchBox.current?.focus()
+              }}
+            >
+              Clear filters
+            </Button>
+          </EmptyState>
         ) : rows.data.total === 0 ? (
           <p className="text-muted-foreground">No enrollments.</p>
         ) : (

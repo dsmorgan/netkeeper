@@ -426,6 +426,10 @@ class ContactQuery(BaseModel):
     limit: int = Field(50, ge=1, le=200)
     offset: int = Field(0, ge=0, le=MAX_QUERY_OFFSET)
     columns: list[ContactColumn] | None = None
+    count_unfiltered: bool | None = None
+    """Also count the contacts the filter matches without its predicate, for "12 of
+    87" (#402). Off unless ``true`` (``null`` keeps the generated client's field
+    optional), so a page that does not show it costs no count."""
 
 
 class ContactRow(BaseModel):
@@ -483,6 +487,9 @@ class ContactPage(BaseModel):
     items: list[ContactRow]
     total: int
     describe: str
+    unfiltered_total: int | None = None
+    """Every contact the filter would match without its predicate (#402). Only
+    ``POST /contacts/query`` sets it, when asked and the filter has a predicate."""
 
 
 class ContactStatsOut(BaseModel):

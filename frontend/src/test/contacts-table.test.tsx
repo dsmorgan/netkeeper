@@ -167,7 +167,7 @@ describe('contacts table', () => {
     await waitFor(() => expect(router.state.location.searchStr).toContain('view=7'))
 
     // Move away from the filter, then come back through the saved view.
-    fireEvent.click(screen.getByRole('button', { name: /Clear filters/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
     await waitFor(() => expect(router.state.location.searchStr).not.toContain('q=ferry'))
 
     fireEvent.click(screen.getByRole('button', { name: /Views/ }))
@@ -209,7 +209,8 @@ describe('contacts table', () => {
       expect(JSON.stringify(lastQuery(seen).filter)).toContain('"field":"connected_on"'),
     )
 
-    fireEvent.click(screen.getByRole('button', { name: /Before 2020/ }))
+    // The views menu, which the view's name labels; its chip says "Remove view: …".
+    fireEvent.click(screen.getByRole('button', { name: 'Before 2020' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Save this view…' }))
     const dialog = within(await screen.findByRole('dialog'))
     fireEvent.change(dialog.getByLabelText('Name'), { target: { value: 'Copy' } })
@@ -229,6 +230,48 @@ describe('contacts table', () => {
     expect(screen.getByText('Loading contacts…')).toBeInTheDocument()
     expect(await screen.findByText('No contacts match this filter.')).toBeInTheDocument()
     expect(screen.getByText('contacts matching “nobody”')).toBeInTheDocument()
+  })
+
+  it('shows each active filter as a chip, with how many of how many (#402)', async () => {
+    const seen = serveTable({ ...page(3), unfiltered_total: 87 })
+    const { router } = await renderApp('/contacts?q=ferry&met=met&tags=vip&tags=alumni')
+    await screen.findByText('Bo Quill')
+
+    expect(screen.getByText(/Showing 3 of 87 · filtered by:/)).toBeVisible()
+    expect(lastQuery(seen)).toMatchObject({ count_unfiltered: true })
+    const chips = within(screen.getByRole('list', { name: 'Active filters' }))
+    expect(chips.getAllByRole('button').map((chip) => chip.textContent)).toEqual([
+      '“ferry”',
+      'met: met',
+      'tag: vip',
+      'tag: alumni',
+    ])
+
+    // One tag chip drops that tag only.
+    fireEvent.click(chips.getByRole('button', { name: 'Remove tag: vip' }))
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ tags: ['alumni'] }))
+    expect(router.state.location.search).toMatchObject({ q: 'ferry', met: 'met' })
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Remove tag: alumni' })).toHaveFocus(),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    await waitFor(() => expect(router.state.location.searchStr).toBe(''))
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Active filters' })).toBeNull())
+    await waitFor(() => expect(screen.getByLabelText('Search contacts')).toHaveFocus())
+    expect(lastQuery(seen).filter?.where).toBeNull()
+    // An unfiltered page asks for no second count.
+    expect(lastQuery(seen)).not.toHaveProperty('count_unfiltered')
+  })
+
+  it('offers to clear the filters when nothing matches them', async () => {
+    serveTable({ ...contactPage([], 0, 'contacts matching “nobody”'), unfiltered_total: 87 })
+    const { router } = await renderApp('/contacts?q=nobody')
+    expect(await screen.findByText('No contacts match this filter.')).toBeInTheDocument()
+    expect(screen.getByText(/Showing 0 of 87 · filtered by:/)).toBeVisible()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }))
+    await waitFor(() => expect(router.state.location.searchStr).toBe(''))
   })
 
   it('shows an error with a way to retry, not a blank table', async () => {

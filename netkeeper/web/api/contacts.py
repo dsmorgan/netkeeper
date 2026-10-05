@@ -172,12 +172,20 @@ def query_contacts(body: ContactQuery, user: CurrentUser, session: SessionDep) -
 
     A `POST` because the filter tree does not fit a query string; it reads only,
     and its session never takes the write lock. `total` counts every match;
-    `describe` reads the filter for the table header.
+    `describe` reads the filter for the table header. With `count_unfiltered`
+    and a filter that has a predicate, `unfiltered_total` counts the contacts it
+    would match without one, archived ones included only if the filter includes
+    them.
     """
     tree = body.filter if body.filter is not None else FilterTree()
     with translate_errors():
         page = service.query(session, user, tree, body.sort, limit=body.limit, offset=body.offset)
-    return _page(page, body.columns)
+    result = _page(page, body.columns)
+    if body.count_unfiltered is True and tree.where is not None:
+        # "Showing 12 of 87" (#402): the same switch on archived contacts, no predicate.
+        everyone = service.Selection(tree=FilterTree(include_archived=tree.include_archived))
+        result.unfiltered_total = service.count_selection(session, user, everyone)
+    return result
 
 
 @router.get("/contacts", operation_id="search_contacts", response_model_exclude_unset=True)

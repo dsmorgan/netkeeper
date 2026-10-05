@@ -825,7 +825,10 @@ export interface paths {
          *
          *     A `POST` because the filter tree does not fit a query string; it reads only,
          *     and its session never takes the write lock. `total` counts every match;
-         *     `describe` reads the filter for the table header.
+         *     `describe` reads the filter for the table header. With `count_unfiltered`
+         *     and a filter that has a predicate, `unfiltered_total` counts the contacts it
+         *     would match without one, archived ones included only if the filter includes
+         *     them.
          */
         post: operations["query_contacts"];
         delete?: never;
@@ -4059,6 +4062,8 @@ export interface components {
             items: components["schemas"]["ContactRow"][];
             /** Total */
             total: number;
+            /** Unfiltered Total */
+            unfiltered_total?: number | null;
         };
         /**
          * ContactPatch
@@ -4178,6 +4183,8 @@ export interface components {
         ContactQuery: {
             /** Columns */
             columns?: ("li_urn" | "li_public_id" | "li_url" | "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "connected_on" | "degree" | "met" | "met_source" | "triaged_at" | "do_not_contact" | "do_not_contact_reason" | "li_missing_count" | "li_disconnected_at" | "last_enriched_at" | "enrich_priority" | "last_contacted_at" | "notes" | "archived_at" | "needs_review_at" | "source" | "created_at" | "updated_at")[] | null;
+            /** Count Unfiltered */
+            count_unfiltered?: boolean | null;
             filter?: components["schemas"]["FilterTree-Input"] | null;
             /**
              * Limit
