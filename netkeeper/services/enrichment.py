@@ -122,21 +122,48 @@ _NATURAL_ENDS = frozenset({StopReason.END_OF_PLAN, StopReason.VISIT_BUDGET})
 
 def contact_info_read_again(result: EnrichResult) -> bool:
     """Whether ``result`` clears the Contact info breaker (#424): the run reached its
-    own end and at least one of its Contact info clicks answered with a body.
+    own end and read and parsed at least one Contact info answer.
 
-    A run that clicked nothing (every profile not found, say), or lost every overlay
-    it clicked, says nothing about whether the body tap works again, so it leaves the
-    streak where it was.
+    A run that clicked nothing (every profile not found, say), lost every overlay it
+    clicked, or got only answers it could not parse, says nothing about whether the
+    body tap works again, so it does not clear the streak.
     """
-    return result.reason in _NATURAL_ENDS and result.clicks > result.contact_info_lost
+    return result.reason in _NATURAL_ENDS and result.contact_info_read >= 1
+
+
+#: The clicks a run must have made, every one lost, to extend the breaker without
+#: reaching the #405 caps (#424 review). One lost click is ordinary (about one in
+#: seven); two or more with none read, in a run too small to reach the caps, is the
+#: tap failing.
+ALL_LOST_MIN_CLICKS: Final = 2
+
+
+def contact_info_lost_again(result: EnrichResult) -> bool:
+    """Whether ``result`` extends the Contact info breaker (#424): the Contact info caps
+    stopped it (``answer_lost``), or it reached its own end after
+    :data:`ALL_LOST_MIN_CLICKS` or more clicks with every one lost.
+
+    The second case is for a small visit budget: a run of four clicks or fewer never
+    reaches the #405 caps, so without it a broken body tap would never trip the
+    breaker. It does not change how the run itself stopped.
+    """
+    if result.reason is StopReason.ANSWER_LOST:
+        return True
+    return (
+        result.reason in _NATURAL_ENDS
+        and result.clicks >= ALL_LOST_MIN_CLICKS
+        and result.contact_info_lost == result.clicks
+    )
 
 
 __all__ = [
+    "ALL_LOST_MIN_CLICKS",
     "CANCEL_SLICE_S",
     "EnrichRunReport",
     "HeatSkipped",
     "SessionFlagged",
     "TodaysVisits",
+    "contact_info_lost_again",
     "contact_info_read_again",
     "enrich_contacts",
     "resume_enrichment",
@@ -509,13 +536,14 @@ async def enrich_contacts(
         def record_breaker(result: EnrichResult) -> None:
             # #424: its own writer session, before the run's ending is written, the way
             # connections_sync records its breakers. Only the Contact info caps end an
-            # enrichment run answer_lost (#405), so that stop extends the streak.
+            # enrichment run answer_lost (#405); that stop, or a natural end with every
+            # one of two or more clicks lost, extends the streak.
             with session_scope(factory, write=True) as session:
                 route_breaker.record_contact_info(
                     session,
                     _load_user(session, user_id),
                     account_id,
-                    answer_lost=result.reason is StopReason.ANSWER_LOST,
+                    answer_lost=contact_info_lost_again(result),
                     clean_end=contact_info_read_again(result),
                     now=clock(),
                 )

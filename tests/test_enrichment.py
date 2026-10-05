@@ -53,12 +53,14 @@ from netkeeper.models import (
 from netkeeper.scoping import get_scoped
 from netkeeper.services import budgets, enrich_plan, route_breaker, run_diagnostics, runs
 from netkeeper.services import heat as heat_service
-from netkeeper.services.budgets import ActionClass
+from netkeeper.services.budgets import ActionClass, BudgetExceeded
 from netkeeper.services.enrichment import (
+    ALL_LOST_MIN_CLICKS,
     CANCEL_SLICE_S,
     EnrichRunReport,
     HeatSkipped,
     SessionFlagged,
+    contact_info_lost_again,
     contact_info_read_again,
     enrich_contacts,
     resume_enrichment,
@@ -1569,11 +1571,12 @@ async def test_a_run_that_reads_contact_info_to_its_end_clears_the_streak(
     assert (streak.count, streak.since, streak.tripped) == (0, None, False)
 
 
-async def test_a_run_that_lost_every_overlay_it_clicked_leaves_the_streak(
+async def test_a_small_run_that_lost_every_overlay_it_clicked_extends_the_streak(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """Three visits, three lost overlays: under both caps, so the run reaches its end,
-    but it never read Contact info, so it says nothing about the body tap working."""
+    """#424 review: three visits, three lost overlays, under both #405 caps, so the run
+    reaches its end; with a small budget the caps are never reached, so two or more
+    clicks with every one lost extend the streak (the run's own stop is unchanged)."""
     people = _people(3)
     user_id, _ = _setup(session_factory, people)
     _seed_streak(session_factory, user_id, 2)
@@ -1583,18 +1586,150 @@ async def test_a_run_that_lost_every_overlay_it_clicked_leaves_the_streak(
 
     assert report.result.reason is StopReason.END_OF_PLAN
     assert (report.result.clicks, report.result.contact_info_lost) == (3, 3)
+    run = _last_run(session_factory, user_id)
+    assert (run.status, run.stop_reason) == (SyncRunStatus.COMPLETED, "end_of_plan")
+    streak = _streak(session_factory, user_id)
+    assert (streak.count, streak.tripped) == (3, True)
+
+
+async def test_two_clicks_both_lost_is_the_smallest_run_that_extends(
+    session_factory: sessionmaker[Session],
+) -> None:
+    people = _people(2)
+    user_id, _ = _setup(session_factory, people)
+    browser = FakeBrowser.of(people, script={1: _info_lost(), 3: _info_lost()})
+
+    report = await _enrich(session_factory, user_id, browser)
+
+    assert report.result.reason is StopReason.END_OF_PLAN
+    assert _streak(session_factory, user_id).count == 1
+
+
+async def test_one_click_lost_neither_extends_nor_clears(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """One lost overlay is ordinary (about one in seven), even when it is the only click."""
+    people = _people(1)
+    user_id, _ = _setup(session_factory, people)
+    _seed_streak(session_factory, user_id, 2)
+    browser = FakeBrowser.of(people, script={1: _info_lost()})
+
+    report = await _enrich(session_factory, user_id, browser)
+
+    assert report.result.reason is StopReason.END_OF_PLAN
+    assert (report.result.clicks, report.result.contact_info_lost) == (1, 1)
     assert _streak(session_factory, user_id).count == 2
 
 
-def _ended(reason: StopReason, *, clicks: int, lost: int) -> EnrichResult:
+async def test_an_unparsed_contact_info_answer_is_not_a_read(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#424 review: only a Contact info answer read and parsed clears the streak. One
+    lost and one unparsed: a natural end, but nothing was read."""
+    people = _people(2)
+    user_id, _ = _setup(session_factory, people)
+    _seed_streak(session_factory, user_id, 2)
+    browser = FakeBrowser.of(people, script={1: _info_lost(), 3: UNRECOGNIZED})
+
+    report = await _enrich(session_factory, user_id, browser)
+
+    assert report.result.reason is StopReason.END_OF_PLAN
+    assert (report.result.clicks, report.result.contact_info_lost) == (2, 1)
+    assert report.result.contact_info_read == 0
+    assert _streak(session_factory, user_id).count == 2
+
+
+def _spend_the_day_at_click(
+    factory: sessionmaker[Session], user_id: int, click: int
+) -> Callable[[str, object], None]:
+    """An ``on_event`` that spends the rest of the day's visits at the ``click``th click."""
+    seen = 0
+
+    def on_event(kind: str, value: object) -> None:
+        nonlocal seen
+        if kind != "click":
+            return
+        seen += 1
+        if seen != click:
+            return
+        with session_scope(factory, write=True) as session:
+            user = session.get(User, user_id)
+            assert user is not None
+            account = ensure_account(session, user).id
+            while True:  # whatever is left of the day
+                try:
+                    budgets.consume(
+                        session,
+                        user,
+                        account,
+                        ActionClass.PROFILE_VISITS,
+                        now=NOW,
+                        settings=SMALL.budget,
+                    )
+                except BudgetExceeded:
+                    break
+
+    return on_event
+
+
+@pytest.mark.parametrize(
+    "ending",
+    ["route_changed", "throttled", "checkpoint", "cancelled", "budget"],
+)
+async def test_no_other_enrichment_ending_moves_the_streak(
+    session_factory: sessionmaker[Session], ending: str
+) -> None:
+    """#424 review: a run that a response stops (route_changed, throttled, checkpoint), a
+    cancel, or the budget leaves the streak where it was, even after two lost overlays
+    and none read."""
+    people = _people(5)
+    user_id, _ = _setup(session_factory, people)
+    _seed_streak(session_factory, user_id, 1)
+    lost = {1: _info_lost(), 3: _info_lost()}
+    responses = {"route_changed": BAD_REQUEST, "throttled": THROTTLED, "checkpoint": CHECKPOINT}
+    if ending in responses:
+        browser = FakeBrowser.of(people, script={**lost, 4: responses[ending]})
+    elif ending == "cancelled":
+        browser = FakeBrowser.of(
+            people, script=lost, on_event=_cancel_after(session_factory, user_id, 2)
+        )
+    else:
+        browser = FakeBrowser.of(
+            people, script=lost, on_event=_spend_the_day_at_click(session_factory, user_id, 2)
+        )
+
+    report = await _enrich(session_factory, user_id, browser)
+
+    expected = {
+        "route_changed": StopReason.RESPONSE,
+        "throttled": StopReason.RESPONSE,
+        "checkpoint": StopReason.RESPONSE,
+        "cancelled": StopReason.CANCELLED,
+        "budget": StopReason.BUDGET,
+    }[ending]
+    assert report.result.reason is expected
+    assert (report.result.clicks, report.result.contact_info_lost) == (2, 2)
+    streak = _streak(session_factory, user_id)
+    assert (streak.count, streak.since) == (1, NOW - timedelta(days=1))
+
+
+def _ended(reason: StopReason, *, clicks: int, lost: int, read: int = 0) -> EnrichResult:
     return EnrichResult(
-        reason=reason, planned=8, visits=clicks, completed=(), clicks=clicks, contact_info_lost=lost
+        reason=reason,
+        planned=8,
+        visits=clicks,
+        completed=(),
+        clicks=clicks,
+        contact_info_lost=lost,
+        contact_info_read=read,
     )
 
 
 @pytest.mark.parametrize("reason", [StopReason.END_OF_PLAN, StopReason.VISIT_BUDGET])
 def test_a_natural_end_that_read_one_overlay_reads_contact_info_again(reason: StopReason) -> None:
-    assert contact_info_read_again(_ended(reason, clicks=4, lost=3))
+    assert contact_info_read_again(_ended(reason, clicks=4, lost=3, read=1))
+    # Clicks not lost but not read either (unparsed) are not a read.
+    assert not contact_info_read_again(_ended(reason, clicks=4, lost=3, read=0))
     assert not contact_info_read_again(_ended(reason, clicks=4, lost=4))
     assert not contact_info_read_again(_ended(reason, clicks=0, lost=0))
 
@@ -1609,4 +1744,35 @@ def test_a_natural_end_that_read_one_overlay_reads_contact_info_again(reason: St
 )
 def test_no_other_ending_reads_contact_info_again(reason: StopReason) -> None:
     """A budget stop, a cancel, the window closing, a response, or the caps: none clears."""
-    assert not contact_info_read_again(_ended(reason, clicks=4, lost=0))
+    assert not contact_info_read_again(_ended(reason, clicks=4, lost=0, read=4))
+
+
+def test_the_all_lost_minimum_is_two_clicks() -> None:
+    assert ALL_LOST_MIN_CLICKS == 2
+
+
+@pytest.mark.parametrize("reason", [StopReason.END_OF_PLAN, StopReason.VISIT_BUDGET])
+def test_a_natural_end_with_every_click_lost_is_lost_again(reason: StopReason) -> None:
+    assert contact_info_lost_again(_ended(reason, clicks=2, lost=2))
+    assert contact_info_lost_again(_ended(reason, clicks=4, lost=4))
+    assert not contact_info_lost_again(_ended(reason, clicks=1, lost=1))
+    assert not contact_info_lost_again(_ended(reason, clicks=4, lost=3))
+    assert not contact_info_lost_again(_ended(reason, clicks=0, lost=0))
+
+
+def test_the_contact_info_caps_are_lost_again() -> None:
+    assert contact_info_lost_again(_ended(StopReason.ANSWER_LOST, clicks=5, lost=5))
+    assert contact_info_lost_again(_ended(StopReason.ANSWER_LOST, clicks=8, lost=5, read=3))
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        reason
+        for reason in StopReason
+        if reason not in (StopReason.END_OF_PLAN, StopReason.VISIT_BUDGET, StopReason.ANSWER_LOST)
+    ],
+)
+def test_no_other_ending_is_lost_again(reason: StopReason) -> None:
+    """A response, a cancel, a budget stop, or the window closing: even all lost, no."""
+    assert not contact_info_lost_again(_ended(reason, clicks=4, lost=4))

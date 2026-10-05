@@ -471,6 +471,8 @@ class EnrichResult:
     fixed cause and the contact's reference, in order (#405). ``stopped_by`` is the
     visit whose answer stopped the run at once as ``RouteChanged`` (not by the
     unreadable limits), with its cause; ``None`` for any other stop.
+    ``contact_info_read`` is how many Contact info answers were read and parsed
+    (#424).
     """
 
     reason: StopReason
@@ -491,6 +493,7 @@ class EnrichResult:
     unreadable_visits: tuple[UnreadableVisit, ...] = ()
     stopped_by: UnreadableVisit | None = None
     contact_info_lost: int = 0
+    contact_info_read: int = 0
 
 
 # --- the source seam ---------------------------------------------------------
@@ -659,6 +662,8 @@ async def run_enrichment(
     visits = harvested = not_found = unreadable = unreadable_in_a_row = clicks = mismatched = 0
     # #405: Contact info answers lost, and lost in a row among the visits that clicked.
     info_lost = info_lost_in_a_row = 0
+    # #424: Contact info answers read and parsed, for the breaker across runs.
+    info_read = 0
 
     def progress(stopped: StopReason | None = None) -> ProgressEvent:
         return ProgressEvent(
@@ -707,6 +712,7 @@ async def run_enrichment(
             unreadable_visits=tuple(unreadable_visits),
             stopped_by=stopped_by,
             contact_info_lost=info_lost,
+            contact_info_read=info_read,
         )
 
     for index, step in enumerate(plan.steps):
@@ -765,6 +771,7 @@ async def run_enrichment(
                         answers.append(info)
                         if info.outcome is Outcome.OK:
                             info_lost_in_a_row = 0
+                            info_read += 1
         failed = next((a for a in answers if a.outcome is not Outcome.OK), None)
         cause: UnreadableCause | None = None
         if failed is not None and failed.outcome is Outcome.NOT_FOUND:

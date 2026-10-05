@@ -1806,9 +1806,10 @@ def _answer_lost_limit(session: Session, user: User, account_id: int) -> Protect
 
 def _contact_info_breaker(session: Session, user: User, account_id: int) -> Protection:
     """The Contact info breaker's count (#424): consecutive enrichment runs (by hand or
-    by schedule) that ended ``answer_lost`` because too many Contact info answers
-    arrived with no body (#405). Reported the way :func:`_route_changed_breaker`
-    reports its own streak, an unreadable row included.
+    by schedule) that lost their Contact info answers: stopped ``answer_lost`` by the
+    #405 caps, or reached their end with every one of two or more clicks lost.
+    Reported the way :func:`_route_changed_breaker` reports its own streak, an
+    unreadable row included.
     """
     current = route_breaker.contact_info_state(session, user, account_id)
     since = f" (since {current.since:%Y-%m-%d %H:%M UTC})" if current.since is not None else ""
@@ -1829,24 +1830,27 @@ def _contact_info_breaker(session: Session, user: User, account_id: int) -> Prot
         return Protection(
             name="Contact info breaker",
             status=Status.ON,
-            value="clear: no consecutive enrichment runs have ended answer_lost",
+            value="clear: no consecutive enrichment runs have lost their Contact info answers",
         )
     if not current.tripped:
         return Protection(
             name="Contact info breaker",
             status=Status.ON,
             value=(
-                f"{current.count} of {route_breaker.CONTACT_INFO_THRESHOLD} answer_lost"
-                f" enrichment runs in a row{since}"
+                f"{current.count} of {route_breaker.CONTACT_INFO_THRESHOLD} enrichment runs"
+                f" in a row lost their Contact info answers{since}"
             ),
         )
     return Protection(
         name="Contact info breaker",
         status=Status.ON,
-        value=f"tripped: {current.count} answer_lost enrichment runs in a row{since}",
+        value=(
+            f"tripped: {current.count} enrichment runs in a row lost their Contact info"
+            f" answers{since}"
+        ),
         warnings=(
-            f"{current.count} enrichment runs in a row stopped because too many Contact info"
-            f" answers arrived with no readable body{since}: scheduled enrichment runs are"
+            f"{current.count} enrichment runs in a row lost their Contact info answers, which"
+            f" arrived with no readable body{since}: scheduled enrichment runs are"
             " skipped until this clears. Run one by hand (`netkeeper linkedin enrich`) to"
             " check whether Contact info reads again, or clear it directly with"
             " `netkeeper linkedin schedule reset-breaker`",

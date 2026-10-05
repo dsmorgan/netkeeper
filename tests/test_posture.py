@@ -1806,7 +1806,7 @@ def _lose_contact_info(writer: Session, user: User, runs: int) -> None:
 def test_a_clear_contact_info_breaker_shows_no_warning(writer: Session, user: User) -> None:
     row = _row(_report(writer, user), "Contact info breaker")
     assert row.status is Status.ON and row.warnings == ()
-    assert row.value == "clear: no consecutive enrichment runs have ended answer_lost"
+    assert row.value == "clear: no consecutive enrichment runs have lost their Contact info answers"
 
 
 def test_a_contact_info_streak_below_the_breaker_shows_its_count(
@@ -1815,7 +1815,10 @@ def test_a_contact_info_streak_below_the_breaker_shows_its_count(
     _lose_contact_info(writer, user, 2)
     row = _row(_report(writer, user), "Contact info breaker")
     assert row.status is Status.ON and row.warnings == ()
-    assert row.value == "2 of 3 answer_lost enrichment runs in a row (since 2026-09-23 18:00 UTC)"
+    assert row.value == (
+        "2 of 3 enrichment runs in a row lost their Contact info answers"
+        " (since 2026-09-23 18:00 UTC)"
+    )
 
 
 def test_a_tripped_contact_info_breaker_warns(writer: Session, user: User) -> None:
@@ -1823,8 +1826,9 @@ def test_a_tripped_contact_info_breaker_warns(writer: Session, user: User) -> No
     report = _report(writer, user)
     row = _row(report, "Contact info breaker")
     assert row.status is Status.ON
-    assert (
-        row.value == "tripped: 3 answer_lost enrichment runs in a row (since 2026-09-23 18:00 UTC)"
+    assert row.value == (
+        "tripped: 3 enrichment runs in a row lost their Contact info answers"
+        " (since 2026-09-23 18:00 UTC)"
     )
     assert len(row.warnings) == 1
     warning = row.warnings[0]
