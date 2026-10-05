@@ -279,6 +279,7 @@ class _ScopeGuard:
         ``joinedload()`` adds its JOIN at compile time, after this listener runs, so
         the table walk cannot see it. ``_with_options`` is what ``.options()`` fills.
         """
+        # Statement._with_options and Load.context are private SQLAlchemy API: recheck on upgrades.
         for option in state.statement._with_options:
             if not isinstance(option, Load):
                 continue
