@@ -17,7 +17,7 @@ import json
 import os
 import re
 import tokenize
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,7 @@ import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Connection, Engine, MetaData, inspect, text
+from sqlalchemy import Connection, Engine, MetaData, ScalarResult, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from netkeeper import migrations
@@ -631,7 +631,7 @@ def _insert_import_row(
 
 def _raw_cells(connection: Connection, row_id: int) -> Any:
     """``raw_json`` as a dict: SQLite hands back the text, PostgreSQL the parsed JSON."""
-    value = connection.execute(
+    value: object = connection.execute(
         text("SELECT raw_json FROM import_rows WHERE id = :id"), {"id": row_id}
     ).scalar_one()
     return json.loads(value) if isinstance(value, str) else value
@@ -920,7 +920,7 @@ def test_deleting_a_contact_or_its_user_takes_the_triage_log_with_it(
 
     with migration_engine.begin() as connection:
         connection.execute(text("DELETE FROM contacts WHERE id = 1"))
-        remaining = connection.execute(
+        remaining: ScalarResult[int] = connection.execute(
             text("SELECT id FROM triage_decisions ORDER BY id")
         ).scalars()
         assert list(remaining) == [2, 3]
@@ -1061,7 +1061,7 @@ def test_the_backfill_never_leaves_a_known_tag_stored_even_via_entities(
         )
     migrations.upgrade(migration_engine, "0010")
     with migration_engine.begin() as connection:
-        summary = connection.execute(
+        summary: str = connection.execute(
             text("SELECT summary FROM interactions WHERE id = 1")
         ).scalar_one()
     assert summary == "She wrote\nhello\nin the box"
@@ -1137,7 +1137,9 @@ def test_downgrading_drops_the_decisions_the_old_schema_cannot_hold(
         )
     migrations.downgrade(migration_engine, "0007")
     with migration_engine.begin() as connection:
-        kept = connection.execute(text("SELECT id FROM triage_decisions ORDER BY id")).scalars()
+        kept: ScalarResult[int] = connection.execute(
+            text("SELECT id FROM triage_decisions ORDER BY id")
+        ).scalars()
         assert list(kept) == [1]
 
 
@@ -1155,7 +1157,7 @@ def _put_setting(connection: Connection, user_id: int, key: str, value: str = "1
 
 
 def _keys(connection: Connection, user_id: int) -> set[str]:
-    rows = connection.execute(
+    rows: ScalarResult[str] = connection.execute(
         text("SELECT key FROM settings_kv WHERE user_id = :user_id"), {"user_id": user_id}
     ).scalars()
     return set(rows)
@@ -1305,7 +1307,7 @@ def test_unfinished_plans_become_resumable_runs_and_nobody_is_armed(
             "linkedin.enrich.2.plan.ffff",  # account 2 is user 2's, not user 1's
             "linkedin.enrich.1.pins",
         }
-        armed = connection.execute(
+        armed: ScalarResult[str | None] = connection.execute(
             text("SELECT scheduled_runs_armed_at FROM linkedin_accounts")
         ).scalars()
         assert list(armed) == [None, None]
@@ -1435,7 +1437,8 @@ def test_the_seeded_validated_list_is_marked_builtin_and_nothing_else_is(
         assert marked.scalars().all() == [1, 3]
         _insert_list(connection, id=7, user_id=1, name="New")  # the default fills it
         new = connection.execute(text("SELECT builtin FROM lists WHERE id = 7"))
-        assert not new.scalar_one()  # 0 on SQLite, false on PostgreSQL
+        builtin: object = new.scalar_one()
+        assert not builtin  # 0 on SQLite, false on PostgreSQL
 
     migrations.downgrade(migration_engine, "0015")
     columns = {column["name"] for column in inspect(migration_engine).get_columns("lists")}
@@ -2125,7 +2128,7 @@ def test_0025_starts_every_mailbox_without_a_history_and_every_message_without_a
         assert connection.execute(text("SELECT snippet FROM messages")).scalars().all() == [None]
         # Gmail's historyId can outgrow a 32-bit integer.
         connection.execute(text("UPDATE mailboxes SET history_id = 9007199254740993"))
-        found = connection.execute(text("SELECT history_id FROM mailboxes")).scalar_one()
+        found: int = connection.execute(text("SELECT history_id FROM mailboxes")).scalar_one()
         assert found == 9007199254740993
 
 
@@ -2697,8 +2700,12 @@ def test_0031_starts_every_activated_campaign_at_its_activation(migration_engine
     migrations.upgrade(migration_engine, "0031")
     with migration_engine.begin() as connection:
         rows = connection.execute(text("SELECT id, starts_at FROM campaigns ORDER BY id")).all()
-        chosen = connection.execute(text("SELECT start_chosen FROM campaigns")).scalars().all()
-        times = connection.execute(text("SELECT send_time FROM campaign_steps")).scalars().all()
+        chosen: Sequence[object] = (
+            connection.execute(text("SELECT start_chosen FROM campaigns")).scalars().all()
+        )
+        times: Sequence[object] = (
+            connection.execute(text("SELECT send_time FROM campaign_steps")).scalars().all()
+        )
     starts = {row[0]: None if row[1] is None else str(row[1])[:19] for row in rows}
     assert starts == {
         1: None,
@@ -2817,7 +2824,7 @@ def test_0034_downgrade_deletes_the_self_contact_and_leaves_nothing_naming_it(
             for fk in table.foreign_keys:
                 if fk.column.table.name == "contacts":
                     column = fk.parent.name
-                    named = connection.execute(
+                    named: int = connection.execute(
                         text(f"SELECT count(*) FROM {table.name} WHERE {column} = 1")
                     ).scalar_one()
                     assert named == 0, f"{table.name}.{column}"
@@ -2829,7 +2836,7 @@ def test_0034_downgrade_deletes_the_self_contact_and_leaves_nothing_naming_it(
         )
         assert _raw_cells(connection, 1) == {"Given": "Hortensia"}  # the audit row stays
         for child in CHILD_ROWS:  # the other contact keeps its own
-            count = connection.execute(
+            count: int = connection.execute(
                 text(f"SELECT count(*) FROM {child} WHERE contact_id = 3")
             ).scalar_one()
             assert count == 1, child

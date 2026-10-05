@@ -944,7 +944,7 @@ def compile_filter(
     session: Session,
     now: datetime | None = None,
     all_lists: Mapping[int, ContactList] | None = None,
-) -> Select[tuple[Contact]]:
+) -> Select[Contact]:
     """``scoped_contacts(user)`` filtered by ``tree``. Sort and page it with the helpers below."""
     where = compile_where(user, tree, session=session, now=now, all_lists=all_lists)
     return scoped_contacts(user).where(where)
@@ -957,7 +957,7 @@ def compile_count(
     session: Session,
     now: datetime | None = None,
     all_lists: Mapping[int, ContactList] | None = None,
-) -> Select[tuple[int]]:
+) -> Select[int]:
     """``scoped_contacts_count(user)`` filtered by ``tree``."""
     where = compile_where(user, tree, session=session, now=now, all_lists=all_lists)
     return scoped_contacts_count(user).where(where)
@@ -984,9 +984,7 @@ def compile_update(
     )
 
 
-def apply_sort(
-    statement: Select[tuple[Contact]], sort: Sequence[SortKey]
-) -> Select[tuple[Contact]]:
+def apply_sort(statement: Select[Contact], sort: Sequence[SortKey]) -> Select[Contact]:
     """Replace the ordering of ``statement`` with ``sort``, then ``id`` ascending as the tiebreak.
 
     Strings order by ``lower()``; NULLs go last in either direction (SQLite and
@@ -1002,9 +1000,7 @@ def apply_sort(
     return statement.order_by(None).order_by(*clauses)
 
 
-def paginate(
-    statement: Select[tuple[Contact]], *, limit: int, offset: int = 0
-) -> Select[tuple[Contact]]:
+def paginate(statement: Select[Contact], *, limit: int, offset: int = 0) -> Select[Contact]:
     """One page. ``limit`` is at least 1 and ``offset`` at least 0, else :class:`ValueError`."""
     if limit < 1:
         raise ValueError("limit must be at least 1")
@@ -1158,7 +1154,7 @@ class _Compiler:
 
     def _child_rows(
         self, model: type[ContactEmail | ContactPhone | ContactPosition | ContactSnapshot]
-    ) -> Select[tuple[int]]:
+    ) -> Select[int]:
         """``SELECT id FROM <child> WHERE contact_id = contacts.id AND user_id = :user``.
 
         The ``user_id`` term is defense in depth: the outer statement is already
@@ -1211,7 +1207,7 @@ class _Compiler:
                 self._lists[list_id] = get_scoped(self.session, self.user, ContactList, list_id)
         return self._lists[list_id]
 
-    def _members_of(self, list_id: int) -> Select[tuple[int]]:
+    def _members_of(self, list_id: int) -> Select[int]:
         """``list_members`` rows of this contact in that list; correlated, like a child subquery.
 
         ``(user_id, list_id, contact_id)`` is the table's unique constraint, so
@@ -1256,7 +1252,7 @@ class _Compiler:
                 self._expanding = self._expanding[:-1]
         return and_(*clauses)
 
-    def _tagged(self, names: Sequence[str]) -> Select[tuple[int]]:
+    def _tagged(self, names: Sequence[str]) -> Select[int]:
         """``contact_tags`` rows of this contact whose tag is named in ``names``.
 
         Names match ``tags.name_key`` (the lowercased name), so the comparison is

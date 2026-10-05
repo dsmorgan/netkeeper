@@ -137,7 +137,7 @@ def list_inbox(
         .order_by(_ARRIVED.desc().nulls_last(), Message.id.desc())
         .limit(limit)
         .offset(offset)
-    ).tuples()
+    )
     return InboxPage(
         items=tuple(_item(m, e, c, contact) for m, e, c, contact in rows),
         total=total,

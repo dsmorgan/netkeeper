@@ -409,7 +409,7 @@ def _enrollment_counts(
         .with_only_columns(Enrollment.campaign_id, Enrollment.status, func.count(Enrollment.id))
         .where(Enrollment.campaign_id.in_(campaign_ids))
         .group_by(Enrollment.campaign_id, Enrollment.status)
-    ).tuples()
+    )
     for campaign_id, status, n in rows:
         counts[campaign_id][status] = n
     return counts
@@ -444,7 +444,7 @@ def list_campaigns(
             .with_only_columns(CampaignStep.campaign_id, func.count(CampaignStep.id))
             .where(CampaignStep.campaign_id.in_(ids))
             .group_by(CampaignStep.campaign_id)
-        ).tuples():
+        ):
             steps[campaign_id] = n
     active = [c.id for c in rows if c.status is CampaignStatus.ACTIVE]
     next_at: dict[int, datetime | None] = {}
@@ -457,7 +457,7 @@ def list_campaigns(
                 Enrollment.status == EnrollmentStatus.ACTIVE,
             )
             .group_by(Enrollment.campaign_id)
-        ).tuples():
+        ):
             next_at[campaign_id] = due
     return [CampaignSummary(c, steps[c.id], dict(counts[c.id]), next_at.get(c.id)) for c in rows]
 
@@ -517,7 +517,7 @@ def campaign_status(
             Message.direction == MessageDirection.OUT,
         )
         .group_by(Message.step_id, Message.status)
-    ).tuples():
+    ):
         if step_id is not None:
             outbound[step_id, False] += n
             if status in (MessageStatus.SENT, MessageStatus.BOUNCED):
@@ -634,7 +634,7 @@ def list_enrollments(
         .order_by(Enrollment.id)
         .limit(limit)
         .offset(offset)
-    ).tuples()
+    )
     pairs = list(rows)
     emails: dict[int, str] = {}
     if pairs:
@@ -643,7 +643,7 @@ def list_enrollments(
             .with_only_columns(ContactEmail.contact_id, ContactEmail.email)
             .where(ContactEmail.contact_id.in_([c.id for _, c in pairs]))
             .order_by(ContactEmail.is_primary.desc(), ContactEmail.id)
-        ).tuples():
+        ):
             emails.setdefault(contact_id, email)
     return EnrollmentPage(
         items=tuple(
@@ -1040,7 +1040,7 @@ def delete_plan(session: Session, user: User, campaign_id: int) -> DeletePlan:
                 CampaignStep.user_id == user.id,
             )
             .order_by(TestSend.sent_at, TestSend.id)
-        ).tuples()
+        )
     )
     return DeletePlan(
         campaign_id=campaign.id,

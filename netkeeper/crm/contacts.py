@@ -595,7 +595,7 @@ def count_selection(
     if selection.tree is not None:
         return session.scalar(compile_count(user, selection.tree, session=session, now=now)) or 0
     assert selection.ids is not None
-    statement: Select[tuple[int]] = scoped_contacts_count(user).where(
+    statement: Select[int] = scoped_contacts_count(user).where(
         Contact.id.in_(selection.ids), Contact.merged_into_id.is_(None)
     )
     return session.scalar(statement) or 0

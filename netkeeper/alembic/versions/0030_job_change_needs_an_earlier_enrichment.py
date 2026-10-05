@@ -118,7 +118,7 @@ def upgrade() -> None:
         for position in positions:
             enriched[(position.user_id, position.contact_id)].append(position)
 
-    def supported(row: sa.Row[tuple[object, ...]]) -> bool:
+    def supported(row: sa.Row[*tuple[object, ...]]) -> bool:
         if row.source != "sync":
             return False
         title, company = _fold(row.current_title), _fold(row.current_company)

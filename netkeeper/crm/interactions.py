@@ -362,7 +362,7 @@ def _refresh_last_contacted(session: Session, user: User, contact: Contact) -> N
     )
 
 
-def _newest_outbound_at(user: User) -> Select[tuple[datetime]]:
+def _newest_outbound_at(user: User) -> Select[datetime]:
     """``max(at)`` over ``user``'s outbound interactions; the caller narrows it to a contact."""
     return (
         scoped(user, Interaction)

@@ -94,7 +94,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from email.utils import parseaddr
-from typing import Final
+from typing import Final, cast
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session, sessionmaker
@@ -876,7 +876,8 @@ def linkedin_watches(
         )
         .group_by(MessageRow.enrollment_id)
     ):
-        sent[enrollment_id] = (first, latest)
+        # The query filters out a NULL sent_at, so neither aggregate is NULL.
+        sent[enrollment_id] = (cast("datetime", first), cast("datetime", latest))
     watched: list[tuple[Enrollment, datetime]] = []
     for enrollment, campaign_status in rows:
         times = sent.get(enrollment.id)

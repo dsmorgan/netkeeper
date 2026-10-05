@@ -21,9 +21,6 @@ updates:
     groups:
       python-minor-patch:
         update-types: [minor, patch]
-        # SQLAlchemy 2.1 needs its own migration (#406): it deprecates
-        # Result.tuples() and changes Select typing. It comes on its own instead.
-        exclude-patterns: ["sqlalchemy"]
 
   # frontend/package.json and pnpm-lock.yaml (the npm ecosystem reads pnpm lockfiles).
   - package-ecosystem: npm

@@ -25,6 +25,7 @@ from netkeeper.models import (
     Base,
     Contact,
     ContactAlias,
+    ContactChild,
     ContactEmail,
     ContactLink,
     ContactList,
@@ -119,7 +120,8 @@ def test_factories_produce_valid_rows(session: Session, users: tuple[User, User]
         ("555-0101", None, False),
     ]
     assert [(p.title, p.is_current) for p in contact.positions] == [("CTO", True), ("Dev", False)]
-    assert all(child.user_id == alice.id for child in [*contact.emails, *contact.phones])
+    children: list[ContactChild] = [*contact.emails, *contact.phones]
+    assert all(child.user_id == alice.id for child in children)
     assert factories.make_contact(session, alice, li_urn=None, li_public_id=None).li_url is None
 
 

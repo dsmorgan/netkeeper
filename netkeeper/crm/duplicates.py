@@ -143,7 +143,7 @@ def possible_duplicates(
     return contact, found[:limit]
 
 
-def _live_others(user: User, contact: Contact) -> Select[tuple[Contact]]:
+def _live_others(user: User, contact: Contact) -> Select[Contact]:
     return scoped_contacts(user).where(
         Contact.id != contact.id,
         Contact.merged_into_id.is_(None),

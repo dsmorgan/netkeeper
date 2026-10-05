@@ -94,7 +94,7 @@ class UnscopedQueryError(RuntimeError):
 # --- the helper -------------------------------------------------------------
 
 
-def scoped[T: UserOwned](user: User, model: type[T]) -> Select[tuple[T]]:
+def scoped[T: UserOwned](user: User, model: type[T]) -> Select[T]:
     """``select(model)`` filtered to ``user``'s rows and marked for the guard."""
     return select(model).where(model.user_id == user.id).execution_options(**_scope_of(user))
 
@@ -109,7 +109,7 @@ def scoped_delete[T: UserOwned](user: User, model: type[T]) -> Delete:
     return delete(model).where(model.user_id == user.id).execution_options(**_scope_of(user))
 
 
-def scoped_count[T: UserOwned](user: User, model: type[T]) -> Select[tuple[int]]:
+def scoped_count[T: UserOwned](user: User, model: type[T]) -> Select[int]:
     """``select(count(*))`` over ``user``'s rows of ``model``, marked for the guard.
 
     For paged list endpoints: ``session.scalar(scoped_count(user, Contact).where(...))``.
@@ -145,7 +145,7 @@ def not_self() -> ColumnElement[bool]:
     return Contact.is_self.is_(false())
 
 
-def scoped_contacts(user: User) -> Select[tuple[Contact]]:
+def scoped_contacts(user: User) -> Select[Contact]:
     """``user``'s contacts, less the self contact: :func:`scoped` for anything that lists,
     counts, searches, matches, exports, merges, enrolls or enriches contacts.
 
@@ -155,7 +155,7 @@ def scoped_contacts(user: User) -> Select[tuple[Contact]]:
     return scoped(user, Contact).where(not_self())
 
 
-def scoped_contacts_count(user: User) -> Select[tuple[int]]:
+def scoped_contacts_count(user: User) -> Select[int]:
     """:func:`scoped_count` of :func:`scoped_contacts`."""
     return scoped_count(user, Contact).where(not_self())
 
