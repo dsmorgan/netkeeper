@@ -288,6 +288,18 @@ class GmailSender:
         """How often the drafts poll runs, per user."""
         return self._drafts_every
 
+    @property
+    def replies_every(self) -> timedelta:
+        """How often the reply poll runs, per user."""
+        return self._replies_every
+
+    def replies_polled_at(self, user_id: int) -> datetime | None:
+        """When this process last started a reply poll of ``user_id`` that caught up (or is
+        still running); None before the first, or after one that stopped part way, which
+        the next tick retries. Read-only, like :meth:`drafts_polled_at`: this is the time
+        :meth:`reconcile` measures the next poll from."""
+        return self._replies_polled.get(user_id)
+
     def drafts_polled_at(self, user_id: int) -> datetime | None:
         """When this process last ran ``user_id``'s drafts poll; None before the first.
 

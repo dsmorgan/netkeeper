@@ -26,17 +26,21 @@ export function nextText(iso: string, now: number): string {
   return `${date.toLocaleDateString(undefined, { weekday: 'short' })} ${time}`
 }
 
-/** "every 10 min", "every 3 h", "every day", "every 7 days". */
+/**
+ * "every minute", "every 10 min", "every 90 min", "every 3 h", "every day", "every 7 days".
+ * An interval that is not a whole number of hours or days stays in the unit below.
+ */
 export function everyText(minutes: number): string {
-  if (minutes < 60) return `every ${minutes} min`
-  if (minutes < 1440) return `every ${minutes / 60} h`
+  if (minutes <= 1) return 'every minute'
+  if (minutes < 60 || minutes % 60 !== 0) return `every ${minutes} min`
+  if (minutes < 1440 || minutes % 1440 !== 0) return `every ${minutes / 60} h`
   const days = minutes / 1440
   return days === 1 ? 'every day' : `every ${days} days`
 }
 
 /** What a check that has no next time says instead. Never a time. */
 export const STATE_TEXT: Record<Exclude<CheckState, 'scheduled'>, string> = {
-  due: 'due now',
+  due: 'due soon',
   idle: 'nothing to check',
   paused: 'paused',
   outside_hours: 'outside active hours',

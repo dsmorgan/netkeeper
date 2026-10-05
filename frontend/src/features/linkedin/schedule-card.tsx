@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
+import { pollStatusKeys } from '@/features/poll-status/api'
 import { cn } from '@/lib/utils'
 
 import { armSchedule, budgetQuery, disarmSchedule, linkedinKeys, scheduleQuery } from './api'
@@ -39,6 +40,7 @@ export function ScheduleCard() {
     onSuccess: (data) => {
       queryClient.setQueryData(linkedinKeys.schedule(), data)
       void queryClient.invalidateQueries({ queryKey: linkedinKeys.status() })
+      void queryClient.invalidateQueries({ queryKey: pollStatusKeys.all })
       setAsking(false)
     },
   })
@@ -47,6 +49,7 @@ export function ScheduleCard() {
     onSuccess: (data) => {
       queryClient.setQueryData(linkedinKeys.schedule(), data)
       void queryClient.invalidateQueries({ queryKey: linkedinKeys.status() })
+      void queryClient.invalidateQueries({ queryKey: pollStatusKeys.all })
     },
   })
 

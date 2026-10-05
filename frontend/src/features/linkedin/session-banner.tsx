@@ -4,6 +4,7 @@ import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
+import { pollStatusKeys } from '@/features/poll-status/api'
 
 import { clearSessionFlag, linkedinKeys } from './api'
 import { formatWhen } from './fields'
@@ -46,6 +47,7 @@ export function SessionBanner({ status }: { status: LinkedInStatus }) {
     onSuccess: (data) => {
       queryClient.setQueryData(linkedinKeys.status(), data)
       void queryClient.invalidateQueries({ queryKey: linkedinKeys.browserHealth() })
+      void queryClient.invalidateQueries({ queryKey: pollStatusKeys.all })
       setAsking(false)
     },
     // A refusal means the flag is not what this banner shows any more; reread it.
