@@ -103,6 +103,9 @@ export function InboxPage({ enrollment }: { enrollment?: number }) {
         ? 'one enrollment'
         : `enrollment: ${first.contact_name || 'Unnamed contact'} in ${first.campaign_name}`,
     )
+  } else if (enrollment !== undefined && enrollmentLabel === undefined && page.isError) {
+    // No page to name it from, but you can still drop the filter.
+    setEnrollmentLabel('this enrollment')
   }
   const chips: FilterChip[] = []
   if (kind !== '') {

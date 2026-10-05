@@ -259,6 +259,42 @@ describe('inbox', () => {
     expect(screen.queryByRole('list', { name: 'Active filters' })).toBeNull()
   })
 
+  it('still says how many match when the whole count fails', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/inbox': (call) =>
+          call.query.get('kind') === 'bounce'
+            ? jsonResponse({ total: 1, unhandled: 3, items: [PAGE.items[2]] })
+            : call.query.get('limit') === '1'
+              ? jsonResponse({ detail: 'the database is locked' }, 500)
+              : jsonResponse(PAGE),
+      }),
+    )
+    await renderApp('/inbox')
+    await screen.findByRole('listitem', { name: /^Reply from Tobias/ })
+    fireEvent.change(screen.getByLabelText('Kind'), { target: { value: 'bounce' } })
+    await waitFor(() =>
+      expect(screen.getByText(/filtered by:/, { selector: '[role="status"]' })).toHaveTextContent(
+        /^Showing 1 · filtered by:/,
+      ),
+    )
+  })
+
+  it('still lets you drop the enrollment when its page fails', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/inbox': (call) =>
+          call.query.has('enrollment_id')
+            ? jsonResponse({ detail: 'the database is locked' }, 500)
+            : jsonResponse(PAGE),
+      }),
+    )
+    const { router } = await renderApp('/inbox?enrollment=302')
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove this enrollment' }))
+    await waitFor(() => expect(router.state.location.searchStr).toBe(''))
+    expect(await screen.findByRole('listitem', { name: /^Reply from Tobias/ })).toBeVisible()
+  })
+
   it('marks an item handled, then reloads the list', async () => {
     const calls: Call[] = []
     let page = PAGE
