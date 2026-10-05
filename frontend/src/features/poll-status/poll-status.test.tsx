@@ -11,6 +11,7 @@ import { pollStatusKeys, pollStatusQuery } from './api'
 import {
   LATE_AFTER_MS,
   ago,
+  checkNowLate,
   checkSummary,
   everyText,
   nextText,
@@ -173,6 +174,15 @@ describe('format', () => {
     }
     expect(checkSummary(check({ state: 'paused', last_at: null }), NOW)).toBe('paused')
     expect(checkSummary(check({ state: 'outside_hours' }), NOW)).toContain('outside active hours')
+  })
+
+  it('calls a waiting check now late only after three minutes, and never without a time', () => {
+    const waiting = (at: string | null) =>
+      check({ state: 'due', next_at: null, requested: true, requested_at: at })
+    expect(checkNowLate(waiting(minutes(-2)), NOW)).toBe(false)
+    expect(checkNowLate(waiting(minutes(-3)), NOW)).toBe(true)
+    expect(checkNowLate(waiting(null), NOW)).toBe(false)
+    expect(checkNowLate(check({ requested: false, requested_at: minutes(-10) }), NOW)).toBe(false)
   })
 
   it('words the campaign page’s replies line', () => {

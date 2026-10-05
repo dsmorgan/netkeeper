@@ -236,8 +236,12 @@ class _Polls:
 
     def __init__(self) -> None:
         self.calls: list[tuple[datetime, frozenset[int] | None]] = []
+        self.skipped: list[frozenset[int]] = []
         self.result = campaign_replies.RepliesPolled()
         self.during: Callable[[int], object] | None = None
+        self.answer: Callable[[frozenset[int]], campaign_replies.RepliesPolled] | None = None
+        """With ``armed`` set, what each poll answers for the mailboxes it read."""
+        self.armed: frozenset[int] = frozenset()
 
     def __call__(
         self,
@@ -246,11 +250,16 @@ class _Polls:
         *,
         now: datetime,
         only: Collection[int] | None = None,
+        skip: Collection[int] = (),
         **_: Any,
     ) -> campaign_replies.RepliesPolled:
         self.calls.append((now, None if only is None else frozenset(only)))
+        self.skipped.append(frozenset(skip))
         if self.during is not None:
             self.during(user_id)
+        if self.answer is not None:
+            read = (self.armed if only is None else frozenset(only)) - frozenset(skip)
+            return self.answer(read)
         return self.result
 
     def last(self) -> tuple[datetime, frozenset[int] | None]:
@@ -345,20 +354,78 @@ def test_check_now_in_a_due_only_interval_polls_every_mailbox_and_clears_the_due
     assert len(polls.calls) == 3  # nothing due, inside the interval
 
 
-def test_check_now_polls_a_mailbox_in_its_backoff(
+def _healthy_and_failing(read: frozenset[int]) -> campaign_replies.RepliesPolled:
+    """Mailbox 1 always reads; mailbox 2's poll always fails."""
+    return campaign_replies.RepliesPolled(caught_up=read & {1}, failed=read & {2})
+
+
+def test_check_now_follows_a_failing_mailboxs_backoff(
     session_factory: sessionmaker[Session], polls: _Polls
 ) -> None:
+    """A press every minute reads the healthy mailbox every time, and the failing one
+    only at its retry times: 1, 2, then 4 minutes apart (doubling, never past the
+    interval)."""
     user_id = _user(session_factory)
     sender, tick = _reconcile(session_factory, user_id)
-    polls.result = campaign_replies.RepliesPolled(failed=frozenset({1}))
-    tick(T0)
-    tick(T0 + timedelta(seconds=30))  # its backoff (one minute) has not passed
-    assert len(polls.calls) == 1
+    polls.armed = frozenset({1, 2})
+    polls.answer = _healthy_and_failing
+    reads: dict[int, list[int]] = {1: [], 2: []}
+    for minute in range(10):
+        if minute:
+            assert sender.request_replies_poll(user_id)
+        tick(T0 + minute * M)
+        at, only = polls.last()
+        assert at == T0 + minute * M and only is None  # every press is a full poll...
+        for mailbox_id in (1, 2):
+            if mailbox_id not in polls.skipped[-1]:  # ...less what is backing off
+                reads[mailbox_id].append(minute)
 
-    sender.request_replies_poll(user_id)
-    tick(T0 + timedelta(seconds=40))
+    assert reads[1] == list(range(10))
+    assert reads[2] == [0, 1, 3, 7]
+    assert sender.replies_due(user_id) == {2}  # waiting for its retry time, still due
+    assert sender.replies_retry_at(user_id) == {2: T0 + 15 * M}  # 7 + 8
 
-    assert polls.last() == (T0 + timedelta(seconds=40), None)
+
+def test_the_scheduled_full_poll_still_ignores_a_backoff(
+    session_factory: sessionmaker[Session], polls: _Polls
+) -> None:
+    """#420's full poll each interval reads every armed mailbox, backoff or not."""
+    user_id = _user(session_factory)
+    sender, tick = _reconcile(session_factory, user_id)
+    polls.armed = frozenset({1, 2})
+    polls.answer = _healthy_and_failing
+    for minute in (0, 1, 3, 7):  # its retries; the last backs off 8 min, to T0 + 15
+        tick(T0 + minute * M)
+    assert sender.replies_retry_at(user_id) == {2: T0 + 15 * M}
+
+    tick(T0 + 10 * M)  # the interval from the last full poll, at T0
+
+    assert polls.last() == (T0 + 10 * M, None)
+    assert polls.skipped[-1] == frozenset()
+
+
+def test_poll_status_shows_a_backing_off_mailbox_waiting_for_its_retry(
+    session_factory: sessionmaker[Session],
+) -> None:
+    now = datetime.now(UTC)
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        ok = _mailbox(session, user, email="ok@example.test").id
+        failing = _mailbox(session, user, email="failing@example.test").id
+        serving = service.Serving(
+            campaign_engine=True,
+            replies_polled_at=now - timedelta(minutes=2),
+            replies_every=EVERY,
+            replies_due=frozenset({failing}),
+            replies_retry_at={failing: now + timedelta(minutes=3)},
+            replies_requested_at=now,
+        )
+        status = service.poll_status(session, user, now=now, settings=Settings(), serving=serving)
+
+    polls = {poll.mailbox_id: poll for poll in status.mailboxes}
+    assert polls[ok].state is service.CheckState.DUE
+    assert polls[failing].state is service.CheckState.SCHEDULED
+    assert polls[failing].next_at == now + timedelta(minutes=3)
 
 
 def test_a_not_ready_mailbox_does_not_keep_the_request_alive(
@@ -383,23 +450,50 @@ def test_a_not_ready_mailbox_does_not_keep_the_request_alive(
     assert polls.last() == (T0 + 2 * M, frozenset({2}))  # alone, not a full poll
 
 
+@pytest.mark.parametrize(
+    "short",
+    [
+        campaign_replies.RepliesPolled(caught_up=frozenset({1}), behind=frozenset({2})),
+        campaign_replies.RepliesPolled(caught_up=frozenset({1}), failed=frozenset({2})),
+    ],
+    ids=["behind", "failed"],
+)
 def test_a_request_leaves_the_send_hold_alone(
-    session_factory: sessionmaker[Session], polls: _Polls
+    session_factory: sessionmaker[Session], polls: _Polls, short: campaign_replies.RepliesPolled
 ) -> None:
-    """A not-ready mailbox holds its new conversations until a poll of it catches up; a
-    press asks for that poll, and nothing else moves the hold."""
+    """A mailbox seen not ready holds its new conversations until a poll of it catches
+    up. A requested poll that stops short of that keeps the hold; one that catches up
+    releases it, as any poll does."""
     user_id = _user(session_factory)
     sender, tick = _reconcile(session_factory, user_id)
-    polls.result = campaign_replies.RepliesPolled(not_ready={2: "reauth_required"})
+    polls.result = campaign_replies.RepliesPolled(
+        caught_up=frozenset({1}), not_ready={2: "reauth_required"}
+    )
     tick(T0)
-    held = set(sender._replies_catch_up[user_id])
-    assert held == {2}
+    assert sender._replies_catch_up[user_id] == {2}
 
     sender.request_replies_poll(user_id)
-    assert sender._replies_catch_up[user_id] == held
-    polls.result = campaign_replies.RepliesPolled(not_ready={2: "reauth_required"})
+    assert sender._replies_catch_up[user_id] == {2}  # the press moves nothing
+    polls.result = short
     tick(T0 + M)
-    assert sender._replies_catch_up[user_id] == held  # still not caught up: still held
+    assert sender._replies_catch_up[user_id] == {2}  # not caught up: still held
+
+    sender.request_replies_poll(user_id)
+    polls.result = campaign_replies.RepliesPolled(caught_up=frozenset({1, 2}))
+    tick(T0 + 5 * M)  # past the failed one's backoff too
+    assert sender._replies_catch_up[user_id] == set()
+
+
+def test_concurrent_presses_ask_once(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Presses arrive on worker threads: exactly one of many at once asks."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    sender = GmailSender(session_factory, opener=_no_gmail, replies_every=EVERY)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        answers = list(pool.map(lambda _: sender.request_replies_poll(7), range(64)))
+    assert answers.count(True) == 1
 
 
 def test_a_request_flags_only_its_own_user(
