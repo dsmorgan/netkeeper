@@ -487,14 +487,18 @@ async def test_a_contact_info_answer_that_breaks_off_is_not_clicked_for_again(
     provider: AttachBrowserProvider, site: str
 ) -> None:
     """The overlay's answer breaks off after the one click: no contact info for
-    Priya this visit, no second click, and the run goes on to Mateo."""
+    Priya this visit, no second click, and the run goes on to Mateo. Since #405 her
+    profile is still saved, without contact info, and the visit is not unreadable."""
     _Replica.drop = {f"overlay:{PRIYA.slug}"}
     result, harvests, _, _ = await _visit(provider, site, [_target(PRIYA), _target(MATEO)])
-    assert [h.outcome for h in harvests] == [Outcome.ROUTE_CHANGED, Outcome.OK]
-    assert harvests[0].contact_info is None and harvests[1].contact_info is not None
+    assert [h.outcome for h in harvests] == [Outcome.OK, Outcome.OK]
+    assert harvests[0].contact_info is None and harvests[0].contact_info_lost
+    assert harvests[1].contact_info is not None
     assert result.reason is StopReason.END_OF_PLAN and result.clicks == 2
+    assert (result.unreadable, result.contact_info_lost) == (0, 1)
     (lost,) = result.lost
     assert lost.startswith("visit 1: the Contact info answer could not be read (")
+    assert lost.endswith("; the profile was saved without it")
     navigations = [r for r in _Replica.received if r["path"] == NAVIGATION_PATH]
     slugs = [json.loads(r["body"])["clientArguments"]["payload"]["vanityName"] for r in navigations]
     assert slugs == [PRIYA.slug, MATEO.slug]  # one overlay request each: never asked again

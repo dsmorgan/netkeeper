@@ -233,3 +233,47 @@ async def test_a_finished_stream_is_a_copy() -> None:
 
 def test_the_one_whole_failure_is_pinned() -> None:
     assert body_tap.ABORTED_BY_PAGE == "net::ERR_ABORTED"
+
+
+# --- #405: why a take had no copy, in fixed words -------------------------------------------
+
+
+class _Stalled(Stream):
+    """A ``Network.streamResourceContent`` that never answers within the wait."""
+
+    async def __call__(self, request_id: str) -> Mapping[str, Any]:
+        self.asked.append(request_id)
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.parametrize(
+    ("case", "miss"),
+    [
+        ("unmatched", body_tap.MISS_NOT_MATCHED),
+        ("refused", body_tap.MISS_NOT_STREAMED),
+        ("stalled", body_tap.MISS_NOT_STARTED),
+        ("open", body_tap.MISS_NOT_ENDED),
+        ("reset", body_tap.MISS_FAILED),
+        ("large", body_tap.MISS_TOO_LARGE),
+        ("whole", None),
+    ],
+)
+async def test_each_take_without_a_copy_says_why(case: str, miss: str | None) -> None:
+    stream: Stream = _Stalled() if case == "stalled" else Stream(buffered=b"x" * 10)
+    if case == "refused":
+        stream = Stream(refuse=True)
+    tap = _tap(stream, limit=16 if case == "large" else 1024)
+    if case == "large":
+        _answer(tap, "1", chunks=(b"y" * 10,))
+    elif case == "refused":
+        _answer(tap, "1", end="finished")
+    elif case in ("stalled", "open", "reset"):
+        _answer(tap, "1", end=None)
+        if case == "reset":
+            tap.on_failed({"requestId": "1", "errorText": "net::ERR_CONNECTION_RESET"})
+    elif case == "whole":
+        _answer(tap, "1")
+    got = await tap.take("POST", PAGINATION, ASK, wait_s=0.05)
+    assert tap.last_miss == miss and (got is None) is (miss is not None)
+    await tap.close()

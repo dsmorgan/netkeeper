@@ -49,9 +49,13 @@ too large or too slow is the observation failing, not LinkedIn answering:
 body to hand over. For the profile's screen, the landing keeps waiting in case the page
 sends the screen another way; if none reads, the visit is unreadable, with the fixed
 cause (:func:`~netkeeper.linkedin.observe.unreadable_cause`) in
-:attr:`~netkeeper.linkedin.enrich.Answer.lost`. For the Contact info overlay, the visit
-is unreadable -- no contact info for that person this visit, and nothing is clicked
-again. A lazy card is skipped, as a card that failed is. Where the tab is still decides
+:attr:`~netkeeper.linkedin.enrich.Answer.lost`. For the Contact info overlay, the answer
+is ``RouteChanged`` with the cause ``CONTACT_INFO_LOST`` -- no contact info for that
+person this visit, and nothing is clicked again; the job saves the profile without it
+and keeps the contact due (#405). Its :attr:`~netkeeper.linkedin.enrich.Answer.lost`
+also says what became of the body tap's copy: none, and why
+(:attr:`~netkeeper.linkedin.observe.ReadDiagnostics.streamed_miss`), or one that was
+not whole. A lazy card is skipped, as a card that failed is. Where the tab is still decides
 first: a checkpoint or a login wall there stops the run. A profile navigation that times
 out (Playwright's ``TimeoutError``: the document broke off, and the page never loaded) is
 an unreadable visit the same way, with the cause :data:`NAVIGATION_TIMED_OUT`, after the
@@ -625,7 +629,11 @@ class PageProfiles:
             cause = _lost_cause(response)
             body = _whole_copy(response, endpoint=COMPONENT_ENDPOINT)
             if body is None:
-                log.info("enrichment: skipped a lazy card that could not be read (%s)", cause)
+                log.info(
+                    "enrichment: skipped a lazy card that could not be read (%s; %s)",
+                    cause,
+                    _copy_note(response),
+                )
                 return None
             log.info(
                 "enrichment: read a lazy card from the copy streamed as it arrived (%d bytes)",
@@ -709,9 +717,13 @@ class PageProfiles:
                 # No contact info for this person on this visit, and no second click:
                 # the visit is unreadable (read_contact_info checks the tab for a wall).
                 # #203: unless the body tap's streamed copy of it is whole.
-                lost = f"the Contact info answer could not be read ({_lost_cause(response)})"
+                cause = _lost_cause(response)
                 body = _whole_copy(response, endpoint=CONTACT_INFO_ENDPOINT)
                 if body is None:
+                    lost = (
+                        "the Contact info answer could not be read"
+                        f" ({cause}; {_copy_note(response)})"
+                    )
                     log.info("enrichment: %s; not clicking again", lost)
                     return Answer(
                         Outcome.ROUTE_CHANGED,
@@ -900,6 +912,20 @@ def _whole_copy(response: ObservedResponse, *, endpoint: str) -> bytes | None:
         log.info("enrichment: the streamed copy of a lost answer is not whole; not used")
         return None
     return streamed
+
+
+def _copy_note(response: ObservedResponse) -> str:
+    """What became of the body tap's copy of a lost answer, in fixed words (#405).
+
+    ``"streamed copy not whole"`` when the tap handed one over and :func:`_whole_copy`
+    refused it; otherwise ``"no streamed copy"`` and, when the read's diagnostics say,
+    why the tap had none (:attr:`~netkeeper.linkedin.observe.ReadDiagnostics.streamed_miss`).
+    """
+    if response.streamed is not None:
+        return "streamed copy not whole"
+    diagnostics = response.diagnostics
+    miss = None if diagnostics is None else diagnostics.streamed_miss
+    return "no streamed copy" if miss is None else f"no streamed copy: {miss}"
 
 
 def _answer_slug(response: ObservedResponse) -> str | None:

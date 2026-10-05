@@ -633,17 +633,28 @@ async def test_a_lost_screen_on_a_tab_that_moved_to_a_wall_stops_the_run() -> No
     assert out.result.lost == ()
 
 
-async def test_a_lost_contact_info_answer_is_an_unreadable_visit_and_no_second_click(
+async def test_a_lost_contact_info_answer_saves_the_profile_without_it_and_no_second_click(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """#405: a lost overlay body is not a changed route. The profile read whole is
+    handed over without contact info, recorded as deferred, and counts toward no
+    unreadable limit."""
     caplog.set_level(logging.DEBUG, logger="netkeeper")
     site = ProfileSite([ProfilePage(PRIYA, overlay_error=LOST), ProfilePage(MATEO)])
     out = await visit(site, [target(PRIYA), target(MATEO)])
     assert out.result.reason is StopReason.END_OF_PLAN
-    assert out.outcomes == [Outcome.ROUTE_CHANGED, Outcome.OK]
-    assert out.harvests[0].details is None and out.harvests[0].contact_info is None
+    assert out.outcomes == [Outcome.OK, Outcome.OK]
+    first = out.harvests[0]
+    assert first.details is not None and first.details.urn == PRIYA.urn
+    assert first.contact_info is None and first.contact_info_lost
+    assert first.unreadable_cause is UnreadableCause.CONTACT_INFO_DEFERRED
+    assert (out.result.unreadable, out.result.contact_info_lost) == (0, 1)
+    assert out.result.unreadable_visits == (
+        UnreadableVisit(1, PRIYA.n, UnreadableCause.CONTACT_INFO_DEFERRED),
+    )
     assert out.result.lost == (
-        f"visit 1: the Contact info answer could not be read ({LOST_CAUSE})",
+        f"visit 1: the Contact info answer could not be read ({LOST_CAUSE};"
+        " no streamed copy: no body tap); the profile was saved without it",
     )
     # One click per visit: Priya's was spent, and not tried again.
     assert [slug for slug, _, _ in site.clicks] == [PRIYA.slug, MATEO.slug]
@@ -1385,7 +1396,8 @@ async def test_a_cut_overlay_copy_before_its_email_row_is_never_read() -> None:
     )
     site.custom_copies[overlay] = cut
     out = await visit(site, [target(PRIYA)])
-    assert out.outcomes == [Outcome.ROUTE_CHANGED] and out.harvests[0].contact_info is None
+    assert out.outcomes == [Outcome.OK] and out.harvests[0].contact_info is None
+    assert out.harvests[0].contact_info_lost
 
 
 async def test_a_lost_overlay_reads_from_its_whole_streamed_copy() -> None:
@@ -1404,12 +1416,21 @@ async def test_a_lost_overlay_reads_from_its_whole_streamed_copy() -> None:
 
 
 @pytest.mark.parametrize("how", ["half", "rows", "orphan", "none"])
-async def test_a_lost_overlay_without_a_whole_copy_is_still_unreadable(how: str) -> None:
+async def test_a_lost_overlay_without_a_whole_copy_saves_no_contact_info(how: str) -> None:
+    """Never read from a copy that is not whole; since #405 the profile is still saved,
+    and the lost line says what became of the copy."""
     site = ProfileSite([ProfilePage(PRIYA, overlay_error=LOST, overlay_streamed=how)], tap=True)
     out = await visit(site, [target(PRIYA)])
-    assert out.outcomes == [Outcome.ROUTE_CHANGED]
+    assert out.outcomes == [Outcome.OK]
+    assert out.harvests[0].contact_info is None and out.harvests[0].contact_info_lost
+    note = (
+        "no streamed copy: Chrome did not stream it"
+        if how == "none"
+        else ("streamed copy not whole")
+    )
     assert out.result.lost == (
-        f"visit 1: the Contact info answer could not be read ({LOST_CAUSE})",
+        f"visit 1: the Contact info answer could not be read ({LOST_CAUSE}; {note});"
+        " the profile was saved without it",
     )
     assert [slug for slug, _, _ in site.clicks] == [PRIYA.slug]  # never clicked again
 
@@ -1538,7 +1559,8 @@ def _cause_cases() -> list[Any]:
             UnreadableCause.NAVIGATION_TIMED_OUT,
         ),
         (ProfilePage(PRIYA, screen_error=LOST), UnreadableCause.PROFILE_SCREEN_LOST),
-        (ProfilePage(PRIYA, overlay_error=LOST), UnreadableCause.CONTACT_INFO_LOST),
+        # A lost overlay (CONTACT_INFO_LOST) is not unreadable since #405: see
+        # test_a_lost_contact_info_answer_saves_the_profile_without_it_and_no_second_click.
         # #415 review: each code's second call site, and the refusals end to end.
         (
             ProfilePage(PRIYA, document=_BROKEN_REHYDRATION),

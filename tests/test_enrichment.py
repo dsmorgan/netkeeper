@@ -1430,3 +1430,65 @@ async def test_a_thin_contact_info_copy_keeps_the_contact_due_and_is_noted_on_th
     run_row = _last_run(session_factory, user_id)
     assert run_row.notes is not None and "read from streamed copies: visit" in run_row.notes
     assert run_row.counts_json is not None and run_row.counts_json["copied"] == 1
+
+
+# --- #405: a lost Contact info answer saves the profile and keeps the contact due --------------
+
+_INFO_LOST = "the Contact info answer could not be read (Error (no data); no streamed copy)"
+
+
+def _info_lost() -> Scripted:
+    return Scripted(
+        Outcome.ROUTE_CHANGED,
+        unparsed=True,
+        lost=_INFO_LOST,
+        cause=UnreadableCause.CONTACT_INFO_LOST,
+    )
+
+
+async def test_lost_contact_info_answers_are_saved_kept_due_and_recorded(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Three lost overlays used to stop the run as route_changed (run 66 of #405): now
+    the run reaches its end, each profile is written, each contact stays due, and the
+    run records each visit as deferred."""
+    people = _people(5)
+    user_id, ids = _setup(session_factory, people)
+    browser = FakeBrowser.of(people, script={1: _info_lost(), 5: _info_lost(), 9: _info_lost()})
+
+    report = await _enrich(session_factory, user_id, browser)
+
+    assert report.result.reason is StopReason.END_OF_PLAN
+    assert (report.harvests.applied, report.harvests.unreadable) == (5, 0)
+    assert report.harvests.kept_due == 3
+    run = _last_run(session_factory, user_id)
+    assert (run.status, run.stop_reason) == (SyncRunStatus.COMPLETED, "end_of_plan")
+    assert run.counts_json is not None
+    assert (run.counts_json["unreadable"], run.counts_json["contact_info_lost"]) == (0, 3)
+    assert run.counts_json["unreadable_visits"] == [
+        {"visit": v, "contact_id": ids[people[v - 1].n], "reason": "contact_info_deferred"}
+        for v in (1, 3, 5)
+    ]
+    assert run.notes is not None and "the profile was saved without it" in run.notes
+    lost = _contact(session_factory, user_id, ids[people[0].n])
+    read = _contact(session_factory, user_id, ids[people[1].n])
+    assert lost.headline == people[0].headline and lost.li_enrich_attempted_at == NOW
+    assert lost.last_enriched_at is None  # still due for Contact info
+    assert read.last_enriched_at == NOW
+
+
+async def test_five_lost_contact_info_answers_in_a_row_end_the_run_as_answer_lost(
+    session_factory: sessionmaker[Session],
+) -> None:
+    people = _people(7)
+    user_id, _ = _setup(session_factory, people)
+    browser = FakeBrowser.of(people, script={2 * v + 1: _info_lost() for v in range(5)})
+
+    report = await _enrich(session_factory, user_id, browser)
+
+    assert report.result.reason is StopReason.ANSWER_LOST
+    assert (report.heat_raised, report.session_flagged) == (False, False)
+    run = _last_run(session_factory, user_id)
+    assert (run.status, run.stop_reason) == (SyncRunStatus.ABORTED, "answer_lost")
+    assert run.counts_json is not None and run.counts_json["contact_info_lost"] == 5
+    assert report.harvests.applied == 5 and len(browser.visited()) == 5

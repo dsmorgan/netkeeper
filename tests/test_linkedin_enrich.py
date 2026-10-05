@@ -470,6 +470,7 @@ def test_the_cause_codes_are_pinned() -> None:
         "navigation_timed_out",
         "profile_screen_lost",
         "contact_info_lost",
+        "contact_info_deferred",
         "profile_status",
         "id_mismatch",
         "unknown",
@@ -711,3 +712,144 @@ async def test_a_person_scrolls_back_up_and_pauses_before_the_click() -> None:
 )
 def test_the_mask_takes_the_profile_segment_and_nothing_else(url: str, masked: str) -> None:
     assert enrich.masked(url) == masked
+
+
+# --- #405: a lost Contact info answer is a soft failure ---------------------------------------
+
+#: What PageProfiles answers for an overlay whose body Chrome did not keep.
+INFO_LOST = Scripted(
+    Outcome.ROUTE_CHANGED,
+    unparsed=True,
+    lost="the Contact info answer could not be read (Error (no data); no streamed copy)",
+    cause=UnreadableCause.CONTACT_INFO_LOST,
+)
+
+
+def _people(count: int) -> list[Profile]:
+    return [Profile(300 + i, "Lost", f"N{i}") for i in range(count)]
+
+
+def _losing(people: list[Profile], lost: set[int]) -> FakeBrowser:
+    """Every visit clicks; visit ``v`` (from 0) in ``lost`` loses its overlay (read 2v+1)."""
+    return FakeBrowser.of(people, script={2 * v + 1: INFO_LOST for v in lost})
+
+
+def test_the_contact_info_lost_limits_are_five_in_a_row_and_half_after_six() -> None:
+    assert enrich.MAX_CONTACT_INFO_LOST_IN_A_ROW == 5
+    assert enrich.CONTACT_INFO_LOST_SHARE_AFTER == 6
+
+
+async def test_lost_contact_info_saves_the_profile_and_counts_toward_no_unreadable_limit() -> None:
+    """Three lost overlays would have stopped the run as route_changed before #405; now
+    each profile is handed over without contact info, and the run reaches its end."""
+    people = _people(5)
+    browser = _losing(people, {0, 2, 4})
+    result, harvests, events = await _run(_spec(people), browser)
+    assert result.reason is StopReason.END_OF_PLAN and result.outcome is None
+    assert (result.unreadable, result.contact_info_lost, result.clicks) == (0, 3, 5)
+    assert [h.outcome for h in harvests] == [Outcome.OK] * 5
+    assert [h.contact_info_lost for h in harvests] == [True, False, True, False, True]
+    for harvest in (harvests[0], harvests[2], harvests[4]):
+        assert harvest.details is not None and harvest.contact_info is None
+        assert harvest.unreadable_cause is UnreadableCause.CONTACT_INFO_DEFERRED
+    assert result.unreadable_visits == tuple(
+        UnreadableVisit(v + 1, people[v].n, UnreadableCause.CONTACT_INFO_DEFERRED)
+        for v in (0, 2, 4)
+    )
+    assert [line.split(":")[0] for line in result.lost] == ["visit 1", "visit 3", "visit 5"]
+    assert all(line.endswith("; the profile was saved without it") for line in result.lost)
+    assert browser.clicks == [p.slug for p in people]  # one click per visit, never two
+    assert (events[-1].contact_info_lost, events[-1].unreadable) == (3, 0)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        replace(INFO_LOST, cause=None),  # another cause: still unreadable
+        replace(INFO_LOST, cause=UnreadableCause.OVERLAY_NEVER_ANSWERED),
+        replace(INFO_LOST, unparsed=False),  # the route's own route_changed
+    ],
+)
+async def test_only_a_lost_contact_info_answer_is_soft(answer: Scripted) -> None:
+    people = _people(2)
+    result, harvests, _ = await _run(_spec(people), FakeBrowser.of(people, script={1: answer}))
+    assert result.contact_info_lost == 0
+    assert not any(h.contact_info_lost for h in harvests)
+    if answer.unparsed:  # an unreadable visit, counted as before
+        assert harvests[0].outcome is Outcome.ROUTE_CHANGED and result.unreadable == 1
+    else:  # stops the run at once, as before
+        assert result.reason is StopReason.RESPONSE and harvests == []
+
+
+async def test_a_lost_contact_info_neither_adds_to_nor_clears_the_unreadable_streak() -> None:
+    """Unreadable, lost, unreadable: the lost visit does not break the streak, so the
+    second unreadable one is the second in a row and stops the run."""
+    people = _people(5)
+    # Visit 0 unreadable at its profile (read 0); visit 1 reads 1-2, loses 2; visit 2
+    # unreadable at its profile (read 3).
+    browser = FakeBrowser.of(people, script={0: UNRECOGNIZED, 2: INFO_LOST, 3: UNRECOGNIZED})
+    result, _, _ = await _run(_spec(people), browser)
+    assert result.reason is StopReason.RESPONSE and result.outcome is Outcome.ROUTE_CHANGED
+    assert (result.unreadable, result.contact_info_lost, result.visits) == (2, 1, 3)
+
+
+async def test_five_lost_contact_info_answers_in_a_row_stop_the_run_as_answer_lost() -> None:
+    people = _people(8)
+    result, harvests, events = await _run(_spec(people), _losing(people, {0, 1, 2, 3, 4}))
+    assert result.reason is StopReason.ANSWER_LOST and result.outcome is None
+    assert (result.visits, result.contact_info_lost, result.unreadable) == (5, 5, 0)
+    assert len(harvests) == 5 and all(h.contact_info_lost for h in harvests)  # all saved
+    assert events[-1].stopped is StopReason.ANSWER_LOST
+
+
+async def test_a_read_overlay_clears_the_lost_streak() -> None:
+    """Four lost, five read, one lost, one read: never five in a row, and never more
+    than half of the overlays once six were clicked (5 of 10 is half, not more)."""
+    people = _people(11)
+    result, _, _ = await _run(_spec(people), _losing(people, {0, 1, 2, 3, 9}))
+    assert result.reason is StopReason.END_OF_PLAN
+    assert (result.visits, result.contact_info_lost) == (11, 5)
+
+
+async def test_more_than_half_of_the_overlays_lost_after_six_clicks_stops_the_run() -> None:
+    """Lost, read, lost, read, lost, lost: never five in a row, but four of six."""
+    people = _people(8)
+    result, _, _ = await _run(_spec(people), _losing(people, {0, 2, 4, 5}))
+    assert result.reason is StopReason.ANSWER_LOST
+    assert (result.visits, result.clicks, result.contact_info_lost) == (6, 6, 4)
+
+
+async def test_half_of_the_overlays_lost_is_not_more_than_half() -> None:
+    """Read, lost, read, lost...: three of six, then four of eight, never more than half."""
+    people = _people(12)
+    result, _, _ = await _run(_spec(people), _losing(people, set(range(1, 12, 2))))
+    assert result.reason is StopReason.END_OF_PLAN and result.contact_info_lost == 6
+
+
+async def test_the_share_rule_waits_for_six_clicks() -> None:
+    """Four of the first five lost is more than half, but five clicks are too few."""
+    people = _people(5)
+    result, _, _ = await _run(_spec(people), _losing(people, {0, 1, 2, 3}))
+    assert result.reason is StopReason.END_OF_PLAN and result.contact_info_lost == 4
+
+
+async def test_visits_that_click_nothing_do_not_clear_the_lost_streak() -> None:
+    """Lost on four visits, then a not-found profile (no click), then a fifth lost: five
+    in a row among the visits that clicked."""
+    people = _people(8)
+    script = {2 * v + 1: INFO_LOST for v in range(4)}
+    browser = FakeBrowser.of(people, script=script, landing={4: NOT_FOUND})
+    # Visit 4 (index) is not found: no reads. Visit 5 reads 8 (profile) and 9 (overlay).
+    browser.script[9] = INFO_LOST
+    result, _, _ = await _run(_spec(people), browser)
+    assert result.reason is StopReason.ANSWER_LOST
+    assert (result.visits, result.not_found, result.contact_info_lost) == (6, 1, 5)
+
+
+async def test_a_lost_contact_info_then_an_unreadable_profile_is_one_in_a_row() -> None:
+    """Lost, unreadable, read: the lost visit is not the first of two in a row."""
+    people = _people(3)
+    browser = FakeBrowser.of(people, script={1: INFO_LOST, 2: UNRECOGNIZED})
+    result, _, _ = await _run(_spec(people), browser)
+    assert result.reason is StopReason.END_OF_PLAN
+    assert (result.unreadable, result.contact_info_lost) == (1, 1)
