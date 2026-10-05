@@ -8,6 +8,7 @@ changed.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
@@ -364,3 +365,58 @@ async def test_waiting_marks_an_interrupted_claim(
     )
     discarded = await client.post(f"{BASE}/messages/{message_id}/discard", headers=HEADERS)
     assert discarded.status_code == 200 and discarded.json()["status"] == "discarded"
+
+
+async def test_ready_keeps_one_campaigns_and_counts_its_steps(
+    client: httpx.AsyncClient, running_app: FastAPI, executor: FakeExecutor
+) -> None:
+    """#383: the campaign page's queue and its per-step ready count."""
+    first, second = _seed(running_app, people=2)
+    [other] = _seed(running_app)
+    with session_scope(running_app.state.session_factory) as session:
+        user = _local(session)
+        mine = get_scoped(session, user, Enrollment, first)
+        theirs = get_scoped(session, user, Enrollment, other)
+        assert mine is not None and theirs is not None
+        campaign_id, other_campaign = mine.campaign_id, theirs.campaign_id
+    assert campaign_id != other_campaign
+
+    unfiltered = (await client.get(f"{BASE}/ready")).json()
+    assert (unfiltered["total"], unfiltered["by_step"]) == (3, {})
+    one = (await client.get(f"{BASE}/ready", params={"campaign_id": campaign_id})).json()
+    assert one["total"] == 2
+    assert {item["enrollment_id"] for item in one["items"]} == {first, second}
+    assert one["by_step"] == {"1": 2}
+    paged = (
+        await client.get(f"{BASE}/ready", params={"campaign_id": campaign_id, "limit": 1})
+    ).json()
+    assert (len(paged["items"]), paged["by_step"]) == (1, {"1": 2})  # every page's worth
+    nobody = (await client.get(f"{BASE}/ready", params={"campaign_id": 999})).json()
+    assert nobody == {"items": [], "total": 0, "by_step": {}}
+
+
+async def test_options_say_whether_auto_send_may_be_chosen(
+    client: httpx.AsyncClient, running_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert (await client.get(f"{BASE}/options")).json() == {"auto_send": False}
+    settings = running_app.state.settings
+    on = replace(settings, campaigns=replace(settings.campaigns, linkedin_auto_send=True))
+    monkeypatch.setattr(running_app.state, "settings", on)
+    assert (await client.get(f"{BASE}/options")).json() == {"auto_send": True}
+
+
+async def test_a_linkedin_steps_counts_by_status_are_on_the_campaign(
+    client: httpx.AsyncClient, running_app: FastAPI, executor: FakeExecutor, with_runner: None
+) -> None:
+    """#383: the campaign page shows a LinkedIn step's prefilled, sent and stale counts."""
+    message_id = await _prefilled(client, running_app)
+    with session_scope(running_app.state.session_factory) as session:
+        message = get_scoped(session, _local(session), Message, message_id)
+        assert message is not None
+        enrollment = get_scoped(session, _local(session), Enrollment, message.enrollment_id)
+        assert enrollment is not None
+        campaign_id = enrollment.campaign_id
+    campaign = (await client.get(f"/api/v1/campaigns/{campaign_id}")).json()
+    [step] = campaign["steps"]
+    assert step["outbound"] == {"prefilled": 1}
+    assert (step["fired"], step["sent"]) == (1, 0)

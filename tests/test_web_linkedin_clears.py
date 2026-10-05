@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from test_runs_serve import HEADERS
 
 from netkeeper.config import Settings
+from netkeeper.crm.inbox_apply import record_short_first_poll, short_first_poll
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User, UserKind
@@ -458,3 +459,43 @@ async def test_browser_health_never_touches_the_browser_executor(
 
     assert response.status_code == 200
     assert response.json()["can_start_runs"] is True
+
+
+# --- the first inbox poll's warning (#383) ------------------------------------------------
+
+INBOX_ACK_URL = "/api/v1/linkedin/inbox/acknowledge"
+
+
+async def test_acknowledge_clears_the_first_polls_warning(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    short_of = datetime(2030, 1, 2, tzinfo=UTC)
+    with session_scope(running_app.state.session_factory, write=True) as session:
+        record_short_first_poll(session, _local(session), short_of)
+
+    posture = (await client.get("/api/v1/posture")).json()
+    assert any(row["name"] == "linkedin reply poll" for row in posture["protections"])
+
+    response = await client.post(INBOX_ACK_URL, headers=HEADERS)
+    assert response.status_code == 200
+    assert response.json() == {"cleared": True}
+    with session_scope(running_app.state.session_factory) as session:
+        assert short_first_poll(session, _local(session)) is None
+    posture = (await client.get("/api/v1/posture")).json()
+    assert all(row["name"] != "linkedin reply poll" for row in posture["protections"])
+
+    again = await client.post(INBOX_ACK_URL, headers=HEADERS)
+    assert again.json() == {"cleared": False}
+
+
+async def test_acknowledge_goes_through_the_csrf_guard(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    with session_scope(running_app.state.session_factory, write=True) as session:
+        record_short_first_poll(session, _local(session), datetime(2030, 1, 2, tzinfo=UTC))
+
+    response = await client.post(INBOX_ACK_URL)
+
+    assert response.status_code == 403
+    with session_scope(running_app.state.session_factory) as session:
+        assert short_first_poll(session, _local(session)) is not None

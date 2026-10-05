@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { statusQuery } from './api'
 import { BrowserCard } from './browser-card'
 import { BudgetPanel, HeatPanel } from './budget-heat-panels'
+import { InboxCheckCard } from './inbox-check-card'
 import { PinsPanel } from './pins-panel'
 import { RunDetail } from './run-detail'
 import { RunsPanel } from './runs-panel'
@@ -78,6 +79,7 @@ export function LinkedInPage() {
         </div>
         <div className="flex flex-col gap-4">
           <StartRunCard onStarted={setSelectedRunId} />
+          <InboxCheckCard onStarted={setSelectedRunId} />
           <PinsPanel />
         </div>
       </div>

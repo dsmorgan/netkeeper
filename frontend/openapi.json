@@ -6263,6 +6263,19 @@
         "title": "InboundOut",
         "type": "object"
       },
+      "InboxAcknowledgedOut": {
+        "properties": {
+          "cleared": {
+            "title": "Cleared",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cleared"
+        ],
+        "title": "InboxAcknowledgedOut",
+        "type": "object"
+      },
       "InboxItemOut": {
         "properties": {
           "campaign_id": {
@@ -6310,6 +6323,17 @@
           "kind": {
             "$ref": "#/components/schemas/InboxKind"
           },
+          "li_conversation_urn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Conversation Urn"
+          },
           "received_at": {
             "anyOf": [
               {
@@ -6348,6 +6372,8 @@
         "required": [
           "id",
           "kind",
+          "channel",
+          "li_conversation_urn",
           "contact_id",
           "contact_name",
           "campaign_id",
@@ -8194,6 +8220,20 @@
         "title": "OAuthStartOut",
         "type": "object"
       },
+      "OptionsOut": {
+        "description": "What the step builder needs to know about LinkedIn steps (#383).",
+        "properties": {
+          "auto_send": {
+            "title": "Auto Send",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "auto_send"
+        ],
+        "title": "OptionsOut",
+        "type": "object"
+      },
       "Or-Input": {
         "additionalProperties": false,
         "properties": {
@@ -8896,6 +8936,14 @@
       },
       "ReadyPage": {
         "properties": {
+          "by_step": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "default": {},
+            "title": "By Step",
+            "type": "object"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/ReadyOut"
@@ -10582,6 +10630,17 @@
           },
           "mode": {
             "$ref": "#/components/schemas/StepMode"
+          },
+          "outbound": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "default": {},
+            "propertyNames": {
+              "$ref": "#/components/schemas/MessageStatus"
+            },
+            "title": "Outbound",
+            "type": "object"
           },
           "position": {
             "title": "Position",
@@ -13309,6 +13368,28 @@
         ]
       }
     },
+    "/api/v1/campaigns/linkedin/options": {
+      "get": {
+        "description": "Whether ``auto_send`` may be chosen for a LinkedIn step: the config flag.",
+        "operationId": "get_linkedin_step_options",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptionsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Options",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
     "/api/v1/campaigns/linkedin/prefill": {
       "post": {
         "description": "Claim one LinkedIn step and submit its prefill; answers at once, before any browser\nwork. A refusal answers ``409`` with its reasons; what the refusal changed (a reply\nthat ended the enrollment, a step parked) is kept.",
@@ -13397,6 +13478,24 @@
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
+            }
+          },
+          {
+            "description": "Only this campaign's.",
+            "in": "query",
+            "name": "campaign_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only this campaign's.",
+              "title": "Campaign Id"
             }
           }
         ],
@@ -18035,6 +18134,28 @@
           }
         },
         "summary": "Clear Heat",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/inbox/acknowledge": {
+      "post": {
+        "description": "You checked older LinkedIn replies by hand: clear the posture warning that the first\ninbox poll could not read back far enough. ``netkeeper linkedin inbox-acknowledge``.\nTouches no browser and visits nothing.",
+        "operationId": "acknowledge_linkedin_inbox_first_poll",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboxAcknowledgedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Acknowledge Inbox First Poll",
         "tags": [
           "linkedin"
         ]

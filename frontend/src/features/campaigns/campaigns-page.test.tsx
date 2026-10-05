@@ -10,6 +10,7 @@ import {
   ENROLLMENTS,
   MAILBOX,
   STEPS,
+  TEMPLATES,
   campaign,
   campaignBackend,
   review,
@@ -178,13 +179,86 @@ describe('campaign builder', () => {
       within(step.getByLabelText('Mode'))
         .getAllByRole('option')
         .map((o) => o.textContent),
-    ).toEqual(['Prefill (you send it)', 'Auto-send'])
+    ).toEqual(['Prefill (you send it)'])
 
     fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'a campaign named Autumn reconnect exists',
     )
+  })
+
+  it('offers auto-send only when the config flag is on, with the risk sentence (#383)', async () => {
+    const calls: Call[] = []
+    mockFetch(
+      campaignBackend(
+        { campaign: campaign(), review: review() },
+        {
+          'GET /api/v1/campaigns/linkedin/options': () => jsonResponse({ auto_send: true }),
+          'POST /api/v1/campaigns': () => jsonResponse(campaign({ id: 9 })),
+        },
+        calls,
+      ),
+    )
+    await renderApp('/campaigns/new')
+
+    fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'Hello' } })
+    await screen.findAllByRole('option', { name: 'LinkedIn hello (LinkedIn)' })
+    const step = within(screen.getByRole('listitem', { name: 'Step 1' }))
+    fireEvent.change(step.getByLabelText('Template'), { target: { value: '13' } })
+    await waitFor(() =>
+      expect(
+        within(step.getByLabelText('Mode'))
+          .getAllByRole('option')
+          .map((o) => o.textContent),
+      ).toEqual(['Prefill (you send it)', 'Auto-send']),
+    )
+    expect(step.queryByText(/restricts hardest/)).toBeNull()
+
+    fireEvent.change(step.getByLabelText('Mode'), { target: { value: 'auto_send' } })
+    expect(
+      step.getByText(/An automated send is the action LinkedIn restricts hardest/),
+    ).toBeVisible()
+  })
+
+  it("shows a step's template lint findings under the step (#383)", async () => {
+    mockFetch(
+      campaignBackend(
+        { campaign: campaign(), review: review() },
+        {
+          'GET /api/v1/templates': () =>
+            jsonResponse(
+              TEMPLATES.map((t) =>
+                t.id === 13
+                  ? {
+                      ...t,
+                      lint: [
+                        {
+                          rule: 'linkedin_newline',
+                          severity: 'error',
+                          part: 'body',
+                          line: 2,
+                          field: null,
+                          message: 'line 2: the message has a line break',
+                        },
+                      ],
+                    }
+                  : t,
+              ),
+            ),
+        },
+      ),
+    )
+    await renderApp('/campaigns/new')
+
+    await screen.findAllByRole('option', { name: 'LinkedIn hello (LinkedIn)' })
+    const step = within(screen.getByRole('listitem', { name: 'Step 1' }))
+    expect(step.queryByRole('list', { name: 'Step 1 template lint' })).toBeNull()
+    fireEvent.change(step.getByLabelText('Template'), { target: { value: '13' } })
+
+    const lint = step.getByRole('list', { name: 'Step 1 template lint' })
+    expect(lint).toHaveTextContent('The message has a line break')
+    expect(lint).toHaveTextContent('The prefill never presses Enter')
   })
 })
 
@@ -456,5 +530,68 @@ describe('campaign detail', () => {
     await renderApp('/campaigns/5')
 
     expect(await screen.findByText('No such campaign')).toBeVisible()
+  })
+})
+
+describe('a campaign with a LinkedIn step (#383)', () => {
+  const LINKEDIN_STEP = {
+    ...STEPS[0]!,
+    id: 103,
+    channel: 'linkedin' as const,
+    mode: 'prefill' as const,
+    template_id: 13,
+    template_name: 'LinkedIn hello',
+    fired: 6,
+    sent: 3,
+    outbound: { prefilled: 1, sent: 3, stale: 2 },
+  }
+
+  it("shows the step's ready, prefilled, sent and stale counts, and the queue", async () => {
+    const calls: Call[] = []
+    mockFetch(
+      campaignBackend(
+        {
+          campaign: campaign({ status: 'active', steps: [LINKEDIN_STEP], mailbox_id: null }),
+          review: review(),
+        },
+        {
+          'GET /api/v1/campaigns/linkedin/ready': () =>
+            jsonResponse({ items: [], total: 4, by_step: { '1': 4 } }),
+          'GET /api/v1/campaigns/linkedin/waiting': () => jsonResponse({ items: [], total: 0 }),
+          'GET /api/v1/campaigns/linkedin/options': () => jsonResponse({ auto_send: false }),
+          'GET /api/v1/linkedin/status': () =>
+            jsonResponse({
+              session_flag: null,
+              session_flagged_at: null,
+              heat_tripped: false,
+              armed: false,
+              schedule_paused: false,
+              running_run_id: null,
+              can_start_runs: true,
+            }),
+        },
+        calls,
+      ),
+    )
+    await renderApp('/campaigns/5')
+
+    const counts = await screen.findByLabelText('Step 1 LinkedIn counts')
+    await waitFor(() =>
+      expect(counts).toHaveTextContent('4 ready · 1 prefilled · 3 sent · 2 stale'),
+    )
+    expect(screen.getByText('Prefill (you send it)')).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'LinkedIn queue' })).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'Waiting for you' })).toBeVisible()
+    const ready = calls.filter((c) => c.path === '/api/v1/campaigns/linkedin/ready')
+    expect(ready.every((c) => c.query.get('campaign_id') === '5')).toBe(true)
+  })
+
+  it('shows no LinkedIn counts or queue for an email-only campaign', async () => {
+    mockFetch(campaignBackend({ campaign: campaign({ status: 'active' }), review: review() }))
+    await renderApp('/campaigns/5')
+
+    await screen.findByRole('heading', { name: 'Steps' })
+    expect(screen.queryByLabelText(/LinkedIn counts/)).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'LinkedIn queue' })).toBeNull()
   })
 })

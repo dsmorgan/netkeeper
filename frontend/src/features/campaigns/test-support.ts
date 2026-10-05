@@ -87,6 +87,7 @@ export const STEPS: Campaign['steps'] = [
     template_version: 1,
     fired: 0,
     sent: 0,
+    outbound: {},
   },
   {
     id: 102,
@@ -102,6 +103,7 @@ export const STEPS: Campaign['steps'] = [
     template_version: 2,
     fired: 0,
     sent: 0,
+    outbound: {},
   },
 ]
 

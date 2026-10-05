@@ -19,8 +19,10 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Callout } from '@/features/crm/controls'
+import { stepOptionsQuery } from '@/features/linkedin-steps/api'
 import { mailboxListQuery } from '@/features/mailboxes/api'
 import { templatesQuery, type TemplateOut } from '@/features/templates/api'
+import { LintList } from '@/features/templates/lint-list'
 
 import {
   campaignKeys,
@@ -32,7 +34,7 @@ import {
 } from './api'
 import { sourceBody, sourceProblem, type AudienceSource } from './audience'
 import { AudiencePicker } from './audience-picker'
-import { CONDITION_LABELS, MODE_LABELS } from './format'
+import { AUTO_SEND_RISK, CONDITION_LABELS, MODE_LABELS } from './format'
 
 const MAX_STEPS = 10
 
@@ -51,7 +53,9 @@ interface StepDraft {
 }
 
 const EMAIL_MODES: StepMode[] = ['draft', 'send']
-const LINKEDIN_MODES: StepMode[] = ['prefill', 'auto_send']
+/** `auto_send` is offered only while `[campaigns] linkedin_auto_send` is on (ADR 0004). */
+const LINKEDIN_MODES: StepMode[] = ['prefill']
+const LINKEDIN_MODES_WITH_AUTO: StepMode[] = ['prefill', 'auto_send']
 
 function channelOf(step: StepDraft, templates: readonly TemplateOut[]) {
   return templates.find((t) => t.id === step.templateId)?.channel ?? null
@@ -80,6 +84,8 @@ export function CampaignBuilderPage() {
   const queryClient = useQueryClient()
   const templates = useQuery(templatesQuery)
   const mailboxes = useQuery(mailboxListQuery)
+  const options = useQuery(stepOptionsQuery)
+  const autoSend = options.data?.auto_send === true
   const [name, setName] = useState('')
   const [mailboxId, setMailboxId] = useState<number | null>(null)
   const [steps, setSteps] = useState<StepDraft[]>(() => [newStep(0)])
@@ -205,8 +211,14 @@ export function CampaignBuilderPage() {
           <ol className="flex flex-col gap-3">
             {steps.map((step, index) => {
               const channel = channelOf(step, templateRows)
-              const modes = channel === 'linkedin' ? LINKEDIN_MODES : EMAIL_MODES
-              const mode = step.mode ?? modes[0]
+              const modes =
+                channel === 'linkedin'
+                  ? autoSend
+                    ? LINKEDIN_MODES_WITH_AUTO
+                    : LINKEDIN_MODES
+                  : EMAIL_MODES
+              const mode = step.mode !== null && modes.includes(step.mode) ? step.mode : modes[0]
+              const lint = templateRows.find((t) => t.id === step.templateId)?.lint ?? []
               const threadable = channel === 'email' && hasEarlierEmail(steps, index, templateRows)
               const n = index + 1
               return (
@@ -334,6 +346,19 @@ export function CampaignBuilderPage() {
                       </Button>
                     </div>
                   </div>
+                  {lint.length > 0 && (
+                    <div className="flex flex-col gap-1 sm:col-start-2">
+                      <p className="text-xs text-muted-foreground">
+                        The template&apos;s lint findings. Fix them on the Templates page.
+                      </p>
+                      <LintList issues={lint} label={`Step ${n} template lint`} />
+                    </div>
+                  )}
+                  {channel === 'linkedin' && mode === 'auto_send' && (
+                    <Callout tone="warning" className="sm:col-start-2" title="Auto-send">
+                      <p>{AUTO_SEND_RISK}</p>
+                    </Callout>
+                  )}
                 </li>
               )
             })}

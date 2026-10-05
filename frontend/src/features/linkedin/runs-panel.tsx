@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils'
 import { runsQuery } from './api'
 import { formatWhen, RUN_STATUS_CLASSES, stopReasonLabel, summarizeFields } from './fields'
 import {
-  RUNNABLE_KINDS,
+  RUN_KINDS,
   RUN_KIND_LABELS,
   RUN_STATUS_LABELS,
   type RunKind,
@@ -70,7 +70,7 @@ export function RunsPanel({
             }}
           >
             <option value="">Every kind</option>
-            {RUNNABLE_KINDS.map((value) => (
+            {RUN_KINDS.map((value) => (
               <option key={value} value={value}>
                 {RUN_KIND_LABELS[value]}
               </option>

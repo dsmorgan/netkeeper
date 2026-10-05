@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
 import { jsonResponse, mockFetch } from '@/test/fetch'
@@ -262,5 +262,97 @@ describe('PostureSection', () => {
   it('shows an error state', async () => {
     renderSection('error')
     expect(await screen.findByRole('alert')).toHaveTextContent('boom')
+  })
+})
+
+describe('PostureSection: LinkedIn sends and the first inbox poll (#383)', () => {
+  const MANUAL_ON = {
+    name: 'manual linkedin sends',
+    status: 'on',
+    value: 'auto-send off (ADR 0004)',
+    summary: 'auto-send off (ADR 0004)',
+    warnings: [],
+    notes: [],
+  }
+  const AUTO_SEND_WARNING =
+    'campaigns.linkedin_auto_send is true, so netkeeper sends LinkedIn messages itself rather' +
+    ' than prefilling them for you to send. ADR 0004 defaults it off: an automated send is the' +
+    ' action LinkedIn restricts hardest'
+  const SHORT_POLL_WARNING =
+    "the first LinkedIn inbox poll couldn't read back to 2030-01-02; check older LinkedIn" +
+    ' replies by hand, then run `netkeeper linkedin inbox-acknowledge`'
+  const SHORT_POLL = {
+    name: 'linkedin reply poll',
+    status: 'off',
+    value: 'the first poll fell short of 2030-01-02',
+    summary: 'the first poll fell short of 2030-01-02',
+    warnings: [SHORT_POLL_WARNING],
+    notes: [],
+  }
+
+  function withRows(rows: Posture['protections']): Posture {
+    return { ...CLEAN, protections: [...CLEAN.protections, ...rows] }
+  }
+
+  it('shows manual LinkedIn sends first and plainly while auto-send is off', async () => {
+    renderSection(withRows([MANUAL_ON]))
+
+    const banner = await screen.findByRole('note', { name: 'Manual LinkedIn sends' })
+    expect(banner).toHaveAttribute('data-auto-send', 'off')
+    expect(banner).toHaveTextContent('Auto-send is off.')
+  })
+
+  it('highlights auto-send on as a warning, with the backend’s own text', async () => {
+    renderSection(
+      withRows([
+        {
+          ...MANUAL_ON,
+          status: 'off',
+          value: 'auto-send ON',
+          summary: 'auto-send ON',
+          warnings: [AUTO_SEND_WARNING],
+        },
+      ]),
+    )
+
+    const banner = await screen.findByRole('alert', { name: 'Manual LinkedIn sends' })
+    expect(banner).toHaveAttribute('data-auto-send', 'on')
+    expect(banner.className).toMatch(/destructive/)
+    expect(banner).toHaveTextContent('Auto-send is ON.')
+    expect(banner).toHaveTextContent('an automated send is the action LinkedIn restricts hardest')
+  })
+
+  it('acknowledges the first inbox poll’s warning with a button, no CLI', async () => {
+    let posture = withRows([MANUAL_ON, SHORT_POLL])
+    const posted: Request[] = []
+    mockFetch((request) => {
+      const { pathname } = new URL(request.url)
+      if (pathname === '/api/v1/posture') return jsonResponse(posture)
+      if (pathname === '/api/v1/linkedin/inbox/acknowledge' && request.method === 'POST') {
+        posted.push(request)
+        posture = withRows([MANUAL_ON])
+        return jsonResponse({ cleared: true })
+      }
+      return jsonResponse({ detail: 'no fake' }, 404)
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <PostureSection />
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByText('LinkedIn replies to check by hand')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Acknowledge' }))
+
+    await waitFor(() => expect(screen.queryByText('LinkedIn replies to check by hand')).toBeNull())
+    expect(posted).toHaveLength(1)
+    expect(posted[0]?.headers.get('X-Netkeeper-Client')).toBe('1')
+  })
+
+  it('offers no Acknowledge button while no first poll fell short', async () => {
+    renderSection(withRows([MANUAL_ON]))
+    await screen.findByRole('note', { name: 'Manual LinkedIn sends' })
+    expect(screen.queryByRole('button', { name: 'Acknowledge' })).toBeNull()
   })
 })

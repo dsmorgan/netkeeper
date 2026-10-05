@@ -24,6 +24,7 @@ function item(overrides: Partial<InboxItem> = {}): InboxItem {
     enrollment_id: 302,
     enrollment_status: 'replied',
     channel: 'email',
+    li_conversation_urn: null,
     subject: 'Re: Catching up',
     snippet: 'Good to hear <b>from</b> you',
     received_at: '2030-06-18T12:00:00Z',
@@ -98,6 +99,62 @@ describe('inbox', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('database is locked')
     expect(screen.getByText('The inbox is unavailable.')).toBeVisible()
+  })
+
+  it('badges each item by channel, and links a LinkedIn reply to its conversation (#383)', async () => {
+    mockFetch(
+      inbox({
+        total: 2,
+        unhandled: 2,
+        items: [
+          item(),
+          item({
+            id: 905,
+            channel: 'linkedin',
+            li_conversation_urn: 'urn:li:msg_conversation:2-INVENTEDTHREAD',
+            contact_name: 'Ada Pemberton',
+            subject: null,
+            snippet: 'Sounds good, next week works',
+          }),
+        ],
+      }),
+    )
+    await renderApp('/inbox')
+
+    const linkedin = within(
+      await screen.findByRole('listitem', { name: /^Reply from Ada Pemberton on LinkedIn$/ }),
+    )
+    expect(linkedin.getByText('LinkedIn')).toBeVisible()
+    expect(linkedin.getByText('Sounds good, next week works')).toBeVisible()
+    const thread = linkedin.getByRole('link', { name: 'Open the conversation on LinkedIn' })
+    expect(thread).toHaveAttribute(
+      'href',
+      'https://www.linkedin.com/messaging/thread/2-INVENTEDTHREAD/',
+    )
+    expect(thread).toHaveAttribute('rel', 'noopener noreferrer')
+    expect(linkedin.queryByText(/Gmail/)).toBeNull()
+    expect(linkedin.queryByText('(no subject)')).toBeNull()
+    expect(linkedin.getByText('LinkedIn message')).toBeVisible()
+
+    const email = within(screen.getByRole('listitem', { name: /^Reply from Tobias/ }))
+    expect(email.getByText('Email')).toBeVisible()
+    expect(email.getByText('Open the thread in Gmail to read the rest.')).toBeVisible()
+    expect(email.queryByRole('link', { name: /on LinkedIn/ })).toBeNull()
+  })
+
+  it('never links a LinkedIn reply whose conversation was not recorded', async () => {
+    mockFetch(
+      inbox({
+        total: 1,
+        unhandled: 1,
+        items: [item({ id: 906, channel: 'linkedin', li_conversation_urn: null, subject: null })],
+      }),
+    )
+    await renderApp('/inbox')
+
+    const row = within(await screen.findByRole('listitem', { name: /on LinkedIn$/ }))
+    expect(row.queryByRole('link', { name: /on LinkedIn/ })).toBeNull()
+    expect(row.getByText(/the conversation was not recorded/)).toBeVisible()
   })
 
   it('lists each kind with its links, and the snippet as plain text', async () => {

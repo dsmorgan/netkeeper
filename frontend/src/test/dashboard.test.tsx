@@ -178,6 +178,8 @@ describe('dashboard: a fresh install with nothing imported', () => {
     expect(headings).toEqual([
       'Start here',
       'Live LinkedIn run',
+      'LinkedIn queue',
+      'Waiting for you',
       'Next campaign sends',
       'Next LinkedIn run',
       'LinkedIn browser',

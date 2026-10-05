@@ -40,6 +40,24 @@ function failure(error: unknown, response: Response, what: string): Error {
   return new Error(detailMessage(error) ?? `${what} returned ${response.status}`)
 }
 
+/** The posture row whose warning **Acknowledge** clears (#383). */
+export const LINKEDIN_REPLY_POLL_ROW = 'linkedin reply poll'
+/** The posture row for ADR 0004's manual LinkedIn sends: off means auto-send is on. */
+export const MANUAL_SENDS_ROW = 'manual linkedin sends'
+
+/**
+ * You checked older LinkedIn replies by hand: clear the warning that the first inbox
+ * poll could not read back far enough (`netkeeper linkedin inbox-acknowledge`). False
+ * when there was nothing to clear.
+ */
+export async function acknowledgeInboxFirstPoll(): Promise<boolean> {
+  const { data, error, response } = await api.POST('/api/v1/linkedin/inbox/acknowledge')
+  if (data === undefined) {
+    throw failure(error, response, 'POST /api/v1/linkedin/inbox/acknowledge')
+  }
+  return data.cleared
+}
+
 /** The addresses no campaign sends to (#238), newest first. */
 export const doNotSendQuery = queryOptions({
   queryKey: ['do-not-send'] as const,

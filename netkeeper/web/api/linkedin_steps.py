@@ -1,7 +1,9 @@
 """``/campaigns/linkedin``: a campaign's LinkedIn steps, prefilled one at a time (spec 11.6; P4-09).
 
 - ``GET /campaigns/linkedin/ready``: due LinkedIn steps, oldest first, each ready to
-  prefill once its ``held_until`` (the sending hours) has passed.
+  prefill once its ``held_until`` (the sending hours) has passed. ``campaign_id`` keeps
+  one campaign's, with its count at each step (``by_step``, #383).
+- ``GET /campaigns/linkedin/options``: whether the builder may offer ``auto_send``.
 - ``GET /campaigns/linkedin/waiting``: ``prefilled`` and ``stale`` messages, waiting
   for you to send or discard them, and ``interrupted`` ones (claimed, their run over
   with no outcome), waiting for you to discard them.
@@ -81,6 +83,17 @@ class ReadyOut(BaseModel):
 class ReadyPage(BaseModel):
     items: list[ReadyOut]
     total: int
+    by_step: dict[int, int] = {}
+    """With ``campaign_id``: how many are ready at each step position of that campaign,
+    every page's worth (#383). Empty without it."""
+
+
+class OptionsOut(BaseModel):
+    """What the step builder needs to know about LinkedIn steps (#383)."""
+
+    auto_send: bool
+    """``[campaigns] linkedin_auto_send``: whether a step may be ``auto_send``. Off by
+    default (ADR 0004); the builder offers the mode only when it is on."""
 
 
 class WaitingOut(BaseModel):
@@ -150,10 +163,23 @@ def list_ready(
     session: SessionDep,
     limit: Limit = 20,
     offset: Offset = 0,
+    campaign_id: Annotated[int | None, Query(description="Only this campaign's.")] = None,
 ) -> ReadyPage:
     """Due LinkedIn steps, ready to prefill, oldest due first."""
+    now = utcnow()
     rows, total = service.ready_to_prefill(
-        session, user, now=utcnow(), settings=_settings(request), limit=limit, offset=offset
+        session,
+        user,
+        now=now,
+        settings=_settings(request),
+        limit=limit,
+        offset=offset,
+        campaign_id=campaign_id,
+    )
+    by_step = (
+        {}
+        if campaign_id is None
+        else service.ready_by_step(session, user, now=now, campaign_id=campaign_id)
     )
     return ReadyPage(
         items=[
@@ -170,7 +196,14 @@ def list_ready(
             for row in rows
         ],
         total=total,
+        by_step=by_step,
     )
+
+
+@router.get("/options", operation_id="get_linkedin_step_options")
+def get_options(request: Request, user: CurrentUser) -> OptionsOut:
+    """Whether ``auto_send`` may be chosen for a LinkedIn step: the config flag."""
+    return OptionsOut(auto_send=_settings(request).campaigns.linkedin_auto_send)
 
 
 @router.get("/waiting", operation_id="list_linkedin_waiting")

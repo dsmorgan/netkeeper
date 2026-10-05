@@ -111,6 +111,7 @@ async def test_lists_every_kind_newest_first(
         "enrollment_id": seed["replied"],
         "enrollment_status": "replied",
         "channel": "email",
+        "li_conversation_urn": None,
         "subject": "Re: Catching up",
         "snippet": "Good to hear <b>from</b> you",  # as stored: the page shows it as text
         "received_at": "2030-06-03T12:00:00Z",
@@ -124,7 +125,8 @@ async def test_lists_every_kind_newest_first(
 async def test_a_linkedin_reply_says_its_channel(
     running_app: FastAPI, client: httpx.AsyncClient
 ) -> None:
-    """P4-02 (#381): a LinkedIn reply has a snippet and no subject."""
+    """P4-02 (#381): a LinkedIn reply has a snippet and no subject. With no conversation
+    recorded, it has no conversation to link to (#383)."""
     factory: sessionmaker[Session] = running_app.state.session_factory
     with session_scope(factory, write=True) as session:
         user = session.scalars(select(User).where(User.kind == UserKind.LOCAL)).one()
@@ -150,6 +152,39 @@ async def test_a_linkedin_reply_says_its_channel(
         None,
         "Happy to talk",
     )
+    assert item["li_conversation_urn"] is None
+
+
+async def test_a_linkedin_reply_carries_its_conversation(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """#383: the inbox links a LinkedIn reply to its thread, from the stored URN."""
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = session.scalars(select(User).where(User.kind == UserKind.LOCAL)).one()
+        campaign = factories.make_campaign(session, user, channels=(TemplateChannel.LINKEDIN,))
+        enrollment = factories.make_enrollment(
+            session, campaign, factories.make_contact(session, user)
+        )
+        reply = _reply(
+            session,
+            enrollment,
+            3,
+            channel=TemplateChannel.LINKEDIN,
+            subject=None,
+            snippet="Sounds good",
+            li_conversation_urn="urn:li:msg_conversation:INVENTEDINBOX",
+        )
+        reply_id = reply.id
+
+    [item] = (await client.get("/api/v1/inbox")).json()["items"]
+
+    assert item["id"] == reply_id
+    assert (item["channel"], item["li_conversation_urn"]) == (
+        "linkedin",
+        "urn:li:msg_conversation:INVENTEDINBOX",
+    )
+    assert (item["subject"], item["snippet"]) == (None, "Sounds good")
 
 
 async def test_filters_by_kind_handled_and_enrollment(

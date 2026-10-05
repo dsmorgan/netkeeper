@@ -48,6 +48,7 @@ from netkeeper.models import (
     Campaign,
     CampaignStatus,
     EnrollmentStatus,
+    MessageStatus,
     StepCondition,
     StepMode,
     TemplateChannel,
@@ -166,6 +167,9 @@ class StepOut(BaseModel):
     """Outbound messages of the step, whatever became of them."""
     sent: int
     """Those that went out: ``sent``, or ``bounced`` after they were sent."""
+    outbound: dict[MessageStatus, int] = {}
+    """The step's outbound messages by status, only the statuses it has: a LinkedIn
+    step's ``prefilled``, ``sent`` and ``stale`` counts (#383)."""
 
 
 class CampaignOut(BaseModel):
@@ -399,6 +403,7 @@ def _campaign_out(detail: service.CampaignDetail) -> CampaignOut:
                 template_version=s.template_version,
                 fired=s.fired,
                 sent=s.sent,
+                outbound=dict(s.by_status),
             )
             for s in detail.steps
         ],
