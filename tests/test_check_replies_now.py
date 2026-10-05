@@ -7,6 +7,7 @@ Gmail, and every sender here fails the test if anything does.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -22,6 +23,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.config import Settings
 from netkeeper.db import session_scope
 from netkeeper.models import Mailbox, MailboxStatus, User
+from netkeeper.scoping import scoped
 from netkeeper.services import campaign_replies
 from netkeeper.services import poll_status as service
 from netkeeper.services.campaign_sender import GmailSender
@@ -404,28 +406,82 @@ def test_the_scheduled_full_poll_still_ignores_a_backoff(
     assert polls.skipped[-1] == frozenset()
 
 
-def test_poll_status_shows_a_backing_off_mailbox_waiting_for_its_retry(
-    session_factory: sessionmaker[Session],
-) -> None:
-    now = datetime.now(UTC)
-    with session_scope(session_factory, write=True) as session:
+def _backing_off_status(
+    factory: sessionmaker[Session], *, now: datetime, full_at: datetime, retry_at: datetime
+) -> dict[int, service.MailboxPoll]:
+    """Two ready mailboxes, one due again after a failed poll and backing off until
+    ``retry_at``; the last full poll at ``full_at``; a "Check now" waiting."""
+    with session_scope(factory, write=True) as session:
         user = factories.make_user(session)
         ok = _mailbox(session, user, email="ok@example.test").id
         failing = _mailbox(session, user, email="failing@example.test").id
         serving = service.Serving(
             campaign_engine=True,
-            replies_polled_at=now - timedelta(minutes=2),
+            replies_polled_at=full_at,
             replies_every=EVERY,
             replies_due=frozenset({failing}),
-            replies_retry_at={failing: now + timedelta(minutes=3)},
+            replies_retry_at={failing: retry_at},
             replies_requested_at=now,
         )
         status = service.poll_status(session, user, now=now, settings=Settings(), serving=serving)
-
     polls = {poll.mailbox_id: poll for poll in status.mailboxes}
-    assert polls[ok].state is service.CheckState.DUE
-    assert polls[failing].state is service.CheckState.SCHEDULED
-    assert polls[failing].next_at == now + timedelta(minutes=3)
+    return {0: polls[ok], 1: polls[failing]}
+
+
+def test_poll_status_shows_a_backing_off_mailbox_waiting_for_its_retry(
+    session_factory: sessionmaker[Session],
+) -> None:
+    now = datetime.now(UTC)
+    polls = _backing_off_status(
+        session_factory,
+        now=now,
+        full_at=now - timedelta(minutes=2),
+        retry_at=now + timedelta(minutes=3),
+    )
+    assert polls[0].state is service.CheckState.DUE  # the press reads it at once
+    assert polls[1].state is service.CheckState.SCHEDULED
+    assert polls[1].next_at == now + timedelta(minutes=3)
+
+
+def test_a_backing_off_mailbox_is_read_at_the_full_poll_if_that_comes_first(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """It failed at T0 + 7 and backs off to T0 + 15, but the full poll at T0 + 10 (the
+    interval from T0) reads it anyway: at T0 + 8 its next read is T0 + 10."""
+    polls = _backing_off_status(session_factory, now=T0 + 8 * M, full_at=T0, retry_at=T0 + 15 * M)
+    assert polls[1].state is service.CheckState.SCHEDULED
+    assert polls[1].next_at == T0 + 10 * M
+
+
+def test_a_backing_off_mailbox_past_its_retry_is_due(
+    session_factory: sessionmaker[Session],
+) -> None:
+    polls = _backing_off_status(session_factory, now=T0 + 4 * M, full_at=T0, retry_at=T0 + 3 * M)
+    assert polls[1].state is service.CheckState.DUE
+    assert polls[1].next_at is None
+
+
+async def test_the_endpoint_shows_a_backing_off_mailbox_at_its_retry(
+    running_app: FastAPI, client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``GET /poll-status`` reads the running sender's retry times (``_serving``)."""
+    user_id = _local_user(running_app)
+    sender = _serve(running_app)
+    with session_scope(running_app.state.session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        mailbox_id = session.scalars(scoped(user, Mailbox)).one().id
+    now = datetime.now(UTC)
+    retry_at = now + timedelta(minutes=3)
+    sender._replies_polled[user_id] = now - timedelta(minutes=1)
+    sender._replies_due[user_id] = {mailbox_id}
+    sender._replies_backoff[(user_id, mailbox_id)] = (2, retry_at)
+
+    body = (await client.get("/api/v1/poll-status")).json()
+
+    [poll] = body["mailboxes"]
+    assert poll["state"] == "scheduled"
+    assert datetime.fromisoformat(poll["next_at"]) == retry_at
 
 
 def test_a_not_ready_mailbox_does_not_keep_the_request_alive(
@@ -490,7 +546,11 @@ def test_concurrent_presses_ask_once(
     """Presses arrive on worker threads: exactly one of many at once asks."""
     from concurrent.futures import ThreadPoolExecutor
 
-    sender = GmailSender(session_factory, opener=_no_gmail, replies_every=EVERY)
+    def slow_clock() -> datetime:  # widens the gap between the check and the set
+        time.sleep(0.005)
+        return datetime.now(UTC)
+
+    sender = GmailSender(session_factory, opener=_no_gmail, replies_every=EVERY, clock=slow_clock)
     with ThreadPoolExecutor(max_workers=8) as pool:
         answers = list(pool.map(lambda _: sender.request_replies_poll(7), range(64)))
     assert answers.count(True) == 1

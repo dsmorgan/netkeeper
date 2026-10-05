@@ -356,7 +356,8 @@ class GmailSender:
         """The due mailboxes still in their backoff after a failed poll, with when they
         are tried again (#409): neither the next tick nor a "Check now" reads them before
         that. Read-only."""
-        retry = {m: self._retry_at(user_id, m) for m in self._replies_due.get(user_id, ())}
+        # The frozen copy: the tick thread may change the due set while this reads it.
+        retry = {m: self._retry_at(user_id, m) for m in self.replies_due(user_id)}
         return {m: at for m, at in retry.items() if at > datetime.min.replace(tzinfo=UTC)}
 
     def _poll_soon(self, user_id: int, mailbox_id: int) -> None:

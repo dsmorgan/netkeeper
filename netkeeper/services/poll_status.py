@@ -195,10 +195,11 @@ class Serving:
     replies_due: frozenset[int] = frozenset()
     """Mailboxes the running sender polls again at the next tick, alone (#413)."""
     replies_not_ready: Mapping[int, str] = field(default_factory=dict)
+    """Mailboxes the running sender's last poll could not open, with the code (#413)."""
     replies_retry_at: Mapping[int, datetime] = field(default_factory=dict)
     """Due mailboxes still in their backoff after a failed poll, with their retry time:
-    neither the next tick nor a "Check now" reads them before it (#409)."""
-    """Mailboxes the running sender's last poll could not open, with the code (#413)."""
+    neither the next tick nor a "Check now" reads them before it (#409). The full
+    poll each interval reads them anyway, if that comes first."""
     drafts_polled_at: datetime | None = None
     drafts_every: timedelta = DRAFTS_POLL_EVERY
     replies_requested_at: datetime | None = None
@@ -265,11 +266,7 @@ def _mailbox_poll(
     elif (code := serving.replies_not_ready.get(mailbox.id)) is not None:
         state, reason = CheckState.BLOCKED, _cannot_open(mailbox, code)
     elif mailbox.id in serving.replies_due:
-        retry_at = serving.replies_retry_at.get(mailbox.id)
-        if retry_at is not None and retry_at > now:  # backing off after a failed poll
-            state, next_at = CheckState.SCHEDULED, retry_at
-        else:
-            state = CheckState.DUE
+        state, next_at = _backing_off(serving, mailbox.id, every, now)
     else:
         state, next_at = _next(
             serving.replies_polled_at,
@@ -286,6 +283,23 @@ def _mailbox_poll(
         next_at=next_at,
         reason=reason,
     )
+
+
+def _backing_off(
+    serving: Serving, mailbox_id: int, every: timedelta, now: datetime
+) -> tuple[CheckState, datetime | None]:
+    """A due mailbox: ``due`` (the next tick), unless it is backing off after a failed
+    poll. Then it is read at its retry time or at the next full poll, whichever comes
+    first; ``due`` once that has passed."""
+    retry_at = serving.replies_retry_at.get(mailbox_id)
+    if retry_at is None:
+        return CheckState.DUE, None
+    if serving.replies_polled_at is None:  # no full poll yet: the next tick runs one
+        return CheckState.DUE, None
+    next_at = min(retry_at, serving.replies_polled_at + every)
+    if next_at <= now:
+        return CheckState.DUE, None
+    return CheckState.SCHEDULED, next_at
 
 
 def _needs_sign_in(mailboxes: Sequence[Mailbox]) -> str:

@@ -1577,3 +1577,29 @@ def test_signing_in_again_ends_a_backoff(two: TwoBoxes) -> None:
     # Fails at 20, 21, 23 and 27 (the next try would be 35); not ready at 30 and 31.
     assert polled == [20, 21, 23, 27, 32]
     assert two.polled_at(two.reauth_id) == NOW + timedelta(minutes=32)
+
+
+def test_a_poll_with_skip_never_opens_the_skipped_mailbox(two: TwoBoxes) -> None:
+    """``skip`` (#409): a "Check now" leaves out a mailbox still in its backoff. The real
+    poll never opens it, and still reads every other armed mailbox."""
+    mail = two.mail
+    start_both(two)
+    mail.gmail.calls.clear()
+    two.reauth_gmail.calls.clear()
+
+    def open_gmail(user_id: int, mailbox_id: int) -> FakeGmail:
+        assert mailbox_id != two.reauth_id, "the poll opened a skipped mailbox"
+        return mail.gmail
+
+    polled = replies.poll_replies(
+        mail.factory,
+        mail.user.id,
+        open_gmail=open_gmail,
+        now=NOW + timedelta(minutes=20),
+        skip={two.reauth_id},
+    )
+
+    assert polled.caught_up == {mail.mailbox.id}
+    assert two.reauth_id not in polled.caught_up | polled.retry
+    assert two.polls(mail.gmail) == 1
+    assert two.polls(two.reauth_gmail) == 0
