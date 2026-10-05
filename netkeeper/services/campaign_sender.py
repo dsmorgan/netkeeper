@@ -715,7 +715,9 @@ class GmailSender:
             # honest.
             wait = min(REPLY_BACKOFF_FIRST * 2 ** min(failures - 1, 16), self._replies_every)
             self._replies_backoff[(user_id, mailbox_id)] = (failures, now + wait)
-        for mailbox_id in polled.caught_up | polled.behind:
+        # Read, or not ready: a not-ready mailbox is tried at every tick instead, so it is
+        # polled the minute after it is signed in again or unlocked.
+        for mailbox_id in polled.caught_up | polled.behind | set(polled.not_ready):
             self._replies_backoff.pop((user_id, mailbox_id), None)
         not_ready = self._replies_not_ready.setdefault(user_id, {})
         for mailbox_id in [m for m in not_ready if only is None or m in only]:
