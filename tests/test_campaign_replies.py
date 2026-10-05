@@ -830,6 +830,8 @@ def test_a_busy_inbox_is_read_a_budget_at_a_time_without_skipping(
     first = history_id(mail)
     assert start is not None and first is not None and start < first < mail.gmail.history_id
     assert mail.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
+    # A partial poll is no complete one: the last complete poll is still send_first's.
+    assert mail.read(lambda s: mailbox_of(mail, s).replies_polled_at) == NOW + timedelta(minutes=1)
 
     # Not caught up: the next tick polls again at once, not an interval later.
     mail.sender = poller(mail, every=timedelta(days=1))
@@ -1511,3 +1513,67 @@ def test_the_reply_backoff_starts_at_one_minute() -> None:
     from netkeeper.services import campaign_sender
 
     assert timedelta(minutes=1) == campaign_sender.REPLY_BACKOFF_FIRST
+
+
+def test_after_the_keychain_is_unlocked_the_poll_status_stops_saying_so(two: TwoBoxes) -> None:
+    """The not-ready reason lasts only until a poll opens the mailbox again."""
+    from netkeeper.services import poll_status
+
+    mail = two.mail
+    start_both(two)
+    sender = mail.sender
+    assert isinstance(sender, GmailSender)
+
+    def locked_reason() -> str | None:
+        def read(session: Session) -> str | None:
+            status = poll_status.poll_status(
+                session,
+                user_of(mail, session),
+                now=mail.clock.now,
+                settings=SETTINGS,
+                serving=poll_status.Serving(
+                    campaign_engine=True,
+                    replies_polled_at=sender.replies_polled_at(mail.user.id),
+                    replies_every=sender.replies_every,
+                    replies_due=sender.replies_due(mail.user.id),
+                    replies_not_ready=sender.replies_not_ready(mail.user.id),
+                ),
+            )
+            [row] = [m for m in status.mailboxes if m.mailbox_id == two.reauth_id]
+            return row.reason
+
+        return mail.read(read)
+
+    two.not_ready("locked")
+    mail.tick(NOW + timedelta(minutes=20))
+    assert sender.replies_not_ready(mail.user.id) == {two.reauth_id: "keychain_unavailable"}
+    assert "Keychain is locked" in (locked_reason() or "")
+
+    two.locked.clear()
+    mail.tick(NOW + timedelta(minutes=21))  # retried alone; it opens and reads
+
+    assert two.polled_at(two.reauth_id) == NOW + timedelta(minutes=21)
+    assert sender.replies_not_ready(mail.user.id) == {}
+    assert locked_reason() is None
+
+
+def test_signing_in_again_ends_a_backoff(two: TwoBoxes) -> None:
+    """A mailbox backing off after failed polls, then needing sign-in, is polled the minute
+    after it is signed in again, not when its old backoff ends."""
+    mail = two.mail
+    start_both(two)
+    for _ in range(4):
+        two.reauth_gmail.fail_next("history.list", GmailTransient("down", code="unavailable"))
+    polled: list[int] = []
+    for minute in range(20, 33):
+        if minute == 30:
+            two.needs_sign_in(True)
+        if minute == 32:
+            two.needs_sign_in(False)  # signed in again at 31
+        before = two.polls(two.reauth_gmail)
+        mail.tick(NOW + timedelta(minutes=minute))
+        if two.polls(two.reauth_gmail) > before:
+            polled.append(minute)
+    # Fails at 20, 21, 23 and 27 (the next try would be 35); not ready at 30 and 31.
+    assert polled == [20, 21, 23, 27, 32]
+    assert two.polled_at(two.reauth_id) == NOW + timedelta(minutes=32)
