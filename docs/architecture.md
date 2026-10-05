@@ -888,9 +888,9 @@ stateDiagram-v2
 3. Also `users.messages.list` with `from:<email> after:<step-1 date>` for active enrollments, because people sometimes reply in a fresh email. Bounded to active enrollments only, so this is a few dozen calls a day.
 4. Inbound messages are stored (`direction = in`, subject, snippet, thread id, not the full body unless you open it) and an `email_in` interaction is written.
 
-**LinkedIn.** The inbox poll (9.4) matches conversation participants to contacts and looks for an inbound message after the last outbound in that conversation.
+**LinkedIn.** The inbox poll (9.4) matches conversation participants to contacts and looks for an inbound message from the contact dated at or after the enrollment's first send on any channel. *As built (P4-02):* the poll's reply hook, `campaign_replies.apply_linkedin_news`, in the poll's writer session. It first confirms `prefilled`, `stale` and `discarded` prefills the person sent (the first message you sent the contact from 30 seconds before `prefilled_at` on), then records replies on the enrollments the Gmail poll would watch. An answer polled before its send was known is recorded once the send is (`catch_up_linkedin_replies`), and the Gmail sender reads the enrollment's replies once more just before it sends.
 
-**Unsubscribe phrases.** "unsubscribe", "remove me", "stop emailing" in an inbound message set `do_not_contact` with a reason and move the enrollment to `opted_out`. You can undo it from the contact page.
+**Unsubscribe phrases.** "unsubscribe", "remove me", "stop emailing", "stop messaging" in an inbound message set `do_not_contact` with a reason and move the enrollment to `opted_out`. You can undo it from the contact page.
 
 *As built (P3-08):* `netkeeper/services/campaign_replies.py`. The poll runs inside the campaign engine's tick, from `GmailSender.reconcile`, before anything is chosen, every `[campaigns] reply_poll_minutes` per user: off the event loop, and in the same thread as the claim that follows, so a claim always sees what the poll recorded. A disarmed mailbox is not polled (#277).
 

@@ -54,7 +54,7 @@ from netkeeper.models import (
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import campaign_engine as engine
 from netkeeper.services import campaign_replies as replies
-from netkeeper.services import runs
+from netkeeper.services import linkedin_steps, runs
 from netkeeper.services.campaign_guards import check_step
 from netkeeper.services.inbox_poll import poll_inbox
 from netkeeper.services.linkedin_accounts import ensure_account
@@ -934,3 +934,185 @@ def test_simulate_campaign_replays_a_linkedin_step_in_its_schedule() -> None:
     output = render_schedule(report)
     assert "LinkedIn steps are prefilled one at a time" in output
     assert "do not fire yet" not in output
+
+
+# --- after the safety review (#416) ------------------------------------------------------
+
+
+def _discard(world: World, message_id: int, at: datetime) -> None:
+    world.write(
+        lambda s, u: linkedin_steps.discard(s, u, message_id, settings=world.settings, now=at)
+    )
+
+
+def test_the_confirmation_constants_are_pinned() -> None:
+    assert timedelta(seconds=30) == replies.CONFIRM_SKEW
+    assert frozenset({"prefilled", "stale", "discarded"}) == {
+        str(status) for status in replies.CONFIRMABLE
+    }
+
+
+def test_a_prefill_discarded_then_sent_is_sent_and_a_reply_stops_the_next_step(
+    linkedin_first: World,
+) -> None:
+    """B1: discard, then the person sends it anyway, then the contact answers. The send is
+    recorded, nothing advances twice, and the email step never fires."""
+    world = linkedin_first
+    enrollment_id = world.enroll()
+    message_id = world.prefill(enrollment_id)
+    _discard(world, message_id, NOW + timedelta(minutes=1))
+    discarded_due = world.enrollment(enrollment_id).next_action_at
+    assert discarded_due is not None
+
+    sent_at = NOW + timedelta(minutes=5)
+    thread, [sent] = you_sent(ADA, sent_at)
+    world.apply(thread, polled_at=NOW + timedelta(hours=1))
+    row = world.message(message_id)
+    assert (row.status, row.sent_at, row.li_message_urn) == (
+        MessageStatus.SENT,
+        sent_at,
+        sent.message_urn,
+    )
+    assert world.interaction(sent.message_urn).message_id == message_id
+    enrollment = world.enrollment(enrollment_id)
+    assert (enrollment.status, enrollment.current_step) == (EnrollmentStatus.ACTIVE, 1)
+    assert enrollment.next_action_at is not None
+    # Step 2's delay now counts from the send, after the discard: later, never twice.
+    assert enrollment.next_action_at >= discarded_due
+    assert enrollment.next_action_at >= sent_at + timedelta(days=7)
+
+    world.apply(said(ADA, NOW + timedelta(hours=2)), polled_at=NOW + timedelta(hours=3))
+    enrollment = world.enrollment(enrollment_id)
+    assert (enrollment.status, enrollment.next_action_at) == (EnrollmentStatus.REPLIED, None)
+    assert not world.tick(discarded_due + timedelta(days=1)).fired
+    assert [m.channel for m in world.messages(enrollment_id)] == [LINKEDIN, LINKEDIN]
+
+
+def test_a_discarded_prefill_with_no_send_stays_discarded(linkedin_first: World) -> None:
+    world = linkedin_first
+    enrollment_id = world.enroll()
+    message_id = world.prefill(enrollment_id)
+    _discard(world, message_id, NOW + timedelta(minutes=1))
+    world.apply(said(ADA, NOW + timedelta(hours=2)), polled_at=NOW + timedelta(hours=3))
+    assert world.message(message_id).status is MessageStatus.DISCARDED
+    assert world.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
+
+
+def test_a_reply_at_the_same_instant_as_the_send_counts(linkedin_first: World) -> None:
+    """S1, the main path: the send is known, then a poll reads an answer dated the same."""
+    world = linkedin_first
+    enrollment_id = world.enroll()
+    message_id = world.prefill(enrollment_id)
+    at = NOW + timedelta(minutes=5)
+    thread, _ = you_sent(ADA, at)
+    world.apply(thread, polled_at=NOW + timedelta(hours=1))
+    assert world.message(message_id).status is MessageStatus.SENT
+    world.apply(said(ADA, at), polled_at=NOW + timedelta(hours=2))
+    assert world.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
+
+
+def test_a_caught_up_reply_at_the_same_second_as_the_send_counts(linkedin_first: World) -> None:
+    """S1, the catch-up: the answer was polled first, dated the send's own second."""
+    world = linkedin_first
+    enrollment_id = world.enroll()
+    world.prefill(enrollment_id)
+    at = NOW + timedelta(minutes=5)
+    world.apply(said(ADA, at), polled_at=NOW + timedelta(hours=1))
+    assert world.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
+    thread, _ = you_sent(ADA, at)
+    world.apply(thread, polled_at=NOW + timedelta(hours=2))
+    assert world.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
+
+
+def _claim_only(world: World, enrollment_id: int) -> tuple[int, int]:
+    def run(session: Session, user: User) -> tuple[int, int]:
+        claim = claim_prefill(session, user, enrollment_id, now=NOW, settings=world.settings)
+        assert claim.claimed and claim.message_id is not None and claim.run_id is not None
+        return claim.message_id, claim.run_id
+
+    return world.write(run)
+
+
+def _record_prefilled(world: World, message_id: int, run_id: int, at: datetime) -> None:
+    def run(session: Session, user: User) -> None:
+        outcome = MessageOutcome(MessageOutcomeKind.PREFILLED, "fixed words", None, 12)
+        assert record_prefill_outcome(
+            session, user, message_id, outcome, settings=world.settings, now=at
+        )
+        runs.finish_run(session, user, run_id, status=SyncRunStatus.COMPLETED, now=at)
+
+    world.write(run)
+
+
+@pytest.mark.parametrize(("before", "confirmed"), [(30, True), (31, False)])
+def test_a_send_a_poll_recorded_before_prefilled_at_confirms_it_on_a_later_poll(
+    linkedin_first: World, before: int, confirmed: bool
+) -> None:
+    """S2: the poll recorded the send while the claim was still being recorded, so
+    ``prefilled_at`` came after it. A later poll with nothing new (a "check now")
+    confirms it, within ``CONFIRM_SKEW`` and no further."""
+    world = linkedin_first
+    enrollment_id = world.enroll()
+    message_id, run_id = _claim_only(world, enrollment_id)
+    prefilled_at = NOW + timedelta(minutes=2)
+    sent_at = prefilled_at - timedelta(seconds=before)
+    thread, [sent] = you_sent(ADA, sent_at)
+    world.apply(thread, polled_at=NOW + timedelta(minutes=1, seconds=40))
+    assert world.message(message_id).status is MessageStatus.SCHEDULED
+    _record_prefilled(world, message_id, run_id, prefilled_at)
+
+    world.apply(polled_at=NOW + timedelta(hours=1))  # nothing new
+    row = world.message(message_id)
+    if confirmed:
+        assert (row.status, row.sent_at, row.li_message_urn) == (
+            MessageStatus.SENT,
+            sent_at,
+            sent.message_urn,
+        )
+        assert row.li_conversation_urn == CONVERSATION  # the contact's one conversation
+        assert world.enrollment(enrollment_id).next_action_at is not None
+    else:
+        assert row.status is MessageStatus.PREFILLED
+        assert world.interaction(sent.message_urn).message_id is None
+
+
+def test_a_caught_up_reply_with_no_known_conversation_stores_none(
+    linkedin_first: World,
+) -> None:
+    """S4: with two conversations for the contact, the reply's is unknown, never a guess."""
+    world = linkedin_first
+    enrollment_id = world.enroll()
+    world.prefill(enrollment_id)
+    world.apply(said(ADA, NOW + timedelta(minutes=20)), polled_at=NOW + timedelta(hours=1))
+    other, _ = you_sent(ADA, NOW - timedelta(days=30), name="two")
+    world.apply(other, polled_at=NOW + timedelta(hours=2))
+    thread, _ = you_sent(ADA, NOW + timedelta(minutes=5))
+    world.apply(thread, polled_at=NOW + timedelta(hours=3))
+
+    assert world.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
+    [reply] = world.inbound(enrollment_id)
+    assert reply.li_conversation_urn is None
+
+
+def test_a_linkedin_claim_refuses_after_a_reply_even_if_revived(
+    session_factory: sessionmaker[Session],
+) -> None:
+    world = make_world(session_factory, channels=(EMAIL, LINKEDIN))
+    enrollment_id = world.enroll()
+    world.sent(enrollment_id, NOW - timedelta(days=8))
+    world.apply(said(ADA, NOW - timedelta(minutes=5)))
+    assert world.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
+
+    def revive(session: Session, user: User) -> None:
+        enrollment = get_scoped(session, user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        enrollment.status = EnrollmentStatus.ACTIVE
+        enrollment.exit_reason = None
+        enrollment.next_action_at = NOW - timedelta(minutes=1)
+
+    world.write(revive)
+    claim = world.write(
+        lambda s, u: claim_prefill(s, u, enrollment_id, now=NOW, settings=world.settings)
+    )
+    assert not claim.claimed
+    assert world.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED

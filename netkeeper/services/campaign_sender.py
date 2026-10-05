@@ -381,6 +381,11 @@ class GmailSender:
         except ComposeError as exc:
             return _failed(firing, f"the message could not be built: {exc}")
         label_id = self._label_id(gmail, firing, purpose)
+        if self._replied(firing):
+            # A reply on any channel (the LinkedIn inbox poll writes in its own session)
+            # landed after the claim's reply check: nothing goes out, and the retry's
+            # claim reads the reply and ends the enrollment (#416 review).
+            return _not_sent(firing, "a reply arrived after the claim; nothing was sent")
         draft_id: str | None = None
         try:
             if firing.mode is StepMode.DRAFT:
@@ -419,6 +424,15 @@ class GmailSender:
         return SendResult(
             SendOutcome.SENT, at=at, gmail_message_id=ref.id, gmail_thread_id=ref.thread_id
         )
+
+    def _replied(self, firing: Firing) -> bool:
+        """Whether the enrollment holds a reply now, read just before Gmail is asked to
+        send or draft. Read-only."""
+        with session_scope(self._factory) as session:
+            user = session.get(User, firing.user_id)
+            if user is None:
+                return False
+            return engine._reply_at(session, user, firing.enrollment_id) is not None
 
     def _ready(self, firing: Firing) -> tuple[Gmail, str]:
         if firing.channel is not TemplateChannel.EMAIL or firing.mode not in (
@@ -944,5 +958,17 @@ def _settled_sent(
         return
     # A merge may have moved the message to another enrollment meanwhile: follow it.
     message = get_scoped(session, user, MessageRow, tracked.message_id)
-    if message is not None:
-        replies.catch_up_linkedin_replies(session, user, message.enrollment_id, now=now)
+    if message is None:
+        return
+    try:
+        # A savepoint: a failure here takes back only the catch-up, never the settle.
+        with session.begin_nested():
+            replies.catch_up_linkedin_replies(session, user, message.enrollment_id, now=now)
+    except Exception as exc:
+        # The settle stands (Gmail did send it); an earlier LinkedIn answer stays
+        # unrecorded, so this is an error for a person. By type alone: rows carry text.
+        log.error(
+            "message %d: recording earlier LinkedIn replies failed (%s)",
+            tracked.message_id,
+            type(exc).__name__,
+        )

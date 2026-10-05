@@ -102,13 +102,14 @@ class NewInbound:
     """One inbound message new to the poll: written now, or an archive row it adopted.
 
     ``at`` is the message's time as the page gave it (the interaction's is truncated to
-    whole seconds). ``snippet`` is at most :data:`SNIPPET_MAX` characters and is left out
-    of the ``repr``: never log it.
+    whole seconds). ``conversation_urn`` is ``None`` only for a reply read back from a
+    stored interaction whose conversation is not known. ``snippet`` is at most
+    :data:`SNIPPET_MAX` characters and is left out of the ``repr``: never log it.
     """
 
     contact_id: int
     interaction_id: int
-    conversation_urn: str
+    conversation_urn: str | None
     message_urn: str
     at: datetime
     snippet: str = field(default="", repr=False)

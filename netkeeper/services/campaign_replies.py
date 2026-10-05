@@ -68,10 +68,11 @@ The LinkedIn inbox poll (P4-08) calls :func:`apply_linkedin_news` from
 one-to-one messages new to the poll (a group thread never reaches it, nor the self
 contact). Two things follow, in this order:
 
-- **Sent.** A ``prefilled`` or ``stale`` LinkedIn message becomes ``sent`` when the
-  first message you sent in the contact's conversation after its ``prefilled_at``
-  shows up, whatever its text. Its next step is scheduled from that send.
-- **Reply.** An inbound message from the contact dated after an enrollment's
+- **Sent.** A ``prefilled``, ``stale`` or ``discarded`` LinkedIn prefill becomes
+  ``sent`` when the poll has recorded a message you sent the contact from
+  :data:`CONFIRM_SKEW` before its ``prefilled_at`` on, whatever its text; every poll
+  checks, new messages or not. Its next step is scheduled from that send.
+- **Reply.** An inbound message from the contact dated at or after an enrollment's
   **first** send, on any channel, is a reply on each enrollment the Gmail poll would
   watch (:func:`linkedin_watches`): stored as an inbound ``linkedin`` message (its
   snippet, never more), linked to the poll's ``li_in`` interaction, and a live
@@ -171,8 +172,20 @@ they are watched only :data:`WATCH_AFTER_COMPLETED` after their latest send."""
 LIVE: Final = frozenset({EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED})
 """What detection moves to ``replied``, ``bounced`` or ``opted_out`` (spec 11.3)."""
 
-PREFILL_WAITING: Final = frozenset({MessageStatus.PREFILLED, MessageStatus.STALE})
-"""A LinkedIn message in one of these is confirmed ``sent`` once the inbox shows it went."""
+CONFIRMABLE: Final = frozenset(
+    {MessageStatus.PREFILLED, MessageStatus.STALE, MessageStatus.DISCARDED}
+)
+"""A LinkedIn message in one of these, with a ``prefilled_at``, is confirmed ``sent`` once
+the inbox shows it went: a prefill waiting for the person, one gone stale, and one the
+person discarded and sent anyway (#416 review)."""
+
+CONFIRM_SKEW: Final = timedelta(seconds=30)
+"""How long before a prefill's ``prefilled_at`` a sent message may be dated and still
+confirm it. ``prefilled_at`` is this machine's clock when the outcome was recorded, after
+the last key and any wait for the write lock; a message's time is LinkedIn's clock, and a
+stored interaction's is truncated to the second. Nothing else goes out in that thread
+while the prefill types into its composer, so a message that close is the prefill's own.
+Kept short: confirming a send that did not happen would let a follow-up go early."""
 
 _UNSUBSCRIBE: Final = re.compile(
     r"\b(?:" + "|".join(re.escape(p) for p in UNSUBSCRIBE_PHRASES) + r")\b", re.IGNORECASE
@@ -873,7 +886,7 @@ def record_linkedin_reply(
         snippet=snippet,
         asks_unsubscribe=asks_to_unsubscribe(snippet),
         sent_at=inbound.at,
-        li_conversation_urn=inbound.conversation_urn,
+        li_conversation_urn=inbound.conversation_urn or None,
         li_message_urn=inbound.message_urn,
     )
     session.add(row)
@@ -891,70 +904,111 @@ def record_linkedin_reply(
 def confirm_linkedin_sends(
     session: Session,
     user: User,
-    outbound: Sequence[NewOutbound],
+    outbound: Sequence[NewOutbound] = (),
     *,
     settings: Settings,
     now: datetime,
 ) -> list[int]:
-    """Each ``prefilled`` or ``stale`` LinkedIn message the person has now sent becomes
-    ``sent``; returns their ids.
+    """Each LinkedIn prefill the person has now sent becomes ``sent``; returns their ids.
 
-    A waiting message is confirmed by the first message you sent in the contact's
-    one-to-one conversation (the message's own, when the prefill learned it) after its
-    ``prefilled_at``, whatever its text: you may edit it before sending. Each sent
-    message confirms at most one, the oldest prefill first. The message takes that
-    message's time as ``sent_at`` and its URNs, the poll's ``li_out`` interaction is
-    linked to it (so the guards read it as this enrollment's own step, not as other
-    contact), and the enrollment's next step is scheduled from the send (spec 11.3), or
-    the enrollment completes. Needs a writer session."""
-    if not outbound:
-        return []
-    waiting = session.scalars(
+    Every inbox poll runs it, new messages or not, over every ``prefilled``, ``stale``
+    or ``discarded`` LinkedIn message with a ``prefilled_at`` (a discarded prefill the
+    person sent anyway is sent, as a discarded Gmail draft that went out is). A message
+    is confirmed by the first message you sent the contact, recorded by the poll and
+    not yet any campaign message's (an ``li_out`` interaction with a URN and no
+    ``message_id``), dated no earlier than :data:`CONFIRM_SKEW` before its
+    ``prefilled_at``, whatever its text: you may edit it before sending. When the prefill
+    learned its conversation, the sent message must be in it. ``outbound`` is this
+    poll's new messages: they give the exact time and conversation; one recorded by an
+    earlier poll (``prefilled_at`` stamped after it, a "check now") confirms as well.
+
+    Each sent message confirms at most one prefill, the oldest first. The message takes
+    that message's time as ``sent_at`` and its URNs, the ``li_out`` interaction is linked
+    to it (so the guards read it as this enrollment's own step, not as other contact),
+    and the enrollment's next step is scheduled from the send (spec 11.3), or it
+    completes. A discarded prefill already counted its step, so nothing fires twice:
+    the next step's delay now counts from the send. Needs a writer session."""
+    waiting = session.execute(
         scoped(user, MessageRow)
         .join(Enrollment, Enrollment.id == MessageRow.enrollment_id)
+        .add_columns(Enrollment.contact_id)
         .where(
             Enrollment.user_id == user.id,
-            Enrollment.contact_id.in_({o.contact_id for o in outbound}),
             MessageRow.channel == TemplateChannel.LINKEDIN,
             MessageRow.direction == MessageDirection.OUT,
-            MessageRow.status.in_(PREFILL_WAITING),
+            MessageRow.status.in_(CONFIRMABLE),
             MessageRow.prefilled_at.is_not(None),
         )
         .order_by(MessageRow.prefilled_at, MessageRow.id)
     ).all()
-    used: set[str] = set()
+    if not waiting:
+        return []
+    contact_ids = {contact_id for _, contact_id in waiting}
+    candidates = list(
+        session.scalars(
+            scoped(user, Interaction)
+            .where(
+                Interaction.contact_id.in_(contact_ids),
+                Interaction.kind == InteractionKind.LI_OUT,
+                Interaction.external_id.is_not(None),
+                Interaction.message_id.is_(None),
+            )
+            .order_by(Interaction.at, Interaction.id)
+        )
+    )
+    if not candidates:
+        return []
+    fresh = {o.interaction_id: o for o in outbound}
+    conversations: dict[int, set[str]] = {}
+    for contact_id, urn in session.execute(
+        scoped(user, LiConversation)
+        .with_only_columns(LiConversation.contact_id, LiConversation.conversation_urn)
+        .where(LiConversation.contact_id.in_(contact_ids))
+    ):
+        conversations.setdefault(contact_id, set()).add(urn)
+
+    def sent_at(interaction: Interaction) -> datetime:
+        news = fresh.get(interaction.id)
+        return news.at if news is not None else interaction.at
+
+    def conversation_of(interaction: Interaction) -> str | None:
+        news = fresh.get(interaction.id)
+        if news is not None:
+            return news.conversation_urn
+        known = conversations.get(interaction.contact_id, set())
+        return next(iter(known)) if len(known) == 1 else None
+
+    candidates.sort(key=lambda i: (sent_at(i), i.id))
+    used: set[int] = set()
     confirmed: list[int] = []
-    for message in waiting:
+    for message, contact_id in waiting:
         assert message.prefilled_at is not None
-        enrollment = get_scoped(session, user, Enrollment, message.enrollment_id)
-        if enrollment is None:
-            continue
+        earliest = message.prefilled_at - CONFIRM_SKEW
         sent = next(
             (
-                o
-                for o in outbound  # oldest first
-                if o.message_urn not in used
-                and o.contact_id == enrollment.contact_id
-                and o.at > message.prefilled_at
-                and message.li_conversation_urn in (None, o.conversation_urn)
+                i
+                for i in candidates
+                if i.id not in used
+                and i.contact_id == contact_id
+                and sent_at(i) >= earliest
+                and message.li_conversation_urn in (None, conversation_of(i))
             ),
             None,
         )
         if sent is None:
             continue
-        used.add(sent.message_urn)
+        used.add(sent.id)
+        was = message.status
         message.status = MessageStatus.SENT
-        message.sent_at = sent.at
-        message.li_conversation_urn = sent.conversation_urn
-        message.li_message_urn = sent.message_urn
+        message.sent_at = sent_at(sent)
+        message.li_conversation_urn = conversation_of(sent) or message.li_conversation_urn
+        message.li_message_urn = sent.external_id
         message.error = None
-        interaction = get_scoped(session, user, Interaction, sent.interaction_id)
-        if interaction is not None:
-            interaction.message_id = message.id
+        sent.message_id = message.id
         session.flush()
         engine.schedule_next(session, user, message.enrollment_id, settings=settings, now=now)
         confirmed.append(message.id)
-        log.info("message %d is sent (seen in the LinkedIn inbox)", message.id)
+        log.info("message %d (%s) is sent (seen in the LinkedIn inbox)", message.id, was)
     return confirmed
 
 
@@ -999,20 +1053,23 @@ def catch_up_linkedin_replies(
     ).all()
     if not polled:
         return 0
-    conversation = session.scalar(
-        scoped(user, LiConversation)
-        .with_only_columns(LiConversation.conversation_urn)
-        .where(LiConversation.contact_id == enrollment.contact_id)
-        .order_by(LiConversation.last_activity_at.desc(), LiConversation.id.desc())
-        .limit(1)
+    # An interaction does not record its conversation: the contact's, when it has
+    # just one; otherwise unknown (NULL), never a guess.
+    known = set(
+        session.scalars(
+            scoped(user, LiConversation)
+            .with_only_columns(LiConversation.conversation_urn)
+            .where(LiConversation.contact_id == enrollment.contact_id)
+        )
     )
+    conversation = next(iter(known)) if len(known) == 1 else None
     recorded = 0
     for interaction in polled:
         assert interaction.external_id is not None
         inbound = NewInbound(
             contact_id=enrollment.contact_id,
             interaction_id=interaction.id,
-            conversation_urn=conversation or "",
+            conversation_urn=conversation,
             message_urn=interaction.external_id,
             at=interaction.at,
             snippet=_polled_snippet(interaction.summary),
@@ -1049,7 +1106,7 @@ def apply_linkedin_news(session: Session, user: User, news: InboxNews) -> None:
     settings = news.settings if news.settings is not None else Settings()
     for message_id in confirm_linkedin_sends(
         session, user, news.outbound, settings=settings, now=news.polled_at
-    ):
+    ):  # every poll: a send an earlier poll recorded may confirm a prefill now
         confirmed = get_scoped(session, user, MessageRow, message_id)
         if confirmed is not None:
             catch_up_linkedin_replies(session, user, confirmed.enrollment_id, now=news.polled_at)
@@ -1057,5 +1114,5 @@ def apply_linkedin_news(session: Session, user: User, news: InboxNews) -> None:
         for enrollment, first_sent_at in linkedin_watches(
             session, user, inbound.contact_id, now=news.polled_at
         ):
-            if inbound.at > first_sent_at:
+            if inbound.at >= first_sent_at:  # a tie counts: see catch_up_linkedin_replies
                 record_linkedin_reply(session, user, enrollment.id, inbound)
