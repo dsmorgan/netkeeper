@@ -87,7 +87,7 @@ from netkeeper.linkedin.enrich import (
     run_enrichment,
 )
 from netkeeper.models import JsonValue, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
-from netkeeper.services import budgets, enrich_plan, run_contacts, runs
+from netkeeper.services import budgets, enrich_plan, route_breaker, run_contacts, runs
 from netkeeper.services import heat as heat_service
 from netkeeper.services.budgets import ActionClass, BudgetExceeded
 from netkeeper.services.linkedin_session import flag_session
@@ -115,12 +115,29 @@ CANCEL_SLICE_S: Final = 5.0
 _HEAT_OUTCOMES = frozenset({Outcome.THROTTLED, Outcome.CHECKPOINT})
 _FLAG_OUTCOMES = frozenset({Outcome.CHECKPOINT, Outcome.LOGGED_OUT})
 
+#: How an enrichment run reaches its own end: every target visited, or the visits
+#: it was allowed made. A budget, a cancel, or the window closing is a gate's stop.
+_NATURAL_ENDS = frozenset({StopReason.END_OF_PLAN, StopReason.VISIT_BUDGET})
+
+
+def contact_info_read_again(result: EnrichResult) -> bool:
+    """Whether ``result`` clears the Contact info breaker (#424): the run reached its
+    own end and at least one of its Contact info clicks answered with a body.
+
+    A run that clicked nothing (every profile not found, say), or lost every overlay
+    it clicked, says nothing about whether the body tap works again, so it leaves the
+    streak where it was.
+    """
+    return result.reason in _NATURAL_ENDS and result.clicks > result.contact_info_lost
+
+
 __all__ = [
     "CANCEL_SLICE_S",
     "EnrichRunReport",
     "HeatSkipped",
     "SessionFlagged",
     "TodaysVisits",
+    "contact_info_read_again",
     "enrich_contacts",
     "resume_enrichment",
     "todays_visits",
@@ -489,6 +506,22 @@ async def enrich_contacts(
             clock=clock,
         )
 
+        def record_breaker(result: EnrichResult) -> None:
+            # #424: its own writer session, before the run's ending is written, the way
+            # connections_sync records its breakers. Only the Contact info caps end an
+            # enrichment run answer_lost (#405), so that stop extends the streak.
+            with session_scope(factory, write=True) as session:
+                route_breaker.record_contact_info(
+                    session,
+                    _load_user(session, user_id),
+                    account_id,
+                    answer_lost=result.reason is StopReason.ANSWER_LOST,
+                    clean_end=contact_info_read_again(result),
+                    now=clock(),
+                )
+
+        await off_loop(record_breaker, result)
+
         def finish(result: EnrichResult) -> EnrichRunReport:
             # One transaction, as before: heat, the session flag, and the run's ending.
             heat_raised = flagged = False
@@ -577,11 +610,14 @@ async def resume_enrichment(
 
 
 def _lost_notes(result: EnrichResult) -> tuple[str, ...]:
-    """#197: each unreadable visit whose answer's body was lost, in fixed words; and
+    """#197: each unreadable visit whose answer's body was lost, in fixed words; #424:
+    each visit that saved the profile without its lost Contact info, on its own; and
     #207 review: each visit whose Contact info came from a streamed copy instead."""
     notes: list[str] = []
     if result.lost:
         notes.append(f"unreadable answers: {'; '.join(result.lost)}.")
+    if result.deferred:
+        notes.append(f"deferred Contact info: {'; '.join(result.deferred)}.")
     if result.copied:
         notes.append(f"read from streamed copies: {'; '.join(result.copied)}.")
     return tuple(notes)

@@ -392,6 +392,22 @@ class BrowserWorker:
                     "answer_lost_breaker",
                     "the answer-lost limit is tripped for this account",
                 )
+            if (
+                facts.trigger is SyncRunTrigger.SCHEDULED
+                and facts.kind is SyncRunKind.ENRICH
+                and route_breaker.contact_info_tripped(session, user, facts.account_id)
+            ):
+                # #424: the same second, independent check for the Contact info breaker.
+                log.error(
+                    "scheduled run %d reached the worker with the Contact info breaker"
+                    " tripped for account %d",
+                    run_id,
+                    facts.account_id,
+                )
+                return (
+                    "contact_info_breaker",
+                    "the Contact info breaker is tripped for this account",
+                )
             if facts.kind is SyncRunKind.INBOX and self._inbox_sources is inbox_source:
                 # P4-08: no page source exists yet, so the run is refused before the lock
                 # and the attach. P4-01 (#380) removes this check when it wires the source.

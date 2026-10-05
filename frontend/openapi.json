@@ -9250,8 +9250,15 @@
         "type": "object"
       },
       "RunDiagnosticsOut": {
-        "description": "Why a run's visits or answers could not be read (#405), nothing from the page.\nBoth lists are empty for a run that has none, or one recorded before #405.\n``stopped_by`` is the visit whose answer stopped the run at once as\n``route_changed`` (a status no limit forgives): one item, or none.",
+        "description": "Why a run's visits or answers could not be read (#405), nothing from the page.\nThe lists are empty for a run that has none, or one recorded before #405.\n``stopped_by`` is the visit whose answer stopped the run at once as\n``route_changed`` (a status no limit forgives): one item, or none.\n``deferred_visits`` (#424) are the visits that saved the profile without its lost\nContact info (``contact_info_deferred``); they are not unreadable, so they are not\nin ``unreadable_visits``.",
         "properties": {
+          "deferred_visits": {
+            "items": {
+              "$ref": "#/components/schemas/RunVisitReasonOut"
+            },
+            "title": "Deferred Visits",
+            "type": "array"
+          },
           "lost_answers": {
             "items": {
               "$ref": "#/components/schemas/RunLostAnswerOut"
@@ -9276,6 +9283,7 @@
         },
         "required": [
           "unreadable_visits",
+          "deferred_visits",
           "lost_answers",
           "stopped_by"
         ],

@@ -55,6 +55,26 @@ reset-breaker``). Every other ending (a route change, a budget stop, a cancel,
 a checkpoint, even with losses) leaves the count where it was. The counters
 never feed each other: each is its own ``settings_kv`` row.
 
+**The Contact info breaker** (#424) lives here too, as a third, separate
+streak, for enrichment. Since #405 a Contact info overlay whose body Chrome
+did not keep is a soft failure: the profile is saved without it, and only too
+many of them (``MAX_CONTACT_INFO_LOST_IN_A_ROW`` in a row, or more than half
+of a run's overlays after ``CONTACT_INFO_LOST_SHARE_AFTER`` clicks) stop the
+run as ``answer_lost``. If the body tap breaks for good, every scheduled
+enrichment run would still make five to seven clicks and stop, forever.
+:data:`CONTACT_INFO_THRESHOLD` consecutive enrichment runs, by hand or by
+schedule, ending ``answer_lost`` (the only way enrichment ends ``answer_lost``
+is those caps) trip it, and the scheduler (and the worker's second check) then
+skip every scheduled enrichment fire as ``"contact_info_breaker"``. Connections
+runs are never skipped for it, and it never skips enrichment for a connections
+streak: the two read different endpoints. The streak clears when an enrichment
+run reaches its own end (``end_of_plan`` or ``visit_budget``) after reading at
+least one Contact info answer that was not lost (:func:`record_contact_info`),
+whatever its trigger, so a manual run that reads Contact info again clears it;
+:func:`reset` clears it with the others. Every other ending (a budget stop, a
+cancel, the window closing, a route change, a run that clicked nothing or lost
+every overlay it clicked) leaves the count where it was.
+
 Persisted like :mod:`netkeeper.services.heat`: a ``settings_kv`` row keyed by
 account id, read and written through a session and a ``User`` -- the
 extractor boundary (ADR 0005, spec 9.10) keeps this off the ``linkedin/``
@@ -99,6 +119,14 @@ ANSWER_LOST_THRESHOLD: Final = 3
 #: The run kinds that each keep their own answer-lost streak (#199 review, M2).
 ANSWER_LOST_KINDS: Final = (SyncRunKind.CONNECTIONS_FULL, SyncRunKind.CONNECTIONS_INCREMENTAL)
 
+_CONTACT_INFO_KEY_PREFIX: Final = "linkedin.contact_info_breaker"
+
+#: Consecutive enrichment runs ending ``answer_lost`` (the Contact info caps, #405)
+#: that trip the Contact info breaker (#424). Pinned literally. The same bar as the
+#: connections answer-lost limit: one run stopping on lost overlays can be a bad
+#: hour; three in a row, on three separate fires, is the body tap not working.
+CONTACT_INFO_THRESHOLD: Final = 3
+
 
 @dataclass(frozen=True, slots=True)
 class BreakerState:
@@ -119,7 +147,8 @@ class BreakerState:
     since: datetime | None
     readable: bool = True
     #: The count that trips this streak: :data:`THRESHOLD` for the route-changed
-    #: breaker, :data:`ANSWER_LOST_THRESHOLD` for the answer-lost limit.
+    #: breaker, :data:`ANSWER_LOST_THRESHOLD` for the answer-lost limit,
+    #: :data:`CONTACT_INFO_THRESHOLD` for the Contact info breaker.
     threshold: int = THRESHOLD
 
     @property
@@ -247,11 +276,62 @@ def record_answer_lost(
     return updated
 
 
+def contact_info_state(session: Session, user: User, account_id: int) -> BreakerState:
+    """The Contact info breaker's streak (#424): how many consecutive enrichment runs
+    have ended ``answer_lost``, and when the streak started. Read-only."""
+    return _load_streak(session, user, account_id, _CONTACT_INFO)
+
+
+def contact_info_tripped(session: Session, user: User, account_id: int) -> bool:
+    """Whether the Contact info breaker is tripped: the streak is at or above
+    :data:`CONTACT_INFO_THRESHOLD`, or unreadable (fail closed). Read-only. The
+    scheduler and the worker ask it before a scheduled enrichment run."""
+    return contact_info_state(session, user, account_id).tripped
+
+
+def record_contact_info(
+    session: Session,
+    user: User,
+    account_id: int,
+    *,
+    answer_lost: bool,
+    clean_end: bool,
+    now: datetime,
+) -> BreakerState:
+    """Record one enrichment run's outcome on the Contact info breaker (#424). Needs a
+    writer session.
+
+    ``answer_lost`` (the run's ``stop_reason`` was ``answer_lost``: the Contact info
+    caps stopped it) extends the streak by one. ``clean_end`` (the run reached its own
+    end, ``end_of_plan`` or ``visit_budget``, and read at least one Contact info
+    answer that was not lost) clears it, whatever the trigger: that is how a manual
+    run shows the overlay can be read again. Neither leaves the count where it was,
+    and a corrupt row stays as it is (still read as tripped).
+    """
+    _require_writer(session, "route_breaker.record_contact_info")
+    if answer_lost and clean_end:
+        raise ValueError("a run cannot both lose too many answers and end cleanly")
+    current = _load_streak(session, user, account_id, _CONTACT_INFO)
+    if clean_end:
+        updated = BreakerState(count=0, since=None, threshold=CONTACT_INFO_THRESHOLD)
+    elif answer_lost:
+        # Fail closed as record() does: a corrupt row reads as tripped, and one more
+        # answer_lost run keeps it tripped rather than restarting at 1.
+        count = current.count + 1 if current.readable else CONTACT_INFO_THRESHOLD
+        updated = BreakerState(
+            count=count, since=current.since or now, threshold=CONTACT_INFO_THRESHOLD
+        )
+    else:
+        return current
+    _store_streak(session, user, account_id, _CONTACT_INFO, updated)
+    return updated
+
+
 def reset(session: Session, user: User, account_id: int) -> BreakerState:
     """Clear the breaker directly (``netkeeper linkedin schedule reset-breaker``),
-    and every answer-lost streak with it (#199): one command clears whatever skips
-    scheduled connections runs. Needs a writer session. Idempotent. Returns the
-    route-changed breaker's cleared state."""
+    and every answer-lost streak with it (#199), and the Contact info breaker (#424):
+    one command clears whatever skips scheduled LinkedIn runs after failed runs. Needs
+    a writer session. Idempotent. Returns the route-changed breaker's cleared state."""
     _require_writer(session, "route_breaker.reset")
     cleared = BreakerState(count=0, since=None)
     _store(session, user, account_id, cleared)
@@ -263,6 +343,13 @@ def reset(session: Session, user: User, account_id: int) -> BreakerState:
             BreakerState(count=0, since=None, threshold=ANSWER_LOST_THRESHOLD),
             lost_kind=kind,
         )
+    _store_streak(
+        session,
+        user,
+        account_id,
+        _CONTACT_INFO,
+        BreakerState(count=0, since=None, threshold=CONTACT_INFO_THRESHOLD),
+    )
     return cleared
 
 
@@ -272,17 +359,39 @@ def _lost_kind(kind: SyncRunKind) -> SyncRunKind:
     return kind
 
 
-def _key(account_id: int, *, lost_kind: SyncRunKind | None = None) -> str:
+@dataclass(frozen=True, slots=True)
+class _Streak:
+    """Where one streak is stored, what trips it, and its name in the log."""
+
+    prefix: str
+    threshold: int
+    label: str
+
+
+_CONTACT_INFO: Final = _Streak(
+    _CONTACT_INFO_KEY_PREFIX, CONTACT_INFO_THRESHOLD, "Contact info breaker"
+)
+
+
+def _streak(lost_kind: SyncRunKind | None) -> _Streak:
     if lost_kind is None:
-        return f"{_KEY_PREFIX}.{account_id}"
-    return f"{_ANSWER_LOST_KEY_PREFIX}.{lost_kind.value}.{account_id}"
+        return _Streak(_KEY_PREFIX, THRESHOLD, "route-changed breaker")
+    return _Streak(
+        f"{_ANSWER_LOST_KEY_PREFIX}.{lost_kind.value}",
+        ANSWER_LOST_THRESHOLD,
+        f"answer-lost limit ({lost_kind.value})",
+    )
 
 
 def _load(
     session: Session, user: User, account_id: int, *, lost_kind: SyncRunKind | None = None
 ) -> BreakerState:
-    threshold = THRESHOLD if lost_kind is None else ANSWER_LOST_THRESHOLD
-    raw = get_setting(session, user, _key(account_id, lost_kind=lost_kind))
+    return _load_streak(session, user, account_id, _streak(lost_kind))
+
+
+def _load_streak(session: Session, user: User, account_id: int, streak: _Streak) -> BreakerState:
+    threshold = streak.threshold
+    raw = get_setting(session, user, f"{streak.prefix}.{account_id}")
     if raw is None:
         return BreakerState(count=0, since=None, threshold=threshold)
     try:
@@ -304,20 +413,13 @@ def _load(
         # thing that should crash on a corrupt row -- fail closed instead
         # (BreakerState.tripped reads true when unreadable) and say so in the log;
         # `posture()` turns this into a warning a person actually sees.
-        log.error(
-            "%s state for account %d is corrupt: %s",
-            "route-changed breaker"
-            if lost_kind is None
-            else f"answer-lost limit ({lost_kind.value})",
-            account_id,
-            exc,
-        )
+        log.error("%s state for account %d is corrupt: %s", streak.label, account_id, exc)
         return BreakerState(count=0, since=None, readable=False, threshold=threshold)
 
 
 def _field(raw: dict[str, Any], name: str) -> Any:
     if name not in raw:
-        raise TypeError(f"route-changed breaker state is missing {name!r}: {raw!r}")
+        raise TypeError(f"breaker state is missing {name!r}: {raw!r}")
     return raw[name]
 
 
@@ -329,10 +431,16 @@ def _store(
     *,
     lost_kind: SyncRunKind | None = None,
 ) -> None:
+    _store_streak(session, user, account_id, _streak(lost_kind), state)
+
+
+def _store_streak(
+    session: Session, user: User, account_id: int, streak: _Streak, state: BreakerState
+) -> None:
     set_setting(
         session,
         user,
-        _key(account_id, lost_kind=lost_kind),
+        f"{streak.prefix}.{account_id}",
         {
             "count": state.count,
             "since": None if state.since is None else state.since.isoformat(),

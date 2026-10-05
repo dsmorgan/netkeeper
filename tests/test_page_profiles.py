@@ -652,7 +652,8 @@ async def test_a_lost_contact_info_answer_saves_the_profile_without_it_and_no_se
     assert out.result.unreadable_visits == (
         UnreadableVisit(1, PRIYA.n, UnreadableCause.CONTACT_INFO_DEFERRED),
     )
-    assert out.result.lost == (
+    assert out.result.lost == ()
+    assert out.result.deferred == (
         f"visit 1: the Contact info answer could not be read ({LOST_CAUSE};"
         " no streamed copy: no body tap); the profile was saved without it",
     )
@@ -1428,7 +1429,8 @@ async def test_a_lost_overlay_without_a_whole_copy_saves_no_contact_info(how: st
         if how == "none"
         else ("streamed copy not whole")
     )
-    assert out.result.lost == (
+    assert out.result.lost == ()
+    assert out.result.deferred == (
         f"visit 1: the Contact info answer could not be read ({LOST_CAUSE}; {note});"
         " the profile was saved without it",
     )

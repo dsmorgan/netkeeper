@@ -430,6 +430,8 @@ def _linkedin(
         blocked = gate
         if blocked is None and account is not None and kind in _CONNECTIONS_KINDS:
             blocked = _breaker(session, user, account.id)
+        if blocked is None and account is not None and kind is JobKind.ENRICH:
+            blocked = _contact_info_breaker(session, user, account.id)
         if blocked is None:
             blocked = _outside_hours(settings, now=now)
         if blocked is not None:
@@ -462,7 +464,8 @@ def _linkedin_gate(
     serving: Serving,
 ) -> tuple[CheckState, str] | None:
     """What stops every scheduled LinkedIn kind, in the scheduler's order; None when nothing.
-    The connections breakers (per kind) and active hours follow, in :func:`_linkedin`."""
+    The connections breakers and enrichment's Contact info breaker (per kind) and active
+    hours follow, in :func:`_linkedin`."""
     if not serving.scheduler:
         return CheckState.NOT_RUNNING, NOT_SERVING
     if account_id is None or not scheduled_runs_armed(session, user, account_id):
@@ -497,5 +500,17 @@ def _breaker(session: Session, user: User, account_id: int) -> tuple[CheckState,
         return (
             CheckState.BLOCKED,
             "Connections syncs are stopped after several failed runs; see the LinkedIn page",
+        )
+    return None
+
+
+def _contact_info_breaker(
+    session: Session, user: User, account_id: int
+) -> tuple[CheckState, str] | None:
+    if route_breaker.contact_info_tripped(session, user, account_id):
+        return (
+            CheckState.BLOCKED,
+            "Enrichment is stopped after several runs lost too many Contact info answers;"
+            " see Posture on the Settings page",
         )
     return None

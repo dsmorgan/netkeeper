@@ -756,8 +756,10 @@ async def test_lost_contact_info_saves_the_profile_and_counts_toward_no_unreadab
         UnreadableVisit(v + 1, people[v].n, UnreadableCause.CONTACT_INFO_DEFERRED)
         for v in (0, 2, 4)
     )
-    assert [line.split(":")[0] for line in result.lost] == ["visit 1", "visit 3", "visit 5"]
-    assert all(line.endswith("; the profile was saved without it") for line in result.lost)
+    # #424: deferred visits are listed apart from the unreadable ones.
+    assert result.lost == ()
+    assert [line.split(":")[0] for line in result.deferred] == ["visit 1", "visit 3", "visit 5"]
+    assert all(line.endswith("; the profile was saved without it") for line in result.deferred)
     assert browser.clicks == [p.slug for p in people]  # one click per visit, never two
     assert (events[-1].contact_info_lost, events[-1].unreadable) == (3, 0)
 

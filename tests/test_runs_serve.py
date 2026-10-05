@@ -1103,3 +1103,69 @@ def test_a_live_worker_reads_profiles_through_the_live_source() -> None:
     assert inspect.signature(BrowserWorker).parameters["profiles"].default is profile_source
     assert inspect.signature(profile_source).parameters.keys() == {"run", "sleep"}
     assert LANDING_WAIT_S == 20.0
+
+
+# --- #424: the Contact info breaker at the worker -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "trigger", "refused"),
+    [
+        (SyncRunKind.ENRICH, SyncRunTrigger.SCHEDULED, True),
+        # Manual runs are never refused for it: a run by hand is how a person checks.
+        (SyncRunKind.ENRICH, SyncRunTrigger.MANUAL, False),
+        # Enrichment's streak never stops a connections run.
+        (SyncRunKind.CONNECTIONS_FULL, SyncRunTrigger.SCHEDULED, False),
+        (SyncRunKind.CONNECTIONS_INCREMENTAL, SyncRunTrigger.SCHEDULED, False),
+    ],
+)
+async def test_the_worker_refuses_only_a_scheduled_enrichment_run_for_the_contact_info_breaker(
+    session_factory: Any,
+    settings: Settings,
+    kind: SyncRunKind,
+    trigger: SyncRunTrigger,
+    refused: bool,
+) -> None:
+    import factories
+
+    from netkeeper.linkedin.browser import BrowserUnavailable
+    from netkeeper.worker import BrowserWorker
+
+    provider, connector = fake_provider(error=BrowserUnavailable("Chrome is not running"))
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        account = ensure_account(session, user)
+        arm_scheduled_runs(session, user, now=START)
+        for _ in range(route_breaker.CONTACT_INFO_THRESHOLD):
+            route_breaker.record_contact_info(
+                session, user, account.id, answer_lost=True, clean_end=False, now=START
+            )
+        run = SyncRun(
+            user_id=user.id,
+            linkedin_account_id=account.id,
+            kind=kind,
+            trigger=trigger,
+            started_at=START,
+        )
+        session.add(run)
+        session.flush()
+        run_id, user_id = run.id, user.id
+    worker = BrowserWorker(provider, session_factory, settings.linkedin)
+
+    outcome = await worker.execute(run_id, user_id)
+
+    if not refused:
+        assert connector.attaches == 1
+        assert outcome is runs.RunOutcome.RETRY_LATER
+        return
+    assert outcome is runs.RunOutcome.DONE
+    assert connector.attaches == 0
+    with session_scope(session_factory) as session:
+        owner = session.get(User, user_id)
+        assert owner is not None
+        stored = runs.get_run(session, owner, run_id)
+        assert (stored.status, stored.stop_reason) == (
+            SyncRunStatus.FAILED,
+            "contact_info_breaker",
+        )
+        assert stored.error == "the Contact info breaker is tripped for this account"

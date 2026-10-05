@@ -101,6 +101,35 @@ def test_each_visit_reads_back_with_its_reason_and_the_contacts_name(writer: Ses
     assert found.lost_answers == ()
 
 
+def test_deferred_visits_are_listed_apart_from_the_unreadable_ones(writer: Session) -> None:
+    """#424: a visit that saved the profile without its lost Contact info is stored
+    beside the unreadable ones but is not unreadable, so it reads back on its own."""
+    session = writer
+    user = factories.make_user(session)
+    ada = factories.make_contact(session, user, first_name="Ada", last_name="Fake")
+    run = _run(
+        session,
+        user,
+        counts={
+            "unreadable_visits": [
+                _visit(2, ada.id, "contact_info_deferred"),
+                _visit(4, ada.id, "overlay_never_answered"),
+                _visit(6, ada.id, "contact_info_deferred"),
+            ]
+        },
+    )
+
+    found = run_diagnostics.diagnose(session, user, run)
+
+    assert [(v.visit, v.reason) for v in found.unreadable_visits] == [(4, "overlay_never_answered")]
+    assert [(v.visit, v.reason) for v in found.deferred_visits] == [
+        (2, "contact_info_deferred"),
+        (6, "contact_info_deferred"),
+    ]
+    assert found.deferred_visits[0].first_name == "Ada"
+    assert found.deferred_visits[0].reason_text.endswith("(not counted as unreadable)")
+
+
 def test_a_running_run_reads_its_progress_record(writer: Session) -> None:
     session = writer
     user = factories.make_user(session)
@@ -191,7 +220,12 @@ async def test_the_api_answers_the_runs_reasons(
         run_id = _run(
             session,
             user,
-            counts={"unreadable_visits": [_visit(2, ada.id, "contact_info_control_missing")]},
+            counts={
+                "unreadable_visits": [
+                    _visit(2, ada.id, "contact_info_control_missing"),
+                    _visit(4, ada.id, "contact_info_deferred"),
+                ]
+            },
         ).id
         ada_id = ada.id
 
@@ -209,6 +243,22 @@ async def test_the_api_answers_the_runs_reasons(
                 "last_name": "Fake",
                 "reason": "contact_info_control_missing",
                 "reason_text": "no Contact info control on the page",
+            }
+        ],
+        # #424: a deferred visit is listed apart, not as unreadable.
+        "deferred_visits": [
+            {
+                "visit": 4,
+                "contact_id": ada_id,
+                "contact_exists": True,
+                "first_name": "Ada",
+                "last_name": "Fake",
+                "reason": "contact_info_deferred",
+                "reason_text": (
+                    "the Contact info answer arrived with no readable body; the profile was"
+                    " saved, and Contact info is read on a later visit (not counted as"
+                    " unreadable)"
+                ),
             }
         ],
         "lost_answers": [],
@@ -357,6 +407,37 @@ def test_linkedin_run_prints_each_visits_reason(cli_db: sessionmaker[Session]) -
     assert table[2].split()[:3] == ["5", str(gone_id), "(deleted)"]
     # The list is its own table, never a cell of the field table.
     assert not any(line.startswith("unreadable visits ") for line in lines)
+
+
+def test_linkedin_run_lists_deferred_visits_under_their_own_heading(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """#424: deferred Contact info is not an unreadable visit."""
+    with session_scope(cli_db, write=True) as session:
+        user = ensure_local_user(session, settings=Settings())
+        ada = factories.make_contact(session, user, first_name="Ada", last_name="Fake")
+        visits = [_visit(1, ada.id, "contact_info_deferred")]
+        only_deferred = _run(session, user, counts={"unreadable_visits": visits}).id
+        both = _run(
+            session,
+            user,
+            counts={"unreadable_visits": [*visits, _visit(2, ada.id, "landed_off_profile")]},
+        ).id
+        ada_id = ada.id
+
+    shown = CliRunner().invoke(cli, ["linkedin", "run", str(only_deferred)])
+    assert shown.exit_code == 0, shown.output
+    lines = shown.output.splitlines()
+    heading = "deferred Contact info (profile saved; read on a later visit):"
+    assert heading in lines and "unreadable visits:" not in lines
+    table = lines[lines.index(heading) + 1 :]
+    assert table[0].split() == ["VISIT", "CONTACT", "NAME", "REASON"]
+    assert table[1].split()[:4] == ["1", str(ada_id), "Ada", "Fake"]
+    assert table[1].endswith("(contact_info_deferred)")
+
+    mixed = CliRunner().invoke(cli, ["linkedin", "run", str(both)]).output.splitlines()
+    unreadable = mixed[mixed.index("unreadable visits:") + 1 : mixed.index(heading)]
+    assert [line.split()[0] for line in unreadable if line.strip()] == ["VISIT", "2"]
 
 
 def test_linkedin_run_says_which_visit_stopped_a_run_at_once(

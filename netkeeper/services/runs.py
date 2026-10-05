@@ -670,6 +670,7 @@ STOP_REASON_TEXT: Final[Mapping[str, str]] = {
     "disarmed": "refused: scheduled runs are disarmed",
     "route_changed_breaker": "refused: the route-changed breaker is tripped",
     "answer_lost_breaker": "refused: the answer-lost limit is tripped",
+    "contact_info_breaker": "refused: the Contact info breaker is tripped",
     "no_runner": "refused: no runner for this kind",
     "no_source": "refused: the LinkedIn inbox poll has no page source yet",
     "browser_busy": "the browser was busy with another run",

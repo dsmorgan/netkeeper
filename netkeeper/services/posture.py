@@ -535,6 +535,7 @@ def posture(
         _campaign_templates(session, user),
         _route_changed_breaker(session, user, account_id),
         _answer_lost_limit(session, user, account_id),
+        _contact_info_breaker(session, user, account_id),
         _network_aging(session, user),
     ]
     linkedin_replies = _linkedin_reply_poll(session, user)
@@ -1798,6 +1799,56 @@ def _answer_lost_limit(session: Session, user: User, account_id: int) -> Protect
             " unreadable, and scheduled connections runs are skipped until this clears."
             " Run one of that kind by hand (`netkeeper linkedin sync`, with `--full` for a"
             " full sync) to check whether they still do, or clear it directly with"
+            " `netkeeper linkedin schedule reset-breaker`",
+        ),
+    )
+
+
+def _contact_info_breaker(session: Session, user: User, account_id: int) -> Protection:
+    """The Contact info breaker's count (#424): consecutive enrichment runs (by hand or
+    by schedule) that ended ``answer_lost`` because too many Contact info answers
+    arrived with no body (#405). Reported the way :func:`_route_changed_breaker`
+    reports its own streak, an unreadable row included.
+    """
+    current = route_breaker.contact_info_state(session, user, account_id)
+    since = f" (since {current.since:%Y-%m-%d %H:%M UTC})" if current.since is not None else ""
+    if not current.readable:
+        return Protection(
+            name="Contact info breaker",
+            status=Status.UNKNOWN,
+            value="stored state unreadable; treated as tripped",
+            warnings=(
+                "the Contact info breaker's stored state is corrupt and could not be read."
+                " Scheduled enrichment runs are skipped until it is next written (fail"
+                " closed) -- run one by hand (`netkeeper linkedin enrich`) to check and"
+                " repair it, or clear it directly with"
+                " `netkeeper linkedin schedule reset-breaker`",
+            ),
+        )
+    if current.count == 0:
+        return Protection(
+            name="Contact info breaker",
+            status=Status.ON,
+            value="clear: no consecutive enrichment runs have ended answer_lost",
+        )
+    if not current.tripped:
+        return Protection(
+            name="Contact info breaker",
+            status=Status.ON,
+            value=(
+                f"{current.count} of {route_breaker.CONTACT_INFO_THRESHOLD} answer_lost"
+                f" enrichment runs in a row{since}"
+            ),
+        )
+    return Protection(
+        name="Contact info breaker",
+        status=Status.ON,
+        value=f"tripped: {current.count} answer_lost enrichment runs in a row{since}",
+        warnings=(
+            f"{current.count} enrichment runs in a row stopped because too many Contact info"
+            f" answers arrived with no readable body{since}: scheduled enrichment runs are"
+            " skipped until this clears. Run one by hand (`netkeeper linkedin enrich`) to"
+            " check whether Contact info reads again, or clear it directly with"
             " `netkeeper linkedin schedule reset-breaker`",
         ),
     )

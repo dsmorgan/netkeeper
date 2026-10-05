@@ -458,9 +458,10 @@ class EnrichResult:
     per visit in order, ``None`` for a visit that clicked nothing; ``clicks``
     how many clicks the run asked for, never more than one per visit;
     ``mismatched`` how many profiles answered under another id than the contact's;
-    ``lost`` one fixed line per visit whose answer's body the browser could not hand
-    over (#197), naming the visit by its number in this run: an unreadable one, or one
-    whose Contact info was deferred (#405); ``contact_info_lost`` how many visits
+    ``lost`` one fixed line per unreadable visit whose answer's body the browser could
+    not hand over (#197), naming the visit by its number in this run; ``deferred`` one
+    such line per visit whose Contact info body was lost and whose profile was saved
+    without it (#405, kept apart since #424); ``contact_info_lost`` how many visits
     deferred their Contact info that way, which the unreadable limits do not count;
     and
     ``copied`` one fixed line per visit whose Contact info was read from the body
@@ -485,6 +486,7 @@ class EnrichResult:
     clicks: int = 0
     mismatched: int = 0
     lost: tuple[str, ...] = ()
+    deferred: tuple[str, ...] = ()
     copied: tuple[str, ...] = ()
     unreadable_visits: tuple[UnreadableVisit, ...] = ()
     stopped_by: UnreadableVisit | None = None
@@ -651,6 +653,7 @@ async def run_enrichment(
     completed: list[int] = []
     pauses: list[float | None] = []
     lost: list[str] = []
+    deferred_lines: list[str] = []
     copied: list[str] = []
     unreadable_visits: list[UnreadableVisit] = []
     visits = harvested = not_found = unreadable = unreadable_in_a_row = clicks = mismatched = 0
@@ -699,6 +702,7 @@ async def run_enrichment(
             clicks=clicks,
             mismatched=mismatched,
             lost=tuple(lost),
+            deferred=tuple(deferred_lines),
             copied=tuple(copied),
             unreadable_visits=tuple(unreadable_visits),
             stopped_by=stopped_by,
@@ -803,7 +807,7 @@ async def run_enrichment(
             info_lost += 1
             info_lost_in_a_row += 1
             cause = UnreadableCause.CONTACT_INFO_DEFERRED
-            lost.append(f"visit {visits}: {info.lost}; the profile was saved without it")
+            deferred_lines.append(f"visit {visits}: {info.lost}; the profile was saved without it")
             log.info(
                 "enrichment: visit %d saved the profile without Contact info: %s",
                 visits,

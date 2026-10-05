@@ -321,6 +321,7 @@ def get_run_diagnostics(run_id: int, user: CurrentUser, session: SessionDep) -> 
     found = run_diagnostics.diagnose(session, user, run)
     return RunDiagnosticsOut(
         unreadable_visits=[_visit_out(item) for item in found.unreadable_visits],
+        deferred_visits=[_visit_out(item) for item in found.deferred_visits],
         lost_answers=[
             RunLostAnswerOut(start=item.start, cause=item.cause, ending=item.ending)
             for item in found.lost_answers
