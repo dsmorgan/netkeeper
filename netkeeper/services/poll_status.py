@@ -7,8 +7,11 @@ store, never by running one:
 - **Gmail replies** (spec 11.7): every ``[campaigns] reply_poll_minutes``, in the
   campaign tick, for every armed mailbox. Last and next come from one source, the
   running sender's own gate (:meth:`GmailSender.replies_polled_at`): the next poll
-  is that plus the sender's interval, and with none (a fresh start, or a poll that
-  stopped part way) the next tick polls, so the check is ``due``. Without ``serve``
+  is that plus the sender's interval, and with none (a fresh start) the next tick
+  polls, so the check is ``due``. A ready mailbox the sender polls again sooner,
+  alone (:meth:`GmailSender.replies_due`: its poll stopped part way, or it holds a
+  follow-up), is ``due`` too, and so is the check; the others keep their time
+  (#413). Without ``serve``
   there is no next poll, and the last one is read from the armed mailboxes'
   ``replies_polled_at``: the oldest, or none while one was never polled. An armed
   mailbox that needs signing in again is named in the check's reason; it blocks
@@ -182,6 +185,8 @@ class Serving:
     replies_polled_at: datetime | None = None
     replies_every: timedelta | None = None
     """The running sender's reply interval; None reads ``[campaigns] reply_poll_minutes``."""
+    replies_due: frozenset[int] = frozenset()
+    """Mailboxes the running sender polls again at the next tick, alone (#413)."""
     drafts_polled_at: datetime | None = None
     drafts_every: timedelta = DRAFTS_POLL_EVERY
 
@@ -224,8 +229,8 @@ def _next(
 def _mailbox_poll(
     mailbox: Mailbox, *, now: datetime, every: timedelta, serving: Serving
 ) -> MailboxPoll:
-    """One mailbox, gated like the check. Its next poll is the user's: the sender polls
-    every armed mailbox together."""
+    """One mailbox, gated like the check. Its next poll is the user's (the sender polls
+    every armed mailbox together), or the next tick when it is due again alone (#413)."""
     armed = mailbox.arm is not None
     state: CheckState
     next_at: datetime | None = None
@@ -241,6 +246,8 @@ def _mailbox_poll(
         )
     elif mailbox.status is not MailboxStatus.OK:
         state, reason = CheckState.BLOCKED, _needs_sign_in([mailbox])
+    elif mailbox.id in serving.replies_due:
+        state = CheckState.DUE
     else:
         state, next_at = _next(serving.replies_polled_at, every, now)
     return MailboxPoll(
@@ -297,6 +304,8 @@ def _gmail_replies(
     stuck = [m for m in mailboxes if m.arm is not None and m.status is not MailboxStatus.OK]
     reason = None if not stuck else _needs_sign_in(stuck)
     state, next_at = _next(serving.replies_polled_at, every, now)
+    if any(p.state is CheckState.DUE for p in polls):  # one ready mailbox is due again
+        state, next_at = CheckState.DUE, None
     return replace(
         base, state=state, last_at=serving.replies_polled_at, next_at=next_at, reason=reason
     )

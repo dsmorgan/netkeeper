@@ -90,7 +90,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from email.utils import parseaddr
@@ -132,6 +132,7 @@ from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped, get_scoped_contact, not_self, scoped
 from netkeeper.services import campaign_engine as engine
 from netkeeper.services.campaign_engine import PREFILL_STALE_AFTER
+from netkeeper.services.mailboxes import MailboxNotReady
 
 log = logging.getLogger(__name__)
 
@@ -156,7 +157,8 @@ SEARCH_MAX: Final = 20
 
 POLL_MAX_READS: Final = 50
 """At most this many ``messages.get`` one history read makes per mailbox and poll. The
-rest wait for the next tick's poll, which comes at once (the sender asks for it)."""
+rest wait for the next tick's poll of that mailbox, which comes at once (the sender asks
+for it)."""
 
 STALE_AFTER_POLLS: Final = 2
 """A mailbox whose last complete poll is older than this many poll intervals holds its
@@ -714,6 +716,25 @@ Labeler = Callable[[Gmail, int, str, str], None]
 """``(gmail, mailbox_id, label name, gmail message id)``: put the campaign label on a reply."""
 
 
+@dataclass(frozen=True, slots=True)
+class RepliesPolled:
+    """What one :func:`poll_replies` left for the next tick (#413). Both sets hold only
+    mailboxes with something to watch: one with nothing is caught up without a call."""
+
+    behind: frozenset[int] = frozenset()
+    """Mailboxes whose poll stopped part way or failed: the next tick polls them again."""
+    not_ready: frozenset[int] = frozenset()
+    """Mailboxes that could not be opened (:class:`MailboxNotReady`: they need signing
+    in again, or a secret is missing). Skipped without a Gmail call. Their
+    ``replies_polled_at`` stays where it was, so their follow-ups that start a new
+    conversation stay held, and the sender tries them again, alone, at the next tick."""
+
+    @property
+    def retry(self) -> frozenset[int]:
+        """Every mailbox the next tick polls again, without waiting for the interval."""
+        return self.behind | self.not_ready
+
+
 def poll_replies(
     factory: sessionmaker[Session],
     user_id: int,
@@ -721,10 +742,13 @@ def poll_replies(
     open_gmail: Callable[[int, int], Gmail],
     now: datetime,
     label: Labeler | None = None,
-) -> bool:
-    """One poll of every armed mailbox of the user (the module). Blocking. True when every
-    mailbox read everything up to now; False when one stopped part way or failed, and the
-    next tick should poll again.
+    only: Collection[int] | None = None,
+) -> RepliesPolled:
+    """One poll of every armed mailbox of the user (the module), or of those in ``only``.
+    Blocking. Says which mailboxes the next tick should poll again: one that stopped part
+    way or failed, and one that is not ready (#413). A mailbox that is not ready is
+    skipped, not counted against the others, so it never makes the healthy ones poll
+    again before their interval.
 
     A mailbox with nothing to watch gets no Gmail call: it is caught up by definition.
     ``replies_polled_at`` is set only for a mailbox that caught up, and it is what
@@ -733,9 +757,12 @@ def poll_replies(
     with session_scope(factory) as session:
         user = session.get(User, user_id)
         if user is None:
-            return True
+            return RepliesPolled()
         work = reply_work(session, user, now=now)
-    caught_up = True
+    if only is not None:
+        work = [mailbox for mailbox in work if mailbox.mailbox_id in only]
+    behind: set[int] = set()
+    not_ready: set[int] = set()
     for mailbox in work:
         gmail: Gmail | None = None
         if not mailbox.watches:
@@ -745,17 +772,22 @@ def poll_replies(
             try:
                 gmail = open_gmail(user_id, mailbox.mailbox_id)
                 result = _Poll(gmail, mailbox, purpose).run()
+            except MailboxNotReady as exc:  # skipped: it holds its own sends (#413)
+                log.info("mailbox %d: the reply poll skips it (%s)", mailbox.mailbox_id, exc.code)
+                not_ready.add(mailbox.mailbox_id)
+                continue
             except Exception as exc:  # the next poll reads the same messages again
                 code = exc.code if isinstance(exc, GmailError) else type(exc).__name__
                 log.warning("mailbox %d: the reply poll waits (%s)", mailbox.mailbox_id, code)
-                caught_up = False
+                behind.add(mailbox.mailbox_id)
                 continue
-        caught_up = caught_up and result.caught_up
+        if not result.caught_up:
+            behind.add(mailbox.mailbox_id)
         new: list[Reply | Bounce] = []
         with session_scope(factory, write=True) as session:
             user = session.get(User, user_id)
             if user is None:
-                return caught_up
+                return RepliesPolled(frozenset(behind), frozenset(not_ready))
             for item in result.found:
                 done = (
                     record_reply(session, user, item)
@@ -769,7 +801,7 @@ def poll_replies(
             for item in new:
                 if isinstance(item, Reply):
                     label(gmail, mailbox.mailbox_id, item.label, item.message.id)
-    return caught_up
+    return RepliesPolled(frozenset(behind), frozenset(not_ready))
 
 
 # --- LinkedIn (P4-02, #381) --------------------------------------------------------------

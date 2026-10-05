@@ -36,6 +36,7 @@ from netkeeper.models import (
     InteractionKind,
     Mailbox,
     MailboxArm,
+    MailboxStatus,
     MessageDirection,
     MessageStatus,
     StepMode,
@@ -54,6 +55,7 @@ from netkeeper.services.campaign_engine import (
     activate,
 )
 from netkeeper.services.campaign_sender import GmailSender
+from netkeeper.services.mailboxes import MailboxNotReady
 from netkeeper.services.simulate_campaign import simulate_campaign
 
 ADA = "ada@example.test"
@@ -1085,3 +1087,207 @@ def test_in_simulate_a_reply_ends_the_enrollment_before_the_follow_up_fires(
         statuses = {e.id: e.status for e in session.scalars(scoped(owner, Enrollment))}
     assert statuses[enrolled[ADA]] is EnrollmentStatus.REPLIED
     assert statuses[enrolled["grace@example.test"]] is EnrollmentStatus.COMPLETED
+
+
+# --- a mailbox that needs signing in again (#413) ------------------------------------------------
+
+GRACE = "grace@example.test"
+INTERVAL = timedelta(minutes=10)
+
+
+@dataclass
+class TwoBoxes:
+    """``mail``'s mailbox (healthy) and a second one, ``reauth``, each with a two-step
+    campaign whose second step starts a new conversation (so the stale rule holds it)."""
+
+    mail: Mail
+    reauth_id: int
+    reauth_gmail: FakeGmail
+    campaign_id: int
+    locked: set[int]
+    """Mailboxes whose secrets cannot be read (the Keychain is locked): still ``ok``, so
+    the engine claims their steps, but the sender cannot open them."""
+
+    def polls(self, gmail: FakeGmail) -> int:
+        return sum(1 for method, purpose in gmail.calls if purpose.startswith("reply poll"))
+
+    def not_ready(self, how: str) -> None:
+        """``reauth``: it needs signing in again; ``locked``: its Keychain is locked."""
+        if how == "reauth":
+            self.needs_sign_in(True)
+        else:
+            self.locked.add(self.reauth_id)
+
+    def needs_sign_in(self, needed: bool) -> None:
+        status = MailboxStatus.REAUTH_REQUIRED if needed else MailboxStatus.OK
+
+        def change(session: Session) -> None:
+            mailbox = get_scoped(session, self.mail.user, Mailbox, self.reauth_id)
+            assert mailbox is not None
+            mailbox.status = status
+
+        self.mail.write(change)
+
+    def polled_at(self, mailbox_id: int) -> datetime | None:
+        def read(session: Session) -> datetime | None:
+            mailbox = get_scoped(session, self.mail.user, Mailbox, mailbox_id)
+            assert mailbox is not None
+            return mailbox.replies_polled_at
+
+        return self.mail.read(read)
+
+
+@pytest.fixture
+def two(session_factory: sessionmaker[Session]) -> TwoBoxes:
+    mail = make_mail(session_factory, modes=(StepMode.SEND,) * 2, same_thread=(False, False))
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, mail.user.id)
+        assert user is not None
+        mailbox = make_mailbox(
+            session, user, email="b@example.com", keychain_ref="gmail/mailbox/2", **ARMED_FOR_SEND
+        )
+        campaign = factories.make_campaign(
+            session, user, channels=(TemplateChannel.EMAIL,) * 2, mailbox_id=mailbox.id
+        )
+        for step in campaign.steps:
+            step.mode = StepMode.SEND
+            step.same_thread = False
+        reauth_id, campaign_id = mailbox.id, campaign.id
+    reauth_gmail = FakeGmail("b@example.com", mailbox_id=reauth_id, clock=mail.clock)
+    boxes: dict[int, FakeGmail] = {mail.mailbox.id: mail.gmail, reauth_id: reauth_gmail}
+    locked: set[int] = set()
+
+    def open_gmail(user_id: int, mailbox_id: int) -> FakeGmail:
+        # What netkeeper.services.mailboxes.open_gmail does first: a mailbox not ``ok``
+        # is refused before any secret is read or Gmail is called.
+        def status(session: Session) -> MailboxStatus:
+            mailbox = get_scoped(session, mail.user, Mailbox, mailbox_id)
+            assert mailbox is not None
+            return mailbox.status
+
+        found = mail.read(status)
+        if found is not MailboxStatus.OK:
+            raise MailboxNotReady(mailbox_id, found.value)
+        if mailbox_id in locked:
+            raise MailboxNotReady(mailbox_id, "keychain_unavailable")
+        return boxes[mailbox_id]
+
+    mail.sender = GmailSender(
+        session_factory,
+        opener=open_gmail,
+        clock=mail.clock,
+        drafts_every=timedelta(0),
+        replies_every=INTERVAL,
+    )
+    return TwoBoxes(mail, reauth_id, reauth_gmail, campaign_id, locked)
+
+
+def start_both(two: TwoBoxes) -> tuple[int, int]:
+    """Step 1 goes out on each mailbox in the first minutes (sends are spaced apart); the
+    poll at NOW + 10 min, the first with something to watch, reads both."""
+    mail = two.mail
+    healthy = mail.enroll(ADA)
+    stuck = mail.enroll(GRACE, campaign_id=two.campaign_id)
+    for minute in range(10):
+        mail.tick(NOW + timedelta(minutes=minute))
+    assert len(mail.gmail.sent()) == len(two.reauth_gmail.sent()) == 1
+    mail.tick(NOW + INTERVAL)
+    assert two.polled_at(mail.mailbox.id) == two.polled_at(two.reauth_id) == NOW + INTERVAL
+    return healthy, stuck
+
+
+@pytest.mark.parametrize("how", ["reauth", "locked"])
+def test_a_mailbox_not_ready_leaves_the_others_on_their_interval(two: TwoBoxes, how: str) -> None:
+    """#413: the healthy mailbox is polled once an interval, not at every minute tick, while
+    the other is not ready. Needing sign-in, the engine claims nothing on it; with its
+    Keychain locked, it is claimed and the sender holds its follow-up (stale replies),
+    which asks for a poll of that mailbox alone."""
+    mail = two.mail
+    healthy, stuck = start_both(two)
+    two.not_ready(how)
+    mail.gmail.calls.clear()
+    two.reauth_gmail.calls.clear()
+
+    for minute in range(11, 41):  # polls at +20, +30, +40 only
+        mail.tick(NOW + timedelta(minutes=minute))
+    assert two.polls(mail.gmail) == 3
+    assert two.reauth_gmail.calls == []
+    assert two.polled_at(mail.mailbox.id) == NOW + timedelta(minutes=40)
+    assert two.polled_at(two.reauth_id) == NOW + INTERVAL  # never marked caught up
+
+    # Step 2 comes due on both: the healthy one sends; the other's stays held.
+    due = NOW + WEEK
+    mail.gmail.calls.clear()
+    held: list[str | None] = []
+    for minute in range(0, 40):
+        result = mail.tick(due + timedelta(minutes=minute))
+        held += [o.error for f, o in result.fired if f.enrollment_id == stuck]
+        if how == "reauth":
+            assert result.skipped().get(stuck, ("mailbox_unhealthy",)) == ("mailbox_unhealthy",)
+    assert len(mail.gmail.sent()) == 2
+    assert mail.enrollment(healthy).status is EnrollmentStatus.COMPLETED
+    assert len(two.reauth_gmail.sent()) == 1
+    if how == "locked":  # claimed again after each retry wait, and held each time
+        assert held
+        assert set(held) == {"replies have not been polled recently; nothing was sent"}
+    else:
+        assert held == []
+    assert two.reauth_gmail.calls == []
+    # A full poll at due, +10, +20 and +30: the held follow-up asks for its mailbox only.
+    assert two.polls(mail.gmail) == 4
+    assert two.polled_at(two.reauth_id) == NOW + INTERVAL
+
+
+def test_a_mailbox_is_polled_at_the_next_tick_after_signing_in_again(two: TwoBoxes) -> None:
+    """Recovery does not wait for the interval, and does not poll the healthy one with it.
+    A reply that came while it needed signing in ends the enrollment before step 2."""
+    mail = two.mail
+    _, stuck = start_both(two)
+    two.needs_sign_in(True)
+    due = NOW + WEEK + INTERVAL  # step 2 is due on both
+    mail.tick(due)  # the full poll skips it; its step 2 is held
+    assert len(two.reauth_gmail.sent()) == 1
+    two.reauth_gmail.reply(
+        MessageRef(two.reauth_gmail.sent()[0].id, two.reauth_gmail.sent()[0].thread_id),
+        sender=GRACE,
+        at=due + timedelta(seconds=10),
+    )
+    two.needs_sign_in(False)
+    mail.gmail.calls.clear()
+
+    mail.tick(due + timedelta(minutes=1))
+
+    assert two.polled_at(two.reauth_id) == due + timedelta(minutes=1)
+    assert two.polls(mail.gmail) == 0  # the healthy one waits for its interval
+    assert mail.enrollment(stuck).status is EnrollmentStatus.REPLIED
+    assert len(two.reauth_gmail.sent()) == 1
+
+
+def test_after_signing_in_again_a_follow_up_waits_for_a_poll_that_catches_up(
+    two: TwoBoxes,
+) -> None:
+    """The safety rule (#296 review) holds across #413's skip: a skipped mailbox keeps its
+    old ``replies_polled_at``, so once it is ready again, a failed first poll still holds
+    the follow-up that starts a new conversation. Nothing has read its replies."""
+    mail = two.mail
+    _, stuck = start_both(two)
+    two.needs_sign_in(True)
+    due = NOW + WEEK + INTERVAL  # step 2 is due on both
+    for minute in range(0, 25):  # several full polls skip it
+        mail.tick(due - timedelta(minutes=30) + timedelta(minutes=minute))
+    two.reauth_gmail.reply(
+        MessageRef(two.reauth_gmail.sent()[0].id, two.reauth_gmail.sent()[0].thread_id),
+        sender=GRACE,
+        at=due - timedelta(minutes=2),
+    )
+    two.needs_sign_in(False)
+    two.reauth_gmail.fail_next("history.list", GmailTransient("down", code="unavailable"))
+
+    [outcome] = [o for f, o in mail.tick(due).fired if f.enrollment_id == stuck]
+
+    assert outcome.outcome is SendOutcome.NOT_SENT
+    assert outcome.error == "replies have not been polled recently; nothing was sent"
+    assert len(two.reauth_gmail.sent()) == 1
+    mail.tick(due + timedelta(minutes=1))  # polled again at once: the reply ends it
+    assert mail.enrollment(stuck).status is EnrollmentStatus.REPLIED
+    assert len(two.reauth_gmail.sent()) == 1
