@@ -118,6 +118,7 @@ API_PATHS = {
     "/api/v1/triage/suggestions/{key}/contacts",
     "/api/v1/triage/suggestions/{key}/apply",
     "/api/v1/poll-status",
+    "/api/v1/poll-status/gmail-replies/check-now",
     "/api/v1/posture",
     "/api/v1/settings/self-contact",
     "/api/v1/settings/sending-hours",

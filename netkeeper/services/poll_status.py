@@ -17,7 +17,9 @@ store, never by running one:
   there is no next poll, and the last one is read from the armed mailboxes'
   ``replies_polled_at``: the oldest, or none while one was never polled. An armed
   mailbox that needs signing in again is named in the check's reason; it blocks
-  the check only when every armed mailbox does.
+  the check only when every armed mailbox does. A person can ask for it sooner
+  ("Check now", #409): the check is then ``due`` and ``requested`` until the next
+  tick starts the poll, and :func:`replies_check_refused` says when they cannot.
 - **Gmail drafts** (spec 11.5): every :data:`~netkeeper.services.campaign_sender.DRAFTS_POLL_EVERY`,
   only while a campaign draft waits in an armed mailbox. Its last run is kept only
   in the running sender's memory (:meth:`GmailSender.drafts_polled_at`).
@@ -157,6 +159,8 @@ class Check:
     reason: str | None = None
     """Why it has no next time, in a sentence. A ``scheduled`` or ``due`` Gmail reply
     check may carry one too: an armed mailbox it cannot read."""
+    requested_at: datetime | None = None
+    """When a person asked for it sooner ("Check now", #409); it runs at the next tick."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +198,9 @@ class Serving:
     """Mailboxes the running sender's last poll could not open, with the code (#413)."""
     drafts_polled_at: datetime | None = None
     drafts_every: timedelta = DRAFTS_POLL_EVERY
+    replies_requested_at: datetime | None = None
+    """When the "Check now" that waits for the next tick was asked for
+    (:meth:`GmailSender.request_replies_poll`); None when none waits."""
 
 
 def poll_status(
@@ -223,10 +230,11 @@ def poll_status(
 
 
 def _next(
-    last: datetime | None, every: timedelta, now: datetime
+    last: datetime | None, every: timedelta, now: datetime, *, requested: bool = False
 ) -> tuple[CheckState, datetime | None]:
-    """``scheduled`` at ``last + every`` while that is ahead; else ``due`` (the next tick)."""
-    if last is None or last + every <= now:
+    """``scheduled`` at ``last + every`` while that is ahead; else, or when a person asked
+    for it sooner, ``due`` (the next tick)."""
+    if requested or last is None or last + every <= now:
         return CheckState.DUE, None
     return CheckState.SCHEDULED, last + every
 
@@ -256,7 +264,12 @@ def _mailbox_poll(
     elif mailbox.id in serving.replies_due:
         state = CheckState.DUE
     else:
-        state, next_at = _next(serving.replies_polled_at, every, now)
+        state, next_at = _next(
+            serving.replies_polled_at,
+            every,
+            now,
+            requested=serving.replies_requested_at is not None,
+        )
     return MailboxPoll(
         mailbox_id=mailbox.id,
         email=mailbox.email,
@@ -326,12 +339,30 @@ def _gmail_replies(
         if p.state is CheckState.BLOCKED and p.mailbox_id in serving.replies_not_ready and p.reason
     ]
     reason = "; ".join(reasons) or None
-    state, next_at = _next(serving.replies_polled_at, every, now)
+    requested_at = serving.replies_requested_at
+    state, next_at = _next(
+        serving.replies_polled_at, every, now, requested=requested_at is not None
+    )
     if any(p.state is CheckState.DUE for p in polls):  # one ready mailbox is due again
         state, next_at = CheckState.DUE, None
     return replace(
-        base, state=state, last_at=serving.replies_polled_at, next_at=next_at, reason=reason
+        base,
+        state=state,
+        last_at=serving.replies_polled_at,
+        next_at=next_at,
+        reason=reason,
+        requested_at=requested_at,
     )
+
+
+def replies_check_refused(session: Session, user: User, *, serving: Serving) -> str | None:
+    """Why a person cannot ask for the reply poll now ("Check now", #409), or None when
+    they can. The check's own gate, so a refusal reads like the popover: ``serve`` not
+    running, no mailbox armed or connected, every armed mailbox needing sign-in. Reads
+    only; the request itself is :meth:`GmailSender.request_replies_poll`."""
+    mailboxes = list(session.scalars(scoped(user, Mailbox).order_by(Mailbox.id)))
+    gate = _gmail_gate(mailboxes, serving)
+    return None if gate is None else gate[1]
 
 
 def _stored_last(polls: Sequence[MailboxPoll]) -> datetime | None:

@@ -1587,6 +1587,19 @@
         "title": "CheckGroup",
         "type": "string"
       },
+      "CheckNowOut": {
+        "properties": {
+          "already_requested": {
+            "title": "Already Requested",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "already_requested"
+        ],
+        "title": "CheckNowOut",
+        "type": "object"
+      },
       "CheckState": {
         "description": "Where a check stands. Only ``scheduled`` carries a next time.",
         "enum": [
@@ -8421,6 +8434,22 @@
             ],
             "title": "Reason"
           },
+          "requested": {
+            "title": "Requested",
+            "type": "boolean"
+          },
+          "requested_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested At"
+          },
           "state": {
             "$ref": "#/components/schemas/CheckState"
           }
@@ -8433,7 +8462,9 @@
           "interval_minutes",
           "last_at",
           "next_at",
-          "reason"
+          "reason",
+          "requested",
+          "requested_at"
         ],
         "title": "PollCheckOut",
         "type": "object"
@@ -19636,6 +19667,31 @@
           }
         },
         "summary": "Get Poll Status",
+        "tags": [
+          "poll-status"
+        ]
+      }
+    },
+    "/api/v1/poll-status/gmail-replies/check-now": {
+      "post": {
+        "description": "Poll Gmail for replies at the next campaign tick (within a minute), not at the end\nof the interval. Never calls Gmail itself: the tick runs the poll, gated as usual.\nRefused, with the reason, while ``serve`` isn't running, no mailbox is armed or\nconnected, or every armed mailbox needs signing in again.",
+        "operationId": "check_gmail_replies_now",
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckNowOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "The reply poll cannot run now; the detail says why"
+          }
+        },
+        "summary": "Check Gmail Replies Now",
         "tags": [
           "poll-status"
         ]

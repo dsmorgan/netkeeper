@@ -65,6 +65,27 @@ export function checkSummary(check: PollCheck, now: number): string {
   return parts.join(' · ')
 }
 
+/** Whether a check runs at all, so "Check now" (#409) can ask for it sooner. */
+export function canCheckNow(check: { state: CheckState }): boolean {
+  return check.state === 'scheduled' || check.state === 'due'
+}
+
+/**
+ * How long a "Check now" may wait before its button comes back. The campaign tick
+ * runs every minute, so a request still waiting after three has not been served:
+ * the tick may be held. Pressing again joins the same request.
+ */
+export const LATE_AFTER_MS = 3 * 60_000
+
+/** Whether a waiting "Check now" is past {@link LATE_AFTER_MS}. */
+export function checkNowLate(check: PollCheck, now: number): boolean {
+  return (
+    check.requested &&
+    check.requested_at !== null &&
+    now - Date.parse(check.requested_at) >= LATE_AFTER_MS
+  )
+}
+
 /** A reason as a sentence: with its full stop. */
 function sentence(text: string): string {
   return /[.!?]$/.test(text) ? text : `${text}.`

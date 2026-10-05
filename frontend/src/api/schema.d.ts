@@ -2620,6 +2620,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/poll-status/gmail-replies/check-now": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check Gmail Replies Now
+         * @description Poll Gmail for replies at the next campaign tick (within a minute), not at the end
+         *     of the interval. Never calls Gmail itself: the tick runs the poll, gated as usual.
+         *     Refused, with the reason, while ``serve`` isn't running, no mailbox is armed or
+         *     connected, or every armed mailbox needs signing in again.
+         */
+        post: operations["check_gmail_replies_now"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/posture": {
         parameters: {
             query?: never;
@@ -3800,6 +3823,11 @@ export interface components {
          * @enum {string}
          */
         CheckGroup: "gmail" | "linkedin";
+        /** CheckNowOut */
+        CheckNowOut: {
+            /** Already Requested */
+            already_requested: boolean;
+        };
         /**
          * CheckState
          * @description Where a check stands. Only ``scheduled`` carries a next time.
@@ -6012,6 +6040,10 @@ export interface components {
             next_at: string | null;
             /** Reason */
             reason: string | null;
+            /** Requested */
+            requested: boolean;
+            /** Requested At */
+            requested_at: string | null;
             state: components["schemas"]["CheckState"];
         };
         /** PollStatusOut */
@@ -13156,6 +13188,33 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["PollStatusOut"];
                 };
+            };
+        };
+    };
+    check_gmail_replies_now: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CheckNowOut"];
+                };
+            };
+            /** @description The reply poll cannot run now; the detail says why */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

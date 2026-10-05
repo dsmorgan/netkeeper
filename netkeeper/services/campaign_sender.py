@@ -75,7 +75,10 @@ Each tick, before anything is chosen, :meth:`GmailSender.reconcile` looks up wha
 - **Replies and bounces** (P3-08; every ``replies_every``, per user, last):
   :func:`netkeeper.services.campaign_replies.poll_replies`. A ``same_thread``
   follow-up whose thread holds a message from the other side since the first
-  step sends nothing (``not_sent``) and asks for a poll on the next tick.
+  step sends nothing (``not_sent``) and asks for a poll on the next tick. So does a
+  person's "Check now" (#409, :meth:`GmailSender.request_replies_poll`): the
+  request sets a flag, and the next tick polls every armed mailbox, as a full poll
+  each interval does.
   Every armed mailbox is polled once an interval; one that stopped at the read
   budget, was not ready (it needs signing in again, or the Keychain is locked), or
   holds a follow-up because its replies are stale is polled again alone at the next
@@ -311,6 +314,7 @@ class GmailSender:
         # Mailboxes seen not ready whose poll has not caught up since: their follow-ups
         # that start a new conversation wait for it, however recent the last good poll.
         self._replies_catch_up: dict[int, set[int]] = {}
+        self._replies_requested: dict[int, datetime] = {}
         self._label_ids: dict[tuple[int, str], str] = {}
 
     # --- what the poll status reads (#401) -------------------------------------------
@@ -347,6 +351,30 @@ class GmailSender:
     def _poll_soon(self, user_id: int, mailbox_id: int) -> None:
         """Poll this one mailbox at the next tick, leaving the others on their interval."""
         self._replies_due.setdefault(user_id, set()).add(mailbox_id)
+
+    def replies_poll_requested(self, user_id: int) -> bool:
+        """Whether a person asked for ``user_id``'s reply poll on the next tick (#409) and
+        that tick has not started it yet."""
+        return user_id in self._replies_requested
+
+    def replies_poll_requested_at(self, user_id: int) -> datetime | None:
+        """When the waiting "Check now" was first asked for; None when none waits. The
+        poll status shows it, so a request no tick has served yet can say so."""
+        return self._replies_requested.get(user_id)
+
+    def request_replies_poll(self, user_id: int) -> bool:
+        """Poll ``user_id``'s replies on the next tick, not at the end of the interval:
+        the "Check now" request (#409). True when this asked; False when a request was
+        already waiting, so repeated presses within one tick collapse into one poll.
+
+        It only sets a flag. The poll itself still runs in :meth:`_poll_replies`, in the
+        campaign tick, with the same arming, mailbox readiness and read budget as every
+        other poll; nothing here opens Gmail or a session. It leaves the send hold
+        (:meth:`_replies_stale`, the catch-up set) alone."""
+        if user_id in self._replies_requested:
+            return False
+        self._replies_requested[user_id] = self._clock()
+        return True
 
     def drafts_polled_at(self, user_id: int) -> datetime | None:
         """When this process last ran ``user_id``'s drafts poll; None before the first.
@@ -676,11 +704,18 @@ class GmailSender:
     def _poll_replies(self, factory: sessionmaker[Session], user_id: int, now: datetime) -> None:
         """Every armed mailbox once an interval; between, only the mailboxes due again
         (#413). A mailbox that stopped part way, or is not ready, is polled again alone at
-        the next tick, so it never makes the healthy ones poll every minute."""
+        the next tick, so it never makes the healthy ones poll every minute.
+
+        A person's "Check now" (#409) makes this tick's poll a full one: every armed
+        mailbox, whatever its backoff, and the due set starts over from what it finds."""
         last = self._replies_polled.get(user_id)
         due = self._replies_due.get(user_id, set())
         only: frozenset[int] | None = None
-        if last is None or now - last >= self._replies_every:
+        requested = user_id in self._replies_requested
+        if requested or last is None or now - last >= self._replies_every:
+            # Cleared before any mailbox is polled: a press during the poll asks for
+            # another. A mailbox that is not ready goes back in the due set, not here.
+            self._replies_requested.pop(user_id, None)
             self._replies_polled[user_id] = now
         else:
             only = frozenset(m for m in due if self._retry_at(user_id, m) <= now)
