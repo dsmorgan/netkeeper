@@ -2364,6 +2364,17 @@
           "total": {
             "title": "Total",
             "type": "integer"
+          },
+          "unfiltered_total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unfiltered Total"
           }
         },
         "required": [
@@ -2798,6 +2809,17 @@
               }
             ],
             "title": "Columns"
+          },
+          "count_unfiltered": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Count Unfiltered"
           },
           "filter": {
             "anyOf": [
@@ -14949,7 +14971,7 @@
     },
     "/api/v1/contacts/query": {
       "post": {
-        "description": "The Contacts table: filter, sort, page, and the columns to carry (spec 10.1, 10.4).\n\nA `POST` because the filter tree does not fit a query string; it reads only,\nand its session never takes the write lock. `total` counts every match;\n`describe` reads the filter for the table header.",
+        "description": "The Contacts table: filter, sort, page, and the columns to carry (spec 10.1, 10.4).\n\nA `POST` because the filter tree does not fit a query string; it reads only,\nand its session never takes the write lock. `total` counts every match;\n`describe` reads the filter for the table header. With `count_unfiltered`\nand a filter that has a predicate, `unfiltered_total` counts the contacts it\nwould match without one, archived ones included only if the filter includes\nthem.",
         "operationId": "query_contacts",
         "requestBody": {
           "content": {

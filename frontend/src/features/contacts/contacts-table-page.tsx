@@ -1,7 +1,9 @@
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { FilterSummary, type FilterChip } from '@/components/filter-summary'
+import { quoted } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Select } from '@/components/ui/select'
 
@@ -27,6 +29,7 @@ import {
   buildFilter,
   filterBarCanShow,
   formatSort,
+  isUnfiltered,
   lastPage,
   pageOffset,
   pageSize,
@@ -35,7 +38,15 @@ import {
   PAGE_SIZES,
   type ContactsSearch,
 } from './search'
-import type { BulkSelection, ContactRow, FilterTree, SavedView, SortField, SortKey } from './types'
+import {
+  MET_LABELS,
+  type BulkSelection,
+  type ContactRow,
+  type FilterTree,
+  type SavedView,
+  type SortField,
+  type SortKey,
+} from './types'
 import { useColumnPreference } from './views'
 import { SavedViews } from './saved-views'
 
@@ -90,11 +101,20 @@ export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps
   const sort = applied && applied.sort.length > 0 ? applied.sort : sortKeys(search)
 
   const page = useQuery({
-    ...contactsPageQuery({ filter, sort, limit: size, offset }, columnIds),
+    ...contactsPageQuery(
+      { filter, sort, limit: size, offset, countUnfiltered: filter.where !== null },
+      columnIds,
+    ),
     enabled: !awaitingView,
   })
   const rows = useMemo(() => page.data?.items ?? EMPTY_ROWS, [page.data])
   const total = page.data?.total ?? 0
+  const filtered = !isUnfiltered(search)
+  // "12 of 87": the server counts the list without the filter's predicate. With
+  // no predicate (only "include archived") the whole is what the table shows.
+  const unfilteredTotal =
+    page.data?.unfiltered_total ?? (page.isSuccess && filter.where === null ? total : undefined)
+  const searchBox = useRef<HTMLInputElement>(null)
 
   // A page past the last one — a hand-edited link, or rows that went away since
   // the link was made — lands on the last page rather than on an empty table
@@ -227,27 +247,78 @@ export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps
     ? { filter, ids: null }
     : { filter: null, ids: [...picked] }
   const showBulk = everything || picked.size > 0
+  const clearFilters = useCallback(
+    () =>
+      update({
+        q: undefined,
+        company: undefined,
+        met: undefined,
+        tags: undefined,
+        dnc: undefined,
+        archived: undefined,
+        view: undefined,
+      }),
+    [update],
+  )
+  const chips: FilterChip[] = []
+  if (applied !== undefined) {
+    chips.push({
+      key: 'view',
+      label: `view: ${applied.name}`,
+      // The bar keeps what it can show of the view; only the stored tree goes.
+      onRemove: () => update({ view: undefined }),
+    })
+  } else if (search.view !== undefined) {
+    chips.push({
+      key: 'view',
+      label: `view: ${search.view}`,
+      onRemove: () => update({ view: undefined }),
+    })
+  }
+  if (search.q)
+    chips.push({ key: 'q', label: quoted(search.q), onRemove: () => update({ q: undefined }) })
+  if (search.company) {
+    chips.push({
+      key: 'company',
+      label: `company: ${search.company}`,
+      onRemove: () => update({ company: undefined }),
+    })
+  }
+  if (search.met) {
+    chips.push({
+      key: 'met',
+      label: `met: ${MET_LABELS[search.met].toLowerCase()}`,
+      onRemove: () => update({ met: undefined }),
+    })
+  }
+  for (const tag of search.tags ?? []) {
+    chips.push({
+      key: `tag:${tag}`,
+      label: `tag: ${tag}`,
+      onRemove: () => {
+        const rest = (search.tags ?? []).filter((name) => name !== tag)
+        update({ tags: rest.length > 0 ? rest : undefined })
+      },
+    })
+  }
+  if (search.dnc) {
+    chips.push({ key: 'dnc', label: 'do not contact', onRemove: () => update({ dnc: undefined }) })
+  }
+  if (search.archived) {
+    chips.push({
+      key: 'archived',
+      label: 'including archived',
+      onRemove: () => update({ archived: undefined }),
+    })
+  }
+
   const first = total === 0 ? 0 : offset + 1
   const last = Math.min(offset + rows.length, total)
 
   return (
     <div className="grid gap-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <FilterBar
-          search={search}
-          onChange={update}
-          onClear={() =>
-            update({
-              q: undefined,
-              company: undefined,
-              met: undefined,
-              tags: undefined,
-              dnc: undefined,
-              archived: undefined,
-              view: undefined,
-            })
-          }
-        />
+        <FilterBar search={search} onChange={update} searchRef={searchBox} />
         <div className="flex items-center gap-2">
           <SavedViews
             current={search}
@@ -264,6 +335,14 @@ export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps
           <AddContactDialog />
         </div>
       </div>
+
+      <FilterSummary
+        shown={page.isSuccess ? total : undefined}
+        total={unfilteredTotal}
+        chips={chips}
+        onClear={clearFilters}
+        returnFocusTo={searchBox}
+      />
 
       {viewFailed && (
         <div role="alert" className="grid gap-2 rounded-xl bg-destructive/10 p-4 text-destructive">
@@ -345,6 +424,18 @@ export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps
         <div className="grid justify-items-start gap-2 rounded-xl bg-muted/40 p-6">
           <p className="font-medium">No contacts match this filter.</p>
           <p className="text-muted-foreground">{page.data.describe}</p>
+          {filtered && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                clearFilters()
+                searchBox.current?.focus()
+              }}
+            >
+              Clear filters
+            </Button>
+          )}
         </div>
       )}
 

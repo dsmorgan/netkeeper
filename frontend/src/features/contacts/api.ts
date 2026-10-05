@@ -70,6 +70,8 @@ export interface ContactsPageRequest {
   sort: readonly SortKey[]
   limit: number
   offset: number
+  /** Ask for `unfiltered_total` too, the "of 87" in "Showing 12 of 87" (#402). */
+  countUnfiltered?: boolean
 }
 
 /** One page of the table: a filter, a sort, a page, and the columns on screen. */
@@ -80,6 +82,8 @@ export function contactsPageQuery(request: ContactsPageRequest, columns: readonl
     limit: request.limit,
     offset: request.offset,
     columns: requestedColumns(columns),
+    // Only when asked, so an unfiltered page's request stays what it was.
+    ...(request.countUnfiltered === true ? { count_unfiltered: true } : {}),
   }
   return queryOptions({
     queryKey: [...contactsKeys.pages(), body] as const,

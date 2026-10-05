@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
-import { Search, Tags, X } from 'lucide-react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Search, Tags } from 'lucide-react'
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -16,7 +16,7 @@ import {
 import { Select } from '@/components/ui/select'
 
 import { tagsQuery } from './api'
-import { isUnfiltered, type ContactsSearch } from './search'
+import type { ContactsSearch } from './search'
 import { MET_LABELS, MET_VALUES, type ContactMet } from './types'
 
 /**
@@ -34,7 +34,9 @@ function DebouncedInput({
   label,
   placeholder,
   icon,
+  inputRef,
 }: {
+  inputRef?: RefObject<HTMLInputElement | null>
   value: string
   onCommit: (next: string) => void
   label: string
@@ -71,6 +73,7 @@ function DebouncedInput({
         </span>
       )}
       <Input
+        ref={inputRef}
         aria-label={label}
         placeholder={placeholder}
         value={text}
@@ -84,11 +87,15 @@ function DebouncedInput({
 export interface FilterBarProps {
   search: ContactsSearch
   onChange: (patch: Partial<ContactsSearch>) => void
-  onClear: () => void
+  /** The search box, for focus to land on once every filter is cleared. */
+  searchRef?: RefObject<HTMLInputElement | null>
 }
 
-/** The filters above the table. Every one of them ends up in the URL. */
-export function FilterBar({ search, onChange, onClear }: FilterBarProps) {
+/**
+ * The filters above the table. Every one of them ends up in the URL. What is
+ * active, and Clear, show in the page's filter summary (#402).
+ */
+export function FilterBar({ search, onChange, searchRef }: FilterBarProps) {
   const tags = useQuery(tagsQuery)
   const chosenTags = new Set(search.tags ?? [])
 
@@ -102,6 +109,7 @@ export function FilterBar({ search, onChange, onClear }: FilterBarProps) {
   return (
     <div className="flex flex-wrap items-center gap-2">
       <DebouncedInput
+        inputRef={searchRef}
         label="Search contacts"
         placeholder="Name, company, title…"
         icon={<Search className="size-3.5" />}
@@ -174,13 +182,6 @@ export function FilterBar({ search, onChange, onClear }: FilterBarProps) {
         />
         Include archived
       </label>
-
-      {!isUnfiltered(search) && (
-        <Button variant="ghost" size="sm" onClick={onClear}>
-          <X data-icon="inline-start" />
-          Clear filters
-        </Button>
-      )}
     </div>
   )
 }

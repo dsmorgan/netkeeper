@@ -202,6 +202,44 @@ async def test_columns_pick_what_a_row_carries(
     assert row["primary_email"]
 
 
+async def test_a_filtered_query_counts_the_list_without_its_predicate(
+    client: httpx.AsyncClient, people: list[int]
+) -> None:
+    """ "Showing 1 of 2" (#402): the whole is the same archived switch, no predicate."""
+    where = {"op": "contains", "field": "current_company", "value": "Blueleaf"}
+    page = await _query(client, filter={"where": where}, count_unfiltered=True)
+    assert page["total"] == 1
+    assert page["unfiltered_total"] == 2
+
+    wide = await _query(
+        client, filter={"where": where, "include_archived": True}, count_unfiltered=True
+    )
+    assert wide["unfiltered_total"] == 3
+
+
+async def test_only_a_filtered_query_that_asks_carries_a_second_count(
+    client: httpx.AsyncClient, people: list[int]
+) -> None:
+    assert "unfiltered_total" not in await _query(client, count_unfiltered=True)
+    wide = await _query(client, filter={"include_archived": True}, count_unfiltered=True)
+    assert "unfiltered_total" not in wide
+    # Not asked, not counted: a page that shows no "of N" spends no query on it.
+    where = {"op": "contains", "field": "current_company", "value": "Blueleaf"}
+    assert "unfiltered_total" not in await _query(client, filter={"where": where})
+
+
+async def test_the_unfiltered_count_is_the_users_own(
+    client: httpx.AsyncClient, running_app: FastAPI, intruder: User, people: list[int]
+) -> None:
+    where = {"op": "contains", "field": "current_company", "value": "Blueleaf"}
+    with acting_as(running_app, intruder.id):
+        page = await _query(
+            client, filter={"where": where, "include_archived": True}, count_unfiltered=True
+        )
+    assert page["total"] == 0
+    assert page["unfiltered_total"] == 0
+
+
 async def test_a_row_carries_its_primary_email_and_phone(
     client: httpx.AsyncClient, people: list[int]
 ) -> None:

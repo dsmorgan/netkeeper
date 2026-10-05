@@ -1,7 +1,8 @@
-import { Link } from '@tanstack/react-router'
+import { Link, useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 
+import { FilterSummary, type FilterChip } from '@/components/filter-summary'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/input'
@@ -59,7 +60,53 @@ export function InboxPage({ enrollment }: { enrollment?: number }) {
   )
   const [kind, setKind] = useState<InboxKind | ''>('')
   const [offset, setOffset] = useState(0)
+  const [shownEnrollment, setShownEnrollment] = useState(enrollment)
+  if (shownEnrollment !== enrollment) {
+    // The enrollment chip went away, or a link named another: start from page one.
+    setShownEnrollment(enrollment)
+    setOffset(0)
+  }
   const page = useQuery(inboxQuery({ handled, kind, enrollment, offset }))
+  const navigate = useNavigate()
+  const kindPicker = useRef<HTMLSelectElement>(null)
+  // "Unhandled" or "All" is which inbox you are reading, not a filter on it, so
+  // the count's whole is that inbox without a kind or an enrollment.
+  const filtered = kind !== '' || enrollment !== undefined
+  const whole = useQuery({
+    ...inboxQuery({ handled, kind: '', offset: 0 }),
+    enabled: filtered && page.isSuccess,
+  })
+
+  function clearKind() {
+    setOffset(0)
+    setKind('')
+  }
+  function clearEnrollment() {
+    void navigate({ to: '/inbox' })
+  }
+  const chips: FilterChip[] = []
+  if (kind !== '') {
+    chips.push({
+      key: 'kind',
+      label: `kind: ${KIND_LABELS[kind].toLowerCase()}`,
+      onRemove: clearKind,
+    })
+  }
+  if (enrollment !== undefined) {
+    const first = page.data?.items[0]
+    chips.push({
+      key: 'enrollment',
+      label:
+        first === undefined
+          ? 'one enrollment'
+          : `enrollment: ${first.contact_name || 'Unnamed contact'} in ${first.campaign_name}`,
+      onRemove: clearEnrollment,
+    })
+  }
+  function clearAll() {
+    clearKind()
+    if (enrollment !== undefined) clearEnrollment()
+  }
 
   return (
     <div className="flex max-w-5xl flex-col gap-4">
@@ -81,6 +128,7 @@ export function InboxPage({ enrollment }: { enrollment?: number }) {
           <option value="all">All</option>
         </Select>
         <Select
+          ref={kindPicker}
           aria-label="Kind"
           value={kind}
           onChange={(event) => {
@@ -95,15 +143,14 @@ export function InboxPage({ enrollment }: { enrollment?: number }) {
             </option>
           ))}
         </Select>
-        {enrollment !== undefined && (
-          <span className="text-muted-foreground">
-            One enrollment only.{' '}
-            <Link to="/inbox" className="underline underline-offset-4">
-              Show every enrollment
-            </Link>
-          </span>
-        )}
       </div>
+      <FilterSummary
+        shown={page.data?.total}
+        total={whole.data?.total}
+        chips={chips}
+        onClear={clearAll}
+        returnFocusTo={kindPicker}
+      />
       {page.isPending ? (
         <LoadingNote label="Loading the inbox…" />
       ) : page.isError ? (
@@ -116,6 +163,20 @@ export function InboxPage({ enrollment }: { enrollment?: number }) {
             Back to the first page
           </Button>
         </p>
+      ) : page.data.total === 0 && filtered ? (
+        <EmptyState title="Nothing matches these filters">
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-2"
+            onClick={() => {
+              clearAll()
+              kindPicker.current?.focus()
+            }}
+          >
+            Clear filters
+          </Button>
+        </EmptyState>
       ) : page.data.total === 0 ? (
         <EmptyState title={handled === 'unhandled' ? 'Nothing to handle' : 'Nothing detected yet'}>
           {handled === 'unhandled'
