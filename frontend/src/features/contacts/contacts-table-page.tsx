@@ -112,8 +112,13 @@ export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps
   const filtered = !isUnfiltered(search)
   // "12 of 87": the server counts the list without the filter's predicate. With
   // no predicate (only "include archived") the whole is what the table shows.
-  const unfilteredTotal =
-    page.data?.unfiltered_total ?? (page.isSuccess && filter.where === null ? total : undefined)
+  // Not from a placeholder page: that is the previous filter's answer, and the
+  // summary would announce its count beside the new filter's chips.
+  const settled = page.isSuccess && !page.isPlaceholderData
+  const shownTotal = settled ? total : undefined
+  const unfilteredTotal = settled
+    ? (page.data.unfiltered_total ?? (filter.where === null ? total : null))
+    : undefined
   const searchBox = useRef<HTMLInputElement>(null)
 
   // A page past the last one — a hand-edited link, or rows that went away since
@@ -269,9 +274,10 @@ export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps
       onRemove: () => update({ view: undefined }),
     })
   } else if (search.view !== undefined) {
+    // Never a bare id: until the views load, or once this one is gone, it is "saved view".
     chips.push({
       key: 'view',
-      label: `view: ${search.view}`,
+      label: 'saved view',
       onRemove: () => update({ view: undefined }),
     })
   }
@@ -337,7 +343,7 @@ export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps
       </div>
 
       <FilterSummary
-        shown={page.isSuccess ? total : undefined}
+        shown={shownTotal}
         total={unfilteredTotal}
         chips={chips}
         onClear={clearFilters}

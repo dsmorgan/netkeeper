@@ -60,11 +60,22 @@ export function InboxPage({ enrollment }: { enrollment?: number }) {
   )
   const [kind, setKind] = useState<InboxKind | ''>('')
   const [offset, setOffset] = useState(0)
+  // Set by the enrollment chip, which removes only that filter; any other way
+  // the enrollment changes (the sidebar's Inbox link, a campaign page's link)
+  // starts the inbox afresh.
+  const [keepKind, setKeepKind] = useState(false)
   const [shownEnrollment, setShownEnrollment] = useState(enrollment)
+  // The enrollment's chip label, once its first page says whose it is; kept
+  // while later pages load, so the chip never changes its name under you.
+  const [enrollmentLabel, setEnrollmentLabel] = useState<string | undefined>(undefined)
   if (shownEnrollment !== enrollment) {
-    // The enrollment chip went away, or a link named another: start from page one.
+    // Not keyed by enrollment in the route, so the page resets what it should here.
     setShownEnrollment(enrollment)
     setOffset(0)
+    setHandledFilter(enrollment === undefined ? 'unhandled' : 'all')
+    if (!keepKind) setKind('')
+    setKeepKind(false)
+    setEnrollmentLabel(undefined)
   }
   const page = useQuery(inboxQuery({ handled, kind, enrollment, offset }))
   const navigate = useNavigate()
@@ -73,7 +84,7 @@ export function InboxPage({ enrollment }: { enrollment?: number }) {
   // the count's whole is that inbox without a kind or an enrollment.
   const filtered = kind !== '' || enrollment !== undefined
   const whole = useQuery({
-    ...inboxQuery({ handled, kind: '', offset: 0 }),
+    ...inboxQuery({ handled, kind: '', offset: 0, limit: 1 }),
     enabled: filtered && page.isSuccess,
   })
 
@@ -82,7 +93,16 @@ export function InboxPage({ enrollment }: { enrollment?: number }) {
     setKind('')
   }
   function clearEnrollment() {
+    setKeepKind(true)
     void navigate({ to: '/inbox' })
+  }
+  if (enrollment !== undefined && enrollmentLabel === undefined && page.isSuccess) {
+    const first = page.data.items[0]
+    setEnrollmentLabel(
+      first === undefined
+        ? 'one enrollment'
+        : `enrollment: ${first.contact_name || 'Unnamed contact'} in ${first.campaign_name}`,
+    )
   }
   const chips: FilterChip[] = []
   if (kind !== '') {
@@ -92,20 +112,13 @@ export function InboxPage({ enrollment }: { enrollment?: number }) {
       onRemove: clearKind,
     })
   }
-  if (enrollment !== undefined) {
-    const first = page.data?.items[0]
-    chips.push({
-      key: 'enrollment',
-      label:
-        first === undefined
-          ? 'one enrollment'
-          : `enrollment: ${first.contact_name || 'Unnamed contact'} in ${first.campaign_name}`,
-      onRemove: clearEnrollment,
-    })
+  if (enrollment !== undefined && enrollmentLabel !== undefined) {
+    chips.push({ key: 'enrollment', label: enrollmentLabel, onRemove: clearEnrollment })
   }
   function clearAll() {
     clearKind()
-    if (enrollment !== undefined) clearEnrollment()
+    // Clear drops the kind too, so the enrollment's change need not keep it.
+    if (enrollment !== undefined) void navigate({ to: '/inbox' })
   }
 
   return (
@@ -146,7 +159,7 @@ export function InboxPage({ enrollment }: { enrollment?: number }) {
       </div>
       <FilterSummary
         shown={page.data?.total}
-        total={whole.data?.total}
+        total={whole.isError ? null : whole.data?.total}
         chips={chips}
         onClear={clearAll}
         returnFocusTo={kindPicker}

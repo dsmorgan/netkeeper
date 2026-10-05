@@ -160,13 +160,17 @@ describe('inbox', () => {
   })
 
   it('shows the kind filter as a chip, with how many of how many', async () => {
+    const calls: Call[] = []
     mockFetch(
-      backend({
-        'GET /api/v1/inbox': (call) =>
-          call.query.get('kind') === 'bounce'
-            ? jsonResponse({ total: 1, unhandled: 3, items: [PAGE.items[2]] })
-            : jsonResponse(PAGE),
-      }),
+      backend(
+        {
+          'GET /api/v1/inbox': (call) =>
+            call.query.get('kind') === 'bounce'
+              ? jsonResponse({ total: 1, unhandled: 3, items: [PAGE.items[2]] })
+              : jsonResponse(PAGE),
+        },
+        calls,
+      ),
     )
     await renderApp('/inbox')
     await screen.findByRole('listitem', { name: /^Reply from Tobias/ })
@@ -174,6 +178,9 @@ describe('inbox', () => {
 
     fireEvent.change(screen.getByLabelText('Kind'), { target: { value: 'bounce' } })
     await waitFor(() => expect(screen.getByText(/Showing 1 of 3 · filtered by:/)).toBeVisible())
+    // The whole is counted from one row of the unfiltered inbox.
+    const whole = calls.filter((c) => c.path === '/api/v1/inbox' && !c.query.has('kind')).at(-1)
+    expect(whole?.query.get('limit')).toBe('1')
 
     fireEvent.click(screen.getByRole('button', { name: 'Remove kind: bounce' }))
     await waitFor(() => expect(screen.queryByRole('list', { name: 'Active filters' })).toBeNull())
@@ -200,6 +207,56 @@ describe('inbox', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }))
     expect(await screen.findByRole('listitem', { name: /^Reply from Tobias/ })).toBeVisible()
+  })
+
+  it('keeps the kind but goes back to Unhandled when the enrollment chip goes', async () => {
+    const calls: Call[] = []
+    mockFetch(inbox(PAGE, calls))
+    const { router } = await renderApp('/inbox?enrollment=302')
+    await screen.findByRole('listitem', { name: /^Reply from Tobias/ })
+    // One enrollment's messages show handled and unhandled alike.
+    expect(screen.getByLabelText('Show')).toHaveValue('all')
+    const name = 'Remove enrollment: Tobias Marrowbone in Spring hello'
+    expect(screen.getByRole('button', { name })).toBeVisible()
+
+    fireEvent.change(screen.getByLabelText('Kind'), { target: { value: 'bounce' } })
+    // The chip keeps its name while the next page loads; it never says "one enrollment".
+    expect(screen.getByRole('button', { name })).toBeVisible()
+    await waitFor(() =>
+      expect(
+        calls
+          .filter((c) => c.path === '/api/v1/inbox')
+          .at(-1)
+          ?.query.get('kind'),
+      ).toBe('bounce'),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name }))
+    await waitFor(() => expect(router.state.location.searchStr).toBe(''))
+    expect(screen.getByLabelText('Kind')).toHaveValue('bounce')
+    expect(screen.getByLabelText('Show')).toHaveValue('unhandled')
+    expect(screen.getByRole('button', { name: 'Remove kind: bounce' })).toBeVisible()
+    await waitFor(() => {
+      const last = calls
+        .filter((c) => c.path === '/api/v1/inbox' && c.query.get('kind') === 'bounce')
+        .at(-1)
+      expect(last?.query.has('enrollment_id')).toBe(false)
+      expect(last?.query.get('handled')).toBe('false')
+    })
+  })
+
+  it('starts afresh from the sidebar link, whatever the enrollment view had', async () => {
+    mockFetch(inbox(PAGE))
+    const { router } = await renderApp('/inbox?enrollment=302')
+    await screen.findByRole('listitem', { name: /^Reply from Tobias/ })
+    fireEvent.change(screen.getByLabelText('Kind'), { target: { value: 'bounce' } })
+
+    const nav = screen.getByRole('navigation', { name: 'Primary' })
+    fireEvent.click(within(nav).getByRole('link', { name: 'Inbox' }))
+    await waitFor(() => expect(router.state.location.searchStr).toBe(''))
+    expect(screen.getByLabelText('Kind')).toHaveValue('')
+    expect(screen.getByLabelText('Show')).toHaveValue('unhandled')
+    expect(screen.queryByRole('list', { name: 'Active filters' })).toBeNull()
   })
 
   it('marks an item handled, then reloads the list', async () => {

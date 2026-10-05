@@ -79,15 +79,32 @@ describe('FilterSummary', () => {
     await waitFor(() => expect(screen.getByLabelText('Search')).toHaveFocus())
   })
 
-  it('says only how many match while the whole is unknown', () => {
+  it('says only how many match when the whole is unavailable', () => {
     render(
       <FilterSummary
         shown={3}
-        total={undefined}
+        total={null}
         chips={[{ key: 'k', label: 'kind: bounce', onRemove: () => undefined }]}
         onClear={() => undefined}
       />,
     )
     expect(screen.getByRole('status')).toHaveTextContent(/^Showing 3 · filtered by:/)
+  })
+
+  it('holds the line until both counts arrive, so it is announced once', () => {
+    const chips = [{ key: 'k', label: 'kind: bounce', onRemove: () => undefined }]
+    const props = { chips, onClear: () => undefined }
+    const { rerender } = render(<FilterSummary {...props} shown={undefined} total={undefined} />)
+    // The chips show at once; the live region stays quiet.
+    expect(screen.getByRole('button', { name: 'Remove kind: bounce' })).toBeVisible()
+    expect(screen.getByRole('status')).toHaveTextContent(/^$/)
+
+    rerender(<FilterSummary {...props} shown={3} total={undefined} />)
+    expect(screen.getByRole('status')).toHaveTextContent(/^$/)
+
+    rerender(<FilterSummary {...props} shown={3} total={87} />)
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Showing 3 of 87 · filtered by: kind: bounce',
+    )
   })
 })

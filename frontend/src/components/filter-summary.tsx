@@ -22,8 +22,10 @@ export interface FilterChip {
  * announce the change. With no chips it renders that region empty.
  *
  * `shown` is the number of matches, every page of them, not the rows on screen.
- * `total` is the list without any of the chips' filters; leave it out while it
- * loads and the line says only how many match.
+ * `total` is the list without any of the chips' filters: `null` when it is not
+ * available, and the line says only how many match. Either one `undefined` means
+ * it is still loading, and the line waits for both, so a screen reader hears one
+ * announcement per change, not a partial one and then the whole.
  */
 export function FilterSummary({
   shown,
@@ -34,7 +36,7 @@ export function FilterSummary({
   className,
 }: {
   shown: number | undefined
-  total: number | undefined
+  total: number | null | undefined
   chips: readonly FilterChip[]
   onClear: () => void
   /** Where the focus goes once the last chip is gone, by Clear or by removing it. */
@@ -47,6 +49,7 @@ export function FilterSummary({
   // change), so this waits for the chips themselves to change, not for a frame.
   const pendingFocus = useRef<{ key: string | null } | undefined>(undefined)
   const active = chips.length > 0
+  const text = active && shown !== undefined && total !== undefined ? summaryText(shown, total) : ''
   const keys = chips.map((chip) => chip.key).join('\n')
 
   useEffect(() => {
@@ -85,8 +88,10 @@ export function FilterSummary({
       )}
     >
       <p role="status" aria-live="polite" className={active ? 'text-muted-foreground' : 'sr-only'}>
-        {active ? summaryText(shown, total) : ''}
-        {active && <span className="sr-only"> {chips.map((chip) => chip.label).join(', ')}</span>}
+        {text}
+        {text !== '' && (
+          <span className="sr-only"> {chips.map((chip) => chip.label).join(', ')}</span>
+        )}
       </p>
       {active && (
         <>
@@ -127,9 +132,8 @@ export function FilterSummary({
   )
 }
 
-function summaryText(shown: number | undefined, total: number | undefined): string {
-  if (shown === undefined) return 'Filtered by:'
+function summaryText(shown: number, total: number | null): string {
   const count = shown.toLocaleString()
-  if (total === undefined) return `Showing ${count} · filtered by:`
+  if (total === null) return `Showing ${count} · filtered by:`
   return `Showing ${count} of ${total.toLocaleString()} · filtered by:`
 }

@@ -35,16 +35,24 @@ export interface InboxFilters {
   kind: InboxKind | ''
   enrollment?: number
   offset: number
+  /** Items per page; one is enough for a count. */
+  limit?: number
 }
 
-export function inboxQuery({ handled, kind, enrollment, offset }: InboxFilters) {
+export function inboxQuery({
+  handled,
+  kind,
+  enrollment,
+  offset,
+  limit = INBOX_PAGE,
+}: InboxFilters) {
   return queryOptions({
-    queryKey: [...inboxKeys.all, handled, kind, enrollment ?? null, offset] as const,
+    queryKey: [...inboxKeys.all, handled, kind, enrollment ?? null, offset, limit] as const,
     queryFn: async ({ signal }): Promise<InboxPage> => {
       const { data, error, response } = await api.GET('/api/v1/inbox', {
         params: {
           query: {
-            limit: INBOX_PAGE,
+            limit,
             offset,
             ...(handled === 'unhandled' ? { handled: false } : {}),
             ...(kind === '' ? {} : { kind }),

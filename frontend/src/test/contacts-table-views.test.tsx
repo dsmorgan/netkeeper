@@ -100,6 +100,9 @@ describe('a ?view= link', () => {
     })
     await renderApp('/contacts?view=9')
     expect(await screen.findByText(/Saved view 9 no longer exists/)).toBeInTheDocument()
+    // Its chip never shows a bare id.
+    expect(screen.getByRole('button', { name: 'Remove saved view' })).toBeVisible()
+    expect(screen.queryByRole('button', { name: /Remove view: 9/ })).toBeNull()
   })
 
   it('warns that touching a filter widens a view the bar cannot show', async () => {
