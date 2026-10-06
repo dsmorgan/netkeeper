@@ -306,8 +306,9 @@ class Msg:
     sender: Member | Organization
     text: str
     at_ms: int
-    #: ``None`` makes the message actorless, as two captured list messages were.
-    actor: Member | Organization | None = None
+    #: ``True`` gives the message ``actor: null`` (with a ``sender``), as two captured
+    #: list messages had.
+    actorless: bool = False
     subject: str | None = None
     render_content: tuple[dict[str, Any], ...] = ()
     edited: bool = False
@@ -321,7 +322,7 @@ class Msg:
         return self.sender == OWNER
 
 
-def message(m: Msg, *, actorless: bool = False) -> dict[str, Any]:
+def message(m: Msg) -> dict[str, Any]:
     """A ``com.linkedin.messenger.Message``, as both the list and a thread carry it."""
     mid = message_id(m.conversation, m.k, m.at_ms)
     return {
@@ -338,7 +339,7 @@ def message(m: Msg, *, actorless: bool = False) -> dict[str, Any]:
         "body": _text(m.text),
         "subject": m.subject,
         "deliveredAt": m.at_ms,
-        "actor": None if actorless else participant(m.actor or m.sender),
+        "actor": None if m.actorless else participant(m.sender),
         "sender": participant(m.sender, brief=True),
         "originToken": origin_token(m.conversation * 1000 + m.k) if m.outbound else None,
         "messageBodyRenderFormat": "EDITED" if m.edited else "DEFAULT",
@@ -493,6 +494,21 @@ def host_urn_render_content(kind: str, sender: Member) -> dict[str, Any]:
             "_recipeType": _RECIPE,
             "type": kind,
             "hostUrn": sender.urn,
+        }
+    }
+
+
+def file_render_content() -> dict[str, Any]:
+    """An attachment's ``renderContent`` item (``file``), with invented values."""
+    return {
+        "file": {
+            "_type": "com.linkedin.messenger.FileAttachment",
+            "_recipeType": _RECIPE,
+            "assetUrn": "urn:li:digitalmediaAsset:invented-asset-0001",
+            "byteSize": 1234,
+            "mediaType": "application/x-invented",
+            "name": "invented-attachment.pdf",
+            "url": "https://files.example.invalid/invented-attachment.pdf",
         }
     }
 
@@ -819,19 +835,27 @@ def create_message_response(conversation: int, k: int, text: str, *, token: str,
 
 
 # --- the canned conversations -----------------------------------------------------------
+#
+# Each is one kind the 2026-10-05 capture showed (the shape note's "How kinds are marked"),
+# except where marked invented. ``READ_AS_ONE_TO_ONE``, ``SKIPPED_OTHER`` and
+# ``SKIPPED_GROUP`` say what P4-01 does with each (the shape note's "What P4 reads").
+
+
+def _at(minutes: int) -> int:
+    return T0 + minutes * MINUTE_MS
+
 
 #: One-to-one, the last message from the contact.
 INBOUND_LAST: Final = Msg(
-    11, 3, ZEPHYRINE, "Invented reply about the fictional robotics meetup.", T0 + 50 * MINUTE_MS
+    11, 3, ZEPHYRINE, "Invented reply about the fictional robotics meetup.", _at(50)
 )
 ONE_TO_ONE_INBOUND: Final = Conv(11, (ZEPHYRINE,), INBOUND_LAST, creator=ZEPHYRINE)
 #: One-to-one, the last message the owner's own (``originToken`` set).
 ONE_TO_ONE_OUTBOUND: Final = Conv(
-    12,
-    (THADDEUS,),
-    Msg(12, 2, OWNER, "Invented line one\nInvented line two", T0 + 40 * MINUTE_MS),
+    12, (THADDEUS,), Msg(12, 2, OWNER, "Invented line one\nInvented line two", _at(40))
 )
-#: An InMail the owner accepted: categories include ``INMAIL``, ``state`` ``ACCEPTED``.
+#: An InMail the owner accepted: ``INMAIL`` stays in ``categories``, ``state`` is
+#: ``ACCEPTED``. Read as one-to-one (maintainer's decision, #432 review).
 INMAIL_ACCEPTED: Final = Conv(
     13,
     (MARISOL,),
@@ -840,14 +864,14 @@ INMAIL_ACCEPTED: Final = Conv(
         1,
         MARISOL,
         "Invented recruiter note about an imaginary role.",
-        T0 + 30 * MINUTE_MS,
+        _at(30),
         subject="Invented subject line",
     ),
     categories=(INBOX, PRIMARY_INBOX, INMAIL),
     state="ACCEPTED",
     creator=MARISOL,
 )
-#: A pending InMail with ``hostUrnData`` and the ``InMail`` label.
+#: A pending InMail: ``hostUrnData`` ``SALES_INMAIL``, the ``InMail`` label, a subject.
 INMAIL_PENDING: Final = Conv(
     14,
     (BRIXTON,),
@@ -856,7 +880,7 @@ INMAIL_PENDING: Final = Conv(
         1,
         BRIXTON,
         "Invented pitch from a founder who does not exist.",
-        T0 + 20 * MINUTE_MS,
+        _at(20),
         subject="Invented pitch subject",
         render_content=(host_urn_render_content("SALES_INMAIL", BRIXTON),),
     ),
@@ -865,7 +889,8 @@ INMAIL_PENDING: Final = Conv(
     type_label=INMAIL_LABEL,
     creator=BRIXTON,
 )
-#: A sponsored message from a company: ``ARCHIVE``/``INMAIL``, ``Sponsored``, ad content.
+#: A sponsored conversation from a company: ``conversationAdsMessageContent``,
+#: ``contentMetadata.conversationAdContent``, an organization participant.
 SPONSORED: Final = Conv(
     15,
     (SPONSOR,),
@@ -874,7 +899,7 @@ SPONSORED: Final = Conv(
         1,
         SPONSOR,
         "Invented advertisement text.",
-        T0 + 10 * MINUTE_MS,
+        _at(19),
         render_content=(conversation_ads_render_content(),),
     ),
     categories=(ARCHIVE, INMAIL),
@@ -882,11 +907,118 @@ SPONSORED: Final = Conv(
     ad_content=True,
     creator=SPONSOR,
 )
+#: A sponsored message from a member: ``messageAdRenderContent``, a subject.
+SPONSORED_MESSAGE: Final = Conv(
+    19,
+    (SAFFRON,),
+    Msg(
+        19,
+        1,
+        SAFFRON,
+        "Invented sponsored message text.",
+        _at(18),
+        subject="Invented sponsored subject",
+        render_content=(message_ad_render_content(),),
+    ),
+    categories=(ARCHIVE, INMAIL),
+    type_label=SPONSORED_LABEL,
+    creator=SAFFRON,
+)
+#: An offer: the ``LinkedIn Offer`` label, ``conversationAdsMessageContent``.
+OFFER: Final = Conv(
+    20,
+    (SPONSOR,),
+    Msg(
+        20,
+        1,
+        SPONSOR,
+        "Invented offer text.",
+        _at(17),
+        render_content=(conversation_ads_render_content(),),
+    ),
+    categories=(ARCHIVE, INMAIL),
+    type_label=OFFER_LABEL,
+    ad_content=True,
+    creator=SPONSOR,
+)
+#: A pending message request in ``SECONDARY_INBOX``, with ``hostUrnData``, no label.
+SECONDARY_PENDING: Final = Conv(
+    21,
+    (BRIXTON,),
+    Msg(
+        21,
+        1,
+        BRIXTON,
+        "Invented request text.",
+        _at(16),
+        render_content=(host_urn_render_content("SALES_INMAIL", BRIXTON),),
+    ),
+    categories=(INBOX, SECONDARY_INBOX, INMAIL),
+    state="PENDING",
+    creator=BRIXTON,
+)
+#: An InMail the owner declined.
+INMAIL_DECLINED: Final = Conv(
+    22,
+    (QUILLON,),
+    Msg(22, 1, QUILLON, "Invented declined pitch.", _at(15), subject="Invented declined subject"),
+    categories=(INBOX, PRIMARY_INBOX, INMAIL),
+    state="DECLINED",
+    creator=QUILLON,
+)
+#: A pending Premium InMail: ``hostUrnData`` ``PREMIUM_INMAIL``.
+PREMIUM_INMAIL: Final = Conv(
+    23,
+    (SAFFRON,),
+    Msg(
+        23,
+        1,
+        SAFFRON,
+        "Invented premium pitch.",
+        _at(14),
+        subject="Invented premium subject",
+        render_content=(host_urn_render_content("PREMIUM_INMAIL", SAFFRON),),
+    ),
+    categories=(INBOX, PRIMARY_INBOX, INMAIL),
+    state="PENDING",
+    type_label=INMAIL_LABEL,
+    creator=SAFFRON,
+)
+#: One-to-one whose last message carries a ``file`` render item (an attachment, not an ad).
+WITH_FILE: Final = Conv(
+    24,
+    (ZEPHYRINE,),
+    Msg(
+        24,
+        1,
+        ZEPHYRINE,
+        "Invented note with an attachment.",
+        _at(13),
+        render_content=(file_render_content(),),
+    ),
+    creator=ZEPHYRINE,
+)
+#: One-to-one with a ``title`` (7 captured one-to-one items had one).
+WITH_TITLE: Final = Conv(
+    25,
+    (THADDEUS,),
+    Msg(25, 1, THADDEUS, "Invented titled note.", _at(12)),
+    title="Invented conversation title",
+    creator=THADDEUS,
+)
+#: One-to-one whose last message was edited: ``messageBodyRenderFormat`` ``EDITED``
+#: (seen on 3 captured list messages).
+EDITED: Final = Conv(
+    26,
+    (MARISOL,),
+    Msg(26, 1, MARISOL, "Invented edited note.", _at(11), edited=True),
+    creator=MARISOL,
+)
 #: **Invented:** a group. The capture had none; ``groupChat`` true, three or more participants.
 GROUP: Final = Conv(
     16,
     (QUILLON, SAFFRON),
-    Msg(16, 4, QUILLON, "Invented group message about a pretend offsite.", T0 + 5 * MINUTE_MS),
+    Msg(16, 4, QUILLON, "Invented group message about a pretend offsite.", _at(5)),
     group_chat=True,
     title="Invented group title",
     creator=QUILLON,
@@ -894,32 +1026,60 @@ GROUP: Final = Conv(
 #: A list item with no ``messages`` key, as two captured items had.
 NO_MESSAGES: Final = Conv(17, (THADDEUS,), None, has_messages=False)
 
+#: The first page (by sync token) and the next (by category), each newest first.
 INBOX_FIRST_PAGE: Final = (ONE_TO_ONE_INBOUND, ONE_TO_ONE_OUTBOUND, INMAIL_ACCEPTED, INMAIL_PENDING)
-INBOX_OLDER_PAGE: Final = (SPONSORED, GROUP, NO_MESSAGES)
+INBOX_OLDER_PAGE: Final = (
+    SPONSORED,
+    SPONSORED_MESSAGE,
+    OFFER,
+    SECONDARY_PENDING,
+    INMAIL_DECLINED,
+    PREMIUM_INMAIL,
+    WITH_FILE,
+    WITH_TITLE,
+    EDITED,
+    GROUP,
+    NO_MESSAGES,
+)
 
-#: **Invented as a whole:** a system message. The capture's nearest thing was a list
-#: message with ``actor: null`` (and a ``sender``) in an ordinary conversation.
-ACTORLESS: Final = Msg(18, 1, ZEPHYRINE, "Invented notice text.", T0 + 2 * MINUTE_MS)
+#: What P4-01 reads for replies and send matching.
+READ_AS_ONE_TO_ONE: Final = (
+    ONE_TO_ONE_INBOUND,
+    ONE_TO_ONE_OUTBOUND,
+    INMAIL_ACCEPTED,
+    WITH_FILE,
+    WITH_TITLE,
+    EDITED,
+)
+#: Counted as ``skipped_other``.
+SKIPPED_OTHER: Final = (
+    INMAIL_PENDING,
+    SPONSORED,
+    SPONSORED_MESSAGE,
+    OFFER,
+    SECONDARY_PENDING,
+    INMAIL_DECLINED,
+    PREMIUM_INMAIL,
+)
+#: Counted as ``skipped_group``.
+SKIPPED_GROUP: Final = (GROUP,)
 
-#: The thread of :data:`ONE_TO_ONE_INBOUND`, three messages.
+#: A list message with ``actor: null`` and a ``sender``, as captured twice in ordinary
+#: conversations. **Invented:** a system message; this is the nearest captured thing.
+ACTORLESS: Final = Msg(18, 1, ZEPHYRINE, "Invented notice text.", _at(2), actorless=True)
+
+#: The thread of :data:`ONE_TO_ONE_INBOUND`, three messages, oldest first here;
+#: :func:`messages_by_sync_token` orders them newest first, as captured.
 THREAD_ONE_TO_ONE: Final = (
-    Msg(11, 1, OWNER, "Invented opener about a pretend conference.", T0 + 10 * MINUTE_MS),
-    Msg(
-        11,
-        2,
-        ZEPHYRINE,
-        "Invented answer, line one\nInvented answer, line two",
-        T0 + 30 * MINUTE_MS,
-    ),
+    Msg(11, 1, OWNER, "Invented opener about a pretend conference.", _at(10)),
+    Msg(11, 2, ZEPHYRINE, "Invented answer, line one\nInvented answer, line two", _at(30)),
     INBOUND_LAST,
 )
 
 
 def actorless_list_item() -> dict[str, Any]:
-    """A list item whose last message has ``actor: null``, as captured twice."""
-    item = conversation(Conv(18, (ZEPHYRINE,), ACTORLESS, creator=ZEPHYRINE))
-    item["messages"]["elements"] = [message(ACTORLESS, actorless=True)]
-    return item
+    """A list item whose last message has ``actor: null``."""
+    return conversation(Conv(18, (ZEPHYRINE,), ACTORLESS, creator=ZEPHYRINE))
 
 
 # --- HTML -------------------------------------------------------------------------------
