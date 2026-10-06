@@ -175,7 +175,7 @@ from netkeeper.models import (
 )
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped, scoped, scoped_contacts
-from netkeeper.services import sending_hours
+from netkeeper.services import inbox_hold, sending_hours
 from netkeeper.services.campaign_guards import (
     UNSENDABLE_EMAIL_STATUSES,
     ChannelReason,
@@ -254,6 +254,7 @@ class Skip(enum.StrEnum):
     MAILBOX_ADDRESS = "mailbox_address"
     MAILBOX_DISARMED = "mailbox_disarmed"
     GUARD_EXCLUDED = "guard_excluded"
+    LINKEDIN_INBOX_STALE = "linkedin_inbox_stale"
     ENDED = "ended"
 
 
@@ -1412,6 +1413,14 @@ class _Chooser:
         self.blocks = _Blocks()
         self.wakes: list[datetime] = []
         self.campaigns: dict[int, Campaign] = {}
+        self._stale: bool | None = None
+
+    def _inbox_stale(self) -> bool:
+        """Whether the LinkedIn inbox poll is stale (#417), read once per choose phase: a
+        tick asks per due enrollment, and the answer does not outlive the phase."""
+        if self._stale is None:
+            self._stale = inbox_hold.stale(self.session, self.user, now=self.now)
+        return self._stale
 
     def skip(self, enrollment: Enrollment, *reasons: str) -> None:
         self.result.decisions.append(Decision(enrollment.id, False, tuple(reasons)))
@@ -1628,6 +1637,12 @@ class _Chooser:
         verdict = check_step(session, user, enrollment, step, now=now)
         if not verdict.eligible:
             self._excluded(enrollment, campaign, verdict)
+            return None
+        # Last, so every check that already holds or ends the enrollment runs first and
+        # this only ever adds a wait (#417): nothing on the enrollment changes, the step
+        # stays due, and the next tick asks again. A reply was handled above.
+        if self._inbox_stale() and inbox_hold.contact_watched(session, user, enrollment.contact_id):
+            self.skip(enrollment, Skip.LINKEDIN_INBOX_STALE)
             return None
         mode = StepMode.DRAFT if arm is MailboxArm.DRAFT else step.mode
         return self._claim(campaign, enrollment, step, latest, mode)

@@ -21,6 +21,7 @@ from typing import Any, Final
 import factories
 import pytest
 from campaign_fakes import NOW, SETTINGS, FakeSender, make_mailbox
+from inbox_fakes import record_poll
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -120,6 +121,9 @@ class Lane:
 
     def claim(self, enrollment_id: int, now: datetime = NOW, **kwargs: Any) -> PrefillClaim:
         settings = kwargs.pop("settings", self.settings)
+        if kwargs.pop("polled", True):
+            # The inbox poll keeps running while time passes in a test (#417).
+            self.write(lambda s, u: record_poll(s, u, now - timedelta(minutes=1)))
         return self.write(
             lambda s, u: claim_prefill(s, u, enrollment_id, now=now, settings=settings, **kwargs)
         )
@@ -152,7 +156,14 @@ class Lane:
         return self.read(lambda s, u: get_scoped(s, u, Message, message_id))
 
     def runs(self) -> list[SyncRun]:
-        return self.read(lambda s, u: list(s.scalars(scoped(u, SyncRun).order_by(SyncRun.id))))
+        """The claims' runs: the inbox polls the lane records are not among them."""
+        return self.read(
+            lambda s, u: list(
+                s.scalars(
+                    scoped(u, SyncRun).where(SyncRun.kind != SyncRunKind.INBOX).order_by(SyncRun.id)
+                )
+            )
+        )
 
     def finish_runs(self) -> None:
         """The runs end (as P4-03's runner would after recording)."""
@@ -181,6 +192,7 @@ def make_lane(
     channels: tuple[TemplateChannel, ...] = (LINKEDIN, LINKEDIN),
     settings: Settings | None = None,
     evidence: bool = True,
+    polled: bool = True,
     **campaign: Any,
 ) -> Lane:
     with session_scope(factory, write=True) as session:
@@ -193,6 +205,9 @@ def make_lane(
             if step.channel is EMAIL:
                 step.mode = StepMode.SEND
         ensure_account(session, user)
+        if polled:
+            # A claim waits for a fresh inbox poll (#417); these tests are about the rest.
+            record_poll(session, user, NOW - timedelta(hours=1))
         if evidence:
             record_session_evidence(
                 session, user, logged_in=True, source="preflight", now=NOW - timedelta(hours=1)
@@ -1313,6 +1328,11 @@ def test_a_discarded_linkedin_first_step_moves_on_to_the_email_step(
     assert due is not None and due >= NOW + timedelta(days=7)
 
     assert _tick(lane, due - timedelta(minutes=1)).fired == []
+    # The typed prefill may have been sent: with no inbox poll since, step 2 waits (#417).
+    waiting = _tick(lane, due)
+    assert waiting.fired == []
+    assert waiting.skipped()[enrollment_id] == (Skip.LINKEDIN_INBOX_STALE.value,)
+    lane.write(lambda s, u: record_poll(s, u, due - timedelta(seconds=30)))
     result = _tick(lane, due)
     assert [f.enrollment_id for f, _ in result.fired] == [enrollment_id]
     assert result.fired[0][0].step_position == 2

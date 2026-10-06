@@ -16,7 +16,7 @@ import httpx
 import pytest
 from campaign_fakes import NOW
 from fastapi import FastAPI
-from inbox_fakes import FakeInboxSource
+from inbox_fakes import FIXTURE_NOTE, FakeInboxSource, record_poll
 from run_fakes import fake_provider
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -84,6 +84,7 @@ def _seed(app: FastAPI, *, people: int = 1, **contact: Any) -> list[int]:
         user = _local(session)
         user.timezone = "UTC"
         ensure_account(session, user)
+        record_poll(session, user, NOW - timedelta(hours=1))  # the hold on a stale inbox (#417)
         record_session_evidence(
             session, user, logged_in=True, source="preflight", now=NOW - timedelta(hours=1)
         )
@@ -106,7 +107,16 @@ def _messages(app: FastAPI) -> list[Message]:
 
 def _runs(app: FastAPI) -> list[SyncRun]:
     with session_scope(app.state.session_factory) as session:
-        return list(session.scalars(scoped(_local(session), SyncRun).order_by(SyncRun.id)))
+        return list(
+            session.scalars(
+                scoped(_local(session), SyncRun)
+                .where(
+                    # Not the fixture's poll, which keeps claims from being held (#417).
+                    SyncRun.notes.is_distinct_from(FIXTURE_NOTE)
+                )
+                .order_by(SyncRun.id)
+            )
+        )
 
 
 async def test_ready_lists_due_linkedin_steps_with_no_message_text(

@@ -15,6 +15,7 @@ from typing import Any
 import factories
 import pytest
 from campaign_fakes import LATENCY, NOW, SETTINGS, FakeSender, make_mailbox
+from inbox_fakes import record_poll
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -1378,6 +1379,7 @@ def test_a_linkedin_step_is_left_unfired_and_blocks_nobody(
         assert enrollment is not None
         factories.make_message(session, enrollment, position=1, sent_at=NOW - timedelta(days=8))
 
+    world.write(lambda s: record_poll(s, world.user, NOW - timedelta(hours=1)))  # #417
     world.write(sent_step_one)
     result = world.tick()
     assert [f.enrollment_id for f, _ in result.fired] == [email_step]
@@ -1752,6 +1754,7 @@ def test_linkedin_rows_never_starve_an_email_step(
         assert enrollment is not None
         factories.make_message(session, enrollment, position=1, sent_at=NOW - timedelta(days=8))
 
+    world.write(lambda s: record_poll(s, world.user, NOW - timedelta(hours=1)))  # #417
     world.write(sent_step_one)
     result = world.tick()
     assert [f.enrollment_id for f, _ in result.fired] == [email_step]
