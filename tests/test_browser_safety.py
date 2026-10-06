@@ -299,6 +299,9 @@ ALLOWED_INPUTS = frozenset(
         (LINKEDIN / "browser.py", "BrowserRun.type_into_composer", "type"),
         (LINKEDIN / "browser.py", "BrowserRun.type_into_composer", "insert_text"),
         (LINKEDIN / "browser.py", "BrowserRun.type_into_composer", "press"),
+        # ADR 0007, decision 5, option B (the maintainer's choice, 2026-10-06): one
+        # Locator.focus() on the verified composer, never a click.
+        (LINKEDIN / "browser.py", "BrowserRun._focus_seam", "focus"),
     }
 )
 
@@ -1794,8 +1797,19 @@ def test_the_prefill_methods_are_called_only_from_the_prefill() -> None:
         assert reaches == [(LINKEDIN / "page_messaging.py", "PagePrefill.prefill")], name
 
 
-def test_the_prefill_never_focuses_or_holds_a_key() -> None:
-    """ADR 0007 (decision 5 open: option A): no ``focus``, ``down`` or ``up`` anywhere in
-    the package. The general input rule already refuses them; this names the reason."""
+def test_the_one_focus_is_the_seams_and_nothing_holds_a_key() -> None:
+    """ADR 0007 (decision 5, option B): the only ``focus`` in the package is the one in
+    ``BrowserRun._focus_seam``, whose one call site is ``type_into_composer``; there is no
+    ``down`` or ``up`` anywhere, and no click in the seam."""
     found = [i for i in package_inputs() if i.name in {"focus", "down", "up"}]
-    assert not found, found
+    assert [(i.path, i.function, i.name) for i in found] == [
+        (LINKEDIN / "browser.py", "BrowserRun._focus_seam", "focus")
+    ]
+    seams = [
+        (path, item.function)
+        for path in python_files(PACKAGE)
+        for item, _ in name_reaches(path.read_text(encoding="utf-8"), "_focus_seam", path)
+    ]
+    assert seams == [(LINKEDIN / "browser.py", "BrowserRun.type_into_composer")]
+    clicks = [i for i in package_inputs() if i.function == "BrowserRun._focus_seam"]
+    assert [i.name for i in clicks] == ["focus"]

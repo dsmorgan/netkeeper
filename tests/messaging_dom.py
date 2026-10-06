@@ -389,6 +389,15 @@ class FakeLocator:
     async def click(self, *, delay: float | None = None, timeout: float | None = None) -> None:  # noqa: ASYNC109
         await self._page.clicked(self._one())
 
+    async def focus(self, *, timeout: float | None = None) -> None:  # noqa: ASYNC109
+        """``Locator.focus()``: focuses the one element, unless the page ignores it."""
+        element = self._one()
+        self._page.focus_calls.append(element)
+        if self._page.site.focus_error is not None:
+            raise self._page.site.focus_error
+        if not self._page.site.focus_ignored:
+            self._page.focused = element
+
 
 def _name_matches(name: str | re.Pattern[str], accessible: str, *, exact: bool) -> bool:
     if isinstance(name, re.Pattern):
@@ -499,6 +508,7 @@ class MessagingTab(FakePage):
         self.keys: list[Event] = []
         self.attempts: list[tuple[str, str]] = []
         self.clicks: list[Element] = []
+        self.focus_calls: list[Element] = []
         self.lookups: list[str] = []
         self.reads = 0
         #: Each read, described by the locator chain it read through.
@@ -659,6 +669,9 @@ class MessagingSite(FakeContext):
         self.before = before
         self.land_on = land_on
         self.click_error: BaseException | None = None
+        #: ``Locator.focus()`` raises this, or is silently ignored by the page.
+        self.focus_error: BaseException | None = None
+        self.focus_ignored = False
         self.after_key: dict[int, Callable[[MessagingTab], None]] = {}
         self.stray_keys: list[str] = []
         self.navigations: list[str] = []

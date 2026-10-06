@@ -605,13 +605,6 @@ async def test_two_messaging_dialogs_refuse_even_without_a_second_composer() -> 
         assert "more than one message bubble" in ran.result.outcome.reason
 
 
-async def test_a_composer_without_focus_types_nothing() -> None:
-    """Decision 5, option A: nothing focuses the composer, so no focus means no key."""
-    ran = await prefill(MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, focus_composer=False)))
-    assert_no_keys(ran)
-    assert ran.run.handed_over and not ran.tab.is_closed()
-
-
 async def test_a_url_change_before_the_first_key_types_nothing() -> None:
     site = MessagingSite(ZEPHYRINE)
 
@@ -1083,17 +1076,12 @@ async def test_a_bubble_drawn_after_the_compose_option_is_waited_for(layout: int
 
 
 async def test_focus_that_lands_during_the_wait_lets_the_run_type() -> None:
-    """Option A: no focus input; the page focuses the composer a moment later."""
+    """The page focuses the composer a moment later, after the seam's one focus() call was
+    ignored: the full pass, polled after the seam, sees it."""
     site = MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, focus_after_reads=40))
+    site.focus_ignored = True
     ran = await prefill(site)
     assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
-
-
-async def test_focus_that_never_lands_types_nothing_after_the_whole_wait() -> None:
-    ran = await prefill(MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, focus_composer=False)))
-    assert_no_keys(ran)
-    waits = [s for s, _, _ in ran.sleeps if s == browser_module.COMPOSER_WAIT_S / 50]
-    assert len(waits) == browser_module.COMPOSER_WAIT_POLLS
 
 
 def test_the_composer_wait_is_pinned() -> None:
@@ -1172,65 +1160,6 @@ async def test_an_existing_conversation_has_no_chip_to_check() -> None:
     assert ran.result.outcome.recipient_name_checked is None
 
 
-@pytest.mark.parametrize("draft", [False, True])
-async def test_under_option_b_the_seam_runs_once_only_after_a_pass_without_focus(
-    monkeypatch: pytest.MonkeyPatch, draft: bool
-) -> None:
-    """ADR 0007 (fd571b1): the seam is reached only after a pass in which every check but
-    focus held, and at most once; a bubble that never passes never reaches it."""
-    monkeypatch.setattr(browser_module, "FOCUS_INPUT_AUTHORIZED", True)
-    passes: list[tuple[bool, str | None]] = []
-    seams: list[int] = []
-    original = BrowserRun._composer_refusal
-
-    async def recorded(self: BrowserRun, *args: Any, **kwargs: Any) -> str | None:
-        refusal = await original(self, *args, **kwargs)
-        passes.append((kwargs.get("focus", True), refusal))
-        return refusal
-
-    async def seam(self: BrowserRun, composer: Any) -> None:
-        seams.append(len(passes))
-        assert passes and passes[-1] == (False, None), passes[-3:]
-
-    monkeypatch.setattr(BrowserRun, "_composer_refusal", recorded)
-    monkeypatch.setattr(BrowserRun, "_focus_seam", seam)
-    html = existing_bubble_html(ZEPHYRINE, draft="x") if draft else None
-    bubble = Bubble(ZEPHYRINE, html=html, focus_after_reads=0 if draft else 60, draw_after_reads=20)
-    ran = await prefill(MessagingSite(ZEPHYRINE, bubble=bubble))
-    if draft:
-        assert seams == []
-        assert_no_keys(ran)
-    else:
-        assert len(seams) == 1
-        assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
-        # Before the seam, only passes without focus; after it, only full passes.
-        before, after = passes[: seams[0]], passes[seams[0] :]
-        assert all(focus is False for focus, _ in before)
-        assert all(focus is True for focus, _ in after)
-
-
-async def test_under_option_a_the_wait_polls_the_full_pass_from_the_start(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    passes: list[bool] = []
-    seams: list[int] = []
-    original = BrowserRun._composer_refusal
-
-    async def recorded(self: BrowserRun, *args: Any, **kwargs: Any) -> str | None:
-        passes.append(kwargs.get("focus", True))
-        return await original(self, *args, **kwargs)
-
-    async def seam(self: BrowserRun, composer: Any) -> None:
-        seams.append(1)
-
-    monkeypatch.setattr(BrowserRun, "_composer_refusal", recorded)
-    monkeypatch.setattr(BrowserRun, "_focus_seam", seam)
-    ran = await prefill(MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, focus_after_reads=40)))
-    assert ran.kind is MessageOutcomeKind.PREFILLED
-    assert seams == [] and all(passes)
-    assert browser_module.FOCUS_INPUT_AUTHORIZED is False
-
-
 async def test_a_chip_name_the_matcher_does_not_confirm_is_a_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1248,3 +1177,103 @@ async def test_a_chip_name_the_matcher_does_not_confirm_is_a_mismatch(
     ran = await prefill(MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, None)))
     assert_no_keys(ran)
     assert ran.result.outcome.reason == "recipient_name_mismatch"
+
+
+# --- decision 5, option B: one Locator.focus() on the verified composer ------------------
+
+
+async def test_an_unfocused_composer_is_focused_once_then_typed() -> None:
+    ran = await prefill(MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, focus_composer=False)))
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert ran.tab.focus_calls == [ran.tab.composer]  # one focus(), on the composer
+    assert [e.tag for e in ran.tab.clicks] == ["a"]  # the Message click, never a click into it
+    assert browser_module.FOCUS_INPUT_AUTHORIZED is True
+
+
+async def test_a_composer_that_already_holds_focus_is_not_focused_again() -> None:
+    ran = await prefill(MessagingSite(ZEPHYRINE))
+    assert ran.kind is MessageOutcomeKind.PREFILLED
+    assert ran.tab.focus_calls == []
+
+
+@pytest.mark.parametrize("how", ["ignored", "raises"])
+async def test_a_focus_that_does_not_take_types_nothing_after_the_whole_wait(how: str) -> None:
+    site = MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, focus_composer=False))
+    if how == "ignored":
+        site.focus_ignored = True
+    else:
+        site.focus_error = RuntimeError("focus failed")
+    ran = await prefill(site)
+    assert_no_keys(ran)
+    assert ran.result.outcome.reason == "the composer does not hold focus"
+    assert len(ran.tab.focus_calls) == 1  # never retried
+    waits = [s for s, _, _ in ran.sleeps if s == browser_module.COMPOSER_WAIT_S / 50]
+    assert len(waits) == browser_module.COMPOSER_WAIT_POLLS
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        existing_bubble_html(ZEPHYRINE, draft="x"),
+        _reply_with(f'<a href="/in/{THADDEUS.profile_id}/">x</a>'),
+        existing_bubble_html(ZEPHYRINE) + existing_bubble_html(THADDEUS),
+    ],
+    ids=["draft", "wrong_recipient", "two_composers"],
+)
+async def test_a_bubble_that_fails_a_check_never_reaches_the_focus_call(html: str) -> None:
+    site = MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, html=html, focus_composer=False))
+    ran = await prefill(site)
+    assert_no_keys(ran)
+    assert ran.tab.focus_calls == []
+
+
+async def test_the_seam_runs_once_only_after_a_pass_without_focus_then_full_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR 0007: the seam follows a pass in which every check but focus held; every pass
+    after it includes focus."""
+    passes: list[tuple[bool, str | None]] = []
+    original = BrowserRun._composer_refusal
+
+    async def recorded(self: BrowserRun, *args: Any, **kwargs: Any) -> str | None:
+        refusal = await original(self, *args, **kwargs)
+        passes.append((kwargs.get("focus", True), refusal))
+        return refusal
+
+    seams: list[int] = []
+    seam = BrowserRun._focus_seam
+
+    async def counted(self: BrowserRun, tab: Any, composer: Any) -> None:
+        assert passes and passes[-1] == (False, None), passes[-3:]
+        seams.append(len(passes))
+        await seam(self, tab, composer)
+
+    monkeypatch.setattr(BrowserRun, "_composer_refusal", recorded)
+    monkeypatch.setattr(BrowserRun, "_focus_seam", counted)
+    bubble = Bubble(ZEPHYRINE, focus_composer=False, draw_after_reads=20)
+    ran = await prefill(MessagingSite(ZEPHYRINE, bubble=bubble))
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert len(seams) == 1 and len(ran.tab.focus_calls) == 1
+    before, after = passes[: seams[0]], passes[seams[0] :]
+    assert any(refusal is not None for _, refusal in before)  # it waited for the bubble
+    assert all(focus is False for focus, _ in before)
+    assert all(focus is True for focus, _ in after)
+
+
+async def test_the_seam_raises_on_a_second_call() -> None:
+    site = MessagingSite(ZEPHYRINE)
+    provider, _ = fake_provider(site)
+    async with provider.run() as run:
+        await run.goto(f"https://www.linkedin.com/in/{ZEPHYRINE.slug}/")
+        tab = site.tab
+        composer = tab.get_by_role("link", name="Message", exact=True)
+        await run._focus_seam(tab, composer.first)  # type: ignore[arg-type]
+        with pytest.raises(RuntimeError, match="at most once"):
+            await run._focus_seam(tab, composer.first)  # type: ignore[arg-type]
+
+
+async def test_option_a_stays_one_switch_away(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(browser_module, "FOCUS_INPUT_AUTHORIZED", False)
+    ran = await prefill(MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, focus_composer=False)))
+    assert_no_keys(ran)
+    assert ran.tab.focus_calls == []

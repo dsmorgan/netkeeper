@@ -324,6 +324,7 @@ async def test_a_refusal_after_the_click_gives_the_claim_back_and_hands_the_tab_
     lane: Lane,
 ) -> None:
     site = MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, focus_composer=False))
+    site.focus_ignored = True
     f = Fixture(lane, site)
     await f.execute()
     _given_back(f, "focus")
