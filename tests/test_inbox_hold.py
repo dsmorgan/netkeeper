@@ -318,6 +318,10 @@ def test_a_claim_is_held_with_its_reason_while_no_poll_has_completed(
     assert claim.reasons == (Refusal.INBOX_STALE.value,) == ("linkedin_inbox_stale",)
     assert claim.detail is not None
     assert "no poll has completed yet" in claim.detail
+    assert "run `netkeeper linkedin inbox` by hand; scheduled polls wait for a first one" in (
+        claim.detail
+    )
+    assert "or wait for the next scheduled poll" not in claim.detail
     assert "netkeeper linkedin inbox" in claim.detail
     # Wait, never skip or fail: nothing was written, and the enrollment is still due.
     assert lane.messages(enrollment_id) == []
@@ -336,6 +340,7 @@ def test_a_claim_is_held_on_an_old_complete_poll_and_goes_on_a_fresh_one(
     held = lane.claim(enrollment_id, polled=False)
     assert held.reasons == ("linkedin_inbox_stale",)
     assert held.detail is not None and "hours ago" in held.detail
+    assert "or wait for the next scheduled poll" in held.detail  # an older poll exists
 
     lane.write(lambda s, u: record_poll(s, u, NOW - LIMIT))
     assert lane.claim(enrollment_id, polled=False).claimed
@@ -679,6 +684,9 @@ def test_posture_row_has_no_hold_text_when_linkedin_is_not_in_use(
     world.enroll_new()
     row = _row(world)
     assert row is not None and row.notes == ()  # nothing waits, so nothing is held
+    _poll(world, NOW - timedelta(hours=1))
+    polled = _row(world)
+    assert polled is not None and "holds past" not in polled.value
 
 
 def test_posture_explains_the_hold_when_no_poll_has_completed(

@@ -32,8 +32,8 @@ store, never by running one:
   (:func:`~netkeeper.services.runs.refuse_if_outside_active_hours`).
 - **LinkedIn inbox**: served like the other LinkedIn kinds since P4-01 (#380). A kind
   the scheduler does not serve would be ``not_wired``: never shown as running. Whatever
-  its state, its reason also says when LinkedIn steps are held because its newest complete poll is
-  stale or missing (:mod:`netkeeper.services.inbox_hold`, #417).
+  its state, its reason also says when LinkedIn steps are held because its newest
+  complete poll is stale or missing (:mod:`netkeeper.services.inbox_hold`, #417).
 
 The campaign engine's one-minute tick is left out on purpose: it is not a check.
 

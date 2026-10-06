@@ -203,9 +203,12 @@ def why_stale(session: Session, user: User, *, now: datetime) -> str:
     """The sentence that says why the inbox is stale, for a refusal or a status line.
     Read-only."""
     last = last_complete_poll(session, user, now=now)
-    action = "run `netkeeper linkedin inbox`, or wait for the next scheduled poll"
     if last is None:
-        return f"{_REASON}: no poll has completed yet; {action}"
+        return (
+            f"{_REASON}: no poll has completed yet; run `netkeeper linkedin inbox` by hand;"
+            " scheduled polls wait for a first one"
+        )
+    action = "run `netkeeper linkedin inbox`, or wait for the next scheduled poll"
     hours = max((now - last).total_seconds(), 0) / 3600
     return (
         f"{_REASON}: its last complete poll was {hours:.1f} hours ago, and a poll older than"
