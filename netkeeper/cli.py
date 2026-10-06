@@ -1712,7 +1712,7 @@ def linkedin_schedule_status(ctx: typer.Context) -> None:
     typer.echo(
         _streak_line("Contact info breaker", "Contact-info-lost", info, kind=SyncRunKind.ENRICH)
     )
-    typer.echo(_streak_line("inbox breaker", "route_changed", inbox, kind=SyncRunKind.INBOX))
+    typer.echo(_streak_line("inbox breaker", "unreadable", inbox, kind=SyncRunKind.INBOX))
 
 
 def _streak_line(
@@ -1933,9 +1933,9 @@ def linkedin_schedule_reset_breaker(
                 f"{info.count} Contact-info-lost enrich"
                 if info.readable
                 else "Contact-info-lost enrich unreadable",
-                f"{inbox.count} `route_changed` inbox"
+                f"{inbox.count} unreadable inbox"
                 if inbox.readable
-                else "route_changed inbox unreadable",
+                else "inbox breaker state unreadable",
             ]
         )
         question = (

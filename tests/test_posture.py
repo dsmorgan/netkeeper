@@ -2237,14 +2237,17 @@ def _inbox_changed(writer: Session, user: User, polls: int) -> None:
 def test_a_clear_inbox_breaker_shows_no_warning(writer: Session, user: User) -> None:
     row = _row(_report(writer, user), "Inbox breaker")
     assert row.status is Status.ON and row.warnings == ()
-    assert row.value == "clear: no consecutive inbox polls have ended route_changed"
+    assert (
+        row.value == "clear: no consecutive inbox polls ended because the messaging page changed"
+        " or could not be read"
+    )
 
 
 def test_an_inbox_streak_below_the_breaker_shows_its_count(writer: Session, user: User) -> None:
     _inbox_changed(writer, user, 1)
     row = _row(_report(writer, user), "Inbox breaker")
     assert row.status is Status.ON and row.warnings == ()
-    assert row.value == "1 of 2 route_changed inbox polls in a row (since 2026-09-23 18:00 UTC)"
+    assert row.value == "1 of 2 unreadable inbox polls in a row (since 2026-09-23 18:00 UTC)"
 
 
 def test_a_tripped_inbox_breaker_warns_why_and_how_to_release_it(
@@ -2254,7 +2257,7 @@ def test_a_tripped_inbox_breaker_warns_why_and_how_to_release_it(
     report = _report(writer, user)
     row = _row(report, "Inbox breaker")
     assert row.status is Status.ON
-    assert row.value == "tripped: 2 route_changed inbox polls in a row (since 2026-09-23 18:00 UTC)"
+    assert row.value == "tripped: 2 unreadable inbox polls in a row (since 2026-09-23 18:00 UTC)"
     (warning,) = row.warnings
     assert "Scheduled inbox polls are skipped" in warning
     assert "connections syncs are unaffected" in warning

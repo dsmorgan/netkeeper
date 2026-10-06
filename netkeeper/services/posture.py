@@ -1897,8 +1897,8 @@ def _contact_info_breaker(session: Session, user: User, account_id: int) -> Prot
 
 def _inbox_breaker(session: Session, user: User, account_id: int, *, now: datetime) -> Protection:
     """The inbox breaker's count (#437): consecutive LinkedIn inbox polls (by hand or by
-    schedule) that ended ``route_changed``, so the messaging page no longer reads. Its
-    own streak: connections syncs are never blocked by it. Reported the way
+    schedule) that ended because the messaging page changed or could not be read. Its own
+    streak: connections syncs are never blocked by it. Reported the way
     :func:`_contact_info_breaker` reports its own, an unreadable row included.
 
     While it is tripped no scheduled poll refreshes the inbox, so #417's hold
@@ -1934,24 +1934,27 @@ def _inbox_breaker(session: Session, user: User, account_id: int, *, now: dateti
         return Protection(
             name="Inbox breaker",
             status=Status.ON,
-            value="clear: no consecutive inbox polls have ended route_changed",
+            value=(
+                "clear: no consecutive inbox polls ended because the messaging page changed"
+                " or could not be read"
+            ),
         )
     if not current.tripped:
         return Protection(
             name="Inbox breaker",
             status=Status.ON,
             value=(
-                f"{current.count} of {route_breaker.INBOX_THRESHOLD} route_changed inbox"
+                f"{current.count} of {route_breaker.INBOX_THRESHOLD} unreadable inbox"
                 f" polls in a row{since}"
             ),
         )
     return Protection(
         name="Inbox breaker",
         status=Status.ON,
-        value=f"tripped: {current.count} route_changed inbox polls in a row{since}",
+        value=f"tripped: {current.count} unreadable inbox polls in a row{since}",
         warnings=(
-            f"{current.count} LinkedIn inbox polls in a row ended route_changed: the messaging"
-            f" page no longer reads as expected{since}. Scheduled inbox polls are skipped,"
+            f"{current.count} LinkedIn inbox polls in a row ended because the messaging page"
+            f" changed or could not be read{since}. Scheduled inbox polls are skipped,"
             f" and connections syncs are unaffected.{waits} To check whether the page"
             f" reads again, {release}",
         ),
