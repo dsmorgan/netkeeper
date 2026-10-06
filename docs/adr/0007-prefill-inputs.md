@@ -1,12 +1,12 @@
 # 0007. The prefill's inputs: one Message click, typing into one verified composer, never Enter
 
-Date: 2026-10-03, updated 2026-10-05 with the P4-06 messaging capture (#374)
+Date: 2026-10-03, updated 2026-10-05 with the P4-06 messaging capture (#374), accepted 2026-10-06
 
 ## Status
 
-Proposed
+Accepted (2026-10-06)
 
-The maintainer accepts this ADR in review. Before acceptance, the maintainer makes the [decisions listed for acceptance](#decisions-the-maintainer-makes-at-acceptance), and P4-06's analysis (`docs/linkedin-messaging-shapes.md`, #374) merges first. The facts below come from that analysis (PR #432), which corrects the first summary on #374 in several places: the profile renders three Message controls, the existing conversation's header links by profile id rather than by slug, and the compose requests name the recipient.
+The maintainer accepted this ADR in review on 2026-10-06, with the [decisions recorded at acceptance](#decisions-recorded-at-acceptance). The facts below come from that analysis (PR #432), which corrects the first summary on #374 in several places: the profile renders three Message controls, the existing conversation's header links by profile id rather than by slug, and the compose requests name the recipient.
 
 ## Context
 
@@ -51,14 +51,14 @@ The 2026-10-05 capture (#374) settled these facts. They're structure only: no na
 
 The capture didn't show four things this ADR depends on. Each one fails safe as written here:
 
-- **Whether the composer holds keyboard focus right after the Message click** (#429, item 5). The shape doc expects P4-03 to focus the composer itself. Whether netkeeper may do that is [decision 5](#focusing-the-composer-decision-5). Under either answer, a composer without focus after the checks gets no key, and the prefill ends `not_typed`.
+- **Whether the composer holds keyboard focus right after the Message click** (#429, item 5). The shape doc expects P4-03 to focus the composer itself. netkeeper may, once, under [Focusing the composer](#focusing-the-composer). A composer without focus after that gets no key, and the prefill ends `not_typed`.
 - **Which Message control is visible** (#429, item 6). The click rule below doesn't depend on it.
 - **Whether a half-typed desktop draft appears in the phone app** (#429). No draft-save request appeared while typing, so the capture gives no sign that a draft leaves the browser; no check here depends on it.
 - **Whether the never-messaged bubble's root is `role="dialog"`.** The checks for that layout don't rely on it.
 
 ## Decision
 
-netkeeper may give a LinkedIn page exactly two new inputs, both in `BrowserRun` (`netkeeper/linkedin/browser.py`), and one new way to end a run. If the maintainer chooses option B of [decision 5](#focusing-the-composer-decision-5), a third input, one `Locator.focus()` on the verified composer, is added. Everything else in ADR 0006 stays: no script in the page, no request of netkeeper's own, and no interception. The run also brings its tab to the front once, at the start (see below).
+netkeeper may give a LinkedIn page exactly three new inputs, all in `BrowserRun` (`netkeeper/linkedin/browser.py`): one click on Message, typing into one verified composer, and at most one `Locator.focus()` on that composer. It also gets one new way to end a run. Everything else in ADR 0006 stays: no script in the page, no request of netkeeper's own, and no interception. The run also brings its tab to the front once, at the start (see below).
 
 ### Who triggers it
 
@@ -67,7 +67,7 @@ A prefill runs only when a person asks for it, from the "ready to prefill" queue
 A prefill run is never retried and never resumed. Before it spends any budget or navigates, its runner settles two things, and each ends the run as `not_typed`, so P4-09 gives the claim back and the message doesn't stay interrupted, holding the one open slot:
 
 - **The browser lock.** The run asks for it with `wait=False`. If another run holds it, the run records `not_typed` ("the browser was busy").
-- **The claim lapse.** If more than N seconds have passed since `Message.scheduled_at`, the run records `not_typed` ("the claim lapsed"). So a prefill never starts long after the person who asked has stopped watching. **N is a maintainer decision** (suggested: 60). P4-09 has no lapse of its own.
+- **The claim lapse.** If more than 60 seconds have passed since `Message.scheduled_at`, the run records `not_typed` ("the claim lapsed"). So a prefill never starts long after the person who asked has stopped watching. The 60 seconds is a module constant pinned to its literal. P4-09 has no lapse of its own.
 
 Both count toward P4-09's `NOT_TYPED_PARK_AFTER` like any other `not_typed`.
 
@@ -85,7 +85,7 @@ The runner calls `typing_plan` without `allow_newlines=`, so the flag's default,
 
 The run brings its tab to the front once, at the start, before `click_message`, while the person is watching. That's the only `bring_to_front` call in the package. Nothing later in the run changes which tab or window is in front, and `hand_over()` doesn't either: a change while the person is reading or typing elsewhere could send their keys somewhere they didn't intend.
 
-This adjusts the maintainer's "brought to the front" wording, which placed it at the hand-over. The maintainer confirms it at acceptance.
+This adjusts the maintainer's "brought to the front" wording of 2026-10-03, which placed it at the hand-over. The maintainer accepted the change on 2026-10-06.
 
 ### One click on Message
 
@@ -117,12 +117,12 @@ Once `click_message` returns, the run never calls `ensure_page`, `goto`, `new_pa
 
 `BrowserRun.type_into_composer` types the rendered body into the composer the click opened. Before the first key, it verifies all of these, and types nothing if any fails. Every count includes hidden elements (`include_hidden=True`), so a minimized bubble counts.
 
-**The composer wait.** The bubble and the compose option arrive a moment after the click. So before the first key, `type_into_composer` polls the full set of read-only checks below (the compose option seen, one composer, empty, the recipient, and focus) until they all pass in one pass, for at most `COMPOSER_WAIT_S` (5 seconds, a module constant pinned to its literal). The wait is read-only: it gives no input. A pass counts only when every check passes in it, including that the tab's URL is unchanged and that exactly one compose option was seen, with no later one; checks that passed in different passes don't add up. If no pass has succeeded by then, the prefill ends `not_typed`. The focus check is part of every pass under both options of decision 5. Under option A, the wait polls the full pass from the start. Under option B, the wait first polls until one pass holds every check except focus; then `_focus_seam` runs once, and never again; then the wait polls the full pass, focus included, for the rest of `COMPOSER_WAIT_S`. So the focus call still comes only after the recipient, emptiness and single-composer checks have passed, and before the full pass that authorizes the first key.
+**The composer wait.** The bubble and the compose option arrive a moment after the click. So before the first key, `type_into_composer` polls the full set of read-only checks below (the compose option seen, one composer, empty, the recipient, and focus) until they all pass in one pass, for at most `COMPOSER_WAIT_S` (5 seconds, a module constant pinned to its literal). The wait is read-only: it gives no input. A pass counts only when every check passes in it, including that the tab's URL is unchanged and that exactly one compose option was seen, with no later one; checks that passed in different passes don't add up. If no pass has succeeded by then, the prefill ends `not_typed`. The focus check is part of every authorizing pass. The wait first polls until one pass holds every check except focus; then, if the composer doesn't already hold focus, `_focus_seam` runs once, and never again; then the wait polls the full pass, focus included, for the rest of `COMPOSER_WAIT_S`. So the focus call still comes only after the recipient, emptiness and single-composer checks have passed, and before the full pass that authorizes the first key.
 
 - **Exactly one composer is on the page.** The composer is found by role and name: role `textbox`, name `Write a message…` (with U+2026, the ellipsis character), exact, never by a CSS class or the `msg-form-…` id. It must sit in the bubble the recipient checks verified (see the next subsection). Any other composer on the page, such as a minimized bubble left from an earlier prefill or opened by the person, means more than one, and the prefill refuses with a reason that asks the person to close the other message bubbles. netkeeper never closes a bubble: closing one deletes its draft, and it's an input this ADR doesn't authorize.
 - **The composer is empty.** It reads as empty under [the text rule](#reading-the-composers-text). The capture shows that a minimized bubble keeps its draft across pages, so the Message click can restore a bubble that already holds a draft for this contact. The prefill refuses, and the person clears the draft.
 - **The composer's recipient is this contact.** See the next subsection.
-- **The verified composer holds focus.** Focus is read through Playwright's own selector engine (a `:focus` match on the composer's locator), never through `evaluate` or other script of netkeeper's in the page. If the composer doesn't hold focus, the prefill types nothing (but see [decision 5](#focusing-the-composer-decision-5)).
+- **The verified composer holds focus.** Focus is read through Playwright's own selector engine (a `:focus` match on the composer's locator), never through `evaluate` or other script of netkeeper's in the page. If the composer doesn't hold focus after the one focus call [below](#focusing-the-composer), the prefill types nothing.
 - **No chunk holds a control character.** The method refuses, before the first key, a plan in which any chunk contains `\n`, `\r`, or any other C0 or C1 control character. Playwright's `keyboard.type` maps `\n` and `\r` to the Enter key, so a newline is only ever a `newline=True` step of the plan, pressed as Shift+Enter. `TypeStep`'s constructor already refuses such a chunk; this check doesn't rely on it.
 
 #### The recipient
@@ -178,14 +178,13 @@ The checks above don't run only once. Playwright sends keys to whatever has focu
 - Before the hand-over, the composer's text must equal the body, or the outcome is `partially_typed`.
 - The prefill UI tells the person not to type or click in Chrome while the prefill types.
 
-### Focusing the composer (decision 5)
+### Focusing the composer
 
-Where focus lands after the Message click is unknown (#429, item 5). The maintainer chooses one option at acceptance; either is a one-line change to this subsection, and the rest of this ADR holds under both.
+Where focus lands after the Message click is unknown (#429, item 5), so netkeeper may focus the composer once. The maintainer chose this on 2026-10-06 (decision 5, option B, the safety review's recommendation).
 
-- **Option A: no focus input.** netkeeper never focuses the composer. If focus isn't in it after the recipient checks, the prefill ends `not_typed`. If #429 shows focus doesn't land there, every prefill refuses until an amendment adds option B.
-- **Option B (the safety review's recommendation): one `Locator.focus()`.** `type_into_composer` may call `BrowserRun._focus_seam`, which calls `focus()` on the verified composer's locator, never a click. It's called at most once per run, only after every recipient, emptiness, and single-composer check has passed, and only when the composer doesn't already hold focus. Focus is then checked again, and if the composer still doesn't hold it, the prefill ends `not_typed`. `ALLOWED_INPUTS` names `focus` at `_focus_seam`, which only `type_into_composer` calls.
+`type_into_composer` may call `BrowserRun._focus_seam`, which calls `focus()` on the verified composer's locator, never a click. It's called at most once per run, only after every recipient, emptiness, and single-composer check has passed, and only when the composer doesn't already hold focus. Focus is then checked again, and if the composer still doesn't hold it, the prefill ends `not_typed`. `ALLOWED_INPUTS` names `focus` at `_focus_seam`, which only `type_into_composer` calls.
 
-**Chosen: to be decided at acceptance.**
+The alternative, no focus input at all, was rejected: if focus doesn't land in the composer after the click, every prefill would refuse until an amendment.
 
 ### The typing indicator
 
@@ -240,11 +239,11 @@ P4-03 (#382) changes `tests/test_browser_safety.py` in the same pull request as 
 
 Static pins:
 
-- `ALLOWED_INPUTS` entries for exactly two methods: `click` in `BrowserRun.click_message`; and `keyboard` (read once, into a local), `type`, `insert_text`, and `press` in `BrowserRun.type_into_composer`. Under option B of decision 5, also `focus` in `BrowserRun._focus_seam`, and a static pin that `_focus_seam` has exactly one call site, in `type_into_composer`.
+- `ALLOWED_INPUTS` entries for exactly three methods: `click` in `BrowserRun.click_message`; and `keyboard` (read once, into a local), `type`, `insert_text`, and `press` in `BrowserRun.type_into_composer`. Also `focus` in `BrowserRun._focus_seam`, and a static pin that `_focus_seam` has exactly one call site, in `type_into_composer`.
 - A literal check that the only `press` argument anywhere is `"Shift+Enter"`.
-- No `keyboard.down` and no `keyboard.up` anywhere. No `focus()` anywhere, except option B's one call in `_focus_seam`.
+- No `keyboard.down` and no `keyboard.up` anywhere. No `focus()` anywhere, except the one call in `_focus_seam`.
 - `keyboard.type` is never called with a space, or with a chunk that isn't one printable ASCII character other than a space.
-- The Message link's role and name (`"link"`, `"Message"`), the composer's role and name (`"textbox"`, `"Write a message…"`), the dialog's name (`"Messaging"`), the `"New message"` heading, the `"Enter message recipients"` field, the `"Remove "` chip prefix, and `COMPOSER_WAIT_S` (`5`) are module constants pinned to literals.
+- The Message link's role and name (`"link"`, `"Message"`), the composer's role and name (`"textbox"`, `"Write a message…"`), the dialog's name (`"Messaging"`), the `"New message"` heading, the `"Enter message recipients"` field, the `"Remove "` chip prefix, `COMPOSER_WAIT_S` (`5`), and the claim lapse (`60` seconds) are module constants pinned to literals.
 - No string argument to a locator-building call (`get_by_role`, `get_by_text`, `get_by_label`, `get_by_title`, `locator`, `filter`, or a `has_text` or `name` keyword) under `netkeeper/linkedin/` matches "send" or "submit", ignoring case.
 - The `click` in `click_message` is on a locator built with the contact's `href`, never on a bare `nth` of the role locator.
 - No code under `netkeeper/` passes `allow_newlines=` to `typing_plan`.
@@ -258,7 +257,7 @@ Runtime pins, against a fake page:
 - A plan with a `"\n"` chunk gives `not_typed` with zero keys.
 - A `typing_plan` failure, including an unexpected exception, gives `too_long` or `not_typed` with zero keys, no navigation, and no budget spent.
 - A busy browser lock gives `not_typed` with zero navigation and zero budget spent.
-- A claim older than N seconds (by `Message.scheduled_at`) gives `not_typed` with zero navigation and zero budget spent.
+- A claim older than 60 seconds (by `Message.scheduled_at`) gives `not_typed` with zero navigation and zero budget spent.
 - Three Message links with the contact's `href` give one click, on the first visible one, through a locator that matches the `href`.
 - A link named Message that names another profile, mismatched `profileUrn` and `recipient`, a repeated query parameter, no link, or no visible link gives `not_typed` with no click.
 - A `button` named Message beside the links is ignored: the prefill proceeds and never clicks it.
@@ -275,7 +274,7 @@ Runtime pins, against a fake page:
 - A bare text node in the composer, or text before a `<p>`, makes the composer unreadable: `not_typed` before the first key, `partially_typed` after.
 - Checks that haven't all passed after `COMPOSER_WAIT_S` give `not_typed` with zero keys; checks that pass during the wait proceed, and the wait gives no input.
 - An existing conversation's `conversation_urn` is the `urn:li:msg_conversation:(…)` URN from the observed `messengerMessages` request; with no such request, or a different thread id, it's `None`, never the `fsd_conversation` form.
-- Focus not in the composer before the first key gives `not_typed`; focus moving away after chunk k gives zero further keys. Under option B, `_focus_seam` is called at most once, only after a pass of every check except focus, and the full pass, focus included, is polled after it.
+- Focus not in the composer before the first key gives `not_typed`; focus moving away after chunk k gives zero further keys. `_focus_seam` is called at most once, only after a pass of every check except focus, and the full pass, focus included, is polled after it.
 - A space is sent with `insert_text`, never with `keyboard.type`.
 - No delay is awaited between a step's checks and its key, and the focus check is the last read before each key.
 - A URL change before the first key gives `not_typed`; a URL change mid-type gives `partially_typed` with zero further keys.
@@ -309,19 +308,21 @@ P4-03's loopback replica (`tests/smoke/test_prefill_smoke.py`) copies the captur
 - Any other message bubble on the page stops the prefill before the first key. The person closes earlier bubbles, including the last prefill's and any empty one a refusal left, before the next one.
 - A contact without a public id can't be prefilled.
 - **The remaining risk is a send.** Focus is checked right before each key, not atomically with it. If focus moves to the Send button in the moment between the check and a Shift+Enter, the Shift+Enter could activate it and send what's typed so far. A space can't, because it's inserted as text, and other characters don't activate a button. A character landing elsewhere is stopped by the next step's checks. This window is the reason the person watches and leaves Chrome alone.
-- Under option A of decision 5, if focus doesn't land in the composer after the Message click, every prefill ends `not_typed` until an amendment adds option B.
+- netkeeper focuses the composer at most once, after every recipient check, if focus didn't land there after the click. It never clicks into the composer.
 - Handed-over tabs accumulate in the user's Chrome until the user closes them. That's deliberate: netkeeper closing a tab is how a draft would be lost.
 - The person must leave Chrome alone while the prefill types. Touching it stops the prefill as `partially_typed`, which is the safe direction.
 - If LinkedIn changes the Message control, the compose option, the composer, or how the bubble shows its recipient, the prefill refuses and types nothing. That's the intended failure.
 - If LinkedIn changes what Shift+Enter does, nothing in this ADR detects it at run time. The capture is the evidence, and a later capture that contradicts it means newlines are refused (the flag goes back to false) until a new amendment.
 - A future contributor keeps these true: the only clicks are Contact info and Message, each once, each bound to the profile it's on; the only typing is aimed at one verified composer for the contact, with focus and the composer checked again right before every key; the only key pressed is Shift+Enter; no code path presses Enter or clicks Send; and a handed-over tab is never touched again.
 
-## Decisions the maintainer makes at acceptance
+## Decisions recorded at acceptance
 
-1. **Where the tab comes to the front.** This ADR brings it to the front once, at the run's start, and `hand_over()` changes no focus. That adjusts the "brought to the front" wording of 2026-10-03.
-2. **N, the claim lapse.** How many seconds after `Message.scheduled_at` a claim may wait to start before it lapses back to the queue (suggested: 60).
-3. **Other open bubbles.** This ADR refuses a page that shows any composer besides the one the click opened, so the person closes earlier bubbles, including the last prefill's, before the next prefill. The alternative, allowing minimized bubbles for other people and relying on the focus and recipient checks, is looser.
-4. **The Message click rule.** The profile renders three identical Message links. This ADR requires every link named Message to name the contact's URN and bare id, then clicks the first visible one, once. It replaces the draft's "exactly one, in the top card" rule.
-5. **Focusing the composer.** Option A (no focus input) or option B (one `Locator.focus()` after every check), as [described above](#focusing-the-composer-decision-5).
+The maintainer accepted these on 2026-10-06:
+
+1. **Where the tab comes to the front.** Once, at the run's start, before the Message click; `hand_over()` changes no focus. That adjusts the "brought to the front" wording of 2026-10-03.
+2. **The claim lapse.** 60 seconds after `Message.scheduled_at`.
+3. **Other open bubbles.** The prefill refuses a page that shows any composer besides the one the click opened, hidden ones included, so the person closes earlier bubbles, including the last prefill's, before the next prefill.
+4. **The Message click rule.** Every link named Message must name the contact's URN and bare id, and the click goes through the first visible one, through a locator bound to that `href`. It replaces the draft's "exactly one, in the top card" rule.
+5. **Focusing the composer.** One `Locator.focus()`, in `_focus_seam`, after every check (option B), as [described above](#focusing-the-composer).
 
 The typing indicator, a decision in the draft, was settled on 2026-10-05: accepted, with a possible toggle later (#430).
