@@ -91,8 +91,8 @@ waited for on the database thread instead of freezing the loop it needs to commi
 
 **Wired into ``netkeeper serve`` (P2-10), disarmed.** ``serve``'s lifespan
 builds and starts this scheduler (:mod:`netkeeper.services.scheduled_runs`)
-for :data:`SERVED_SCHEDULES` -- the connections syncs and enrichment; the
-inbox poll has no page source yet (P4-01) -- with handlers that record a ``sync_runs`` row
+for :data:`SERVED_SCHEDULES` -- the connections syncs, enrichment, and the
+inbox poll (P4-01) -- with handlers that record a ``sync_runs`` row
 and hand it to the browser worker. Before any of that, :func:`poll_and_fire`
 asks the **arm gate**: while a person has not armed the account's scheduled
 runs (every account starts disarmed) a due fire is skipped as ``"disarmed"``
@@ -337,13 +337,11 @@ LATE_FIRE_SLACK: Final = timedelta(minutes=5)
 NOT_DONE_JITTER: Final = timedelta(hours=3)
 
 #: The kinds ``netkeeper serve`` schedules: the ones whose runner can do its job
-#: (P2-06, P2-07). ``inbox`` is left out, not registered-but-inert: its runner and
-#: handler exist (P4-08), but it has no page source until P4-01 (#380) wires one,
-#: and a due time for a job that can only fail would read in ``netkeeper posture``
-#: as a job that runs. P4-01 removes this exclusion in the PR that wires the source.
-SERVED_SCHEDULES: Final[dict[JobKind, JobSchedule]] = {
-    kind: schedule for kind, schedule in DEFAULT_SCHEDULES.items() if kind is not JobKind.INBOX
-}
+#: (P2-06, P2-07, and the inbox poll since P4-01, #380). Today that is every default
+#: schedule; the name stays so a kind that cannot run yet can be left out again, not
+#: registered-but-inert (a due time for a job that can only fail would read in
+#: ``netkeeper posture`` as a job that runs).
+SERVED_SCHEDULES: Final[dict[JobKind, JobSchedule]] = dict(DEFAULT_SCHEDULES)
 
 
 # --- the heat gate: on unless explicitly, namedly disabled (spec 9.7) --------

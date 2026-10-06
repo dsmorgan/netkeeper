@@ -160,7 +160,7 @@ def _no_times(checks: dict[str, service.Check]) -> None:
 # --- Gmail ------------------------------------------------------------------------------
 
 
-def test_without_serve_nothing_is_running_and_the_inbox_is_not_wired(world: World) -> None:
+def test_without_serve_nothing_is_running(world: World) -> None:
     for session, user in world.write():
         _mailbox(session, user, polled=NOW - timedelta(minutes=3))
         _arm_linkedin(session, user, kinds=(JobKind.ENRICH,))
@@ -180,20 +180,19 @@ def test_without_serve_nothing_is_running_and_the_inbox_is_not_wired(world: Worl
     assert checks["gmail_replies"].state is S.NOT_RUNNING
     assert checks["gmail_replies"].last_at == NOW - timedelta(minutes=3)  # history still holds
     assert checks["linkedin_enrich"].state is S.NOT_RUNNING
-    assert checks["linkedin_inbox"].state is S.NOT_WIRED
-    assert checks["linkedin_inbox"].reason == service.INBOX_NOT_WIRED
+    assert checks["linkedin_inbox"].state is S.NOT_RUNNING
     assert status.mailboxes[0].state is S.NOT_RUNNING
     _no_times(checks)
 
 
-def test_the_inbox_is_not_wired_even_while_everything_else_runs(world: World) -> None:
+def test_the_inbox_is_scheduled_like_the_other_linkedin_kinds(world: World) -> None:
     for session, user in world.write():
-        _arm_linkedin(session, user, kinds=(JobKind.ENRICH,))
+        _arm_linkedin(session, user, kinds=(JobKind.INBOX,))
 
     inbox = world.read()["linkedin_inbox"]
 
-    assert inbox.state is S.NOT_WIRED
-    assert inbox.next_at is None
+    assert inbox.state is S.SCHEDULED
+    assert inbox.next_at is not None
 
 
 def test_gmail_not_connected(world: World) -> None:
@@ -682,7 +681,7 @@ async def test_endpoint_answers_without_serve(client: httpx.AsyncClient) -> None
     assert by_key["gmail_replies"]["state"] == "not_running"
     assert by_key["gmail_replies"]["interval_minutes"] == 10
     assert by_key["gmail_drafts"]["interval_minutes"] == 10
-    assert by_key["linkedin_inbox"]["state"] == "not_wired"
+    assert by_key["linkedin_inbox"]["state"] == "not_running"
     assert by_key["linkedin_enrich"]["state"] == "not_running"
     assert by_key["linkedin_enrich"]["interval_minutes"] == 180
     assert by_key["linkedin_incremental_sync"]["interval_minutes"] == 1440

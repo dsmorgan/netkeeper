@@ -219,7 +219,7 @@ async def test_a_disarmed_serve_never_touches_the_browser_across_a_week(
         inbox = scheduler.stored_due(session, user, account, scheduler.JobKind.INBOX)
     assert full is not None and full > clock.at - timedelta(days=1)
     assert enrich is not None and enrich > START + timedelta(days=8)
-    assert inbox is None  # no page source yet (P4-01), not scheduled
+    assert inbox is not None  # served since P4-01
 
     # 2 and 3: past the gate, then past create_run too.
     provider, connector = fake_provider()
@@ -401,6 +401,7 @@ async def test_arming_takes_confirm_and_the_client_header(
             "connections_incremental",
             "connections_full",
             "enrich",
+            "inbox",
         ]
         armed = await client.post(
             "/api/v1/linkedin/schedule/arm", json={"confirm": True}, headers=HEADERS

@@ -1218,9 +1218,9 @@ def linkedin_inbox(ctx: typer.Context) -> None:
     poll budget and follows the same heat, session-flag, and active-hours rules as
     the other runs. It works while scheduled runs are disarmed.
 
-    The page source that reads the inbox is not built yet (P4-01), so today the run
-    is refused with that reason before it attaches to Chrome. It spends no budget and
-    loads no page.
+    It opens the messaging page in your Chrome, scrolls the list for older
+    conversations, and opens at most five threads by going to their pages. It reads only
+    what the page loads and sends no request of its own.
     """
     _run_by_hand(ctx, SyncRunKind.INBOX)
 

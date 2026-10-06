@@ -23,9 +23,7 @@ and enrichment). A handler:
 4. for the inbox poll only (P4-08), answers
    :attr:`~netkeeper.services.scheduler.JobOutcome.NOTHING_TO_WATCH` before anything
    else when no live enrollment has a contact with a LinkedIn URN: it records no
-   run and attaches to nothing, and the fire counts as skipped. The inbox kind has
-   a handler here but is not in ``SERVED_SCHEDULES`` until P4-01 (#380) wires its
-   page source, so ``netkeeper serve`` never fires it today;
+   run and attaches to nothing, and the fire counts as skipped;
 5. answers :attr:`~netkeeper.services.scheduler.JobOutcome.NOT_DONE` when a full
    sync ran but lost some of the page's answers (#200,
    :func:`netkeeper.services.runs.lost_answers`): it is incomplete and aged
@@ -79,8 +77,7 @@ RUN_KIND: Final[dict[JobKind, SyncRunKind]] = {
     JobKind.ENRICH: SyncRunKind.ENRICH,
 }
 
-#: The inbox poll's run kind. Its handler is registered with the others, but the kind
-#: stays out of ``SERVED_SCHEDULES`` until P4-01 (#380) wires a page source.
+#: The inbox poll's run kind. Its handler is registered with the others (P4-01, #380).
 INBOX_RUN_KIND: Final = {JobKind.INBOX: SyncRunKind.INBOX}
 
 #: The task name a run is submitted under.
@@ -251,8 +248,8 @@ def start_serve_scheduler(
     Establishing the schedule writes due times and fires nothing; a fire needs
     a heartbeat, and a fire on a disarmed account is skipped by the arm gate
     (``build_scheduler``'s default, never turned off here). The scheduler runs
-    :data:`~netkeeper.services.scheduler.SERVED_SCHEDULES` only (no inbox poll:
-    it has no page source yet) with the configured heat gate and active hours.
+    :data:`~netkeeper.services.scheduler.SERVED_SCHEDULES` only (the inbox poll
+    included since P4-01) with the configured heat gate and active hours.
     """
     executor = extractor.executor(factory, bus)
     _quiet_the_heartbeat()

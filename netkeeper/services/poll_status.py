@@ -30,8 +30,8 @@ store, never by running one:
   not check at fire time (it snaps every due time into the window), so they come
   last; the manual-run check words them
   (:func:`~netkeeper.services.runs.refuse_if_outside_active_hours`).
-- **LinkedIn inbox**: until a page source is wired (P4-01, #380) the scheduler does
-  not serve it, and it is ``not_wired``: never shown as running.
+- **LinkedIn inbox**: served like the other LinkedIn kinds since P4-01 (#380). A kind
+  the scheduler does not serve would be ``not_wired``: never shown as running.
 
 The campaign engine's one-minute tick is left out on purpose: it is not a check.
 
@@ -139,10 +139,7 @@ LABELS: Final[dict[str, str]] = {
 }
 
 NOT_SERVING: Final = "netkeeper serve isn't running in this process, so no background check runs"
-INBOX_NOT_WIRED: Final = (
-    "The LinkedIn inbox poll isn't running yet: it needs the LinkedIn inbox reader,"
-    " which comes in a later release"
-)
+NOT_WIRED: Final = "This check isn't running yet: netkeeper serve doesn't schedule it"
 _CONNECTIONS_KINDS: Final = frozenset({JobKind.CONNECTIONS_FULL, JobKind.CONNECTIONS_INCREMENTAL})
 _SYNC_RUN_KIND: Final[dict[JobKind, SyncRunKind]] = {**RUN_KIND, **INBOX_RUN_KIND}
 
@@ -477,7 +474,7 @@ def _linkedin(
             last_at=_last_run(session, user, _SYNC_RUN_KIND[kind]),
         )
         if kind not in SERVED_SCHEDULES:
-            checks.append(replace(base, state=CheckState.NOT_WIRED, reason=INBOX_NOT_WIRED))
+            checks.append(replace(base, state=CheckState.NOT_WIRED, reason=NOT_WIRED))
             continue
         blocked = gate
         if blocked is None and account is not None and kind in _CONNECTIONS_KINDS:

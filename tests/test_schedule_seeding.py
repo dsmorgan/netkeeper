@@ -3,9 +3,8 @@
 A schedule established before a kind existed has no due time for that kind, and a
 kind with no due time never fires. ``serve``'s start (``build_scheduler``) and arming
 (``seed_served_schedule``) give each missing kind its normal first due time, and never
-move one that is already set. The LinkedIn inbox poll has a runner (P4-08) but no
-page source yet (P4-01), so ``serve`` does not schedule it, and arming does not seed
-it either.
+move one that is already set. The LinkedIn inbox poll is served since P4-01, so it
+is seeded like the others.
 """
 
 from __future__ import annotations
@@ -210,14 +209,13 @@ def test_arming_before_serve_ever_ran_seeds_nothing(
     )
     dues = _dues(session_factory)
     assert dues[JobKind.ENRICH] == much_later + SERVED_SCHEDULES[JobKind.ENRICH].interval
-    assert dues[JobKind.INBOX] is None
+    assert dues[JobKind.INBOX] is not None
 
 
-def test_arming_seeds_a_missing_served_kind_and_never_the_inbox_poll(
+def test_arming_seeds_a_missing_served_kind_the_inbox_poll_included(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """The inbox poll has no page source yet (P4-01): ``serve`` does not schedule it, so
-    arming leaves it without a due time rather than give a job that can only fail one."""
+    """P4-01: the inbox poll is a served kind, so arming gives it a due time too."""
     one: dict[JobKind, JobSchedule] = {
         JobKind.CONNECTIONS_INCREMENTAL: SERVED_SCHEDULES[JobKind.CONNECTIONS_INCREMENTAL]
     }
@@ -227,9 +225,8 @@ def test_arming_seeds_a_missing_served_kind_and_never_the_inbox_poll(
         seeded = seed_served_schedule(session, user, SETTINGS.linkedin, now=LATER)
 
     assert set(seeded) == set(SERVED_SCHEDULES) - set(one)
-    assert JobKind.INBOX not in SERVED_SCHEDULES
+    assert JobKind.INBOX in SERVED_SCHEDULES
     dues = _dues(session_factory)
-    assert dues[JobKind.INBOX] is None
     assert all(dues[kind] is not None for kind in SERVED_SCHEDULES)
 
 
@@ -245,4 +242,4 @@ def test_arming_keeps_a_due_time_already_set(session_factory: sessionmaker[Sessi
     assert seeded == [JobKind.ENRICH]
     assert after[JobKind.ENRICH] == LATER + SERVED_SCHEDULES[JobKind.ENRICH].interval
     assert {k: after[k] for k in served_but_enrich} == {k: before[k] for k in served_but_enrich}
-    assert after[JobKind.INBOX] is None
+    assert after[JobKind.INBOX] is not None
