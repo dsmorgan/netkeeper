@@ -58,44 +58,44 @@ def test_the_first_page_parses_in_order_with_the_owner_and_counterparts() -> Non
     assert inbound.thread_path == f"/messaging/thread/{mp.thread_id(11)}/"
 
 
-def test_an_accepted_inmail_is_kept_beside_ordinary_conversations() -> None:
-    """INMAIL stays on an accepted InMail in PRIMARY_INBOX: skipping it would miss a reply."""
+def _kind_of(c: mp.Conv) -> Kind:
+    [item] = shapes.parse_conversation_list(mp.conversations_by_sync_token([c])).items
+    return item.kind
+
+
+@pytest.mark.parametrize("c", mp.READ_AS_ONE_TO_ONE, ids=lambda c: f"conv{c.n}")
+def test_the_fixtures_read_as_one_to_one_are_one_to_one(c: mp.Conv) -> None:
+    """An accepted InMail is kept beside ordinary conversations; a file, a title, and an
+    edited message do not disqualify one."""
+    assert _kind_of(c) is Kind.ONE_TO_ONE
+
+
+@pytest.mark.parametrize("c", mp.SKIPPED_OTHER, ids=lambda c: f"conv{c.n}")
+def test_the_fixtures_skipped_as_other_are(c: mp.Conv) -> None:
+    assert _kind_of(c) is Kind.OTHER
+
+
+@pytest.mark.parametrize("c", mp.SKIPPED_GROUP, ids=lambda c: f"conv{c.n}")
+def test_the_fixtures_skipped_as_group_are(c: mp.Conv) -> None:
+    assert _kind_of(c) is Kind.GROUP
+
+
+def test_the_accepted_inmail_keeps_its_counterpart_and_last_message() -> None:
     accepted = _first().items[2]
-
     assert mp.INMAIL in mp.INMAIL_ACCEPTED.categories
-    assert accepted.kind is Kind.ONE_TO_ONE
-    assert accepted.counterpart_urn == mp.MARISOL.urn
-    assert accepted.last_message is not None
+    assert accepted.counterpart_urn == mp.MARISOL.urn and accepted.last_message is not None
 
 
-@pytest.mark.parametrize("state", ["PENDING", "DECLINED"])
-def test_an_unaccepted_inmail_is_skipped(state: str) -> None:
-    conv = _with(mp.INMAIL_ACCEPTED, state=state)
-    [item] = shapes.parse_conversation_list(mp.conversations_by_sync_token([conv])).items
-    assert item.kind is Kind.OTHER
-
-
-def test_the_captured_pending_inmail_is_skipped() -> None:
-    assert _first().items[3].kind is Kind.OTHER
-
-
-def test_an_inmail_with_no_state_is_kept_rather_than_guessed_at() -> None:
-    conv = _with(mp.INMAIL_ACCEPTED, state=None)
-    [item] = shapes.parse_conversation_list(mp.conversations_by_sync_token([conv])).items
-    assert item.kind is Kind.ONE_TO_ONE
-
-
-def test_a_file_render_item_does_not_disqualify_a_conversation() -> None:
-    file_item = {"file": {"_type": "com.linkedin.messenger.File", "name": "invented.pdf"}}
-    last = mp.Msg(11, 3, mp.ZEPHYRINE, "Invented.", mp.T0, render_content=(file_item,))
-    conv = _with(mp.ONE_TO_ONE_INBOUND, last=last)
-    [item] = shapes.parse_conversation_list(mp.conversations_by_sync_token([conv])).items
-    assert item.kind is Kind.ONE_TO_ONE
+@pytest.mark.parametrize("state", ["PENDING", "DECLINED", None])
+def test_an_inmail_the_person_has_not_accepted_is_skipped(state: str | None) -> None:
+    assert _kind_of(_with(mp.INMAIL_ACCEPTED, state=state)) is Kind.OTHER
 
 
 def test_an_ad_a_company_and_a_group_are_skipped_by_kind() -> None:
     older = shapes.parse_conversation_list(
-        mp.conversations_by_category(mp.INBOX_OLDER_PAGE, next_cursor="invented-cursor-1")
+        mp.conversations_by_category(
+            (mp.SPONSORED, mp.GROUP, mp.NO_MESSAGES), next_cursor="invented-cursor-1"
+        )
     )
 
     kinds = [i.kind for i in older.items]
@@ -167,7 +167,8 @@ def test_more_than_two_participants_is_a_group_even_without_the_flag() -> None:
 def test_a_message_with_no_actor_reads_its_sender() -> None:
     doc = _doc(mp.conversations_by_sync_token([mp.ONE_TO_ONE_INBOUND]))
     [item] = _field_items(doc)
-    item["messages"]["elements"] = [mp.message(mp.INBOUND_LAST, actorless=True)]
+    actorless = mp.Msg(11, 3, mp.ZEPHYRINE, "Invented.", mp.T0, actorless=True)
+    item["messages"]["elements"] = [mp.message(actorless)]
     assert item["messages"]["elements"][0]["actor"] is None
 
     [parsed] = shapes.parse_conversation_list(json.dumps(doc)).items

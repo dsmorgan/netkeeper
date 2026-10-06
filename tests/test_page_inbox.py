@@ -66,6 +66,11 @@ def spec(
     )
 
 
+def _last(c: mp.Conv) -> mp.Msg:
+    assert c.last is not None
+    return c.last
+
+
 def descending(count: int, *, start: int = 100, step: int = 5, **kwargs: Any) -> list[mp.Conv]:
     """``count`` one-to-one conversations, newest first, ``step`` minutes apart."""
     return [conv(100 + i, who, start - step * i, **kwargs) for i, who in enumerate(people(count))]
@@ -173,7 +178,7 @@ async def test_a_list_that_stops_loading_is_route_changed_after_the_connections_
 
     assert stop.outcome is Outcome.ROUTE_CHANGED
     # Two pages answered, then six scrolls brought nothing.
-    assert len(site.pages[0].mouse.wheels) == 8  # type: ignore[attr-defined]
+    assert len(site.pages[0].mouse.wheels) == 8
 
 
 async def test_a_gap_before_an_older_page_is_a_stop_not_a_skipped_page() -> None:
@@ -215,17 +220,15 @@ async def test_a_second_mailbox_owner_is_a_stop() -> None:
 
 async def test_kinds_are_counted_and_skipped_and_an_accepted_inmail_is_kept() -> None:
     everything = [*mp.INBOX_FIRST_PAGE, *mp.INBOX_OLDER_PAGE]
-    site = InboxSite(everything, behavior=Behavior(first=4, page_size=3))
+    site = InboxSite(everything, behavior=Behavior(first=4, page_size=4))
     delta, _ = await read(site, spec())
 
     kept = {c.conversation_urn for c in delta.conversations}
-    assert mp.conversation_urn(13) in kept  # the accepted InMail: a contact's reply lives here
-    assert mp.conversation_urn(11) in kept and mp.conversation_urn(12) in kept
-    assert mp.conversation_urn(14) not in kept  # pending InMail
-    assert mp.conversation_urn(15) not in kept  # sponsored
-    assert mp.conversation_urn(16) not in kept  # group
-    assert mp.conversation_urn(17) not in kept  # nothing to report
-    assert (delta.skipped_group, delta.skipped_other) == (1, 2)
+    assert kept == {c.urn for c in mp.READ_AS_ONE_TO_ONE}  # the accepted InMail among them
+    assert mp.INMAIL_ACCEPTED.urn in kept
+    assert delta.skipped_group == len(mp.SKIPPED_GROUP)
+    assert delta.skipped_other == len(mp.SKIPPED_OTHER)
+    assert mp.NO_MESSAGES.urn not in kept  # nothing to report
     assert delta.complete
 
 
@@ -236,7 +239,7 @@ async def test_a_sender_who_is_neither_party_makes_it_a_group_the_list_did_not_m
     thread = [
         mp.Msg(100, 0, who, "Invented.", mp.T0 + 40 * mp.MINUTE_MS),
         mp.Msg(100, 2, stranger, "Invented third voice.", mp.T0 + 45 * mp.MINUTE_MS),
-        c.last,  # type: ignore[list-item]
+        _last(c),
     ]
     site = InboxSite([c], {100: thread}, Behavior(first=1))
     delta, _ = await read(site, spec(open_for=frozenset({c.urn})))
@@ -252,7 +255,7 @@ def _with_threads(count: int) -> tuple[InboxSite, list[mp.Conv]]:
     threads = {
         c.n: [
             mp.Msg(c.n, 0, mp.OWNER, "Invented opener.", mp.T0 + 10 * mp.MINUTE_MS),
-            c.last,  # type: ignore[list-item]
+            _last(c),
         ]
         for c in convs
     }
@@ -306,8 +309,8 @@ async def test_a_conversation_quiet_since_the_last_poll_is_not_opened() -> None:
 
 async def test_a_group_or_an_ad_is_never_opened() -> None:
     everything = [*mp.INBOX_FIRST_PAGE, *mp.INBOX_OLDER_PAGE]
-    site = InboxSite(everything, behavior=Behavior(first=7, page_size=3))
-    job = spec(open_for=frozenset({mp.conversation_urn(15), mp.conversation_urn(16)}))
+    site = InboxSite(everything, behavior=Behavior(first=len(everything)))
+    job = spec(open_for=frozenset({mp.SPONSORED.urn, mp.GROUP.urn, mp.INMAIL_PENDING.urn}))
     await read(site, job)
     assert site.thread_navigations == []
 
@@ -365,7 +368,7 @@ async def test_a_send_the_person_made_arrives_as_an_outbound_message_after_the_h
     thread = [
         mp.Msg(100, 0, who, "Invented earlier note.", mp.T0 + 10 * mp.MINUTE_MS),
         mp.Msg(100, 1, mp.OWNER, "Invented sent line.", mp.T0 + 40 * mp.MINUTE_MS),
-        c.last,  # type: ignore[list-item]
+        _last(c),
     ]
     site = InboxSite([c], {100: thread}, Behavior(first=1))
     delta, _ = await read(site, spec(since=at(0), open_for=frozenset({c.urn})))

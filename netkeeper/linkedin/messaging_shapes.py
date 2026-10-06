@@ -12,28 +12,24 @@ item that half-parses refuses the whole list answer, so a poll never reports "no
 replies" from data it could not read. The message of a ``RouteChanged`` names a shape,
 never a value, so no message text or name reaches a log line.
 
-**Which conversations are skipped, and why** (the safe rule). Missing a reply is the
-dangerous direction, so a conversation is skipped only on a *positive* mark that it
-cannot be a person's reply:
+**Which conversations are skipped, and why.** Missing a reply is the dangerous direction,
+so only what cannot be a contact's reply is skipped:
 
-* an advertisement: ``conversationTypeText`` reading ``Sponsored`` or ``LinkedIn
-  Offer``, ``contentMetadata.conversationAdContent``, or an ad item among the last
-  message's ``renderContent``;
-* an InMail the person has not accepted: ``INMAIL`` in ``categories`` with ``state``
-  ``PENDING`` or ``DECLINED`` (maintainer's decision, #374 review). An **accepted**
-  InMail (``ACCEPTED``) with one profile counterpart is one-to-one: about a third of the
-  captured inbox, and a contact's only conversation may have started as InMail. An
-  InMail with no state, or any other, is kept: the rule skips on a positive mark only;
+* an advertisement or a message request: a ``conversationTypeText`` (``Sponsored``,
+  ``LinkedIn Offer``, ``InMail``), a ``contentMetadata``, or an ad or ``hostUrnData``
+  item among the last message's ``renderContent``;
+* an InMail the person has not accepted: ``INMAIL`` in ``categories`` without ``state``
+  ``ACCEPTED`` (pending, declined, or none). An **accepted** InMail with one profile
+  counterpart is one-to-one (maintainer's decision, #374 review): about a third of the
+  captured inbox, and a contact's only conversation may have started as InMail, so the
+  prefill's reply bubble can land in one. ``INMAIL`` alone is not a mark. A ``file``
+  render item, a ``title``, or an ``EDITED`` message does not disqualify a conversation;
 * a company: the counterpart's ``hostIdentityUrn`` is ``urn:li:fsd_company:...``;
 * a group: ``groupChat`` true, or more than one participant besides the owner.
 
-``INMAIL`` alone is **not** a mark: it stays after the person accepts an InMail, so
-an accepted one sits in ``PRIMARY_INBOX`` beside ordinary conversations, and a contact's
-real reply can arrive in it. A non-ad render item (a file) does not disqualify a
-conversation either. A kept conversation is matched by URN like any other; the core
-ignores a stranger's. A counterpart whose
-URN is neither ``fsd_profile`` nor ``fsd_company``, or a conversation with nobody but
-the owner, is an unknown shape: :class:`RouteChanged`.
+A counterpart whose URN is neither ``fsd_profile`` nor ``fsd_company``, or a conversation
+with nobody but the owner, is an unknown shape: :class:`RouteChanged`. A kept
+conversation is matched by URN like any other; the core ignores a stranger's.
 
 **The mailbox owner** is read three ways that must agree: the first part of every
 conversation URN, the participant whose ``member.distance`` is ``SELF``, and the
@@ -80,8 +76,6 @@ BY_SYNC_TOKEN: Final = "messengerConversationsBySyncToken"  # noqa: S105 -- a fi
 BY_CATEGORY: Final = "messengerConversationsByCategoryQuery"
 MESSAGES_BY_SYNC_TOKEN: Final = "messengerMessagesBySyncToken"  # noqa: S105 -- a field name
 
-#: LinkedIn's own labels for an advertisement (captured 2026-10-05).
-AD_LABELS: Final = frozenset({"Sponsored", "LinkedIn Offer"})
 #: Ad items in a message's ``renderContent`` (captured 2026-10-05).
 AD_RENDER_KEYS: Final = frozenset({"messageAdRenderContent", "conversationAdsMessageContent"})
 
@@ -331,29 +325,38 @@ def _text_of(value: object, where: str) -> str | None:
     return text if isinstance(text, str) else None
 
 
-UNACCEPTED_STATES: Final = frozenset({"PENDING", "DECLINED"})
+ACCEPTED_STATE: Final = "ACCEPTED"
+#: An InMail's own marker on a message's ``renderContent`` (captured 2026-10-05).
+INMAIL_RENDER_KEY: Final = "hostUrnData"
 
 
 def _is_unaccepted_inmail(item: Mapping[str, Any]) -> bool:
+    """``INMAIL`` in ``categories`` unless the person accepted it (``state`` ``ACCEPTED``).
+
+    A pending, declined, or stateless InMail is a stranger's request, not a reply
+    (#374 review: accepted InMail is read, the rest is skipped).
+    """
     categories = item.get("categories")
     return (
         isinstance(categories, list)
         and "INMAIL" in categories
-        and item.get("state") in UNACCEPTED_STATES
+        and item.get("state") != ACCEPTED_STATE
     )
 
 
 def _is_ad(item: Mapping[str, Any], last_raw: Mapping[str, Any] | None) -> bool:
-    if _text_of(item.get("conversationTypeText"), "conversationTypeText") in AD_LABELS:
+    """An advertisement or a message request: a label, ``contentMetadata``, or a render
+    item (ad, or ``hostUrnData``) on the last message."""
+    if _text_of(item.get("conversationTypeText"), "conversationTypeText") is not None:
         return True
-    content = item.get("contentMetadata")
-    if isinstance(content, dict) and content.get("conversationAdContent") is not None:
+    if item.get("contentMetadata") is not None:
         return True
     if last_raw is not None:
         render = last_raw.get("renderContent")
         if isinstance(render, list):
+            marks = AD_RENDER_KEYS | {INMAIL_RENDER_KEY}
             for entry in render:
-                if isinstance(entry, dict) and AD_RENDER_KEYS & entry.keys():
+                if isinstance(entry, dict) and marks & entry.keys():
                     return True
     return False
 
