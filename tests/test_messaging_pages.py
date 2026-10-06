@@ -1,15 +1,23 @@
 """The messaging fixtures (#374): invented, consistent with the shape note, and not copied.
 
-The last test reads the maintainer's private capture when it is on this machine and
-checks that no fixture value appears anywhere in it. CI never has the capture, so
-there it skips. A failure names where the fixture value sits, never the value: if it
-matched, it is real data.
+The last test checks that no fixture value appears anywhere in the maintainer's
+private capture. It is opt-in: it runs only when ``NETKEEPER_CAPTURE_DIR`` names the
+capture folder, and skips otherwise, even on a machine that has the folder. It never
+looks at a default path, so an ordinary ``make check`` never reads the private folder.
+Only the maintainer, or an analysis session he approves, sets the variable::
+
+    NETKEEPER_CAPTURE_DIR=~/code/netkeeper-private/messaging-capture \
+        .venv/bin/python -m pytest tests/test_messaging_pages.py
+
+A failure names where the fixture value sits, never the value: if it matched, it is
+real data.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 from collections.abc import Iterator
 from html.parser import HTMLParser
@@ -20,8 +28,14 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 import messaging_pages as mp
 import pytest
 
-#: Where the maintainer keeps the capture (#374). Absent everywhere but his machine.
-CAPTURE_DIR = Path.home() / "code" / "netkeeper-private" / "messaging-capture"
+#: The opt-in: the capture folder to check against (#374). Unset, the check skips.
+CAPTURE_ENV = "NETKEEPER_CAPTURE_DIR"
+
+
+def _capture_dir() -> Path | None:
+    raw = os.environ.get(CAPTURE_ENV, "").strip()
+    return Path(raw).expanduser() if raw else None
+
 
 _PEOPLE = (mp.OWNER, mp.ZEPHYRINE, mp.THADDEUS, mp.MARISOL, mp.BRIXTON, mp.QUILLON, mp.SAFFRON)
 
@@ -267,9 +281,9 @@ def _har_text(path: Path) -> Iterator[str]:
         yield text
 
 
-def _capture_corpus() -> bytes:
+def _capture_corpus(capture_dir: Path) -> bytes:
     parts: list[str] = []
-    for path in sorted(CAPTURE_DIR.iterdir()):
+    for path in sorted(capture_dir.iterdir()):
         if path.suffix == ".har":
             parts.extend(_har_text(path))
         elif path.is_file():
@@ -280,9 +294,13 @@ def _capture_corpus() -> bytes:
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not CAPTURE_DIR.is_dir(), reason="the private capture is not on this machine")
 def test_no_fixture_value_appears_in_the_capture() -> None:
-    corpus = _capture_corpus()
+    capture_dir = _capture_dir()
+    if capture_dir is None:
+        pytest.skip(f"opt-in: set {CAPTURE_ENV} to the capture folder to run it")
+    if not capture_dir.is_dir():
+        pytest.fail(f"{CAPTURE_ENV} is set but is not a folder")
+    corpus = _capture_corpus(capture_dir)
     # Every alphanumeric run of a value that occurs in the corpus is inside one of the
     # corpus's runs, so this cheap check rules most values out before the full search.
     runs = b"\n".join(set(re.findall(rb"[A-Za-z0-9]+", corpus)))
