@@ -99,7 +99,8 @@ log = logging.getLogger(__name__)
 #: The kinds a run can be started for today: the two connections syncs (P2-06),
 #: enrichment (P2-07), the inbox poll (P4-08), and the LinkedIn prefill (P4-03), which
 #: :func:`create_run` still records only manually and only with a claim's gate token.
-#: The inbox poll's page source is P4-01's (#380).
+#: The inbox poll reads its page through ``PageInbox`` (P4-01, #380); a first poll is run by
+#: hand, and scheduled polls wait for it.
 RUNNABLE_KINDS: Final = frozenset(
     {
         SyncRunKind.CONNECTIONS_FULL,

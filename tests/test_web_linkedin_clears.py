@@ -486,7 +486,9 @@ async def test_acknowledge_clears_the_first_polls_warning(
     with session_scope(running_app.state.session_factory) as session:
         assert short_first_poll(session, _local(session)) is None
     posture = (await client.get("/api/v1/posture")).json()
-    assert all(row["key"] != "linkedin_first_poll_short" for row in posture["protections"])
+    # The row stays (the inbox poll's value and hold note); only its warning is gone.
+    [after] = [r for r in posture["protections"] if r["key"] == "linkedin_first_poll_short"]
+    assert after["warnings"] == []
 
     again = await client.post(INBOX_ACK_URL, headers=HEADERS)
     assert again.json() == {"cleared": False}

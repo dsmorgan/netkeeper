@@ -16,6 +16,10 @@ import {
   STATUS_LOGGED_OUT,
 } from './test-support'
 
+/** `STOP_REASON_TEXT['owner_mismatch']` (`netkeeper/services/runs.py`). */
+const OWNER_MISMATCH =
+  "the page showed another LinkedIn mailbox than this account's; if you changed accounts, run `netkeeper linkedin inbox-forget-owner`"
+
 afterEach(() => {
   resetFakeEventSource()
 })
@@ -235,13 +239,13 @@ describe('the inbox poll and the prefill on the LinkedIn page (#383)', () => {
       id: 61,
       kind: 'inbox',
       status: 'failed',
-      stop_reason: 'no_source',
-      stop_reason_text: 'the inbox page source is not built yet',
+      stop_reason: 'owner_mismatch',
+      stop_reason_text: OWNER_MISMATCH,
     })
     act(() => source.emit('run.finished', { run_id: 61, status: 'failed' }))
 
     expect(
-      await screen.findByText(/The inbox check stopped: the inbox page source is not built yet/),
+      await screen.findByText(/The inbox check stopped: the page showed another LinkedIn mailbox/),
     ).toBeVisible()
     expect(button).toBeEnabled()
   })

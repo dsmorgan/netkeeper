@@ -1,3 +1,5 @@
+import { OUTCOME_TEXT, isPrefillOutcome } from '../linkedin-steps/prefill-copy'
+
 import type { RunStatus } from './types'
 
 export const RUN_STATUS_CLASSES: Record<RunStatus, string> = {
@@ -15,6 +17,11 @@ export function stopReasonLabel(run: {
   stop_reason: string | null
   stop_reason_text: string | null
 }): string | null {
+  // A prefill run's outcomes (`not_typed`, `partially_typed`, ...) have no words on the
+  // server yet; its `error` says why, and the queue says what to do.
+  if (isPrefillOutcome(run.stop_reason) && run.stop_reason_text === run.stop_reason) {
+    return OUTCOME_TEXT[run.stop_reason]
+  }
   return run.stop_reason_text ?? run.stop_reason
 }
 

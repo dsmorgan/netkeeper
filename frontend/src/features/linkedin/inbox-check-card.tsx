@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 
+import { FirstPollNote } from '@/features/linkedin-steps/first-poll-note'
 import { useRunGoing } from '@/features/linkedin-steps/use-prefill-run'
 
 import { linkedinKeys, runQuery, startRun } from './api'
@@ -42,6 +43,7 @@ export function InboxCheckCard({ onStarted }: { onStarted: (runId: number) => vo
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2 text-sm">
+        <FirstPollNote />
         <Button disabled={start.isPending || checking} onClick={() => start.mutate()}>
           {start.isPending ? 'Starting…' : 'Check inbox now'}
         </Button>

@@ -26,8 +26,19 @@ import { FakeEventSource, resetFakeEventSource } from '@/test/fake-event-source'
 import { jsonResponse, mockFetch } from '@/test/fetch'
 
 import type { ReadyItem, ReadyPage, WaitingItem, WaitingPage } from './api'
-import { ONE_AT_A_TIME, REVIEW_AND_SEND, TYPING, ageText, threadUrl } from './format'
+import { ONE_AT_A_TIME, REVIEW_AND_SEND, ageText, reasonText, threadUrl } from './format'
 import { LinkedInStepsSection } from './linkedin-steps-section'
+import {
+  CLOSE_BUBBLE,
+  FIRST_POLL_NOTE,
+  MAYBE_CLOSE_BUBBLE,
+  PARTLY_TYPED,
+  PREFILL_NOTE,
+  TYPING,
+  TYPING_WARNING,
+  prefillEnding,
+  prefillReason,
+} from './prefill-copy'
 
 const HOUR = 3_600_000
 
@@ -537,5 +548,355 @@ describe('format', () => {
     expect(ageText('2030-06-15T09:00:00Z', now)).toBe('3 hours ago')
     expect(ageText('2030-06-12T12:00:00Z', now)).toBe('3 days ago')
     expect(ageText(null, now)).toBe('not recorded')
+  })
+})
+
+/** Clicks Prefill for Rosalind, then ends the run the way a prefill run records it. */
+async function finishPrefill(stop_reason: string, error: string | null, status = 'aborted') {
+  let state = STATUS_CLEAR
+  let current = run({ id: 81, kind: 'message_send', status: 'running' })
+  const { source } = renderSection({
+    'GET /api/v1/linkedin/status': () => jsonResponse(state),
+    [`POST ${PREFILL}`]: () => {
+      state = { ...STATUS_CLEAR, running_run_id: 81 }
+      return jsonResponse({ enrollment_id: 31, message_id: 71, run_id: 81, task_id: 't' }, 202)
+    },
+    'GET /api/v1/linkedin/runs/81': () => jsonResponse(current),
+  })
+  fireEvent.click(await screen.findByRole('button', { name: 'Prefill Rosalind Quillfeather' }))
+  await screen.findByText(TYPING)
+  state = STATUS_CLEAR
+  current = run({
+    id: 81,
+    kind: 'message_send',
+    status: status as 'aborted',
+    stop_reason,
+    stop_reason_text: stop_reason,
+    error,
+  })
+  act(() => source.emit('run.finished', { run_id: 81, status }))
+  return screen.findByRole('alert')
+}
+
+describe('the prefill notes (#383, ADR 0007)', () => {
+  it('tells you before the click that the recipient may see "typing…"', async () => {
+    renderSection()
+    await screen.findByRole('list', { name: 'Ready to prefill' })
+    expect(screen.getByText(PREFILL_NOTE)).toBeVisible()
+    expect(PREFILL_NOTE).toContain('may see "typing…"')
+    expect(PREFILL_NOTE).toContain("Don't type or click in Chrome")
+  })
+
+  it('tells you again while it types, and asks you to leave Chrome alone', async () => {
+    renderSection({
+      [`POST ${PREFILL}`]: () =>
+        jsonResponse({ enrollment_id: 31, message_id: 71, run_id: 81, task_id: 't' }, 202),
+      'GET /api/v1/linkedin/runs/81': () =>
+        jsonResponse(run({ id: 81, kind: 'message_send', status: 'running' })),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Prefill Rosalind Quillfeather' }))
+
+    expect(await screen.findByText(TYPING_WARNING)).toBeVisible()
+    expect(TYPING_WARNING).toContain('"typing…"')
+    expect(screen.queryByText(PREFILL_NOTE)).toBeNull()
+  })
+
+  it('says the inbox is held before the first poll, and to run it by hand', async () => {
+    renderSection({
+      'GET /api/v1/poll-status': () =>
+        jsonResponse({
+          items: [
+            {
+              key: 'linkedin_inbox',
+              group: 'linkedin',
+              label: 'LinkedIn inbox',
+              state: 'blocked',
+              interval: 'PT2H',
+              last_at: null,
+              next_at: null,
+              reason: 'The first LinkedIn inbox poll is run by hand',
+              requested: false,
+            },
+          ],
+          mailboxes: [],
+        }),
+    })
+
+    const note = await screen.findByRole('note')
+    expect(note).toHaveTextContent('held until it has')
+    expect(note).toHaveTextContent('Run `netkeeper linkedin inbox` by hand')
+    expect(note).toHaveTextContent(FIRST_POLL_NOTE)
+  })
+
+  it('shows no first-poll note once a poll has completed', async () => {
+    renderSection({
+      'GET /api/v1/poll-status': () =>
+        jsonResponse({
+          items: [
+            {
+              key: 'linkedin_inbox',
+              group: 'linkedin',
+              label: 'LinkedIn inbox',
+              state: 'scheduled',
+              interval: 'PT2H',
+              last_at: hoursAgo(1),
+              next_at: null,
+              reason: null,
+              requested: false,
+            },
+          ],
+          mailboxes: [],
+        }),
+    })
+    await screen.findByRole('list', { name: 'Ready to prefill' })
+    expect(screen.queryByRole('note', { name: /./ })).toBeNull()
+    expect(screen.queryByText(/has not read your LinkedIn inbox yet/)).toBeNull()
+  })
+
+  it('shows the hold as a refusal: held until the inbox is read, with the backend detail', async () => {
+    renderSection({
+      [`POST ${PREFILL}`]: () =>
+        jsonResponse(
+          {
+            detail: {
+              enrollment_id: 31,
+              reasons: ['linkedin_inbox_stale'],
+              detail:
+                'the LinkedIn inbox has not been read: no poll has completed yet; run `netkeeper linkedin inbox` by hand',
+            },
+          },
+          409,
+        ),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Prefill Rosalind Quillfeather' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Not prefilled. Nothing was typed in Chrome.')
+    expect(alert).toHaveTextContent('held until the inbox is read')
+    expect(alert).toHaveTextContent('run `netkeeper linkedin inbox` by hand')
+    expect(reasonText('linkedin_inbox_stale')).toMatch(/^held until the inbox is read/)
+  })
+})
+
+describe('how a prefill that typed nothing ended', () => {
+  it('after a refusal that followed the click, tells you to close the empty bubble', async () => {
+    const alert = await finishPrefill('not_typed', 'recipient_name_mismatch')
+
+    expect(alert).toHaveTextContent('Not prefilled. Nothing was typed in Chrome.')
+    expect(alert).toHaveTextContent(
+      "The name in the message bubble doesn't match the name on the profile.",
+    )
+    expect(alert).toHaveTextContent(CLOSE_BUBBLE)
+    expect(alert).not.toHaveTextContent('recipient_name_mismatch')
+    expect(screen.queryByRole('button', { name: /retry/i })).toBeNull()
+  })
+
+  it('does not ask you to close a bubble when the click never happened', async () => {
+    const alert = await finishPrefill('not_typed', 'the contact has no public profile id to open')
+
+    expect(alert).toHaveTextContent('no public LinkedIn profile address')
+    expect(alert).not.toHaveTextContent('bubble')
+  })
+
+  it('says a refusal the run cannot place may have left a bubble open', async () => {
+    const alert = await finishPrefill('not_typed', 'cancelled')
+    expect(alert).toHaveTextContent('You cancelled the run.')
+    expect(alert).toHaveTextContent(MAYBE_CLOSE_BUBBLE)
+  })
+
+  it('says a body that is too long typed nothing and parked the enrollment', async () => {
+    const alert = await finishPrefill('too_long', 'the body is over the typing ceiling')
+    expect(alert).toHaveTextContent('Nothing was typed in Chrome.')
+    expect(alert).toHaveTextContent('too long to type')
+    expect(alert).toHaveTextContent('parked the enrollment')
+    expect(alert).not.toHaveTextContent('bubble')
+  })
+
+  it('shows a phrase it has no words for exactly as the backend wrote it', async () => {
+    const alert = await finishPrefill('not_typed', 'a phrase from a newer netkeeper')
+    expect(alert).toHaveTextContent('a phrase from a newer netkeeper')
+    expect(alert).toHaveTextContent(MAYBE_CLOSE_BUBBLE)
+  })
+})
+
+describe('how a prefill that typed part of the message ended', () => {
+  it.each([
+    ['partially_typed', 'The prefill stopped part of the way through typing.'],
+    ['unknown', "netkeeper can't tell how much it typed"],
+  ])('%s says part of the message may be in the composer', async (outcome, title) => {
+    const alert = await finishPrefill(outcome, 'the composer does not hold focus', 'failed')
+
+    expect(alert).toHaveTextContent(title)
+    expect(alert).toHaveTextContent('The message box lost focus, so netkeeper stopped.')
+    expect(alert).toHaveTextContent(PARTLY_TYPED)
+    expect(alert).toHaveTextContent('never clears the composer and never retries')
+    expect(alert).not.toHaveTextContent('Nothing was typed')
+    expect(screen.queryByRole('button', { name: /retry/i })).toBeNull()
+  })
+
+  it('says it checked after typing when the final check failed', async () => {
+    const alert = await finishPrefill(
+      'partially_typed',
+      "after typing: the composer's text changed",
+      'failed',
+    )
+    expect(alert).toHaveTextContent(
+      'After typing, the text in the message box changed while netkeeper typed.',
+    )
+  })
+})
+
+describe('prefill refusal reasons in plain words', () => {
+  // Every phrase the prefill records (browser.py, page_messaging.py, messaging.py,
+  // message_send.py): none reaches the person raw.
+  const PHRASES: readonly string[] = [
+    'no claim',
+    'the claim lapsed',
+    'the message has no body',
+    'the contact has no usable LinkedIn URN',
+    'the typing plan refused the body (MultilineRefused)',
+    'the body is over the typing ceiling',
+    'the LinkedIn session is flagged',
+    'heat is too high',
+    "today's LinkedIn budget is spent",
+    'the contact has no public profile id to open',
+    'the page answered logged_out',
+    'the profile opened somewhere else',
+    'no Message control on the page',
+    "a Message control opens something other than this contact's compose",
+    'the Message control was not clicked',
+    'no compose option was loaded after the click',
+    'the compose option could not be read',
+    'more than one compose option was loaded',
+    'the compose option was not answered',
+    'the compose option came from another path',
+    "the compose option's URN has an unexpected shape",
+    'the compose option names another profile',
+    "the compose option's answer could not be read",
+    "the compose option's answer is not JSON",
+    "the compose option's answer has an unexpected shape",
+    'the compose option names another recipient, or more than one',
+    'a reply compose option names no conversation',
+    'a new-message compose option names a conversation',
+    "the compose option's type is not one the prefill knows",
+    'another_compose',
+    'recipient_name_mismatch',
+    'recipient_name_unreadable',
+    'there is more than one message composer, or none; close other bubbles',
+    'more than one message bubble is open; close the others',
+    "the conversation's bubble is not open",
+    'the page shows a new-message bubble, not the conversation',
+    "the composer is not in the conversation's bubble",
+    "the bubble's header does not name one person",
+    'the bubble is for someone else',
+    'the contact has no public profile id to check the new-message bubble by',
+    'the new-message bubble is not open, or more than one is',
+    "the page shows the conversation's bubble, not a new message",
+    'the composer is not in the new-message bubble',
+    'the new-message bubble does not name exactly one recipient',
+    "the new-message bubble's recipient field is missing",
+    'the new-message bubble is for someone else',
+    "the tab's url changed",
+    'the tab or the browser went away',
+    'the composer is not empty',
+    "the composer's text changed",
+    'the composer does not hold focus',
+    'the composer could not be read',
+    'the bubble was not drawn',
+    'a key call failed',
+    'cancelled',
+    'interrupted',
+    'the prefill failed (RuntimeError)',
+    'no tab with a clicked Message control',
+    'the plan holds a control character',
+    'the plan is empty',
+  ]
+
+  it.each(PHRASES)('says %j in plain words', (phrase) => {
+    const reason = prefillReason(phrase)
+    expect(reason.text).not.toBe(phrase)
+    expect(reason.text).toMatch(/^(netkeeper |[A-Z])/)
+    expect(reason.text).not.toMatch(/_/)
+  })
+
+  it('names each of the three codes the way the maintainer would say it', () => {
+    expect(prefillReason('recipient_name_mismatch').text).toBe(
+      "The name in the message bubble doesn't match the name on the profile.",
+    )
+    expect(prefillReason('recipient_name_unreadable').text).toBe(
+      "netkeeper couldn't read the recipient's name in the message bubble, so it couldn't check it against the profile.",
+    )
+    expect(prefillReason('another_compose').text).toMatch(/second message composer/)
+  })
+
+  it('says only the refusals after the click leave a bubble open', () => {
+    expect(prefillReason('the profile opened somewhere else').bubble).toBe('closed')
+    expect(prefillReason('the claim lapsed').bubble).toBe('closed')
+    expect(prefillReason('another_compose').bubble).toBe('open')
+    expect(prefillReason("the tab's url changed").bubble).toBe('open')
+    expect(prefillReason('cancelled').bubble).toBe('maybe')
+  })
+
+  it('has no ending for a prefill, or a stop that is not a prefill outcome', () => {
+    expect(prefillEnding('prefilled', null)).toBeNull()
+    expect(prefillEnding('session_flagged', null)).toBeNull()
+    expect(prefillEnding(null, null)).toBeNull()
+  })
+
+  it('shows a prefill outcome in the runs list as words, not a code', async () => {
+    const { stopReasonLabel } = await import('@/features/linkedin/fields')
+    expect(
+      stopReasonLabel({ stop_reason: 'partially_typed', stop_reason_text: 'partially_typed' }),
+    ).toBe('part of the message was typed')
+    expect(
+      stopReasonLabel({ stop_reason: 'throttled', stop_reason_text: 'LinkedIn throttled it' }),
+    ).toBe('LinkedIn throttled it')
+  })
+})
+
+describe('the inbox check states (#433)', () => {
+  it('says the first poll is run by hand when "I sent it, check now" is refused for it', async () => {
+    renderSection({
+      'GET /api/v1/campaigns/linkedin/waiting': () => jsonResponse(waitingPage([waitingItem()])),
+      'POST /api/v1/campaigns/linkedin/messages/71/check': () =>
+        jsonResponse({ run_id: 91, task_id: 't' }, 202),
+      'GET /api/v1/linkedin/runs/91': () =>
+        jsonResponse(
+          run({
+            id: 91,
+            kind: 'inbox',
+            status: 'failed',
+            stop_reason: 'first_inbox_poll',
+            stop_reason_text: 'refused: the first LinkedIn inbox poll is run by hand',
+          }),
+        ),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'I sent it, check now' }))
+    expect(
+      await screen.findByText(
+        /The inbox check stopped: refused: the first LinkedIn inbox poll is run by hand/,
+      ),
+    ).toBeVisible()
+  })
+
+  it('says to run inbox-forget-owner when the check stops on another mailbox', async () => {
+    renderSection({
+      'GET /api/v1/campaigns/linkedin/waiting': () => jsonResponse(waitingPage([waitingItem()])),
+      'POST /api/v1/campaigns/linkedin/messages/71/check': () =>
+        jsonResponse({ run_id: 91, task_id: 't' }, 202),
+      'GET /api/v1/linkedin/runs/91': () =>
+        jsonResponse(
+          run({
+            id: 91,
+            kind: 'inbox',
+            status: 'failed',
+            stop_reason: 'owner_mismatch',
+            stop_reason_text:
+              "the page showed another LinkedIn mailbox than this account's; if you changed accounts, run `netkeeper linkedin inbox-forget-owner`",
+          }),
+        ),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'I sent it, check now' }))
+    expect(await screen.findByText(/netkeeper linkedin inbox-forget-owner/)).toBeVisible()
   })
 })

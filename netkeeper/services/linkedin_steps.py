@@ -252,9 +252,7 @@ class ReadyPrefill:
     held_until: datetime | None
 
 
-def _ready_statement(
-    user: User, now: datetime, campaign_id: int | None
-) -> Select[tuple[Enrollment]]:
+def _ready_statement(user: User, now: datetime, campaign_id: int | None) -> Select[Enrollment]:
     """The tick's selection, narrowed to LinkedIn steps (and one campaign's, if given)."""
     statement = (
         engine._selected(user, now)
@@ -281,7 +279,7 @@ def ready_by_step(
         .with_only_columns(CampaignStep.position, func.count(Enrollment.id))
         .group_by(CampaignStep.position)
         .order_by(None)
-    ).tuples()
+    )
     return {position: n for position, n in rows}
 
 

@@ -45,13 +45,14 @@ import {
 import {
   ONE_AT_A_TIME,
   REVIEW_AND_SEND,
-  TYPING,
   ageText,
   openPrefill,
   reasonText,
   waitingState,
   type WaitingState,
 } from './format'
+import { PREFILL_NOTE, TYPING, TYPING_WARNING, prefillEnding } from './prefill-copy'
+import { FirstPollNote } from './first-poll-note'
 import { usePrefillRun, useRunGoing, type PrefillRun } from './use-prefill-run'
 
 /** The queue and the waiting list together: one campaign's when `campaignId` is given. */
@@ -142,9 +143,12 @@ export function LinkedInQueueCard({ campaignId, run }: { campaignId?: number; ru
       </CardHeader>
       <CardContent className="flex flex-col gap-3 text-sm">
         <AutoSendBadge />
+        <FirstPollNote />
+        {!typing && <p className="text-muted-foreground">{PREFILL_NOTE}</p>}
         {typing && (
           <div role="status" className="rounded-lg border border-sky-500/40 bg-sky-500/10 p-3">
             <p className="font-medium">{TYPING}</p>
+            <p>{TYPING_WARNING}</p>
             {run.progress !== null && (
               <p className="text-muted-foreground">{summarizeFields(run.progress, 6)}</p>
             )}
@@ -309,6 +313,20 @@ function FinishedPrefill({ runId, onDismiss }: { runId: number; onDismiss: () =>
           Dismiss
         </Button>
       </p>
+    )
+  }
+  const ending = prefillEnding(run.data.stop_reason, run.data.error)
+  if (ending !== null) {
+    return (
+      <Callout tone="warning" role="alert" title={ending.title}>
+        {ending.reason !== null && <p>{ending.reason}</p>}
+        {ending.steps.map((step) => (
+          <p key={step}>{step}</p>
+        ))}
+        <Button size="sm" variant="outline" className="mt-2" onClick={onDismiss}>
+          Dismiss
+        </Button>
+      </Callout>
     )
   }
   const reason = stopReasonLabel(run.data) ?? run.data.error ?? 'no reason recorded'
