@@ -31,19 +31,15 @@ import pytest
 from netkeeper.linkedin.voyager import (
     CONNECTIONS_DEFAULT_COUNT,
     CONNECTIONS_ENDPOINT,
-    CONVERSATIONS_ENDPOINT,
     RESTLI_PROTOCOL_VERSION,
     ConnectionsPageResult,
-    ConversationsPageResult,
     RouteChanged,
     VoyagerFetch,
     VoyagerRequest,
     VoyagerResponse,
     build_headers,
     connections_query,
-    conversations_query,
     parse_connections_page,
-    parse_conversations_page,
     strip_jsessionid,
 )
 
@@ -142,17 +138,6 @@ class TestConnectionsQuery:
     def test_non_positive_count_refused(self) -> None:
         with pytest.raises(ValueError, match="count"):
             connections_query(start=0, count=0)
-
-
-class TestConversationsQuery:
-    def test_shape(self) -> None:
-        query = conversations_query(count=20)
-        assert query["count"] == "20"
-        assert query["decorationId"]
-
-    def test_non_positive_count_refused(self) -> None:
-        with pytest.raises(ValueError, match="count"):
-            conversations_query(count=0)
 
 
 # --- the fetch-helper interface -------------------------------------------------
@@ -402,144 +387,6 @@ class TestParseConnectionsPage:
             )
 
 
-# --- conversations page -------------------------------------------------------------
-
-
-class TestParseConversationsPage:
-    def test_fixture(self) -> None:
-        result = parse_conversations_page(_body("conversations_page.json"))
-        assert isinstance(result, ConversationsPageResult)
-        assert result.start == 0
-        assert result.count == 20
-        assert result.total == 2
-        assert len(result.conversations) == 2
-
-        one_to_one, group = result.conversations
-        assert one_to_one.urn == "urn:li:fsd_conversation:2-FAKECONVO0001"
-        assert one_to_one.unread is False
-        assert len(one_to_one.participants) == 1
-        assert one_to_one.participants[0].first_name == "Jamie"
-        assert one_to_one.last_message_text == "Great catching up last week!"
-        assert one_to_one.last_message_sender_urn == "urn:li:fsd_profile:ACoAAFAKE0000001"
-        assert one_to_one.last_activity_at == datetime.fromtimestamp(1695000000000 / 1000, tz=UTC)
-
-        assert group.unread is True
-        assert len(group.participants) == 2
-        assert group.last_message_text is None
-        assert group.last_message_sender_urn is None
-
-    def test_empty_response_body(self) -> None:
-        with pytest.raises(RouteChanged) as exc:
-            parse_conversations_page("")
-        assert exc.value.endpoint == CONVERSATIONS_ENDPOINT
-
-    def test_valid_json_but_a_completely_different_document(self) -> None:
-        with pytest.raises(RouteChanged):
-            parse_conversations_page(json.dumps(42))
-
-    def test_missing_data_key(self) -> None:
-        with pytest.raises(RouteChanged, match="data"):
-            parse_conversations_page(json.dumps({}))
-
-    def test_element_missing_entity_urn(self) -> None:
-        with pytest.raises(RouteChanged, match="entityUrn"):
-            parse_conversations_page(
-                json.dumps(
-                    {
-                        "data": {
-                            "elements": [
-                                {"lastActivityAt": 1, "unread": False, "participants": []}
-                            ],
-                            "paging": {"start": 0, "count": 20, "total": 1},
-                        }
-                    }
-                )
-            )
-
-    def test_unread_is_a_string_not_a_bool(self) -> None:
-        with pytest.raises(RouteChanged):
-            parse_conversations_page(
-                json.dumps(
-                    {
-                        "data": {
-                            "elements": [
-                                {
-                                    "entityUrn": "urn:li:fsd_conversation:1",
-                                    "lastActivityAt": 1695000000000,
-                                    "unread": "false",
-                                    "participants": [],
-                                }
-                            ],
-                            "paging": {"start": 0, "count": 20, "total": 1},
-                        }
-                    }
-                )
-            )
-
-    def test_participants_entry_missing_first_name(self) -> None:
-        with pytest.raises(RouteChanged, match="firstName"):
-            parse_conversations_page(
-                json.dumps(
-                    {
-                        "data": {
-                            "elements": [
-                                {
-                                    "entityUrn": "urn:li:fsd_conversation:1",
-                                    "lastActivityAt": 1695000000000,
-                                    "unread": False,
-                                    "participants": [
-                                        {"entityUrn": "urn:li:fsd_profile:X", "lastName": "Y"}
-                                    ],
-                                }
-                            ],
-                            "paging": {"start": 0, "count": 20, "total": 1},
-                        }
-                    }
-                )
-            )
-
-    def test_last_message_body_missing_text(self) -> None:
-        with pytest.raises(RouteChanged, match="text"):
-            parse_conversations_page(
-                json.dumps(
-                    {
-                        "data": {
-                            "elements": [
-                                {
-                                    "entityUrn": "urn:li:fsd_conversation:1",
-                                    "lastActivityAt": 1695000000000,
-                                    "unread": False,
-                                    "participants": [],
-                                    "lastMessage": {"body": {}},
-                                }
-                            ],
-                            "paging": {"start": 0, "count": 20, "total": 1},
-                        }
-                    }
-                )
-            )
-
-    def test_last_activity_at_out_of_range_for_a_timestamp(self) -> None:
-        with pytest.raises(RouteChanged):
-            parse_conversations_page(
-                json.dumps(
-                    {
-                        "data": {
-                            "elements": [
-                                {
-                                    "entityUrn": "urn:li:fsd_conversation:1",
-                                    "lastActivityAt": 99999999999999999999,
-                                    "unread": False,
-                                    "participants": [],
-                                }
-                            ],
-                            "paging": {"start": 0, "count": 20, "total": 1},
-                        }
-                    }
-                )
-            )
-
-
 # =============================================================================
 # Systematic guard-coverage sweep (review on #147)
 #
@@ -690,31 +537,7 @@ _CONNECTIONS_SWEEP = _Sweep(
     ),
 )
 
-_CONVERSATIONS_SWEEP = _Sweep(
-    name="conversations",
-    fixture="conversations_page.json",
-    parser=parse_conversations_page,
-    optional=frozenset(
-        {
-            ("data", "elements", 0, "participants", 0, "publicIdentifier"),
-            ("data", "elements", 0, "lastMessage"),
-            ("data", "elements", 0, "lastMessage", "body"),
-            ("data", "elements", 0, "lastMessage", "sender"),
-            ("data", "elements", 1, "participants", 0, "publicIdentifier"),
-            ("data", "elements", 1, "participants", 1, "publicIdentifier"),
-            ("data", "elements", 1, "lastMessage"),
-        }
-    ),
-    # lastMessage carries its own entityUrn in the real payload; this parser
-    # only reads lastMessage.body.text and lastMessage.sender.entityUrn.
-    unused=frozenset(
-        {
-            ("data", "elements", 0, "lastMessage", "entityUrn"),
-        }
-    ),
-)
-
-_SWEEPS = (_CONNECTIONS_SWEEP, _CONVERSATIONS_SWEEP)
+_SWEEPS = (_CONNECTIONS_SWEEP,)
 
 
 def _sweep_cases() -> list[tuple[_Sweep, FieldPath]]:
