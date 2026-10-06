@@ -91,9 +91,9 @@ _CSS_BASE = """
 
 #: Two plausible shapes, both tested. In both the list pane is on the left and each
 #: pane scrolls on its own; they differ in how wide the list is. ``narrow-list`` is a
-#: list column a third of ``<main>``'s width (the pointer rest, which aims at
-#: ``<main>``'s horizontal center, then lands over the thread pane); ``wide-list`` is a
-#: list column more than half of it (the center lands over the list).
+#: list column a third of ``<main>``'s width (``<main>``'s horizontal center is over the
+#: thread pane, which is why the inbox rests the pointer over a conversation link, #439);
+#: ``wide-list`` is a list column more than half of it (the center lands over the list).
 LAYOUTS: dict[str, str] = {
     "narrow-list": _CSS_BASE
     + "#list-pane { width: 33%; } #thread-pane { flex: 1; background: #f9f9f9; }",
@@ -105,7 +105,10 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>replica</titl
 <style>__CSS__</style></head><body>
 <div id="nav"></div>
 <main>
-  <div id="list-pane" class="pane"><div id="list"></div><div style="height:800px"></div></div>
+  <div id="list-pane" class="pane">
+    <a href="/messaging/thread/hidden/" style="display:none">x</a>
+    <a href="/messaging/thread/offscreen/" style="position:absolute;left:-9999px">x</a>
+    <div id="list"></div><div style="height:800px"></div></div>
   <div id="thread-pane" class="pane"><div id="thread"></div><div style="height:3000px"></div></div>
 </main>
 <script type="application/json" id="cfg">__CFG__</script>
@@ -118,7 +121,10 @@ let nextOlder = 0, busy = false, armed = false;
 document.addEventListener('wheel', () => { armed = true; }, {capture: true, passive: true});
 function render(into, count) {
   for (let i = 0; i < count; i++) {
-    const card = document.createElement('div');
+    // The list's cards are links to their threads, as a conversation list's are (#439).
+    const card = document.createElement(into.id === 'list' ? 'a' : 'div');
+    if (into.id === 'list') card.href = '/messaging/thread/invented-' + i + '/';
+    card.style.display = 'block';
     card.className = 'card';
     card.textContent = 'invented card';
     into.appendChild(card);
@@ -328,9 +334,10 @@ def _install(site: Site) -> None:
 # --- the healthy poll ---------------------------------------------------------------------
 
 
-async def test_the_wheel_scrolls_the_list_pane(origin: str) -> None:
-    """With the list wider than half of ``<main>``, the pointer rest lands over the list."""
-    site = _site("wide-list", _conversations())
+@pytest.mark.parametrize("layout", ["wide-list", "narrow-list"])
+async def test_the_wheel_scrolls_the_list_pane(origin: str, layout: str) -> None:
+    """The pointer rest must land where the wheel moves the *list*, never only the thread."""
+    site = _site(layout, _conversations())
     _install(site)
     delta, _ = await _poll(origin, _spec(since=None, open_thread=False))
     assert site.scrolled["list"] > 0, site.scrolled
@@ -338,24 +345,17 @@ async def test_the_wheel_scrolls_the_list_pane(origin: str) -> None:
     assert delta.complete
 
 
-async def test_a_narrow_list_pane_is_not_scrolled_and_the_poll_stops(
-    origin: str, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Pins the #439 finding: the rest aims at ``<main>``'s center, over the thread pane.
-
-    The wheel scrolls the thread pane, the list never loads an older page, and the poll
-    stops ``ROUTE_CHANGED`` after the idle-scroll limit. It never completes. When #439 is
-    fixed this test changes to the list scrolling.
-    """
+async def test_a_narrow_list_pane_scrolls_and_older_pages_load(origin: str) -> None:
+    """The #439 fix: the pointer rests over a conversation link, so a list a third of
+    ``<main>``'s width scrolls, its older pages load, and the read completes."""
     site = _site("narrow-list", _conversations())
     _install(site)
-    with caplog.at_level("WARNING"), pytest.raises(InboxReadStopped) as stopped:
-        await _poll(origin, _spec(since=None, open_thread=False))
-    assert stopped.value.outcome is Outcome.ROUTE_CHANGED
-    assert site.scrolled["list"] == 0, site.scrolled
-    assert site.scrolled["thread"] > 0, site.scrolled
-    assert not [r for r in site.requests if "nextCursor" in r or "lastUpdatedBefore" in r]
-    assert "scrolls brought no new answer" in caplog.text
+    delta, _ = await _poll(origin, _spec(since=None, open_thread=False))
+    assert delta.complete
+    assert len(delta.conversations) == 6
+    assert site.scrolled["list"] > 0, site.scrolled
+    assert site.scrolled["thread"] == 0, site.scrolled
+    assert len([r for r in site.requests if "nextCursor" in r or "lastUpdatedBefore" in r]) == 2
 
 
 async def test_older_pages_load_and_the_read_is_complete_against_since(origin: str) -> None:

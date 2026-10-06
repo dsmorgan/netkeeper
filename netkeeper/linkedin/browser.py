@@ -120,6 +120,10 @@ class _LocatorLike(Protocol):
     @property
     def first(self) -> _LocatorLike: ...
 
+    def nth(self, index: int) -> _LocatorLike: ...
+
+    async def count(self) -> int: ...
+
     async def bounding_box(
         self,
         *,
@@ -197,6 +201,17 @@ CONTENT_LANDMARK_SELECTOR: Final = "main"
 #: purpose: this is a best-effort read, not something worth stalling a run's
 #: pacing over.
 CONTENT_BOX_TIMEOUT_MS: Final = 1000.0
+
+#: How many matches of a caller's ``rest_over`` selector :func:`_first_visible_box`
+#: looks at before it gives up (#439). The first on-screen one is nearly always the
+#: first or second; a bound keeps a page with hundreds of hidden matches from costing a
+#: read each.
+REST_MAX_CANDIDATES: Final = 8
+
+#: How long to wait for each match after the first. The first match has the full
+#: :data:`CONTENT_BOX_TIMEOUT_MS` (a list may still be drawing); a later one is already
+#: in the page or not at all.
+REST_CANDIDATE_TIMEOUT_MS: Final = 200.0
 
 #: A conservative fallback viewport for :meth:`BrowserRun.scroll`'s pointer-rest step
 #: (#192), used only when neither a content box nor the tab's own ``viewport_size``
@@ -1055,6 +1070,7 @@ class BrowserRun:
         sleep: Callable[[float], Awaitable[None]] = _real_sleep,
         cancelled: Callable[[], bool] | None = None,
         rng: random.Random | None = None,
+        rest_over: str | None = None,
     ) -> ScrollOutcome:
         """Rest the pointer over the content, then replay ``plan``: one ``mouse.wheel``
         per step, then the dwell.
@@ -1098,6 +1114,17 @@ class BrowserRun:
         instance for a run that should replay identically from one seed. Defaults to
         a fresh, unseeded one, spent only if this tab's pointer still needs resting.
 
+        ``rest_over`` (#439) is a CSS selector for the element to rest the pointer
+        over instead of the page's ``<main>``. A wheel scrolls the nearest scrollable
+        ancestor of what is under the pointer, and on a split layout ``<main>``'s
+        center can be over a different pane than the one the caller means to scroll.
+        The first match with a box on screen is used (:func:`_first_visible_box`); the
+        pointer goes to the center of that box. When nothing matches, or no match has a
+        box, the rest falls back to ``<main>`` exactly as without it. ``None`` (the
+        default) is that existing behavior, for every other caller. It is a selector,
+        not a script: the only page reads are geometry reads, and the only inputs are
+        still the pointer move and the wheel.
+
         ``cancelled``, when given, is polled once before the pointer-rest walk
         begins, then again before every wheel event and again before the final
         dwell, so a caller wired to spec 9.9's cooperative cancel ("checked
@@ -1116,7 +1143,7 @@ class BrowserRun:
         if cancelled is not None and cancelled():
             return ScrollOutcome(page=page, cancelled=True)
         rest_rng = rng if rng is not None else random.Random()  # noqa: S311 -- pacing, not crypto
-        await self._rest_pointer_over_content(page, sleep=sleep, rng=rest_rng)
+        await self._rest_pointer_over_content(page, sleep=sleep, rng=rest_rng, rest_over=rest_over)
         for step in plan.steps:
             if cancelled is not None and cancelled():
                 return ScrollOutcome(page=page, cancelled=True)
@@ -1133,6 +1160,7 @@ class BrowserRun:
         *,
         sleep: Callable[[float], Awaitable[None]],
         rng: random.Random,
+        rest_over: str | None = None,
     ) -> None:
         """Move the pointer to rest over the page's content, once per tab (#192).
 
@@ -1150,8 +1178,13 @@ class BrowserRun:
         send, at its own pace; nothing here sends, routes, or alters a request
         either way.
 
-        **The target, in order of preference (#192 review, F1):**
+        **The target, in order of preference (#192 review, F1; #439):**
 
+        0. When the caller gave ``rest_over``, the center of the first match's box that
+           is on screen (:func:`_first_visible_box`), with the jitter held inside that
+           box. Still one bare point: ``mouse.move`` is given coordinates, never an
+           element, and the box comes from the same passive geometry read as below.
+           With no usable match this step is skipped, not an error.
         1. A point near the top of :data:`CONTENT_LANDMARK_SELECTOR`'s box
            (:func:`_content_box`), when the page has one -- within
            :data:`REST_VISIBLE_SPAN_PX` of it, never past the box's own vertical
@@ -1178,8 +1211,14 @@ class BrowserRun:
         if self._pointer_rested:
             return
         mouse = cast(_ScrollablePage, page).mouse
-        box = await _content_box(page)
-        if box is not None:
+        element = await _first_visible_box(page, rest_over) if rest_over is not None else None
+        box = await _content_box(page) if element is None else None
+        if element is not None:
+            target_x = element["x"] + element["width"] / 2
+            target_y = element["y"] + element["height"] / 2
+            jitter_x = (element["x"], element["x"] + element["width"])
+            jitter_y = (max(element["y"], REST_MIN_Y_PX), element["y"] + element["height"])
+        elif box is not None:
             box_x, box_y = box["x"], box["y"]
             box_w, box_h = box["width"], box["height"]
             box_top = max(box_y, REST_MIN_Y_PX)
@@ -2019,6 +2058,40 @@ async def _content_box(page: PageLike) -> Mapping[str, float] | None:
     except Exception as exc:
         log.debug("could not read a content box to rest the pointer over: %s", exc)
         return None
+
+
+async def _first_visible_box(page: PageLike, selector: str) -> Mapping[str, float] | None:
+    """The box of the first match of ``selector`` that is on screen, or ``None`` (#439).
+
+    Passive geometry reads only (``bounding_box``, ``count``), like
+    :func:`_content_box`: no script runs in the page and nothing is input. A match
+    is skipped when it has no box (``display: none``, detached), a box with no area,
+    or a center above :data:`REST_MIN_Y_PX` or past the tab's known viewport height
+    (scrolled out of view). The first match may still be drawing, so it gets the full
+    :data:`CONTENT_BOX_TIMEOUT_MS`; later ones get :data:`REST_CANDIDATE_TIMEOUT_MS`.
+    At most :data:`REST_MAX_CANDIDATES` matches are read. ``None`` on any error.
+    """
+    matches = cast(_ScrollablePage, page).locator(selector)
+    height = _known_viewport_height(page)
+
+    def usable(box: Mapping[str, float] | None) -> bool:
+        if box is None or box["width"] <= 0 or box["height"] <= 0:
+            return False
+        center_y = box["y"] + box["height"] / 2
+        return center_y >= REST_MIN_Y_PX and (height is None or center_y <= height)
+
+    try:
+        box = await matches.first.bounding_box(timeout=CONTENT_BOX_TIMEOUT_MS)
+        if usable(box):
+            return box
+        total = min(await matches.count(), REST_MAX_CANDIDATES)
+        for index in range(1, total):
+            box = await matches.nth(index).bounding_box(timeout=REST_CANDIDATE_TIMEOUT_MS)
+            if usable(box):
+                return box
+    except Exception as exc:
+        log.debug("could not read a box for %r to rest the pointer over: %s", selector, exc)
+    return None
 
 
 def _viewport_size(page: PageLike) -> tuple[float, float]:

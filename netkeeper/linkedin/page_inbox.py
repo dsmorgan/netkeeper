@@ -124,6 +124,13 @@ MAX_IDLE_SCROLLS: Final = 6
 #: The pause before each thread navigation, in seconds (a person reading, then choosing).
 THREAD_PAUSE_S: Final = (4.0, 10.0)
 
+#: What the poll's scroll rests the pointer over (#439): a link to a conversation. The
+#: wheel scrolls the nearest scrollable ancestor of what is under the pointer, which for
+#: a conversation link is the list pane, not the thread pane beside it. A selector for
+#: one read-only geometry lookup, never a click: nothing is run in the page, and the link
+#: is only hovered at its center as a bare point.
+CONVERSATION_LINK: Final = f'a[href*="{THREAD_PATH_PREFIX}"]'
+
 _LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
@@ -504,9 +511,11 @@ class PageInbox:
             dwell_sigma=self._scroll_profile.dwell_sigma,
         )
         if self._sleep is None:
-            outcome = await self._run.scroll(plan, rng=self._rng)
+            outcome = await self._run.scroll(plan, rng=self._rng, rest_over=CONVERSATION_LINK)
         else:
-            outcome = await self._run.scroll(plan, sleep=self._sleep, rng=self._rng)
+            outcome = await self._run.scroll(
+                plan, sleep=self._sleep, rng=self._rng, rest_over=CONVERSATION_LINK
+            )
         self._require_observed(outcome.page)
         self._where(outcome.page.url, thread=False)
 

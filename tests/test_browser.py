@@ -724,6 +724,89 @@ async def test_scroll_rests_the_pointer_near_the_top_of_the_content_box_when_fou
     assert only_page(context).locator_calls == [browser.CONTENT_LANDMARK_SELECTOR]
 
 
+LINK = 'a[href*="/messaging/thread/"]'
+MAIN_BOX = {"x": 700.0, "y": 300.0, "width": 800.0, "height": 1200.0}
+
+
+async def _scroll_resting_over(
+    boxes: list[dict[str, float] | None] | None,
+    *,
+    viewport: dict[str, int] | None = None,
+) -> tuple[list[tuple[float, float]], list[str]]:
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+    async with provider.run() as run:
+        page = cast(FakePage, await run.ensure_page())
+        page.viewport_size = viewport
+        page.content_boxes[browser.CONTENT_LANDMARK_SELECTOR] = MAIN_BOX
+        if boxes is not None:
+            page.match_boxes[LINK] = list(boxes)
+        await run.scroll(
+            make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(4), rest_over=LINK
+        )
+    page = only_page(context)
+    return page.mouse.moves, page.locator_calls
+
+
+async def test_scroll_rests_over_the_center_of_the_rest_over_element() -> None:
+    """#439: a conversation link in a narrow list pane is the target, not ``<main>``'s
+    center (x=1100 here, over the thread pane)."""
+    link = {"x": 100.0, "y": 200.0, "width": 300.0, "height": 100.0}
+    moves, calls = await _scroll_resting_over([link])
+    assert calls == [LINK]  # <main> is never read when the link has a box
+    assert moves
+    assert all(100.0 <= x <= 400.0 and 200.0 <= y <= 300.0 for x, y in moves), moves
+    assert moves[-1] == pytest.approx((250.0, 250.0), abs=60.0)
+
+
+async def test_scroll_falls_back_to_main_when_the_rest_over_element_is_absent() -> None:
+    moves, calls = await _scroll_resting_over(None)
+    assert calls == [LINK, browser.CONTENT_LANDMARK_SELECTOR]
+    assert moves[-1][0] > 700.0  # near <main>'s horizontal center, 1100
+
+
+async def test_scroll_falls_back_to_main_when_every_match_is_hidden() -> None:
+    hidden = [None, {"x": 5.0, "y": 5.0, "width": 0.0, "height": 0.0}]
+    moves, calls = await _scroll_resting_over(hidden)
+    assert calls[-1] == browser.CONTENT_LANDMARK_SELECTOR
+    assert moves[-1][0] > 700.0
+
+
+async def test_scroll_skips_a_hidden_match_for_the_next_visible_one() -> None:
+    visible = {"x": 100.0, "y": 400.0, "width": 300.0, "height": 100.0}
+    moves, calls = await _scroll_resting_over([None, visible])
+    assert calls == [LINK]
+    assert all(100.0 <= x <= 400.0 and 400.0 <= y <= 500.0 for x, y in moves), moves
+
+
+async def test_scroll_skips_a_match_scrolled_below_the_known_viewport() -> None:
+    below = {"x": 100.0, "y": 2000.0, "width": 300.0, "height": 100.0}
+    visible = {"x": 100.0, "y": 400.0, "width": 300.0, "height": 100.0}
+    moves, _ = await _scroll_resting_over([below, visible], viewport={"width": 1400, "height": 800})
+    assert all(400.0 <= y <= 500.0 for _, y in moves), moves
+
+
+async def test_scroll_stays_clear_of_the_nav_over_a_link_that_starts_under_it() -> None:
+    link = {"x": 100.0, "y": 56.0, "width": 300.0, "height": 100.0}
+    moves, _ = await _scroll_resting_over([link])
+    assert all(y >= browser.REST_MIN_Y_PX for _, y in moves), moves
+
+
+async def test_scroll_falls_back_when_reading_the_rest_over_element_raises() -> None:
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+    async with provider.run() as run:
+        page = cast(FakePage, await run.ensure_page())
+        page.content_boxes[browser.CONTENT_LANDMARK_SELECTOR] = MAIN_BOX
+        page.locator_error = TimeoutError("slow")
+        await run.scroll(
+            make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(4), rest_over=LINK
+        )
+    assert only_page(context).mouse.moves[-1][0] > 700.0
+
+
 async def test_scroll_rests_near_the_true_center_of_a_short_content_box() -> None:
     """A box short enough that half its height is under ``REST_VISIBLE_SPAN_PX``
     still centers, the same as before #192 review round 2 -- the visible-span cap

@@ -42,13 +42,23 @@ class FakeLocator:
     ``bounding_box``.
     """
 
-    def __init__(self, page: FakePage, selector: str) -> None:
+    def __init__(self, page: FakePage, selector: str, index: int = 0) -> None:
         self._page = page
         self.selector = selector
+        self._index = index
 
     @property
     def first(self) -> FakeLocator:
         return self
+
+    def nth(self, index: int) -> FakeLocator:
+        return FakeLocator(self._page, self.selector, index)
+
+    async def count(self) -> int:
+        listed = self._page.match_boxes.get(self.selector)
+        if listed is not None:
+            return len(listed)
+        return 1 if self.selector in self._page.content_boxes else 0
 
     async def bounding_box(
         self,
@@ -58,7 +68,10 @@ class FakeLocator:
         if self._page.locator_error is not None:
             error, self._page.locator_error = self._page.locator_error, None
             raise error
-        return self._page.content_boxes.get(self.selector)
+        listed = self._page.match_boxes.get(self.selector)
+        if listed is not None:
+            return listed[self._index] if self._index < len(listed) else None
+        return self._page.content_boxes.get(self.selector) if self._index == 0 else None
 
 
 class FakePage:
@@ -82,6 +95,9 @@ class FakePage:
         #: selector. Empty means every selector reads as "no box" -- the
         #: fallback-to-viewport path (#192).
         self.content_boxes: dict[str, Mapping[str, float]] = {}
+        #: Several matches for one selector, in document order (``None``: no box, as a
+        #: hidden element reads). Wins over ``content_boxes`` for that selector (#439).
+        self.match_boxes: dict[str, list[Mapping[str, float] | None]] = {}
         self.locator_calls: list[str] = []
         self.locator_error: Exception | None = None
 
