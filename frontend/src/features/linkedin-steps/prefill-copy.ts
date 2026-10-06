@@ -35,6 +35,9 @@ export const MAYBE_CLOSE_BUBBLE =
 export const PARTLY_TYPED =
   "Part of a message is in the composer and may be kept as a draft. Don't click Send. Clear it, or close the message bubble, which deletes the draft."
 
+/** The partly typed row's extra line: you may have finished it yourself. */
+export const PARTLY_TYPED_SENT_ANYWAY = 'If you finished and sent it yourself, discard this.'
+
 /** After the prefill typed the whole message. */
 export const TYPED_WHOLE =
   'The prefill typed the message. It waits for you below: review it in Chrome and click Send yourself.'
@@ -152,6 +155,7 @@ const BEFORE_CLICK: readonly Rule[] = [
     text: "The profile's Message button isn't visible, so netkeeper didn't click it.",
     bubble: 'closed',
   },
+  { match: 'the run was refused', text: 'netkeeper refused to start the run.', bubble: 'closed' },
   { match: 'the browser was busy', text: 'Chrome was busy with another run.', bubble: 'closed' },
   {
     match: 'the browser was unavailable',

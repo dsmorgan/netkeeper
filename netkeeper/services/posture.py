@@ -246,7 +246,8 @@ class Status(enum.StrEnum):
 KEY_MANUAL_LINKEDIN_SENDS: Final = "manual_linkedin_sends"
 """The key of ADR 0004's row: off means auto-send is on."""
 KEY_LINKEDIN_REPLY_POLL: Final = "linkedin_reply_poll"
-"""The key of the row a short first LinkedIn inbox poll raises; Settings acknowledges it."""
+"""The key of the LinkedIn inbox poll's row (it is always there). A short first poll adds
+a warning to it, which Settings acknowledges."""
 
 
 @dataclass(frozen=True, slots=True)

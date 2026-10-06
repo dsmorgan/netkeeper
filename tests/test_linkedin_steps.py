@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.campaigns.render import LintIssue, LintRule, Part, Rendered, Severity
 from netkeeper.campaigns.templates import REMOVED_FIELD_BLOCK, TEMPLATE_ERRORS_BLOCK, block_reason
 from netkeeper.config import BudgetSettings, LinkedInSettings, Settings
+from netkeeper.crm import identity
 from netkeeper.crm.self_contact import ensure_self_contact
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
@@ -1496,28 +1497,88 @@ def test_a_partly_typed_message_cannot_be_checked_as_sent(lane: Lane) -> None:
         )
 
 
-def test_only_a_partly_typed_failure_that_still_waits_is_listed_and_holds_the_slot(
-    lane: Lane,
-) -> None:
-    """Another failure, or a partly typed one whose enrollment has a next time, neither
-    shows nor blocks."""
-    first, second, third = lane.enroll(), lane.enroll(), lane.enroll()
+def _partly_typed(lane: Lane, enrollment_id: int) -> int:
+    claim = lane.claim(enrollment_id)
+    assert claim.message_id is not None
+    lane.record(claim.message_id, MessageOutcomeKind.PARTIALLY_TYPED)
+    lane.finish_runs()
+    return claim.message_id
 
-    def failed(enrollment_id: int, error: str, next_action_at: datetime | None) -> None:
-        def make(session: Session, user: User) -> None:
-            enrollment = get_scoped(session, user, Enrollment, enrollment_id)
-            assert enrollment is not None
-            enrollment.next_action_at = next_action_at
-            factories.make_message(
-                session, enrollment, status=MessageStatus.FAILED, error=error, sent_at=None
-            )
 
-        lane.write(make)
+def _listed_and_holding(lane: Lane, message_id: int, other_enrollment: int) -> None:
+    [row], total = lane.read(lambda s, u: waiting_for_you(s, u, limit=10))
+    assert (row.message.id, row.partly_typed, total) == (message_id, True, 1)
+    assert lane.claim(other_enrollment).reasons == (Refusal.PREFILL_OPEN,)
 
-    failed(first, "not a prefill outcome", None)
-    failed(second, "partially_typed: fixed words", NOW)
+
+def test_a_non_partial_failure_is_neither_listed_nor_holding_the_slot(lane: Lane) -> None:
+    first, second = lane.enroll(), lane.enroll()
+
+    def make(session: Session, user: User) -> None:
+        enrollment = get_scoped(session, user, Enrollment, first)
+        assert enrollment is not None
+        factories.make_message(
+            session, enrollment, status=MessageStatus.FAILED, error="not a prefill", sent_at=None
+        )
+
+    lane.write(make)
+    assert lane.read(lambda s, u: waiting_for_you(s, u, limit=10)) == ([], 0)
+    assert lane.claim(second).claimed
+
+
+def test_a_partly_typed_message_stays_when_its_enrollment_gets_a_due_time(lane: Lane) -> None:
+    """Re-advancing the enrollment (``schedule_next``) must not hide the message or free
+    the slot: only Discard does."""
+    first, second = lane.enroll(), lane.enroll()
+    message_id = _partly_typed(lane, first)
+    lane.write(lambda s, u: engine.schedule_next(s, u, first, settings=lane.settings, now=NOW))
+    _set(lane, Enrollment, first, next_action_at=NOW + timedelta(days=1))
+    assert lane.enrollment(first).next_action_at is not None
+
+    _listed_and_holding(lane, message_id, second)
+
+    before = lane.enrollment(first)
+    due, step = before.next_action_at, before.current_step
+    lane.write(lambda s, u: discard(s, u, message_id, settings=lane.settings, now=NOW))
+    after = lane.enrollment(first)
+    # It had moved on: the discard lets the bubble go and never advances it again.
+    assert (after.next_action_at, after.current_step) == (due, step)
+    assert lane.read(lambda s, u: waiting_for_you(s, u, limit=10)) == ([], 0)
+    assert lane.claim(second).claimed
+
+
+def test_a_partly_typed_message_stays_after_a_contact_merge(lane: Lane) -> None:
+    """A merge moves the message onto the survivor's enrollment, which has its own due
+    time: the message stays listed and holding the slot."""
+    first, survivor_enrollment, third = lane.enroll(), lane.enroll(), lane.enroll()
+    message_id = _partly_typed(lane, first)
+    loser_contact = lane.enrollment(first).contact_id
+    survivor_contact = lane.enrollment(survivor_enrollment).contact_id
+
+    lane.write(lambda s, u: identity.merge(s, u, survivor_contact, loser_contact))
+
+    message = lane.message(message_id)
+    assert message is not None and message.status is MessageStatus.FAILED
+    assert message.contact_id == survivor_contact
+    _listed_and_holding(lane, message_id, third)
+    lane.write(lambda s, u: discard(s, u, message_id, settings=lane.settings, now=NOW))
     assert lane.read(lambda s, u: waiting_for_you(s, u, limit=10)) == ([], 0)
     assert lane.claim(third).claimed
+
+
+def test_discarding_a_partly_typed_message_of_an_ended_enrollment_leaves_it_ended(
+    lane: Lane,
+) -> None:
+    first = lane.enroll()
+    message_id = _partly_typed(lane, first)
+    _set(lane, Enrollment, first, status=EnrollmentStatus.REPLIED)
+    assert lane.read(lambda s, u: waiting_for_you(s, u, limit=10))[1] == 1
+
+    lane.write(lambda s, u: discard(s, u, message_id, settings=lane.settings, now=NOW))
+
+    assert lane.enrollment(first).status is EnrollmentStatus.REPLIED
+    message = lane.message(message_id)
+    assert message is not None and message.status is MessageStatus.DISCARDED
 
 
 def test_a_partly_typed_row_of_another_user_is_never_listed_or_blocking(

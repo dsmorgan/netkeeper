@@ -243,7 +243,16 @@ class BrowserWorker:
         refusal = await off_loop(self._refusal, run_id, user_id, facts)
         if refusal is not None:
             if facts.kind is SyncRunKind.MESSAGE_SEND:
-                await self._prefill_not_typed(run_id, user_id, refusal[1])
+                # Fixed words, never the exception's text: the UI maps each phrase.
+                await self._prefill_not_typed(
+                    run_id,
+                    user_id,
+                    "the LinkedIn session is flagged"
+                    if refusal[0] == "session_flagged"
+                    else "heat is too high"
+                    if refusal[0] == "heat_skip"
+                    else "the run was refused",
+                )
             await off_loop(
                 self._finish, run_id, user_id, SyncRunStatus.FAILED, refusal[0], refusal[1]
             )
