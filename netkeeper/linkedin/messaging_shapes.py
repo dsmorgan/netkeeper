@@ -13,23 +13,24 @@ replies" from data it could not read. The message of a ``RouteChanged`` names a 
 never a value, so no message text or name reaches a log line.
 
 **Which conversations are skipped, and why.** Missing a reply is the dangerous direction,
-so only what cannot be a contact's reply is skipped:
+so the kind rules run in order and the first that matches decides (the shapes note's
+"What P4 reads"; the fixture groups in ``tests/messaging_pages.py`` are the oracle):
 
-* an advertisement or a message request: a ``conversationTypeText`` (``Sponsored``,
-  ``LinkedIn Offer``, ``InMail``), a ``contentMetadata``, or an ad or ``hostUrnData``
-  item among the last message's ``renderContent``;
-* an InMail the person has not accepted: ``INMAIL`` in ``categories`` without ``state``
-  ``ACCEPTED`` (pending, declined, or none). An **accepted** InMail with one profile
-  counterpart is one-to-one (maintainer's decision, #374 review): about a third of the
-  captured inbox, and a contact's only conversation may have started as InMail, so the
-  prefill's reply bubble can land in one. ``INMAIL`` alone is not a mark. A ``file``
-  render item, a ``title``, or an ``EDITED`` message does not disqualify a conversation;
-* a company: the counterpart's ``hostIdentityUrn`` is ``urn:li:fsd_company:...``;
-* a group: ``groupChat`` true, or more than one participant besides the owner.
+1. A group (``groupChat`` true, or more than one participant besides the owner): skipped.
+2. Sponsored or an offer (a company participant, ``contentMetadata``, or an ad render
+   item on the last message), whatever the category, state, or label: skipped.
+3. An **accepted** InMail (``INMAIL`` in ``categories``, ``state`` ``ACCEPTED``) with one
+   ``fsd_profile`` counterpart: one-to-one, whatever its label, ``hostUrnData``, or
+   verification label (maintainer's decision, #374 review). About a third of the captured
+   inbox is like this, and a contact's only conversation may have started as InMail.
+4. Any other InMail (pending, declined, or no state): skipped.
+5. A ``conversationTypeText`` label or an InMail ``hostUrnData`` outside InMail: skipped.
+6. Everything else is one-to-one. A ``file`` render item, a ``title``, or an ``EDITED``
+   message does not disqualify a conversation.
 
 A counterpart whose URN is neither ``fsd_profile`` nor ``fsd_company``, or a conversation
-with nobody but the owner, is an unknown shape: :class:`RouteChanged`. A kept
-conversation is matched by URN like any other; the core ignores a stranger's.
+with nobody but the owner, is an unknown shape: :class:`RouteChanged`. A kept conversation
+is matched by URN like any other; the core ignores a stranger's.
 
 **The mailbox owner** is read three ways that must agree: the first part of every
 conversation URN, the participant whose ``member.distance`` is ``SELF``, and the
@@ -330,35 +331,34 @@ ACCEPTED_STATE: Final = "ACCEPTED"
 INMAIL_RENDER_KEY: Final = "hostUrnData"
 
 
-def _is_unaccepted_inmail(item: Mapping[str, Any]) -> bool:
-    """``INMAIL`` in ``categories`` unless the person accepted it (``state`` ``ACCEPTED``).
-
-    A pending, declined, or stateless InMail is a stranger's request, not a reply
-    (#374 review: accepted InMail is read, the rest is skipped).
-    """
+def _is_inmail(item: Mapping[str, Any]) -> bool:
     categories = item.get("categories")
-    return (
-        isinstance(categories, list)
-        and "INMAIL" in categories
-        and item.get("state") != ACCEPTED_STATE
-    )
+    return isinstance(categories, list) and "INMAIL" in categories
 
 
 def _is_ad(item: Mapping[str, Any], last_raw: Mapping[str, Any] | None) -> bool:
-    """An advertisement or a message request: a label, ``contentMetadata``, or a render
-    item (ad, or ``hostUrnData``) on the last message."""
-    if _text_of(item.get("conversationTypeText"), "conversationTypeText") is not None:
-        return True
+    """Sponsored or an offer: ``contentMetadata`` or an ad item on the last message,
+    whatever the category, state, or label (rule 2)."""
     if item.get("contentMetadata") is not None:
         return True
-    if last_raw is not None:
-        render = last_raw.get("renderContent")
-        if isinstance(render, list):
-            marks = AD_RENDER_KEYS | {INMAIL_RENDER_KEY}
-            for entry in render:
-                if isinstance(entry, dict) and marks & entry.keys():
-                    return True
-    return False
+    return last_raw is not None and bool(AD_RENDER_KEYS & _render_keys(last_raw))
+
+
+def _is_labelled(item: Mapping[str, Any], last_raw: Mapping[str, Any] | None) -> bool:
+    """A ``conversationTypeText`` label or an InMail's ``hostUrnData`` outside InMail (rule 5)."""
+    if _text_of(item.get("conversationTypeText"), "conversationTypeText") is not None:
+        return True
+    return last_raw is not None and INMAIL_RENDER_KEY in _render_keys(last_raw)
+
+
+def _render_keys(message: Mapping[str, Any]) -> set[str]:
+    render = message.get("renderContent")
+    keys: set[str] = set()
+    if isinstance(render, list):
+        for entry in render:
+            if isinstance(entry, dict):
+                keys.update(entry.keys())
+    return keys
 
 
 def _item(raw: object, index: int) -> ListItem:
@@ -402,14 +402,19 @@ def _item(raw: object, index: int) -> ListItem:
     if not others:
         raise _fail(f"{where}: nobody but the owner takes part")
     counterpart = others[0]
-    if (
-        counterpart.startswith(COMPANY_URN_PREFIX)
-        or _is_ad(item, last_raw)
-        or _is_unaccepted_inmail(item)
-    ):
+    # The kind rules, in order; the first that matches decides (the shapes note):
+    # 1 a group (above), 2 sponsored or an offer, 3 an accepted InMail with one profile
+    # counterpart, 4 any other InMail, 5 a label or hostUrnData outside InMail, 6 the rest.
+    if counterpart.startswith(COMPANY_URN_PREFIX) or _is_ad(item, last_raw):
         return ListItem(urn, thread_id, owner, last_activity, Kind.OTHER)
     if not counterpart.startswith(PROFILE_URN_PREFIX):
         raise _fail(f"{where}: the counterpart is neither a profile nor a company")
+    accepted = item.get("state") == ACCEPTED_STATE
+    if _is_inmail(item):
+        if not accepted:
+            return ListItem(urn, thread_id, owner, last_activity, Kind.OTHER)
+    elif _is_labelled(item, last_raw):
+        return ListItem(urn, thread_id, owner, last_activity, Kind.OTHER)
     message = (
         None if last_raw is None else _message(last_raw, owner=owner, where=f"{where} message")
     )
