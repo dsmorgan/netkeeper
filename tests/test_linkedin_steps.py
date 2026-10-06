@@ -1560,6 +1560,9 @@ def test_a_partly_typed_message_stays_after_a_contact_merge(lane: Lane) -> None:
     message = lane.message(message_id)
     assert message is not None and message.status is MessageStatus.FAILED
     assert message.contact_id == survivor_contact
+    # The message left the losing contact's enrollment for the survivor's.
+    assert message.enrollment_id == survivor_enrollment != first
+    assert lane.enrollment(first).status is EnrollmentStatus.REMOVED
     _listed_and_holding(lane, message_id, third)
     lane.write(lambda s, u: discard(s, u, message_id, settings=lane.settings, now=NOW))
     assert lane.read(lambda s, u: waiting_for_you(s, u, limit=10)) == ([], 0)
