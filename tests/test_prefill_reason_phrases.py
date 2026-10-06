@@ -97,10 +97,6 @@ def _strings(node: ast.AST, constants: dict[str, str]) -> Iterator[str]:
         raise Unresolved(ast.unparse(node))
 
 
-def _where(relative: str, node: ast.AST) -> str:
-    return f"{relative}:{getattr(node, 'lineno', '?')}: {ast.unparse(node)}"
-
-
 def _reasons(relative: str, node: ast.AST, constants: dict[str, str]) -> tuple[set[str], set[str]]:
     """(phrases, unresolved sources) of one reason expression."""
     phrases: set[str] = set()
@@ -111,16 +107,28 @@ def _reasons(relative: str, node: ast.AST, constants: dict[str, str]) -> tuple[s
         for part in ast.walk(node):
             if isinstance(part, ast.Constant) and isinstance(part.value, str):
                 phrases.add(part.value)
-        return phrases, {_where(relative, node)}
+        return phrases, {ast.unparse(node)}
     return phrases, set()
 
 
-def _scan() -> tuple[set[str], set[str]]:
+def _owners(tree: ast.Module) -> dict[int, str]:
+    """The innermost function each node sits in (``<module>`` for none)."""
+    owner: dict[int, str] = {}
+    for function in ast.walk(tree):
+        if isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
+            for inner in ast.walk(function):
+                owner[id(inner)] = function.name  # walk is outer-first: the inner wins
+    return owner
+
+
+def _scan() -> tuple[set[str], set[tuple[str, str, str]]]:
+    """(phrases, unresolved reasons as ``(file, function, source)``)."""
     found: set[str] = set()
-    unresolved: set[str] = set()
+    unresolved: set[tuple[str, str, str]] = set()
     for relative in SOURCES:
         tree = ast.parse((ROOT / relative).read_text())
         constants = _final_constants(tree)
+        owner = _owners(tree)
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 func = node.func
@@ -137,7 +145,7 @@ def _scan() -> tuple[set[str], set[str]]:
                             continue
                         phrases, bad = _reasons(relative, arg, constants)
                         found |= phrases
-                        unresolved |= bad
+                        unresolved |= {(relative, owner[id(node)], src) for src in bad}
             if (
                 isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
                 and node.name in REFUSING_FUNCTIONS
@@ -147,7 +155,7 @@ def _scan() -> tuple[set[str], set[str]]:
                     if value is not None:
                         phrases, bad = _reasons(relative, value, constants)
                         found |= phrases
-                        unresolved |= bad
+                        unresolved |= {(relative, owner[id(node)], src) for src in bad}
     return found - NOT_REASONS, unresolved
 
 
@@ -166,49 +174,44 @@ def _is_reason_position(call: str, node: ast.Call, arg: ast.expr) -> bool:
     return True
 
 
-#: Reasons that pass a phrase on from another scanned place, by their exact source. Each
-#: one is the output of a call or check this scan already reads, so no phrase hides in
-#: it. A new entry needs that same justification.
+#: Reasons that pass a phrase on from another scanned place, by ``(file, function, source)``.
+#: Each is the output of a call or check this scan already reads, so no phrase hides in
+#: it, and each is allowed only in the function named: a local variable of the same name
+#: elsewhere still fails. A new entry needs that same justification.
+_B = "netkeeper/linkedin/browser.py"
+_P = "netkeeper/linkedin/page_messaging.py"
+_M = "netkeeper/services/message_send.py"
 PASS_THROUGH = frozenset(
     {
-        # page_messaging: the click's refusal; the same literal text is scanned beside it.
-        "click.refusal or 'the Message control was not clicked'",
-        # message_send.spend() returns a phrase; run_prefill passes it on to _not_typed.
-        "refused",
-        # _not_typed(option.reason): the ComposeRefusal constructors are scanned.
-        "option.reason",
-        # _not_typed(click.refusal or ...): MessageClick(...) is scanned.
-        "click.refusal",
-        # PrefillResult(MessageOutcome(kind, typing.reason, ...)): TypingResult is scanned.
-        "typing.reason",
-        # type_into_composer: the refusal of _await_bubble / _composer_refusal, both scanned.
-        "refusal",
-        "bubble",
-        "final",
-        "f'after typing: {final}'",
-        # the reason of a TypingResult built from another TypingResult's check.
-        "reason",
-        # plan_refusal() builds its own MessageOutcome from literals, scanned there.
-        "outcome.reason",
-        # the checks call each other: _composer_refusal returns _bubble_refusal's phrase.
-        "await self._bubble_refusal(tab, composer, recipient)",
-        (
-            "await self._composer_refusal(tab, composer, recipient, '', focus=False,"
-            " another_compose=another_compose)"
-        ),
-        "await self._composer_refusal(tab, composer, recipient, '',"
-        " another_compose=another_compose)",
+        # The refusing checks hand their phrase up: every check's returns are scanned.
+        (_B, "_await_bubble", "refusal"),
+        (_B, "_composer_refusal", "bubble"),
+        (_B, "type_into_composer", "refusal"),
+        # click_message passes message_control_refusal's phrase on (scanned).
+        (_B, "click_message", "refusal"),
+        # The one-line helpers take their caller's phrase; every call site is scanned.
+        (_P, "_not_typed", "reason"),
+        (_M, "_not_typed", "reason"),
+        (_M, "_after_failure", "reason"),
+        ("netkeeper/worker.py", "_prefill_not_typed", "reason"),
+        # PagePrefill passes on a TypingResult's reason and the click's: both scanned.
+        (_P, "_result", "typing.reason"),
+        (_P, "prefill", "click.refusal or 'the Message control was not clicked'"),
+        # The compose option's refusal: ComposeRefusal(...) calls are scanned.
+        (_P, "prefill", "option.reason"),
+        # spend() returns a phrase; run_prefill passes it on to _not_typed.
+        (_M, "run_prefill", "refused"),
     }
 )
 
 
 def source_phrases() -> set[str]:
     found, unresolved = _scan()
-    bad = sorted(u for u in unresolved if u.split(": ", 1)[1] not in PASS_THROUGH)
+    bad = sorted(u for u in unresolved if u not in PASS_THROUGH)
     assert not bad, (
         "a refusal reason that isn't a literal or a Final constant; make it one, or, if it"
-        " passes on a phrase this scan already reads, add its source to PASS_THROUGH:\n"
-        + "\n".join(bad)
+        " passes on a phrase this scan already reads, add (file, function, source) to"
+        " PASS_THROUGH:\n" + "\n".join(map(str, bad))
     )
     return found
 

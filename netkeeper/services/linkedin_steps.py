@@ -950,8 +950,10 @@ def discard(
     counts as fired (never twice, as for a discarded Gmail draft), and the enrollment
     moves to its next step, due its delay after the discard (or after a later send), or
     completes. netkeeper changes nothing in LinkedIn: the composer is the person's. A
-    partly typed message is the exception to "moves on": when its enrollment has already
-    moved on (a due time, a merge, an end), the discard only releases the message.
+    partly typed message whose enrollment has already moved on (it has a due time) only
+    has the message released; the enrollment is not advanced again. On an ended
+    enrollment the step still counts as fired, as for any discard (``current_step``
+    rises); the enrollment stays ended.
 
     Raises :class:`LookupError` for a message that is not ``user``'s, and
     :class:`PrefillNotWaiting` for one that does not wait for them. Needs a writer
