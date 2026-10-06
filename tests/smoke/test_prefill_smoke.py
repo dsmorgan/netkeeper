@@ -15,8 +15,9 @@ the tab stays open after the hand-over.
 
 The replica's page script plays the part of LinkedIn's: a click on a Message link
 fetches the compose option and the thread, then opens the bubble, and focuses the
-composer when the scenario says so (where focus lands on the real site is not known,
-#429; ADR 0007's option A adds no focusing input, so an unfocused composer refuses).
+composer when the scenario says so. Where focus lands on the real site is not known
+(#429); under ADR 0007's option B the run makes one ``Locator.focus()`` on the verified
+composer when the page didn't, so a replica that never focuses it is still typed into.
 """
 
 from __future__ import annotations
@@ -93,7 +94,7 @@ SCENARIOS = {
     "draft": Scenario(_member(304), draft="left over"),
     "other_recipient": Scenario(_member(305), header_for=_member(398)),
     "two_composers": Scenario(_member(306), second_composer=True),
-    "unfocused": Scenario(_member(307), focus=False),
+    "never_focused": Scenario(_member(307), focus=False),
     "late_focus": Scenario(_member(308), focus_delay_ms=800),
     "pronouns": Scenario(_member(309), existing=False, pronouns=True),
 }
@@ -284,7 +285,9 @@ def _no_send(state: dict[str, Any]) -> None:
     assert not [e for e in events if e.startswith("click:button")], events
 
 
-@pytest.mark.parametrize("name", ["existing", "never_messaged", "late_focus", "pronouns"])
+@pytest.mark.parametrize(
+    "name", ["existing", "never_messaged", "late_focus", "pronouns", "never_focused"]
+)
 async def test_the_body_is_typed_into_a_real_composer_and_never_sent(
     origin: str, name: str
 ) -> None:
@@ -309,13 +312,10 @@ REFUSALS = {
     "draft": "not empty",
     "other_recipient": "for someone else",
     "two_composers": "more than one message composer",
-    "unfocused": "does not hold focus",
 }
 
 
-@pytest.mark.parametrize(
-    "name", ["decoy_link", "draft", "other_recipient", "two_composers", "unfocused"]
-)
+@pytest.mark.parametrize("name", ["decoy_link", "draft", "other_recipient", "two_composers"])
 async def test_a_refused_prefill_types_nothing(origin: str, name: str) -> None:
     result, state = await _prefill(origin, SCENARIOS[name])
     assert result.outcome.kind is MessageOutcomeKind.NOT_TYPED, result

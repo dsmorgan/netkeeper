@@ -362,6 +362,12 @@ class _MessagingLocator(Protocol):
         timeout: float | None = None,  # noqa: ASYNC109 -- Playwright's own signature
     ) -> None: ...
 
+    async def focus(
+        self,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109 -- Playwright's own signature
+    ) -> None: ...
+
 
 class _KeyboardLike(Protocol):
     """The three keyboard calls ADR 0007 allows, in :meth:`BrowserRun.type_into_composer`
@@ -445,10 +451,12 @@ PROFILE_PATH_PREFIX: Final = "/in/"
 #: the compose option arrived, in seconds, and in how many reads.
 COMPOSER_WAIT_S: Final = 5.0
 COMPOSER_WAIT_POLLS: Final = 50
-#: ADR 0007's decision 5: option A (``False``, no focusing input) until the maintainer
-#: chooses option B, which sets this and gives :meth:`BrowserRun._focus_seam` its one
-#: ``Locator.focus()``.
-FOCUS_INPUT_AUTHORIZED: Final = False
+#: ADR 0007's decision 5: the maintainer chose option B (2026-10-06). The composer wait
+#: may reach :meth:`BrowserRun._focus_seam` once, which makes one ``Locator.focus()`` on
+#: the verified composer, never a click. ``False`` is option A: no focusing input.
+FOCUS_INPUT_AUTHORIZED: Final = True
+#: How long the one ``focus()`` call may wait for the composer, in milliseconds.
+FOCUS_TIMEOUT_MS: Final = 1_000.0
 #: How long one read of an attribute or the composer's text may wait, in milliseconds.
 MESSAGING_READ_TIMEOUT_MS: Final = 1_000.0
 
@@ -983,6 +991,8 @@ class BrowserRun:
         #: How many key calls were attempted (ADR 0007's point of no return).
         self._keys_sent = 0
         self._handed_over = False
+        #: Whether :meth:`_focus_seam` ran (ADR 0007, option B): at most once per run.
+        self._focus_used = False
 
     @property
     def keys_sent(self) -> int:
@@ -1521,7 +1531,15 @@ class BrowserRun:
         composer = tab.get_by_role(
             COMPOSER_ROLE, name=COMPOSER_NAME, exact=True, include_hidden=True
         )
-        refusal = await self._await_bubble(tab, composer, recipient, sleep, another_compose)
+        refusal = await self._await_bubble(
+            tab,
+            composer,
+            recipient,
+            sleep,
+            another_compose,
+            # Decision 5, option B: the seam's one call site.
+            focus_seam=self._focus_seam if FOCUS_INPUT_AUTHORIZED else None,
+        )
         if refusal is not None:
             return TypingResult(TypingEnd.NOT_TYPED, refusal, 0, None)
         keyboard = tab.keyboard
@@ -1614,29 +1632,30 @@ class BrowserRun:
         recipient: BubbleRecipient,
         sleep: Callable[[float], Awaitable[None]],
         another_compose: Callable[[], bool] | None,
+        *,
+        focus_seam: Callable[[_MessagingPage, _MessagingLocator], Awaitable[None]] | None,
     ) -> str | None:
         """The composer wait (ADR 0007): up to :data:`COMPOSER_WAIT_S`, poll the full
         read-only check, focus included, until every check passes in one pass, and
         answer that pass (``None``) or the last refusal.
 
         The bubble, and focus in its composer, can land a moment after the compose
-        option. The wait gives no input. Under option A of decision 5
-        (:data:`FOCUS_INPUT_AUTHORIZED` false) it polls the full pass from the start, and
-        only gives the page up to :data:`COMPOSER_WAIT_S` to focus the composer itself.
-        Under option B it first polls until one pass holds every check but focus, then
-        reaches :meth:`_focus_seam` once, then polls the full pass for the rest of the
-        wait. A lost tab ends the wait at once."""
+        option. Under option B of decision 5 (``focus_seam`` given, the default since
+        the maintainer chose it) it first polls until one pass holds every check but
+        focus, then calls ``focus_seam`` once, its one input, then polls the full pass,
+        focus included, for the rest of the wait. Under option A (``focus_seam`` None) it
+        polls the full pass from the start and gives no input. A lost tab ends the wait at once."""
         refusal: str | None = "the bubble was not drawn"
         # Option B only: first a pass of every check but focus, then the seam, once.
-        seam_pending = FOCUS_INPUT_AUTHORIZED
+        seam_pending = focus_seam is not None
         for _ in range(COMPOSER_WAIT_POLLS):
             if seam_pending:
                 refusal = await self._composer_refusal(
                     tab, composer, recipient, "", focus=False, another_compose=another_compose
                 )
-                if refusal is None:
+                if refusal is None and focus_seam is not None:
                     seam_pending = False
-                    await self._focus_seam(composer)
+                    await focus_seam(tab, composer)
             if not seam_pending:
                 # The authorizing pass: every check, focus last, in one pass.
                 refusal = await self._composer_refusal(
@@ -1649,15 +1668,23 @@ class BrowserRun:
             await sleep(COMPOSER_WAIT_S / COMPOSER_WAIT_POLLS)
         return refusal
 
-    async def _focus_seam(self, composer: _MessagingLocator) -> None:
-        """Where a focusing input on the verified composer would go (ADR 0007, decision 5).
+    async def _focus_seam(self, tab: _MessagingPage, composer: _MessagingLocator) -> None:
+        """ADR 0007's third input (decision 5, option B): one ``Locator.focus()`` on the
+        verified composer, never a click.
 
-        Empty on purpose: the ADR as written authorizes no click into the composer and
-        no ``focus()`` call, so a composer without focus ends ``not_typed``. If the
-        maintainer authorizes one, it is one ``Locator.focus()`` here, reached only
-        after every check above has passed, and pinned in ``tests/test_browser_safety.py``.
-        """
-        return None
+        Reached only from the composer wait, after a pass in which every check but focus
+        held, and at most once per run (a second call raises ``RuntimeError``). When the
+        composer already holds focus it does nothing. A ``focus()`` that fails is not
+        retried: the full pass that follows refuses a composer without focus."""
+        if self._focus_used:
+            raise RuntimeError("the composer is focused at most once per run")
+        self._focus_used = True
+        if await composer.and_(tab.locator(FOCUSED)).count() == 1:
+            return
+        try:
+            await composer.focus(timeout=FOCUS_TIMEOUT_MS)
+        except Exception as exc:
+            log.warning("the composer could not be focused (%s)", type(exc).__name__)
 
     async def _bubble_refusal(
         self, tab: _MessagingPage, composer: _MessagingLocator, recipient: BubbleRecipient
