@@ -732,6 +732,7 @@ async def _scroll_resting_over(
     boxes: list[dict[str, float] | None] | None,
     *,
     viewport: dict[str, int] | None = None,
+    seed: int = 4,
 ) -> tuple[list[tuple[float, float]], list[str]]:
     connector = FakeConnector()
     provider = make_provider(connector)
@@ -743,7 +744,7 @@ async def _scroll_resting_over(
         if boxes is not None:
             page.match_boxes[LINK] = list(boxes)
         await run.scroll(
-            make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(4), rest_over=LINK
+            make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(seed), rest_over=LINK
         )
     page = only_page(context)
     return page.mouse.moves, page.locator_calls
@@ -791,6 +792,50 @@ async def test_scroll_stays_clear_of_the_nav_over_a_link_that_starts_under_it() 
     link = {"x": 100.0, "y": 56.0, "width": 300.0, "height": 100.0}
     moves, _ = await _scroll_resting_over([link])
     assert all(y >= browser.REST_MIN_Y_PX for _, y in moves), moves
+
+
+async def test_scroll_skips_a_match_positioned_left_of_the_screen() -> None:
+    """#441 review: a link at ``left: -9999px`` has a real box with a center on y."""
+    offscreen = {"x": -9999.0, "y": 400.0, "width": 300.0, "height": 100.0}
+    visible = {"x": 100.0, "y": 400.0, "width": 300.0, "height": 100.0}
+    moves, _ = await _scroll_resting_over([offscreen, visible])
+    assert all(x >= 0 for x, _ in moves), moves
+    assert all(100.0 <= x <= 400.0 for x, _ in moves), moves
+
+
+async def test_scroll_skips_a_match_right_of_the_known_viewport_width() -> None:
+    right = {"x": 3000.0, "y": 400.0, "width": 300.0, "height": 100.0}
+    visible = {"x": 100.0, "y": 400.0, "width": 300.0, "height": 100.0}
+    moves, _ = await _scroll_resting_over([right, visible], viewport={"width": 1400, "height": 800})
+    assert all(100.0 <= x <= 400.0 for x, _ in moves), moves
+
+
+async def test_scroll_holds_the_rest_over_jitter_inside_the_screen() -> None:
+    """A link mostly off the left edge, its center just on screen: no wobble may leave."""
+    half = {"x": -60.0, "y": 400.0, "width": 140.0, "height": 100.0}  # center x = 10
+    wide = {"x": 1400.0, "y": 400.0, "width": 400.0, "height": 100.0}  # center x = 1600
+    for seed in range(30):
+        moves, _ = await _scroll_resting_over([half], seed=seed)
+        assert all(0.0 <= x <= 80.0 for x, _ in moves), (seed, moves)
+        moves, _ = await _scroll_resting_over(
+            [wide], viewport={"width": 1600, "height": 800}, seed=seed
+        )
+        assert all(1400.0 <= x <= 1600.0 for x, _ in moves), (seed, moves)
+
+
+async def test_scroll_skips_a_zero_area_match_below_the_nav() -> None:
+    flat = {"x": 100.0, "y": 400.0, "width": 0.0, "height": 100.0}
+    thin = {"x": 100.0, "y": 400.0, "width": 300.0, "height": 0.0}
+    visible = {"x": 600.0, "y": 400.0, "width": 300.0, "height": 100.0}
+    moves, _ = await _scroll_resting_over([flat, thin, visible])
+    assert all(600.0 <= x <= 900.0 for x, _ in moves), moves
+
+
+async def test_scroll_skips_a_link_that_sits_entirely_under_the_nav() -> None:
+    under = {"x": 100.0, "y": 10.0, "width": 300.0, "height": 40.0}  # center y 30
+    visible = {"x": 600.0, "y": 400.0, "width": 300.0, "height": 100.0}
+    moves, _ = await _scroll_resting_over([under, visible])
+    assert all(600.0 <= x <= 900.0 for x, _ in moves), moves
 
 
 async def test_scroll_falls_back_when_reading_the_rest_over_element_raises() -> None:

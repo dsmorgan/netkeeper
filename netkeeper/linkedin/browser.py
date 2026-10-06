@@ -1123,7 +1123,9 @@ class BrowserRun:
         box, the rest falls back to ``<main>`` exactly as without it. ``None`` (the
         default) is that existing behavior, for every other caller. It is a selector,
         not a script: the only page reads are geometry reads, and the only inputs are
-        still the pointer move and the wheel.
+        still the pointer move and the wheel. Like the rest over ``<main>``, it happens
+        once per open tab, on its first ``scroll``: a later call's ``rest_over`` (or a
+        later navigation on the same tab) does not move the pointer again.
 
         ``cancelled``, when given, is polled once before the pointer-rest walk
         begins, then again before every wheel event and again before the final
@@ -1216,7 +1218,13 @@ class BrowserRun:
         if element is not None:
             target_x = element["x"] + element["width"] / 2
             target_y = element["y"] + element["height"] / 2
-            jitter_x = (element["x"], element["x"] + element["width"])
+            known_width = _known_viewport_width(page)
+            jitter_x = (
+                max(element["x"], 0.0),
+                element["x"] + element["width"]
+                if known_width is None
+                else min(element["x"] + element["width"], known_width),
+            )
             jitter_y = (max(element["y"], REST_MIN_Y_PX), element["y"] + element["height"])
         elif box is not None:
             box_x, box_y = box["x"], box["y"]
@@ -2066,19 +2074,27 @@ async def _first_visible_box(page: PageLike, selector: str) -> Mapping[str, floa
     Passive geometry reads only (``bounding_box``, ``count``), like
     :func:`_content_box`: no script runs in the page and nothing is input. A match
     is skipped when it has no box (``display: none``, detached), a box with no area,
-    or a center above :data:`REST_MIN_Y_PX` or past the tab's known viewport height
-    (scrolled out of view). The first match may still be drawing, so it gets the full
-    :data:`CONTENT_BOX_TIMEOUT_MS`; later ones get :data:`REST_CANDIDATE_TIMEOUT_MS`.
+    or a center above :data:`REST_MIN_Y_PX`, left of the screen, or past the tab's known
+    viewport height or width (scrolled or positioned out of view). The first match may
+    still be drawing, so it gets the full :data:`CONTENT_BOX_TIMEOUT_MS`; later ones get
+    :data:`REST_CANDIDATE_TIMEOUT_MS`.
     At most :data:`REST_MAX_CANDIDATES` matches are read. ``None`` on any error.
     """
     matches = cast(_ScrollablePage, page).locator(selector)
     height = _known_viewport_height(page)
+    width = _known_viewport_width(page)
 
     def usable(box: Mapping[str, float] | None) -> bool:
         if box is None or box["width"] <= 0 or box["height"] <= 0:
             return False
+        center_x = box["x"] + box["width"] / 2
         center_y = box["y"] + box["height"] / 2
-        return center_y >= REST_MIN_Y_PX and (height is None or center_y <= height)
+        return (
+            center_y >= REST_MIN_Y_PX
+            and (height is None or center_y <= height)
+            and center_x >= 0
+            and (width is None or center_x <= width)
+        )
 
     try:
         box = await matches.first.bounding_box(timeout=CONTENT_BOX_TIMEOUT_MS)
@@ -2105,6 +2121,13 @@ def _viewport_size(page: PageLike) -> tuple[float, float]:
     if size is None:
         return float(DEFAULT_VIEWPORT_WIDTH), float(DEFAULT_VIEWPORT_HEIGHT)
     return float(size["width"]), float(size["height"])
+
+
+def _known_viewport_width(page: PageLike) -> float | None:
+    """This tab's real viewport width, only when Playwright knows it (see
+    :func:`_known_viewport_height`)."""
+    size = cast(_ScrollablePage, page).viewport_size
+    return float(size["width"]) if size is not None else None
 
 
 def _known_viewport_height(page: PageLike) -> float | None:
