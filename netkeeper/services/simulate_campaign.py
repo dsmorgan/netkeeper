@@ -68,7 +68,7 @@ from netkeeper.models import (
     UserKind,
 )
 from netkeeper.scoping import get_scoped, scoped
-from netkeeper.services import runs
+from netkeeper.services import inbox_hold, runs
 from netkeeper.services.campaign_engine import (
     Firing,
     Sender,
@@ -165,6 +165,7 @@ class SimulatedLinkedIn:
     ) -> None:
         """Queue the replies whose first send happened, then read what the inbox shows."""
         self._queue_replies(factory)
+        self._poll_on_schedule(factory, now=now)
         due = [(owner, item) for owner, item in self._inbox if item.at <= now]
         if not due:
             return
@@ -176,6 +177,30 @@ class SimulatedLinkedIn:
             with session_scope(factory, write=True) as session:
                 user = session.get_one(User, user_id)
                 apply_delta(session, user, delta, polled_at=now, settings=settings)
+
+    def _poll_on_schedule(self, factory: sessionmaker[Session], *, now: datetime) -> None:
+        """Record a complete inbox poll each :data:`~netkeeper.services.inbox_hold.INTERVAL`,
+        as the scheduler would: the replay's inbox is read on time, so a step is never
+        held for a stale one (#417). The read itself is :meth:`before_tick`'s."""
+        with session_scope(factory, write=True) as session:
+            for user in _local_users(session):
+                if not inbox_hold.linkedin_in_use(session, user):
+                    continue  # nothing to hold, and no LinkedIn account to create for it
+                last = inbox_hold.last_complete_poll(session, user, now=now)
+                if last is not None and now - last < inbox_hold.INTERVAL:
+                    continue
+                session.add(
+                    SyncRun(
+                        user_id=user.id,
+                        linkedin_account_id=ensure_account(session, user).id,
+                        kind=SyncRunKind.INBOX,
+                        status=SyncRunStatus.COMPLETED,
+                        trigger=SyncRunTrigger.SCHEDULED,
+                        started_at=now,
+                        completed_at=now,
+                        stop_reason="inbox_read",
+                    )
+                )
 
     def after_tick(
         self, factory: sessionmaker[Session], *, settings: Settings, now: datetime

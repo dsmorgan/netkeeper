@@ -33,6 +33,9 @@ runs, and the LinkedIn ones besides. It refuses with the reasons when:
   refuses: the session is flagged, heat is at its skip threshold, no evidence says
   the session is logged in, or today's ``li_prefills`` (or ``profile_visits``)
   budget is spent;
+- the LinkedIn inbox poll is stale (:mod:`netkeeper.services.inbox_hold`, #417): no
+  complete poll has run, or the newest is too old, so a reply could go unseen. The claim
+  waits (``linkedin_inbox_stale``) and nothing changes; a complete poll releases it;
 - the template has lint errors, the body does not render or renders empty, or the
   rendered message has an error for this contact (``rendered_errors``: the enrollment
   is parked with ``not_sent_error`` "blocked: <rules>");
@@ -122,7 +125,7 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.scoping import get_scoped, not_self, scoped, scoped_contacts
-from netkeeper.services import budgets, runs, sending_hours
+from netkeeper.services import budgets, inbox_hold, runs, sending_hours
 from netkeeper.services import campaign_engine as engine
 from netkeeper.services import heat as heat_service
 from netkeeper.services.campaign_engine import PREFILL_STALE_AFTER, Skip
@@ -178,6 +181,7 @@ class Refusal(enum.StrEnum):
     RUN_IN_PROGRESS = "run_in_progress"
     RUN_REFUSED = "run_refused"
     RENDERED_ERRORS = "rendered_errors"
+    INBOX_STALE = "linkedin_inbox_stale"
 
 
 #: Refusals about the user, not the enrollment: every other enrollment would get the
@@ -190,6 +194,7 @@ USER_REFUSALS: Final[frozenset[str]] = frozenset(
         Refusal.BAD_ACTIVE_HOURS,
         Refusal.RUN_IN_PROGRESS,
         Refusal.RUN_REFUSED,
+        Refusal.INBOX_STALE,
         Skip.BAD_SCHEDULE,
         "browser_unknown",
         "browser_unhealthy",
@@ -477,6 +482,12 @@ class _Claimer:
         )
         if channel:
             return self.refuse(enrollment, *(r.value for r in channel))
+        # Last, so it only ever adds a refusal (#417): LinkedIn replies are not being
+        # read, so a prefill could go to someone who already answered. It waits; a
+        # complete inbox poll releases it, and nothing is changed on the enrollment.
+        stale = inbox_hold.claim_hold(session, user, now=now)
+        if stale is not None:
+            return self.refuse(enrollment, Refusal.INBOX_STALE, detail=stale)
 
         return self._claim(campaign, enrollment, step, latest, slots)
 

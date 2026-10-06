@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 
+from sqlalchemy.orm import Session
+
 from netkeeper.linkedin.inbox import (
     InboxConversation,
     InboxDelta,
@@ -17,6 +19,8 @@ from netkeeper.linkedin.inbox import (
     InboxMessage,
     InboxReadStopped,
 )
+from netkeeper.models import SyncRun, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
+from netkeeper.services.linkedin_accounts import ensure_account
 
 #: The account owner's own profile URN, invented.
 OWNER_URN = "urn:li:fsd_profile:INVENTEDOWNER"
@@ -109,7 +113,41 @@ class FakeInboxSource:
         return self.answer
 
 
+FIXTURE_NOTE = "a fixture poll"
+"""On every row :func:`record_poll` writes, so a test can tell it from a poll that ran."""
+
+
+def record_poll(
+    session: Session,
+    user: User,
+    at: datetime,
+    *,
+    status: SyncRunStatus = SyncRunStatus.COMPLETED,
+    reason: str = "inbox_read",
+    ended: datetime | None = None,
+) -> SyncRun:
+    """An inbox poll that started and ended at ``at``: complete by default, or ``aborted``
+    (``inbox_incomplete``, a wall) and so never counted as one that read the inbox (#417).
+    ``ended`` is when it finished, for a poll that ran long. Written as a row, so it never
+    waits on a run that is still running."""
+    run = SyncRun(
+        user_id=user.id,
+        linkedin_account_id=ensure_account(session, user).id,
+        kind=SyncRunKind.INBOX,
+        status=status,
+        trigger=SyncRunTrigger.MANUAL,
+        started_at=at,
+        completed_at=ended or at,
+        stop_reason=reason,
+        notes=FIXTURE_NOTE,
+    )
+    session.add(run)
+    session.flush()
+    return run
+
+
 __all__ = [
+    "FIXTURE_NOTE",
     "OWNER_URN",
     "FakeInboxSource",
     "InboxReadStopped",
@@ -118,4 +156,5 @@ __all__ = [
     "delta",
     "message",
     "profile_urn",
+    "record_poll",
 ]

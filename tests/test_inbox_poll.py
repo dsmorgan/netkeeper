@@ -862,7 +862,7 @@ def test_a_late_poll_names_how_the_newest_one_ended(
         p for p in _posture(session_factory, user_id).protections if p.name == "linkedin reply poll"
     ]
     (note,) = row.notes
-    assert "the newest poll ended route_changed" in note and "more than 3 times" in note
+    assert "the newest poll ended route_changed" in note and "older than 6.8 hours" in note
 
 
 def test_old_runs_keep_the_words_for_no_source() -> None:

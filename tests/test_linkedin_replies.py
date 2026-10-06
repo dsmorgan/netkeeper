@@ -20,7 +20,15 @@ from typing import Any
 import factories
 import pytest
 from campaign_fakes import NOW, SETTINGS, FakeSender, make_mailbox
-from inbox_fakes import OWNER_URN, FakeInboxSource, conversation, delta, message, profile_urn
+from inbox_fakes import (
+    OWNER_URN,
+    FakeInboxSource,
+    conversation,
+    delta,
+    message,
+    profile_urn,
+    record_poll,
+)
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import LinkedInSettings, Settings
@@ -158,6 +166,7 @@ class World:
         """Claim the due LinkedIn step and record it ``prefilled`` at ``now``; end the run."""
 
         def run(session: Session, user: User) -> int:
+            record_poll(session, user, now - timedelta(minutes=1))  # a claim waits for one (#417)
             claim = claim_prefill(session, user, enrollment_id, now=now, settings=self.settings)
             assert claim.claimed, claim.reasons
             assert claim.message_id is not None and claim.run_id is not None
@@ -217,6 +226,7 @@ def make_world(
             if step.channel is EMAIL:
                 step.mode = StepMode.SEND
         ensure_account(session, user)
+        record_poll(session, user, NOW - timedelta(hours=1))  # the hold on a stale inbox (#417)
         record_session_evidence(
             session, user, logged_in=True, source="preflight", now=NOW - timedelta(hours=1)
         )
@@ -580,6 +590,8 @@ def test_a_prefilled_message_is_confirmed_sent_and_the_next_step_counts_from_it(
         )
     )
     assert verdict.eligible, verdict.reasons
+    # Days later: the inbox poll has kept running, or the watched contact's step is held (#417).
+    world.write(lambda s, u: record_poll(s, u, expected - timedelta(minutes=1)))
     [(firing, _)] = world.tick(expected).fired
     assert firing.enrollment_id == enrollment_id
 

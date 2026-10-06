@@ -91,7 +91,7 @@ from netkeeper.linkedin.pacing import (
 from netkeeper.models import Mailbox, SyncRunKind, SyncRunStatus, User
 from netkeeper.scoping import scoped
 from netkeeper.services import heat as heat_rows
-from netkeeper.services import route_breaker
+from netkeeper.services import inbox_hold, route_breaker
 from netkeeper.services.budgets import (
     HARD_MAX_PER_DAY,
     HARD_MAX_PER_WEEK,
@@ -226,10 +226,6 @@ MISSING_MEANS: Final[dict[JobKind, str]] = {
 #: running. The sender already holds follow-ups that start a new conversation past two
 #: (``campaign_replies.STALE_AFTER_POLLS``), so a late poll is a note, not a warning.
 REPLY_POLL_LATE_AFTER_POLLS: Final = 3
-
-#: The LinkedIn inbox poll is late once its last complete poll is older than this many
-#: of its schedule's intervals (P4-01). Like the Gmail poll: one missed poll is noise.
-LINKEDIN_POLL_LATE_AFTER_POLLS: Final = 3
 
 
 class Status(enum.StrEnum):
@@ -538,7 +534,9 @@ def posture(
         _contact_info_breaker(session, user, account_id),
         _network_aging(session, user),
     ]
-    protections.append(_linkedin_reply_poll(session, user, now=now))
+    linkedin_replies = _linkedin_reply_poll(session, user, now=now)
+    if linkedin_replies is not None:
+        protections.append(linkedin_replies)
     return PostureReport(
         checked_at=now,
         timezone=linkedin.timezone,
@@ -1610,24 +1608,33 @@ def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settin
 
 
 def _linkedin_reply_poll(session: Session, user: User, *, now: datetime) -> Protection:
-    """The LinkedIn inbox poll's row: when it last completed, and whether it is late (P4-01).
+    """The LinkedIn inbox poll's row: when it last completed, and whether LinkedIn steps wait.
 
-    On once the page source is wired: a poll reads the inbox on each fire of its
-    schedule. The row names the last ``completed`` poll (an ``aborted`` one is not
-    fresh, #417), and notes, without warning, a last complete poll older than
-    :data:`LINKEDIN_POLL_LATE_AFTER_POLLS` of its intervals, naming how the newest poll
-    ended when it did not complete. With no complete poll yet, the value says the first one
-    is run by hand: a scheduled poll starts nothing until one has completed.
+    Always there, and ``on``: a poll reads the inbox on each fire of its schedule (P4-01).
+    The hold text below shows while LinkedIn is in use
+    (:func:`~netkeeper.services.inbox_hold.linkedin_in_use`: a live campaign has a
+    LinkedIn step or a watched contact).
+
+    **One threshold** (#417). The inbox is stale past
+    :func:`~netkeeper.services.inbox_hold.stale_after` (two intervals plus the
+    scheduler's longest retry), or with no complete poll yet, and while it is, LinkedIn
+    prefills and every step for a watched contact are held. The row says so as a note,
+    not a warning: the hold is the protection working, as the Gmail row's is. The note
+    names how the newest poll ended when it did not complete (an ``aborted`` one never
+    refreshes the inbox).
+
+    **A first poll by hand.** A scheduled poll starts nothing until one has completed, so
+    with no complete poll the value says to run ``netkeeper linkedin inbox``; the hold
+    note says the same steps wait for it.
 
     A first poll that could not read back to the earliest outreach it watches counted
     as complete anyway, so replies older than what it read were never seen. That stays
     a warning until a person checks them by hand and acknowledges it
     (``netkeeper linkedin inbox-acknowledge``); no poll clears it.
     """
-    interval = DEFAULT_SCHEDULES[JobKind.INBOX].interval
-    late_after = interval * LINKEDIN_POLL_LATE_AFTER_POLLS
-    last = latest_run(session, user, SyncRunKind.INBOX, status=SyncRunStatus.COMPLETED)
-    newest = latest_run(session, user, SyncRunKind.INBOX)
+    in_use = inbox_hold.linkedin_in_use(session, user)
+    short_of = short_first_poll(session, user)
+    last = inbox_hold.last_complete_poll(session, user, now=now)
     notes: list[str] = []
     if last is None:
         value = (
@@ -1635,22 +1642,29 @@ def _linkedin_reply_poll(session: Session, user: User, *, now: datetime) -> Prot
             " `netkeeper linkedin inbox`"
         )
     else:
-        age = now - last.started_at
-        value = f"last complete poll {last.started_at:%Y-%m-%d %H:%M UTC} ({_ago(age)})"
-        if age > late_after:
-            why = ""
-            if newest is not None and newest.status is not SyncRunStatus.COMPLETED:
-                why = f"; the newest poll ended {newest.stop_reason or newest.status.value}"
-                if newest.stop_reason == "owner_mismatch":
-                    why += " (if you changed accounts, run `netkeeper linkedin inbox-forget-owner`)"
-            notes.append(
-                f"the last complete LinkedIn inbox poll was {_ago(age)}, more than"
-                f" {LINKEDIN_POLL_LATE_AFTER_POLLS} times its"
-                f" {interval.total_seconds() / 3600:g} h interval{why}. LinkedIn replies are"
-                " noticed only when a poll completes, and LinkedIn follow-ups wait for a fresh one"
-            )
+        hours = inbox_hold.stale_after().total_seconds() / 3600
+        value = (
+            f"last complete poll {last:%Y-%m-%d %H:%M UTC} ({_ago(now - last)});"
+            f" holds past {hours:.1f} h"
+        )
+    if inbox_hold.is_stale(last, now=now, linkedin_live=in_use):
+        newest = latest_run(session, user, SyncRunKind.INBOX)
+        why = ""
+        if newest is not None and newest.status is not SyncRunStatus.COMPLETED:
+            why = f"; the newest poll ended {newest.stop_reason or newest.status.value}"
+            if newest.stop_reason == "owner_mismatch":
+                why += " (if you changed accounts, run `netkeeper linkedin inbox-forget-owner`)"
+        reason = inbox_hold.why_stale(session, user, now=now)
+        effect = (
+            "LinkedIn prefills, and every step, email included, for a contact you are"
+            " watching on LinkedIn (a conversation the poll has seen, or a prefill you"
+            " claimed), wait until a poll completes; nothing is skipped or failed"
+            if in_use
+            else "no LinkedIn step or watched contact waits on it now, but LinkedIn replies"
+            " are noticed only when a poll completes"
+        )
+        notes.append(f"{reason}{why}. {effect}")
     warnings: tuple[str, ...] = ()
-    short_of = short_first_poll(session, user)
     if short_of is not None:
         warnings = (
             f"the first LinkedIn inbox poll couldn't read back to {short_of:%Y-%m-%d};"

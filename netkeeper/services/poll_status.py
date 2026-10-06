@@ -31,7 +31,9 @@ store, never by running one:
   last; the manual-run check words them
   (:func:`~netkeeper.services.runs.refuse_if_outside_active_hours`).
 - **LinkedIn inbox**: served like the other LinkedIn kinds since P4-01 (#380). A kind
-  the scheduler does not serve would be ``not_wired``: never shown as running.
+  the scheduler does not serve would be ``not_wired``: never shown as running. Whatever
+  its state, its reason also says when LinkedIn steps are held because its newest complete poll is
+  stale or missing (:mod:`netkeeper.services.inbox_hold`, #417).
 
 The campaign engine's one-minute tick is left out on purpose: it is not a check.
 
@@ -70,7 +72,7 @@ from netkeeper.models import (
 from netkeeper.scoping import scoped
 from netkeeper.services import campaign_review as review
 from netkeeper.services import heat as heat_service
-from netkeeper.services import route_breaker, runs
+from netkeeper.services import inbox_hold, route_breaker, runs
 from netkeeper.services.campaign_sender import DRAFTS_POLL_EVERY
 from netkeeper.services.linkedin_accounts import (
     find_account,
@@ -463,6 +465,7 @@ def _linkedin(
         serving=serving,
     )
     checks: list[Check] = []
+    hold = _inbox_hold(session, user, now=now)
     for kind, key in LINKEDIN_KEYS.items():
         schedule = DEFAULT_SCHEDULES[kind]
         base = Check(
@@ -505,7 +508,30 @@ def _linkedin(
             checks.append(replace(base, state=CheckState.DUE))
         else:
             checks.append(replace(base, state=CheckState.SCHEDULED, next_at=due))
+    if hold is not None:
+        checks = [
+            replace(c, reason=hold if c.reason is None else f"{c.reason}. {hold}")
+            if c.key == LINKEDIN_INBOX
+            else c
+            for c in checks
+        ]
     return checks
+
+
+def _inbox_hold(session: Session, user: User, *, now: datetime) -> str | None:
+    """What is held while the inbox poll is stale (#417), or None when nothing is: the
+    inbox is fresh, or no LinkedIn step or watched contact makes a stale one matter. It
+    says so whatever state the check is in (not wired, disarmed, paused, blocked): a poll
+    that is not running is the usual reason it is stale."""
+    if not inbox_hold.linkedin_in_use(session, user):
+        return None
+    if not inbox_hold.stale(session, user, now=now):
+        return None
+    return (
+        "LinkedIn prefills, and steps for a contact you are watching on LinkedIn"
+        " (a conversation the poll has seen, or a prefill you claimed), are held until a"
+        f" poll completes. {inbox_hold.why_stale(session, user, now=now)}"
+    )
 
 
 def _linkedin_gate(
