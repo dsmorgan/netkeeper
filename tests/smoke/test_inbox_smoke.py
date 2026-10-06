@@ -83,9 +83,9 @@ _CSS_BASE = """
   html, body { margin: 0; height: 100%; overflow: hidden; font-family: sans-serif; }
   #nav { position: fixed; top: 0; left: 0; right: 0; height: 56px; background: #0a66c2;
          z-index: 10; }
-  main { position: fixed; top: 56px; bottom: 0; left: 50%; transform: translateX(-50%);
-         width: min(1128px, 100vw); display: flex; background: #fff; }
-  .pane { overflow-y: auto; box-sizing: border-box; }
+  main { position: absolute; top: 56px; left: 100px; width: 1000px; height: 480px;
+         display: flex; background: #fff; }
+  .pane { height: 480px; overflow-y: auto; box-sizing: border-box; }
   .card { height: 100px; border-bottom: 1px solid #ddd; }
 """
 
@@ -113,7 +113,9 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>replica</titl
 const cfg = JSON.parse(document.getElementById('cfg').textContent);
 const listPane = document.getElementById('list-pane');
 const threadPane = document.getElementById('thread-pane');
-let nextOlder = 0, busy = false;
+let nextOlder = 0, busy = false, armed = false;
+// One older page per wheel gesture: only a new wheel event re-arms the fetch.
+document.addEventListener('wheel', () => { armed = true; }, {capture: true, passive: true});
 function render(into, count) {
   for (let i = 0; i < count; i++) {
     const card = document.createElement('div');
@@ -125,10 +127,13 @@ function render(into, count) {
 function report(pane) { fetch('/__scrolled/' + pane, {method: 'POST'}); }
 listPane.addEventListener('scroll', async () => {
   report('list');
+  if (!armed) return;
   const near = listPane.scrollTop + listPane.clientHeight >= listPane.scrollHeight - 400;
   if (busy || !near || nextOlder >= cfg.older.length) return;
   busy = true;
-  await fetch(cfg.older[nextOlder++]);
+  armed = false;
+  const answer = await fetch(cfg.older[nextOlder++]);
+  if (!answer.ok) return;  // the page gives up on the list, as a failed load would
   render(document.getElementById('list'), 2);
   busy = false;
 });
@@ -457,5 +462,9 @@ async def test_an_older_page_that_fails_stops_the_poll(origin: str) -> None:
     _install(site)
     with pytest.raises(InboxReadStopped) as stopped:
         await _poll(origin, _spec(since=at(25), open_thread=False))
+    stopped_at = time.monotonic()
     assert stopped.value.outcome is Outcome.ROUTE_CHANGED
-    assert site.pages[MESSAGING_PAGE_PATH]["older"][0] in site.requests
+    asked = site.requests.index(site.pages[MESSAGING_PAGE_PATH]["older"][0])
+    # At once, from the answer's status: the idle-scroll limit (six waits of a second each)
+    # would take far longer.
+    assert stopped_at - site.stamps[asked] < 3.0
