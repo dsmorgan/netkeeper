@@ -720,3 +720,31 @@ async def test_a_conversation_the_list_names_twice_is_handed_on_once() -> None:
 
     urns = [c.conversation_urn for c in delta.conversations]
     assert len(urns) == 3 and len(set(urns)) == 3 and delta.complete
+
+
+# --- #439: the scroll's rest target -------------------------------------------------------
+
+
+class _Stop(Exception):
+    pass
+
+
+class _RecordingRun:
+    def __init__(self) -> None:
+        self.kwargs: dict[str, Any] = {}
+
+    async def scroll(self, plan: Any, **kwargs: Any) -> Any:
+        self.kwargs = kwargs
+        raise _Stop
+
+
+@pytest.mark.parametrize("sleep", [no_sleep, None], ids=["injected sleep", "real sleep"])
+async def test_both_scroll_branches_rest_over_a_conversation_link(sleep: Any) -> None:
+    from netkeeper.linkedin.page_inbox import CONVERSATION_LINK
+
+    run = _RecordingRun()
+    source = PageInbox(run, sleep=sleep, rng=random.Random(1), scroll_profile=ONE_WHEEL)  # type: ignore[arg-type]
+    with pytest.raises(_Stop):
+        await source._scroll()
+    assert run.kwargs["rest_over"] == CONVERSATION_LINK
+    assert CONVERSATION_LINK == 'a[href*="/messaging/thread/"]'
