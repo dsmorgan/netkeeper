@@ -72,6 +72,7 @@ def test_the_safety_constants_are_the_specs() -> None:
         SyncRunKind.CONNECTIONS_INCREMENTAL,
         SyncRunKind.ENRICH,
         SyncRunKind.INBOX,
+        SyncRunKind.MESSAGE_SEND,  # P4-03 (#382)
     } == runs.RUNNABLE_KINDS
 
 
@@ -152,19 +153,19 @@ def test_one_run_per_account_at_a_time(writer: Session, user: User) -> None:
     )
 
 
-@pytest.mark.parametrize("kind", [SyncRunKind.MESSAGE_SEND])
-def test_a_kind_with_no_runner_is_refused(writer: Session, user: User, kind: SyncRunKind) -> None:
-    # A message_send run also needs the prefill claim's gate (P4-09): given it, the
-    # missing runner still refuses.
-    with pytest.raises(runs.RunError, match="no runner"):
-        runs.create_run(
-            writer,
-            user,
-            kind,
-            trigger=SyncRunTrigger.MANUAL,
-            now=NOW,
-            gate=runs.MESSAGE_SEND_GATE,
-        )
+def test_a_manual_message_send_run_with_the_claims_gate_is_recorded(
+    writer: Session, user: User
+) -> None:
+    """P4-03 (#382): message_send has a runner now; the claim's gate still decides."""
+    run = runs.create_run(
+        writer,
+        user,
+        SyncRunKind.MESSAGE_SEND,
+        trigger=SyncRunTrigger.MANUAL,
+        now=NOW,
+        gate=runs.MESSAGE_SEND_GATE,
+    )
+    assert run.kind is SyncRunKind.MESSAGE_SEND
 
 
 @pytest.mark.parametrize("trigger", list(SyncRunTrigger))

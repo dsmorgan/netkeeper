@@ -619,11 +619,7 @@ ENFORCED_BY: Final[dict[str, tuple[str, ...]]] = {
 #: ``test_the_unenforced_list_is_what_the_package_actually_shows``, which is the
 #: whole point: a hand-maintained list of "not wired up yet" is wrong the week
 #: after it is written.
-UNENFORCED_TODAY: Final[tuple[str, ...]] = (
-    f"{_CONSUME}[{_ACTION_CLASS}.LI_MESSAGES_AUTO]",
-    # P4-09 reads the li_prefills budget before a claim; P4-03's runner consumes it.
-    f"{_CONSUME}[{_ACTION_CLASS}.LI_PREFILLS]",
-)
+UNENFORCED_TODAY: Final[tuple[str, ...]] = (f"{_CONSUME}[{_ACTION_CLASS}.LI_MESSAGES_AUTO]",)
 
 
 def _unenforced_protections() -> tuple[str, ...]:
@@ -644,8 +640,9 @@ GAPS: Final[tuple[str, ...]] = (
     " tell you a limit is set and how much of it is spent; it cannot tell you"
     " that the code which will do the work remembers to ask. The protections"
     f" listed next have no enforcing caller that netkeeper runs yet: {_UNENFORCED_TEXT}."
-    " Their jobs (LinkedIn auto-send, the LinkedIn prefill) do not exist yet, so each"
-    " of those limits is a setting rather than a brake until they do. The connections"
+    " Its job (LinkedIn auto-send) does not exist yet, so that limit is a setting"
+    " rather than a brake until it does. The LinkedIn prefill's runner spends"
+    " `li_prefills` and `profile_visits` before it opens the profile. The connections"
     " sync and enrichment runners are wired: `netkeeper linkedin sync` and `enrich`,"
     " the runs API, and `netkeeper serve`'s scheduler reach them. The inbox poll's"
     " runner spends `inbox_polls` before every read; `netkeeper linkedin inbox`, the"

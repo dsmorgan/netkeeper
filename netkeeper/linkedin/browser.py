@@ -19,15 +19,19 @@ Nothing here imports the ORM or opens a session (spec 9.10, ADR 0005).
 from __future__ import annotations
 
 import asyncio
+import enum
 import logging
 import os
 import random
+import re
+import unicodedata
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Final, Protocol, cast, runtime_checkable
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
 
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin.activity_lock import LEGACY_SHARED_KEY
@@ -36,13 +40,18 @@ from netkeeper.linkedin.body_tap import BodyTap
 from netkeeper.linkedin.errors import BrowserBusy as BrowserBusy
 from netkeeper.linkedin.errors import BrowserError as BrowserError
 from netkeeper.linkedin.errors import BrowserUnavailable as BrowserUnavailable
+from netkeeper.linkedin.messaging import (
+    composer_text,
+    composer_text_matches,
+    plan_control_characters,
+)
 from netkeeper.linkedin.observe import (
     ListenablePage,
     Observation,
     ObservationLimits,
     ResponseMatch,
 )
-from netkeeper.linkedin.pacing import ScrollPlan, rest_pointer_like_a_person
+from netkeeper.linkedin.pacing import ScrollPlan, TypingPlan, rest_pointer_like_a_person
 
 log = logging.getLogger(__name__)
 
@@ -285,6 +294,382 @@ class ContactInfoClick:
     page: PageLike
     clicked: bool
     refusal: str | None = None
+
+
+# --- ADR 0007: the prefill's two inputs and its ending ---------------------------------
+
+
+class _MessagingLocator(Protocol):
+    """The slice of a Playwright ``Locator`` the prefill's two methods use (ADR 0007).
+
+    Local to :meth:`BrowserRun.click_message` and :meth:`BrowserRun.type_into_composer`:
+    finding controls by role and name, narrowing, counting, and reading an attribute
+    or the rendered text. The one click is the only input here; the keys go through
+    :class:`_KeyboardLike`. Nothing here runs script in the page.
+    """
+
+    @property
+    def first(self) -> _MessagingLocator: ...
+
+    @property
+    def last(self) -> _MessagingLocator: ...
+
+    def nth(self, index: int) -> _MessagingLocator: ...
+
+    def and_(self, locator: _MessagingLocator) -> _MessagingLocator: ...
+
+    def filter(
+        self, *, has: _MessagingLocator | None = None, visible: bool | None = None
+    ) -> _MessagingLocator: ...
+
+    def locator(self, selector: str) -> _MessagingLocator: ...
+
+    def get_by_role(
+        self,
+        role: str,
+        *,
+        name: str | re.Pattern[str] | None = None,
+        exact: bool | None = None,
+        include_hidden: bool | None = None,
+        level: int | None = None,
+    ) -> _MessagingLocator: ...
+
+    async def count(self) -> int: ...
+
+    async def get_attribute(
+        self,
+        name: str,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109 -- Playwright's own signature
+    ) -> str | None: ...
+
+    async def inner_text(
+        self,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109 -- Playwright's own signature
+    ) -> str: ...
+
+    async def text_content(
+        self,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109 -- Playwright's own signature
+    ) -> str | None: ...
+
+    async def click(
+        self,
+        *,
+        delay: float | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109 -- Playwright's own signature
+    ) -> None: ...
+
+
+class _KeyboardLike(Protocol):
+    """The three keyboard calls ADR 0007 allows, in :meth:`BrowserRun.type_into_composer`
+    alone. No ``down``, no ``up``: a modifier is never held."""
+
+    async def type(self, text: str) -> None: ...
+
+    async def insert_text(self, text: str) -> None: ...
+
+    async def press(self, key: str) -> None: ...
+
+
+class _MessagingPage(PageLike, Protocol):
+    """A tab the prefill finds its controls on, types into, and brings to the front once."""
+
+    @property
+    def keyboard(self) -> _KeyboardLike: ...
+
+    def locator(self, selector: str) -> _MessagingLocator: ...
+
+    def get_by_role(
+        self,
+        role: str,
+        *,
+        name: str | re.Pattern[str] | None = None,
+        exact: bool | None = None,
+        include_hidden: bool | None = None,
+        level: int | None = None,
+    ) -> _MessagingLocator: ...
+
+    async def bring_to_front(self) -> None: ...
+
+
+#: The Message control (ADR 0007, "One click on Message"): role and name, exact.
+MESSAGE_CONTROL_ROLE: Final = "link"
+MESSAGE_CONTROL_NAME: Final = "Message"
+#: The compose link's path; its host, when absolute, is LinkedIn's own.
+MESSAGE_COMPOSE_PATH: Final = "/messaging/compose/"
+MESSAGE_COMPOSE_HOST: Final = "www.linkedin.com"
+#: How long Playwright may wait for the Message control to be clickable, in milliseconds.
+MESSAGE_CLICK_TIMEOUT_MS: Final = 10_000.0
+#: Time between the press and the release, as a person's click takes, in milliseconds.
+MESSAGE_PRESS_MS: Final = 90.0
+#: The composer: role and name, exact. The last character is U+2026, the ellipsis.
+COMPOSER_ROLE: Final = "textbox"
+COMPOSER_NAME: Final = "Write a message…"
+#: The existing conversation's bubble: role and name, exact.
+BUBBLE_ROLE: Final = "dialog"
+BUBBLE_NAME: Final = "Messaging"
+#: Where the existing conversation's bubble names its recipient: its header's ``h2`` link.
+BUBBLE_HEADER_LINK: Final = "header h2 a"
+#: The never-messaged bubble: its heading, its recipient field, and its recipient chip.
+NEW_MESSAGE_ROLE: Final = "heading"
+NEW_MESSAGE_NAME: Final = "New message"
+RECIPIENTS_FIELD_ROLE: Final = "combobox"
+RECIPIENTS_FIELD_NAME: Final = "Enter message recipients"
+CHIP_ROLE: Final = "button"
+CHIP_NAME: Final = re.compile("^Remove ")
+#: The chip's name: this prefix, then the recipient's name.
+CHIP_NAME_PREFIX: Final = "Remove "
+#: The composer's paragraphs, and what in it the text rule can't read: any element that
+#: is not a paragraph, or anything but a ``<br>`` inside one.
+COMPOSER_PARAGRAPH: Final = "p"
+COMPOSER_UNREADABLE: Final = ":scope > :not(p), p :not(br)"
+#: The profile page's own heading, read once before the click for the chip check.
+PROFILE_HEADING: Final = "h1"
+#: The never-messaged bubble's scope: the composer's nearest ancestor that holds the
+#: ``New message`` heading (ADR 0007), found upward from the verified composer.
+NEW_MESSAGE_SCOPE: Final = "xpath=ancestor::*[.//h2[normalize-space()='New message']][1]"
+#: The refusal a chip whose name isn't ``Remove <the profile's h1>`` gives (ADR 0007).
+RECIPIENT_NAME_MISMATCH: Final = "recipient_name_mismatch"
+#: The refusal a chip whose accessible name the matcher can't confirm gives.
+RECIPIENT_NAME_UNREADABLE: Final = "recipient_name_unreadable"
+#: Elements whose text is not part of an accessible name.
+ARIA_HIDDEN: Final = '[aria-hidden="true"]'
+#: A focus match, read through Playwright's selector engine, never through script.
+FOCUSED: Final = ":focus"
+#: A profile's own path prefix, as the bubbles link to it.
+PROFILE_PATH_PREFIX: Final = "/in/"
+#: How long the prefill waits, reading only, for the bubble's composer to be drawn after
+#: the compose option arrived, in seconds, and in how many reads.
+COMPOSER_WAIT_S: Final = 5.0
+COMPOSER_WAIT_POLLS: Final = 50
+#: ADR 0007's decision 5: option A (``False``, no focusing input) until the maintainer
+#: chooses option B, which sets this and gives :meth:`BrowserRun._focus_seam` its one
+#: ``Locator.focus()``.
+FOCUS_INPUT_AUTHORIZED: Final = False
+#: How long one read of an attribute or the composer's text may wait, in milliseconds.
+MESSAGING_READ_TIMEOUT_MS: Final = 1_000.0
+
+
+class BubbleLayout(enum.StrEnum):
+    """Which bubble the compose option named (ADR 0007, "The recipient", 3)."""
+
+    EXISTING = "existing"
+    """``REPLY``: one ``Messaging`` dialog whose header links to ``/in/<profile id>/``."""
+
+    NEVER_MESSAGED = "never_messaged"
+    """``CONNECTION_MESSAGE``: ``New message``, one chip, and a card for ``/in/<slug>/``."""
+
+
+@dataclass(frozen=True, slots=True)
+class BubbleRecipient:
+    """Who the bubble must be for: the layout, the bare profile id, and the slug."""
+
+    layout: BubbleLayout
+    profile_id: str
+    public_id: str | None
+    #: The profile page's one ``h1`` text, read before the click, when there was exactly
+    #: one: the never-messaged bubble's chip must then be named ``Remove <it>``.
+    profile_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MessageClick:
+    """What :meth:`BrowserRun.click_message` did. ``attempted`` is true once the click
+    was sent to Playwright, whether or not it landed: from then on a bubble may be open
+    and the run never navigates again. ``refusal`` is fixed words."""
+
+    clicked: bool
+    attempted: bool
+    refusal: str | None = None
+
+
+class TypingEnd(enum.StrEnum):
+    """How :meth:`BrowserRun.type_into_composer` ended."""
+
+    TYPED = "typed"
+    """Every step was typed and the composer holds the whole body."""
+
+    NOT_TYPED = "not_typed"
+    """Refused before the first key."""
+
+    PARTIALLY_TYPED = "partially_typed"
+    """A check failed, or a cancel came, after the first key: typing stopped."""
+
+    UNKNOWN = "unknown"
+    """The tab, the browser, or a key call failed after the first key."""
+
+
+@dataclass(frozen=True, slots=True)
+class TypingResult:
+    """What :meth:`BrowserRun.type_into_composer` did. ``started_at`` is taken before the
+    first key, and is ``None`` when no key was attempted. ``typed_chars`` counts the
+    characters of the steps whose key call was attempted. ``reason`` is fixed words."""
+
+    end: TypingEnd
+    reason: str
+    typed_chars: int
+    started_at: datetime | None
+
+
+def message_control_refusal(hrefs: Sequence[str | None], profile_id: str) -> str | None:
+    """ADR 0007's Message click rule (decision 4), as a pure check of every control's href.
+
+    ``None`` when there is at least one control and **every** control named Message
+    opens ``/messaging/compose/`` (relative, or on :data:`MESSAGE_COMPOSE_HOST`) for this
+    contact: ``profileUrn`` (decoded) ``urn:li:fsd_profile:<id>`` and ``recipient``
+    ``<id>``, with each query parameter present exactly once. Otherwise a fixed phrase.
+    """
+    if not hrefs:
+        return "no Message control on the page"
+    for href in hrefs:
+        if href is None or not _is_contact_compose(href, profile_id):
+            return "a Message control opens something other than this contact's compose"
+    return None
+
+
+def _is_contact_compose(href: str, profile_id: str) -> bool:
+    try:
+        split = urlsplit(href)
+    except ValueError:
+        return False
+    if (split.scheme or split.netloc) and (
+        split.scheme != "https" or split.netloc != MESSAGE_COMPOSE_HOST
+    ):
+        return False
+    if split.path != MESSAGE_COMPOSE_PATH or split.fragment:
+        return False
+    try:
+        pairs = parse_qsl(split.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        return False
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        return False
+    values = dict(pairs)
+    return (
+        values.get("profileUrn") == f"urn:li:fsd_profile:{profile_id}"
+        and values.get("recipient") == profile_id
+    )
+
+
+def _css_string(value: str) -> str:
+    """``value`` as a double-quoted CSS string, for an attribute selector."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _is_profile_link(href: str | None, path: str, *, fold_case: bool) -> bool:
+    """Whether ``href`` (relative, or on LinkedIn's own host) is exactly ``path``,
+    percent-decoded, with one trailing ``/`` dropped. ``fold_case`` compares a vanity
+    slug as LinkedIn's routing reads it, case-folded; a profile id is compared exactly."""
+    if href is None:
+        return False
+    try:
+        split = urlsplit(href)
+    except ValueError:
+        return False
+    if (split.scheme or split.netloc) and (
+        split.scheme != "https" or split.netloc != MESSAGE_COMPOSE_HOST
+    ):
+        return False
+    seen, want = _trim_path(unquote(split.path)), _trim_path(unquote(path))
+    return seen.casefold() == want.casefold() if fold_case else seen == want
+
+
+def _profile_path(href: str | None) -> bool:
+    """Whether ``href`` points at a profile (``/in/...``), on any host or none."""
+    if href is None:
+        return False
+    try:
+        return urlsplit(href).path.startswith(PROFILE_PATH_PREFIX)
+    except ValueError:
+        return False
+
+
+def _one_composer(count: int) -> bool:
+    """ADR 0007's decision 3: the page holds exactly one composer, hidden ones counted.
+
+    Any other composer (a minimized bubble from an earlier prefill, or one the person
+    opened) refuses the prefill, and the person closes it. The looser alternative the
+    ADR names, allowing other people's minimized bubbles, would change only this."""
+    return count == 1
+
+
+async def _read_composer(composer: _MessagingLocator) -> str | None:
+    """The composer's text under ADR 0007's rule (``messaging.composer_text``), or ``None``
+    when it holds something the rule can't read: an element that is not a
+    paragraph, or anything but a ``<br>`` inside one."""
+    if await composer.locator(COMPOSER_UNREADABLE).count():
+        return None
+    paragraphs = composer.locator(COMPOSER_PARAGRAPH)
+    texts: list[str] = []
+    contents: list[str] = []
+    for index in range(await paragraphs.count()):
+        paragraph = paragraphs.nth(index)
+        texts.append(await paragraph.inner_text(timeout=MESSAGING_READ_TIMEOUT_MS))
+        contents.append(await paragraph.text_content(timeout=MESSAGING_READ_TIMEOUT_MS) or "")
+    # Text outside every paragraph (a bare text node, as Chrome leaves after select-all,
+    # Backspace, and typing) is invisible to the paragraph reads: the whole composer's
+    # text must be exactly its paragraphs' text, or the composer is unreadable.
+    whole = await composer.text_content(timeout=MESSAGING_READ_TIMEOUT_MS)
+    if whole is None or whole != "".join(contents):
+        return None
+    return composer_text(texts)
+
+
+def _name(text: str | None) -> str | None:
+    """An accessible name as ADR 0007 compares it: whitespace collapsed to single spaces,
+    trimmed, and normalized to NFC. ``None`` for no name."""
+    if text is None:
+        return None
+    name = unicodedata.normalize("NFC", " ".join(text.split()))
+    return name or None
+
+
+async def _accessible_name(
+    page: _MessagingPage,
+    element: _MessagingLocator,
+    role: str,
+    *,
+    level: int | None = None,
+) -> str | None:
+    """``element``'s accessible name, as :func:`_name` normalizes it, or ``None``.
+
+    Playwright has no getter for an accessible name, so the candidates are read, in
+    order: the ``aria-label``, the rendered text, and the rendered text without the
+    text of its ``aria-hidden`` descendants (pronouns in a span, say). The first one
+    that Playwright's own role-and-name matcher confirms, exact, is the name; when none
+    is confirmed (an ``aria-labelledby``, for one), the name is unreadable. A visible
+    element is matched with ``include_hidden=False``, so ``aria-hidden`` text is never
+    part of its name. Reads only."""
+    label = await element.get_attribute("aria-label", timeout=MESSAGING_READ_TIMEOUT_MS)
+    text = await element.inner_text(timeout=MESSAGING_READ_TIMEOUT_MS)
+    hidden_parts = element.locator(ARIA_HIDDEN)
+    shown = text
+    for index in range(await hidden_parts.count()):
+        part = await hidden_parts.nth(index).inner_text(timeout=MESSAGING_READ_TIMEOUT_MS)
+        if part:
+            shown = shown.replace(part, " ", 1)
+    visible = await element.filter(visible=True).count() == 1
+    for raw in dict.fromkeys(c for c in (label, text, shown) if c is not None):
+        candidate = " ".join(raw.split())
+        if not candidate:
+            continue
+        matcher = page.get_by_role(
+            role, name=candidate, exact=True, include_hidden=not visible, level=level
+        )
+        if await element.and_(matcher).count() == 1:
+            return _name(candidate)
+    return None
+
+
+def _keyed(chunk: str) -> bool:
+    """Whether a chunk is typed with ``keyboard.type``: one printable ASCII character
+    other than a space. A space is inserted as text, so no Space key ever reaches a
+    page whose focus might have moved to a button (ADR 0007 revision)."""
+    return len(chunk) == 1 and 0x21 <= ord(chunk) <= 0x7E
 
 
 @dataclass(frozen=True, slots=True)
@@ -588,6 +973,37 @@ class BrowserRun:
         #: itself is reopened, so a recovered tab gets its pointer rested again
         #: rather than inheriting a stale reading from the one that was lost.
         self._pointer_rested = False
+        #: ADR 0007: set once the Message click is sent. From then on the run never
+        #: opens, reopens, or navigates a tab (:meth:`_ensure_page` refuses).
+        self._message_clicked = False
+        #: The tab's url when the Message click was sent; any change stops typing.
+        self._click_url: str | None = None
+        #: How many times :meth:`bring_tab_forward` ran: at most once per run.
+        self._fronted = 0
+        #: How many key calls were attempted (ADR 0007's point of no return).
+        self._keys_sent = 0
+        self._handed_over = False
+
+    @property
+    def keys_sent(self) -> int:
+        """How many key calls this run attempted on its tab (ADR 0007)."""
+        return self._keys_sent
+
+    @property
+    def message_click_attempted(self) -> bool:
+        """Whether this run sent its Message click (ADR 0007): from then on its tab is
+        handed over, never closed, whatever the click's result."""
+        return self._message_clicked
+
+    @property
+    def fronted(self) -> int:
+        """How many times this run brought its tab to the front: 0 or 1."""
+        return self._fronted
+
+    @property
+    def handed_over(self) -> bool:
+        """Whether :meth:`hand_over` gave the tab to the person."""
+        return self._handed_over
 
     @property
     def browser(self) -> BrowserLike:
@@ -954,6 +1370,399 @@ class BrowserRun:
             return ContactInfoClick(page, False, "the control could not be clicked")
         return ContactInfoClick(page, True)
 
+    # --- ADR 0007: the prefill ------------------------------------------------------
+
+    async def bring_tab_forward(self) -> None:
+        """Bring this run's tab to the front, once per run, at the prefill's start.
+
+        ADR 0007, "Bringing the tab to the front" (decision 1): the only
+        ``bring_to_front`` in the package, before the Message click, while the person
+        is watching. Nothing later changes focus, :meth:`hand_over` included. A second
+        call, or one after the click, raises ``RuntimeError``."""
+        if self._fronted or self._message_clicked:
+            raise RuntimeError("the tab is brought to the front once, at the prefill's start")
+        page = cast(_MessagingPage, await self.ensure_page())
+        self._fronted += 1
+        await page.bring_to_front()
+
+    async def read_profile_heading(self) -> str | None:
+        """The profile page's ``h1`` text when it has exactly one, else ``None``: LinkedIn's
+        own name for the profile, read before the click for the never-messaged chip
+        check (ADR 0007, "One click on Message"). A read, not an input."""
+        page = self._page
+        if page is None or page.is_closed() or self._message_clicked:
+            return None
+        tab = cast(_MessagingPage, page)
+        heading = tab.locator(PROFILE_HEADING)
+        try:
+            if await heading.count() != 1:
+                return None
+            return await _accessible_name(tab, heading, "heading", level=1)
+        except Exception as exc:
+            log.info("the profile's heading could not be read (%s)", type(exc).__name__)
+            return None
+
+    async def click_message(
+        self,
+        profile_path: str,
+        profile_id: str,
+        *,
+        pause_s: float,
+        sleep: Callable[[float], Awaitable[None]] = _real_sleep,
+    ) -> MessageClick:
+        """ADR 0007's first input: one click on **Message**, on the contact's profile.
+
+        1. Refuses when the run's tab is gone (:class:`BrowserUnavailable`; it never
+           reopens one), when the Message click was already sent this run, and when
+           the tab isn't on ``profile_path`` (``/in/<slug>/``).
+        2. Waits ``pause_s``, the pause a person takes before reaching for the control.
+        3. Finds every control by role and name (a link named exactly "Message"),
+           hidden or visible, and refuses unless each one opens this contact's compose
+           (:func:`message_control_refusal`, decision 4).
+        4. Clicks once the first visible control, through a locator bound to the
+           contact's verified href (never by position alone), at the control's own
+           box, with a person's press length. A click that fails isn't tried again.
+
+        From the moment the click is sent the run never opens or navigates a tab again
+        (:meth:`_ensure_page`), whatever the click's result.
+        """
+        page = self._page
+        if page is None or page.is_closed():
+            raise BrowserUnavailable(
+                "the run's tab went away before the Message click; aborting rather than reopen it"
+            )
+        if self._message_clicked:
+            return MessageClick(False, False, "the Message control was already clicked")
+        if not _on_path(page.url, profile_path):
+            return MessageClick(False, False, "the tab is not on the contact's profile")
+        await sleep(pause_s)
+        if page.is_closed():
+            raise BrowserUnavailable("the run's tab went away before the Message click")
+        if not _on_path(page.url, profile_path):
+            return MessageClick(False, False, "the tab left the profile before the click")
+        tab = cast(_MessagingPage, page)
+        controls = tab.get_by_role(
+            MESSAGE_CONTROL_ROLE, name=MESSAGE_CONTROL_NAME, exact=True, include_hidden=True
+        )
+        try:
+            matches = await controls.count()
+            hrefs = [
+                await controls.nth(index).get_attribute("href", timeout=MESSAGING_READ_TIMEOUT_MS)
+                for index in range(matches)
+            ]
+            refusal = message_control_refusal(hrefs, profile_id)
+            target: _MessagingLocator | None = None
+            if refusal is None:
+                for href in dict.fromkeys(h for h in hrefs if h is not None):
+                    bound = controls.and_(tab.locator(f"[href={_css_string(href)}]"))
+                    visible = bound.filter(visible=True)
+                    if await visible.count() > 0:
+                        target = visible.first
+                        break
+        except Exception as exc:
+            if self._lost(page):
+                raise BrowserUnavailable("lost the tab while finding Message") from exc
+            return MessageClick(False, False, "the Message control could not be read")
+        if refusal is not None:
+            return MessageClick(False, False, refusal)
+        if target is None:
+            return MessageClick(False, False, "no Message control is visible")
+        self._message_clicked = True
+        self._click_url = page.url
+        try:
+            await target.click(delay=MESSAGE_PRESS_MS, timeout=MESSAGE_CLICK_TIMEOUT_MS)
+        except Exception as exc:
+            log.warning("the Message control could not be clicked (%s)", type(exc).__name__)
+            return MessageClick(False, True, "the Message control could not be clicked")
+        return MessageClick(True, True)
+
+    async def type_into_composer(
+        self,
+        plan: TypingPlan,
+        recipient: BubbleRecipient,
+        *,
+        clock: Callable[[], datetime],
+        sleep: Callable[[float], Awaitable[None]] = _real_sleep,
+        cancelled: Callable[[], Awaitable[bool]] | None = None,
+        another_compose: Callable[[], bool] | None = None,
+    ) -> TypingResult:
+        """ADR 0007's second input: type ``plan`` into the one verified composer, then stop.
+
+        Before the first key it refuses (``not_typed``, zero keys) a plan with a control
+        character in any chunk, and a page where any check fails: exactly one composer
+        (role and name, hidden ones counted), the bubble the compose option named and
+        its recipient (:meth:`_bubble_refusal`), focus in that composer, and an empty
+        composer.
+
+        Each step is then **delay, check, key**, with nothing in between: wait the
+        step's delay, run every check again (the composer's text must equal what was
+        typed so far, the tab's url must be the one the click left it on), and send one
+        key call. A newline step is ``press("Shift+Enter")``; one printable ASCII
+        character other than a space is ``type``; anything else, spaces included, is
+        ``insert_text``. Enter, NumpadEnter and any modifier+Enter are never pressed,
+        and no modifier is held. ``cancelled`` is asked before each step's delay.
+
+        The first key call *attempted* is the point of no return: ``started_at`` is
+        taken just before it. After it, a failed check or a cancel ends
+        ``partially_typed``, and a lost tab or a key call that raised ends ``unknown``.
+        At the end the composer's text must be the whole body, or the result is
+        ``partially_typed``. Nothing here reopens, navigates, or clears anything.
+        """
+        page = self._page
+        if page is None or page.is_closed() or not self._message_clicked:
+            return TypingResult(
+                TypingEnd.NOT_TYPED, "no tab with a clicked Message control", 0, None
+            )
+        if plan_control_characters(plan):
+            return TypingResult(TypingEnd.NOT_TYPED, "the plan holds a control character", 0, None)
+        if not plan:
+            return TypingResult(TypingEnd.NOT_TYPED, "the plan is empty", 0, None)
+        tab = cast(_MessagingPage, page)
+        composer = tab.get_by_role(
+            COMPOSER_ROLE, name=COMPOSER_NAME, exact=True, include_hidden=True
+        )
+        refusal = await self._await_bubble(tab, composer, recipient, sleep, another_compose)
+        if refusal is not None:
+            return TypingResult(TypingEnd.NOT_TYPED, refusal, 0, None)
+        keyboard = tab.keyboard
+        started_at: datetime | None = None
+        so_far = ""
+        for index, step in enumerate(plan):
+            stopped = TypingEnd.NOT_TYPED if index == 0 else TypingEnd.PARTIALLY_TYPED
+            await sleep(step.delay_before_s)
+            # The step's checks: the cancel, then the page. Nothing else is awaited
+            # between them and the key.
+            if cancelled is not None and await cancelled():
+                return TypingResult(stopped, "cancelled", len(so_far), started_at)
+            refusal = await self._composer_refusal(
+                tab, composer, recipient, so_far, another_compose=another_compose
+            )
+            if refusal is not None:
+                if index > 0 and self._lost(page):
+                    return TypingResult(TypingEnd.UNKNOWN, refusal, len(so_far), started_at)
+                return TypingResult(stopped, refusal, len(so_far), started_at)
+            if started_at is None:
+                started_at = clock()
+            self._keys_sent += 1
+            try:
+                if step.newline:
+                    await keyboard.press("Shift+Enter")
+                elif _keyed(step.chunk):
+                    await keyboard.type(step.chunk)
+                else:
+                    await keyboard.insert_text(step.chunk)
+            except Exception as exc:
+                log.warning("a key call failed while typing (%s)", type(exc).__name__)
+                return TypingResult(
+                    TypingEnd.UNKNOWN,
+                    "a key call failed",
+                    len(so_far) + max(len(step.chunk), 1),
+                    started_at,
+                )
+            so_far += "\n" if step.newline else step.chunk
+        body = so_far
+        final = await self._composer_refusal(tab, composer, recipient, body)
+        if final is not None:
+            end = TypingEnd.UNKNOWN if self._lost(page) else TypingEnd.PARTIALLY_TYPED
+            return TypingResult(end, f"after typing: {final}", len(body), started_at)
+        return TypingResult(TypingEnd.TYPED, "typed", len(body), started_at)
+
+    async def _composer_refusal(
+        self,
+        tab: _MessagingPage,
+        composer: _MessagingLocator,
+        recipient: BubbleRecipient,
+        expected: str,
+        *,
+        focus: bool = True,
+        another_compose: Callable[[], bool] | None = None,
+    ) -> str | None:
+        """Every check ADR 0007 makes before a key, as one fixed phrase, or ``None``.
+
+        The tab and the browser are still there and on the url the click left; the
+        bubble and its recipient hold (:meth:`_bubble_refusal`); the composer's text is
+        ``expected``; and, last, the composer holds focus. A read that raises is a
+        refusal."""
+        page = cast(PageLike, tab)
+        if another_compose is not None and another_compose():
+            return "more than one compose option was loaded"
+        if self._lost(page):
+            return "the tab or the browser went away"
+        if page.url != self._click_url:
+            return "the tab's url changed"
+        try:
+            bubble = await self._bubble_refusal(tab, composer, recipient)
+            if bubble is not None:
+                return bubble
+            text = await _read_composer(composer)
+            if not composer_text_matches(text, expected):
+                return (
+                    "the composer is not empty" if not expected else "the composer's text changed"
+                )
+            # Last, so the window between this read and the key is as short as it can be.
+            if focus and await composer.and_(tab.locator(FOCUSED)).count() != 1:
+                return "the composer does not hold focus"
+        except Exception as exc:
+            log.info("a composer check could not read the page (%s)", type(exc).__name__)
+            return "the composer could not be read"
+        return None
+
+    async def _await_bubble(
+        self,
+        tab: _MessagingPage,
+        composer: _MessagingLocator,
+        recipient: BubbleRecipient,
+        sleep: Callable[[float], Awaitable[None]],
+        another_compose: Callable[[], bool] | None,
+    ) -> str | None:
+        """The composer wait (ADR 0007): up to :data:`COMPOSER_WAIT_S`, poll the full
+        read-only check, focus included, until every check passes in one pass, and
+        answer that pass (``None``) or the last refusal.
+
+        The bubble, and focus in its composer, can land a moment after the compose
+        option. The wait gives no input. Under option A of decision 5
+        (:data:`FOCUS_INPUT_AUTHORIZED` false) it polls the full pass from the start, and
+        only gives the page up to :data:`COMPOSER_WAIT_S` to focus the composer itself.
+        Under option B it first polls until one pass holds every check but focus, then
+        reaches :meth:`_focus_seam` once, then polls the full pass for the rest of the
+        wait. A lost tab ends the wait at once."""
+        refusal: str | None = "the bubble was not drawn"
+        # Option B only: first a pass of every check but focus, then the seam, once.
+        seam_pending = FOCUS_INPUT_AUTHORIZED
+        for _ in range(COMPOSER_WAIT_POLLS):
+            if seam_pending:
+                refusal = await self._composer_refusal(
+                    tab, composer, recipient, "", focus=False, another_compose=another_compose
+                )
+                if refusal is None:
+                    seam_pending = False
+                    await self._focus_seam(composer)
+            if not seam_pending:
+                # The authorizing pass: every check, focus last, in one pass.
+                refusal = await self._composer_refusal(
+                    tab, composer, recipient, "", another_compose=another_compose
+                )
+                if refusal is None:
+                    return None
+            if self._lost(cast(PageLike, tab)):
+                return refusal
+            await sleep(COMPOSER_WAIT_S / COMPOSER_WAIT_POLLS)
+        return refusal
+
+    async def _focus_seam(self, composer: _MessagingLocator) -> None:
+        """Where a focusing input on the verified composer would go (ADR 0007, decision 5).
+
+        Empty on purpose: the ADR as written authorizes no click into the composer and
+        no ``focus()`` call, so a composer without focus ends ``not_typed``. If the
+        maintainer authorizes one, it is one ``Locator.focus()`` here, reached only
+        after every check above has passed, and pinned in ``tests/test_browser_safety.py``.
+        """
+        return None
+
+    async def _bubble_refusal(
+        self, tab: _MessagingPage, composer: _MessagingLocator, recipient: BubbleRecipient
+    ) -> str | None:
+        """The bubble the compose option named, for this contact (ADR 0007, "The recipient", 3).
+
+        Page-wide: exactly one composer, hidden ones counted (decision 3:
+        :func:`_one_composer`), and at most one ``Messaging`` dialog.
+
+        - Existing conversation: exactly one ``Messaging`` dialog, holding the composer,
+          no ``New message`` heading and no recipient field anywhere, and the dialog's
+          header ``h2`` holds exactly one link, to ``/in/<profile id>/``.
+        - Never messaged: exactly one ``New message`` heading; in the innermost element
+          holding both it and the composer, exactly one chip (a button named
+          ``Remove …``), one recipient field, and one ``/in/`` link, to the contact's
+          slug. A dialog, if there is one, holds that heading. Without a slug, refused.
+        """
+        if not _one_composer(await composer.count()):
+            return "there is more than one message composer, or none; close other bubbles"
+        dialogs = tab.get_by_role(BUBBLE_ROLE, name=BUBBLE_NAME, exact=True, include_hidden=True)
+        dialog_count = await dialogs.count()
+        if dialog_count > 1:
+            return "more than one message bubble is open; close the others"
+        heading = tab.get_by_role(
+            NEW_MESSAGE_ROLE, name=NEW_MESSAGE_NAME, exact=True, include_hidden=True
+        )
+        field = tab.get_by_role(
+            RECIPIENTS_FIELD_ROLE, name=RECIPIENTS_FIELD_NAME, exact=True, include_hidden=True
+        )
+        if recipient.layout is BubbleLayout.EXISTING:
+            if dialog_count != 1:
+                return "the conversation's bubble is not open"
+            if await heading.count() or await field.count():
+                return "the page shows a new-message bubble, not the conversation"
+            if await dialogs.filter(has=composer).count() != 1:
+                return "the composer is not in the conversation's bubble"
+            links = dialogs.locator(BUBBLE_HEADER_LINK)
+            if await links.count() != 1:
+                return "the bubble's header does not name one person"
+            href = await links.get_attribute("href", timeout=MESSAGING_READ_TIMEOUT_MS)
+            if not _is_profile_link(
+                href, f"{PROFILE_PATH_PREFIX}{recipient.profile_id}/", fold_case=False
+            ):
+                return "the bubble is for someone else"
+            return None
+        if recipient.public_id is None:
+            return "the contact has no public profile id to check the new-message bubble by"
+        if await heading.count() != 1:
+            return "the new-message bubble is not open, or more than one is"
+        if dialog_count == 1 and await dialogs.filter(has=heading).count() != 1:
+            return "the page shows the conversation's bubble, not a new message"
+        scope = composer.locator(NEW_MESSAGE_SCOPE)
+        # Belt and braces: the XPath already found an ancestor holding the heading; the
+        # filter checks it holds the role-and-name heading counted above, too.
+        if await scope.count() != 1 or await scope.filter(has=heading).count() != 1:
+            return "the composer is not in the new-message bubble"
+        chips = scope.get_by_role(CHIP_ROLE, name=CHIP_NAME, include_hidden=True)
+        if await chips.count() != 1:
+            return "the new-message bubble does not name exactly one recipient"
+        if recipient.profile_name is not None:
+            chip = await _accessible_name(tab, chips, CHIP_ROLE)
+            if chip is None:
+                # A name given through aria-labelledby can't be read without script.
+                labelled = await chips.get_attribute(
+                    "aria-labelledby", timeout=MESSAGING_READ_TIMEOUT_MS
+                )
+                return RECIPIENT_NAME_UNREADABLE if labelled else RECIPIENT_NAME_MISMATCH
+            if chip != _name(f"{CHIP_NAME_PREFIX}{recipient.profile_name}"):
+                return RECIPIENT_NAME_MISMATCH
+        if (
+            await scope.get_by_role(
+                RECIPIENTS_FIELD_ROLE, name=RECIPIENTS_FIELD_NAME, exact=True, include_hidden=True
+            ).count()
+            != 1
+        ):
+            return "the new-message bubble's recipient field is missing"
+        links = scope.get_by_role("link", include_hidden=True)
+        hrefs = [
+            await links.nth(index).get_attribute("href", timeout=MESSAGING_READ_TIMEOUT_MS)
+            for index in range(await links.count())
+        ]
+        cards = [href for href in hrefs if _profile_path(href)]
+        if len(cards) != 1 or not _is_profile_link(
+            cards[0], f"{PROFILE_PATH_PREFIX}{recipient.public_id}/", fold_case=True
+        ):
+            return "the new-message bubble is for someone else"
+        return None
+
+    async def hand_over(self) -> None:
+        """End the run by giving the tab to the person (ADR 0007, "Handing the tab over").
+
+        Drops the run's reference to its tab and detaches without closing it, so the
+        provider's later :meth:`close` closes nothing. It changes no focus. From then on
+        the tab isn't netkeeper's: nothing reuses, navigates, or closes it. Reached only
+        from :mod:`netkeeper.linkedin.page_messaging`. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        self._handed_over = True
+        observations, self._observations = self._observations, []
+        for observation in observations:
+            await observation.close()
+        self._page = None
+        await _detach_quietly(self._attachment.detach)
+
     async def goto(self, url: str) -> PageLike:
         """Navigate this run's tab, reopening it first, or again, if it was lost.
 
@@ -1011,6 +1820,10 @@ class BrowserRun:
         for observation in observations:
             await observation.close()
         page, self._page = self._page, None
+        if self._message_clicked:
+            # ADR 0007: an attempted Message click may have opened a bubble; the tab is
+            # the person's now, whatever ended the run. It is left open, never closed.
+            page = None
         if page is not None and not page.is_closed():
             try:
                 await page.close()
@@ -1022,6 +1835,12 @@ class BrowserRun:
         """The recovery routine behind :meth:`ensure_page` (spec 9.9's ``_ensure_page``)."""
         if self._closed:
             raise BrowserUnavailable("this run is over; its tab and connection are closed")
+        if self._message_clicked:
+            # ADR 0007, "No reattach after the click": a reopened or navigated tab has
+            # no verified composer, and keys could land somewhere nobody checked.
+            raise BrowserUnavailable(
+                "the Message click was sent; this run never opens or navigates a tab again"
+            )
         page = self._page
         if page is not None and not page.is_closed():
             return page

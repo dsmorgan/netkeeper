@@ -183,16 +183,19 @@ async def test_a_refusal_answers_409_and_keeps_what_it_changed(
     assert (_messages(running_app), _runs(running_app), executor.executed) == ([], [], [])
 
 
-async def test_without_a_runner_a_prefill_is_refused_and_nothing_is_written(
+async def test_message_send_has_a_runner_so_a_prefill_is_submitted(
     client: httpx.AsyncClient, running_app: FastAPI, executor: FakeExecutor
 ) -> None:
+    """P4-03 (#382): ``message_send`` is a runnable kind, so a claim records its run and
+    submits it, with no stand-in for the runner."""
+    assert SyncRunKind.MESSAGE_SEND in runs.RUNNABLE_KINDS
     [enrollment_id] = _seed(running_app)
     response = await client.post(
         f"{BASE}/prefill", json={"enrollment_id": enrollment_id}, headers=HEADERS
     )
-    assert response.status_code == 409
-    assert response.json()["detail"]["reasons"] == ["run_refused"]
-    assert (_messages(running_app), _runs(running_app), executor.executed) == ([], [], [])
+    assert response.status_code == 202, response.text
+    [run] = _runs(running_app)
+    assert run.kind is SyncRunKind.MESSAGE_SEND
 
 
 async def test_prefill_answers_404_503_and_422(

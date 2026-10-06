@@ -171,6 +171,9 @@ OBSERVING_MODULES = (
     LINKEDIN / "flagship_profile.py",
     LINKEDIN / "messaging_shapes.py",
     LINKEDIN / "page_inbox.py",
+    # ADR 0007: the prefill's page work reaches the page only through BrowserRun's
+    # narrow methods (click_message, type_into_composer, hand_over).
+    LINKEDIN / "page_messaging.py",
 )
 PAGE_DRIVERS = frozenset(
     {
@@ -287,6 +290,15 @@ ALLOWED_INPUTS = frozenset(
         (LINKEDIN / "browser.py", "BrowserRun.click_contact_info", "click"),
         (LINKEDIN / "browser.py", "BrowserRun._rest_pointer_over_content", "move"),
         (PACKAGE / "cli.py", "_execute_printing.show", "type"),
+        # ADR 0007 (#382): the prefill's one click on Message, and its typing into the
+        # one verified composer: the keyboard read once into a local, then `type` for
+        # one printable ASCII character other than a space, `insert_text` for anything
+        # else, and `press` for Shift+Enter alone.
+        (LINKEDIN / "browser.py", "BrowserRun.click_message", "click"),
+        (LINKEDIN / "browser.py", "BrowserRun.type_into_composer", "keyboard"),
+        (LINKEDIN / "browser.py", "BrowserRun.type_into_composer", "type"),
+        (LINKEDIN / "browser.py", "BrowserRun.type_into_composer", "insert_text"),
+        (LINKEDIN / "browser.py", "BrowserRun.type_into_composer", "press"),
     }
 )
 
@@ -340,6 +352,8 @@ BROWSER_MODULES = (
     # #380: the inbox source that scrolls /messaging/, opens threads by navigation, and
     # waits on the page's answers.
     "netkeeper.linkedin.page_inbox",
+    # #382: the prefill source that clicks Message and types into the composer.
+    "netkeeper.linkedin.page_messaging",
 )
 
 # The modules that may reach the provider at all, as paths from the repository root.
@@ -354,6 +368,7 @@ BROWSER_CALLERS = frozenset(
         Path("netkeeper/linkedin/page_connections.py"),  # PageConnections, inside a run (#187)
         Path("netkeeper/linkedin/page_profiles.py"),  # PageProfiles, inside a run (#190)
         Path("netkeeper/linkedin/page_inbox.py"),  # PageInbox, inside a run (#380)
+        Path("netkeeper/linkedin/page_messaging.py"),  # PagePrefill, inside a run (#382)
         # The run worker (P2-10): takes the lock, attaches, runs a recorded run. Not
         # under web/ or services/, and nothing under either imports it: the app and
         # the runs API hold it only as services.runs.RunExecutor.
@@ -1548,3 +1563,239 @@ def test_every_browser_module_is_one_the_scanner_would_catch() -> None:
 def test_connect_scanner_catches_an_attach() -> None:
     assert list(connect_calls("browser = await pw.chromium.connect_over_cdp(url)\n"))
     assert not list(connect_calls("browser = await pw.chromium.connect(url)\n"))
+
+
+# --- ADR 0007: the prefill's pins (#382) -------------------------------------------------
+
+#: The one key the prefill may press, as a literal at its one call (ADR 0007, "Keys").
+SHIFT_ENTER = "Shift+Enter"
+#: The calls that build a locator, whose string arguments may never name Send or Submit.
+LOCATOR_BUILDERS = frozenset(
+    {"get_by_role", "get_by_text", "get_by_label", "get_by_title", "locator", "filter"}
+)
+LOCATOR_KEYWORDS = frozenset({"has_text", "name"})
+SEND_WORDS = ("send", "submit")
+
+
+def _calls_named(source: str, name: str) -> Iterator[tuple[str, ast.Call]]:
+    """Every call ``x.<name>(...)`` in ``source``, with its enclosing function."""
+    tree = ast.parse(source)
+    scopes = _scoped(tree)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == name
+        ):
+            yield scopes.get(id(node), ""), node
+
+
+def press_arguments(source: str) -> list[tuple[str, object]]:
+    """Each ``.press(...)`` call's function and its one argument (a literal, or the node)."""
+    found: list[tuple[str, object]] = []
+    for where, call in _calls_named(source, "press"):
+        args = call.args
+        literal = (
+            args[0].value
+            if len(args) == 1 and not call.keywords and isinstance(args[0], ast.Constant)
+            else args
+        )
+        found.append((where, literal))
+    return found
+
+
+def test_the_only_key_pressed_anywhere_is_shift_enter() -> None:
+    """ADR 0007: one ``press`` in the package, in ``type_into_composer``, whose one
+    argument is the literal ``"Shift+Enter"``: never Enter, NumpadEnter, or a
+    modifier+Enter, and never a name that could be bound to one."""
+    found = [
+        (path, where, argument)
+        for path in python_files(PACKAGE)
+        for where, argument in press_arguments(path.read_text(encoding="utf-8"))
+    ]
+    assert found == [(LINKEDIN / "browser.py", "BrowserRun.type_into_composer", SHIFT_ENTER)]
+
+
+def test_the_press_scanner_sees_another_key() -> None:
+    source = (
+        "class BrowserRun:\n"
+        "    async def type_into_composer(self, keyboard, key):\n"
+        "        await keyboard.press('Enter')\n"
+        "        await keyboard.press(key)\n"
+        "        await keyboard.press('Meta+Enter')\n"
+    )
+    arguments = [argument for _, argument in press_arguments(source)]
+    assert arguments[0] == "Enter" and arguments[2] == "Meta+Enter"
+    assert not isinstance(arguments[1], str)
+
+
+def test_newlines_are_allowed_only_with_the_shift_enter_press() -> None:
+    """ADR 0007: ``SHIFT_ENTER_NEWLINES_ALLOWED`` is true only together with the one
+    Shift+Enter press; and nothing under ``netkeeper/`` passes ``allow_newlines=``, so
+    the module constant is the only switch."""
+    from netkeeper.linkedin import pacing
+
+    browser = (LINKEDIN / "browser.py").read_text(encoding="utf-8")
+    if pacing.SHIFT_ENTER_NEWLINES_ALLOWED:
+        assert press_arguments(browser) == [("BrowserRun.type_into_composer", SHIFT_ENTER)]
+    passing = [
+        f"{path}:{node.lineno}"
+        for path in python_files(PACKAGE)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and any(keyword.arg == "allow_newlines" for keyword in node.keywords)
+        # typing_plan's own forwarding of its parameter to its private body
+        and not (
+            path == LINKEDIN / "pacing.py" and ast.unparse(node.func) == "_typing_plan_unclamped"
+        )
+    ]
+    assert not passing, passing
+
+
+def _string_constants(tree: ast.Module) -> dict[str, list[str]]:
+    """Module-level names bound to a string, or to ``re.compile`` of one."""
+    found: dict[str, list[str]] = {}
+    for node in tree.body:
+        targets: list[ast.expr] = []
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        if value is None:
+            continue
+        strings = [
+            n.value
+            for n in ast.walk(value)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        ]
+        for target in targets:
+            if isinstance(target, ast.Name) and strings:
+                found[target.id] = strings
+    return found
+
+
+def locator_strings(source: str) -> Iterator[tuple[int, str]]:
+    """Every string a locator-building call is given: its arguments and its ``has_text``
+    and ``name`` keywords, literal or through a module constant (followed one step)."""
+    tree = ast.parse(source)
+    constants = _string_constants(tree)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr not in LOCATOR_BUILDERS:
+            continue
+        values = list(node.args) + [
+            keyword.value for keyword in node.keywords if keyword.arg in LOCATOR_KEYWORDS
+        ]
+        for value in values:
+            for inner in ast.walk(value):
+                if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                    yield node.lineno, inner.value
+                elif isinstance(inner, ast.Name):
+                    for text in constants.get(inner.id, []):
+                        yield node.lineno, text
+
+
+def test_no_locator_under_linkedin_names_send_or_submit() -> None:
+    """ADR 0007: nothing under ``netkeeper/linkedin/`` builds a locator from a string that
+    names Send or Submit, so the form's ``button[type="submit"]`` is never located."""
+    findings = [
+        f"{path}:{line}: {text!r}"
+        for path in python_files(LINKEDIN)
+        for line, text in locator_strings(path.read_text(encoding="utf-8"))
+        if any(word in text.casefold() for word in SEND_WORDS)
+    ]
+    assert not findings, findings
+    browser = (LINKEDIN / "browser.py").read_text(encoding="utf-8")
+    assert len(list(locator_strings(browser))) >= 10, "the scanner reads no locator strings"
+
+
+def test_the_locator_scanner_sees_a_send_button() -> None:
+    source = (
+        'SEND = "button[type=submit]"\n'
+        "async def go(page):\n"
+        "    page.get_by_role('button', name='Send')\n"
+        "    page.locator(SEND)\n"
+        "    page.filter(has_text='Submit')\n"
+    )
+    texts = [text for _, text in locator_strings(source)]
+    assert "Send" in texts and "button[type=submit]" in texts and "Submit" in texts
+
+
+def test_the_message_click_is_bound_to_the_contacts_href() -> None:
+    """ADR 0007: the click in ``click_message`` is on a locator narrowed with ``and_`` to
+    an ``[href=...]`` match, never on a bare ``nth`` of the role locator."""
+    source = (LINKEDIN / "browser.py").read_text(encoding="utf-8")
+    clicks = [
+        call for where, call in _calls_named(source, "click") if where == "BrowserRun.click_message"
+    ]
+    assert len(clicks) == 1
+    receiver = clicks[0].func.value  # type: ignore[attr-defined]
+    assert not (
+        isinstance(receiver, ast.Call)
+        and isinstance(receiver.func, ast.Attribute)
+        and receiver.func.attr == "nth"
+    )
+    ands = [
+        call for where, call in _calls_named(source, "and_") if where == "BrowserRun.click_message"
+    ]
+    assert len(ands) == 1
+    built = ast.unparse(ands[0])
+    assert "locator" in built and "[href=" in built
+
+
+def test_bring_to_front_is_called_once_at_the_prefills_start() -> None:
+    """ADR 0007 (decision 1): one ``bring_to_front`` in the package, inside
+    ``BrowserRun.bring_tab_forward``, which only ``PagePrefill.prefill`` calls, before it
+    calls ``click_message``."""
+    fronts = [
+        (path, item.function)
+        for path in python_files(PACKAGE)
+        for item, _ in name_reaches(path.read_text(encoding="utf-8"), "bring_to_front", path)
+    ]
+    assert fronts == [(LINKEDIN / "browser.py", "BrowserRun.bring_tab_forward")]
+    callers = [
+        (path, item.function, item.line)
+        for path in python_files(PACKAGE)
+        for item, _ in name_reaches(path.read_text(encoding="utf-8"), "bring_tab_forward", path)
+    ]
+    assert [(p, f) for p, f, _ in callers] == [
+        (LINKEDIN / "page_messaging.py", "PagePrefill.prefill")
+    ]
+    source = (LINKEDIN / "page_messaging.py").read_text(encoding="utf-8")
+    clicks = [
+        i.line
+        for i, _ in name_reaches(source, "click_message")
+        if i.function == "PagePrefill.prefill"
+    ]
+    assert len(clicks) == 1 and callers[0][2] < clicks[0]
+
+
+def test_hand_over_is_reached_only_from_the_prefill() -> None:
+    """ADR 0007: ``hand_over`` is reached only from ``page_messaging.py``."""
+    reaches = [
+        (path, item.function)
+        for path in python_files(PACKAGE)
+        for item, _ in name_reaches(path.read_text(encoding="utf-8"), "hand_over", path)
+    ]
+    assert reaches == [(LINKEDIN / "page_messaging.py", "PagePrefill._end_after_click")]
+
+
+def test_the_prefill_methods_are_called_only_from_the_prefill() -> None:
+    """``click_message`` and ``type_into_composer`` are reached only from
+    ``PagePrefill.prefill``: no other source clicks Message or types."""
+    for name in ("click_message", "type_into_composer"):
+        reaches = [
+            (path, item.function)
+            for path in python_files(PACKAGE)
+            for item, _ in name_reaches(path.read_text(encoding="utf-8"), name, path)
+        ]
+        assert reaches == [(LINKEDIN / "page_messaging.py", "PagePrefill.prefill")], name
+
+
+def test_the_prefill_never_focuses_or_holds_a_key() -> None:
+    """ADR 0007 (decision 5 open: option A): no ``focus``, ``down`` or ``up`` anywhere in
+    the package. The general input rule already refuses them; this names the reason."""
+    found = [i for i in package_inputs() if i.name in {"focus", "down", "up"}]
+    assert not found, found

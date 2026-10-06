@@ -1021,12 +1021,17 @@ def test_a_caller_nothing_starts_is_not_live() -> None:
         package / "services" / "connections_sync.py",
         package / "services" / "enrichment.py",
         package / "services" / "inbox_poll.py",  # P4-08
+        package / "services" / "message_send.py",  # P4-03
     }
     assert _callers_of("netkeeper.services.heat.raise_heat") == {
         package / "services" / "connections_sync.py",
         package / "services" / "enrichment.py",
         package / "services" / "inbox_poll.py",
+        package / "services" / "message_send.py",
     }
+    # The prefill's runner is live through the worker (P4-03), and only through it.
+    assert package / "services" / "message_send.py" in live
+    assert package / "services" / "message_send.py" not in without_worker
     # The inbox poll's runner is live through the worker (P4-08), and only through it.
     assert package / "services" / "inbox_poll.py" in live
     assert package / "services" / "inbox_poll.py" not in without_worker
@@ -1213,7 +1218,7 @@ def test_a_clean_report_claims_configuration_and_not_enforcement(
     assert "in force" not in text.split("nothing is misconfigured")[1]
     assert "never callers" in text
     for name in _report(writer, user).protections:
-        if name.name in ("budget li_messages_auto", "budget li_prefills"):
+        if name.name == "budget li_messages_auto":
             # Collapsed: the report wraps its lines, and a name may straddle a break.
             covered = text.split("not covered by this report:")[1]
             assert name.name in " ".join(covered.split())
@@ -1231,8 +1236,10 @@ def test_the_gap_lists_the_protections_nothing_enforces_yet(writer: Session, use
     # Since P2-10 the runners and the scheduler are live (netkeeper.worker), and since
     # P4-08 the inbox poll's runner, so what is left is the budgets whose jobs do not
     # exist yet -- and nothing the runners enforce may still be listed as unwired.
-    assert unwired.strip() == "budget li_messages_auto, budget li_prefills"
+    # P4-03 (#382): the prefill's runner spends li_prefills, so only auto-send is left.
+    assert unwired.strip() == "budget li_messages_auto"
     for name in (
+        "budget li_prefills",
         "budget inbox_polls",
         "budget connection_pages",
         "budget profile_visits",

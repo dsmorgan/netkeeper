@@ -155,8 +155,9 @@ def test_typing_constants_are_pinned_to_the_decision() -> None:
     assert frozenset("\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029") == pacing.LINE_BREAK_CHARS
     # The only line breaks the newline flag governs.
     assert frozenset({"\r", "\n"}) == pacing.NEWLINE_CHARS
-    # Multi-line stays refused until P4-06 (#374) shows Shift+Enter never sends.
-    assert pacing.SHIFT_ENTER_NEWLINES_ALLOWED is False
+    # P4-06 (#374) showed Shift+Enter never sends; P4-03 (#382) set the flag with the
+    # Shift+Enter press and its pins (ADR 0007).
+    assert pacing.SHIFT_ENTER_NEWLINES_ALLOWED is True
 
 
 # --- determinism -----------------------------------------------------------------
@@ -220,10 +221,20 @@ def test_line_breaks_become_their_own_newline_steps() -> None:
 @pytest.mark.parametrize(
     "text", ["zebra\nquilt", "zebra\r\nquilt", "zebra\rquilt", "zebra\n", "\n"]
 )
-def test_a_line_break_is_refused_by_default(text: str) -> None:
+def test_a_line_break_is_refused_without_the_flag(text: str) -> None:
     with pytest.raises(MultilineRefused) as raised:
-        typing_plan(text, random.Random(0))
+        typing_plan(text, random.Random(0), allow_newlines=False)
     assert "zebra" not in str(raised.value)  # the body is never quoted
+
+
+@pytest.mark.parametrize(
+    "text", ["zebra\nquilt", "zebra\r\nquilt", "zebra\rquilt", "zebra\n", "\n"]
+)
+def test_a_line_break_is_a_newline_step_by_default(text: str) -> None:
+    """The default is the flag, which P4-03 (#382) set: each newline is one step."""
+    plan = typing_plan(text, random.Random(0))
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    assert sum(step.newline for step in plan) == normalized.count("\n")
 
 
 _CONTROLS = [chr(cp) for cp in [*range(0x00, 0x20), 0x7F, *range(0x80, 0xA0)]]
@@ -231,13 +242,13 @@ _CONTROLS = [chr(cp) for cp in [*range(0x00, 0x20), 0x7F, *range(0x80, 0xA0)]]
 
 @pytest.mark.parametrize("char", _CONTROLS, ids=[f"U+{ord(c):04X}" for c in _CONTROLS])
 def test_every_control_character_is_refused_or_a_newline_step(char: str) -> None:
-    """Every C0 and C1 control and DEL: CR or LF by default raises MultilineRefused,
-    and with newlines allowed becomes a newline step. Anything else, including the
+    """Every C0 and C1 control and DEL: CR or LF without newlines allowed raises
+    MultilineRefused, and with them becomes a newline step. Anything else, including the
     other line breaks (VT, FF, FS, GS, RS, NEL), raises UnsupportedCharacter with the
     flag on or off."""
     text = f"secret{char}body"
     with pytest.raises(TypingPlanError) as raised:
-        typing_plan(text, random.Random(0))
+        typing_plan(text, random.Random(0), allow_newlines=False)
     assert "secret" not in str(raised.value)
     assert is_untypable(char)
     if char in {"\r", "\n"}:

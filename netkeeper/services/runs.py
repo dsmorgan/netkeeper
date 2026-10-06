@@ -97,7 +97,8 @@ from netkeeper.services.settings_kv import delete_setting, get_setting, set_sett
 log = logging.getLogger(__name__)
 
 #: The kinds a run can be started for today: the two connections syncs (P2-06),
-#: enrichment (P2-07), and the inbox poll (P4-08). ``message_send`` has no runner yet.
+#: enrichment (P2-07), the inbox poll (P4-08), and the LinkedIn prefill (P4-03), which
+#: :func:`create_run` still records only manually and only with a claim's gate token.
 #: The inbox poll's page source is P4-01's (#380).
 RUNNABLE_KINDS: Final = frozenset(
     {
@@ -105,6 +106,7 @@ RUNNABLE_KINDS: Final = frozenset(
         SyncRunKind.CONNECTIONS_INCREMENTAL,
         SyncRunKind.ENRICH,
         SyncRunKind.INBOX,
+        SyncRunKind.MESSAGE_SEND,
     }
 )
 
