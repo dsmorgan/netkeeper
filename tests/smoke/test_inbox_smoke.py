@@ -38,6 +38,7 @@ import os
 import random
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -65,10 +66,13 @@ CDP_URL = os.environ.get("NETKEEPER_CDP_URL", "http://127.0.0.1:9222")
 
 T0 = datetime.fromtimestamp(mp.T0 / 1000, tz=UTC)
 
-#: Large, fast wheel deltas: real scroll events without a real dwell per scroll.
-_FAST_SCROLL = ScrollProfile(
-    steps_range=(2, 3),
-    delta_range_px=(2500, 3500),
+#: One short wheel per gesture. The page asks for at most one older page per scroll event,
+#: so a gesture brings at most one older page and a read can stop at ``since`` before the
+#: list's end. (Large multi-step gestures made the page load every older page at once, which
+#: hid whether ``complete`` came from ``since`` or from the end.)
+_STEP_SCROLL = ScrollProfile(
+    steps_range=(1, 1),
+    delta_range_px=(400, 400),
     pause_range_s=(0.02, 0.05),
     back_up_p=0.0,
     dwell_median_s=0.2,
@@ -101,7 +105,7 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>replica</titl
 <style>__CSS__</style></head><body>
 <div id="nav"></div>
 <main>
-  <div id="list-pane" class="pane"><div id="list"></div><div style="height:1500px"></div></div>
+  <div id="list-pane" class="pane"><div id="list"></div><div style="height:800px"></div></div>
   <div id="thread-pane" class="pane"><div id="thread"></div><div style="height:3000px"></div></div>
 </main>
 <script type="application/json" id="cfg">__CFG__</script>
@@ -158,6 +162,8 @@ class Site:
     answers: dict[str, Answer] = field(default_factory=dict)
     #: Every GET the replica received, in order (path and query as sent).
     requests: list[str] = field(default_factory=list)
+    #: ``time.monotonic()`` of each entry in ``requests``.
+    stamps: list[float] = field(default_factory=list)
     scrolled: dict[str, int] = field(default_factory=lambda: {"list": 0, "thread": 0})
 
 
@@ -188,6 +194,7 @@ class _Replica(BaseHTTPRequestHandler):
             self._send(404, "", "text/plain")
             return
         site.requests.append(self.path)
+        site.stamps.append(time.monotonic())
         if path in site.pages:
             cfg = json.dumps(site.pages[path]).replace("</", "<\\/")
             html = _PAGE.replace("__CSS__", LAYOUTS[site.layout]).replace("__CFG__", cfg)
@@ -217,6 +224,8 @@ def origin() -> Iterator[str]:
 # --- the invented mailbox ---------------------------------------------------------------
 
 FIRST = 2
+#: Long, so a failure that falls back to the wait is told from one that fires at once.
+THREAD_WAIT_S = 20.0
 PAGE_SIZE = 2
 THREAD_CONVERSATION = mp.ONE_TO_ONE_INBOUND  # conversation 11, newest, minute 50
 
@@ -234,7 +243,12 @@ def _conversations() -> list[mp.Conv]:
     ]
 
 
-def _site(layout: str, convs: list[mp.Conv], thread: Answer | None = None) -> Site:
+def _site(
+    layout: str,
+    convs: list[mp.Conv],
+    thread: Answer | None = None,
+    older_fail: Answer | None = None,
+) -> Site:
     """The replica for ``convs``: the list on load, the older pages, and one thread."""
     site = Site(layout=layout)
     first_url = _rel(mp.conversations_sync_url())
@@ -256,6 +270,8 @@ def _site(layout: str, convs: list[mp.Conv], thread: Answer | None = None) -> Si
             200, mp.conversations_by_category(page, next_cursor=cursor)
         )
         older.append(_rel(url))
+        if older_fail is not None and index == 0:
+            site.answers[_rel(url)] = older_fail
         index += 1
     site.pages[MESSAGING_PAGE_PATH] = {"on_load": [first_url], "older": older, "first": FIRST}
     thread_path = _rel(mp.thread_url(THREAD_CONVERSATION.n))
@@ -267,11 +283,13 @@ def _site(layout: str, convs: list[mp.Conv], thread: Answer | None = None) -> Si
     return site
 
 
-def _spec(*, since: datetime | None, open_thread: bool) -> InboxJobSpec:
+def _spec(
+    *, since: datetime | None, open_thread: bool, max_conversations: int = 50
+) -> InboxJobSpec:
     return InboxJobSpec(
         since=since,
         watched_urns=frozenset(),
-        max_conversations=50,
+        max_conversations=max_conversations,
         open_threads_for=(
             frozenset({mp.conversation_urn(THREAD_CONVERSATION.n)}) if open_thread else frozenset()
         ),
@@ -289,10 +307,11 @@ async def _poll(origin: str, spec: InboxJobSpec) -> tuple[InboxDelta, PageInbox]
             run,
             origin=origin,
             rng=random.Random(5),
-            scroll_profile=_FAST_SCROLL,
+            scroll_profile=_STEP_SCROLL,
             sleep=_no_sleep,
             thread_pause_s=(0.0, 0.0),
             response_wait_s=1.0,
+            thread_wait_s=THREAD_WAIT_S,
         )
         return await source.read(spec), source
 
@@ -304,32 +323,34 @@ def _install(site: Site) -> None:
 # --- the healthy poll ---------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "layout",
-    [
-        "wide-list",
-        pytest.param(
-            "narrow-list",
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=InboxReadStopped,
-                reason=(
-                    "finding (#438): the pointer rest aims at <main>'s horizontal center, which is"
-                    " over the thread pane when the list is under half of <main>'s width, so the"
-                    " wheel scrolls the thread pane and the list never loads older pages"
-                ),
-            ),
-        ),
-    ],
-)
-async def test_the_wheel_scrolls_the_list_pane(origin: str, layout: str) -> None:
-    """The pointer rest must land where the wheel moves the *list*, never only the thread."""
-    site = _site(layout, _conversations())
+async def test_the_wheel_scrolls_the_list_pane(origin: str) -> None:
+    """With the list wider than half of ``<main>``, the pointer rest lands over the list."""
+    site = _site("wide-list", _conversations())
     _install(site)
     delta, _ = await _poll(origin, _spec(since=None, open_thread=False))
-    assert site.scrolled["list"] > 0, (layout, site.scrolled)
-    assert site.scrolled["thread"] == 0, (layout, site.scrolled)
+    assert site.scrolled["list"] > 0, site.scrolled
+    assert site.scrolled["thread"] == 0, site.scrolled
     assert delta.complete
+
+
+async def test_a_narrow_list_pane_is_not_scrolled_and_the_poll_stops(
+    origin: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Pins the #439 finding: the rest aims at ``<main>``'s center, over the thread pane.
+
+    The wheel scrolls the thread pane, the list never loads an older page, and the poll
+    stops ``ROUTE_CHANGED`` after the idle-scroll limit. It never completes. When #439 is
+    fixed this test changes to the list scrolling.
+    """
+    site = _site("narrow-list", _conversations())
+    _install(site)
+    with caplog.at_level("WARNING"), pytest.raises(InboxReadStopped) as stopped:
+        await _poll(origin, _spec(since=None, open_thread=False))
+    assert stopped.value.outcome is Outcome.ROUTE_CHANGED
+    assert site.scrolled["list"] == 0, site.scrolled
+    assert site.scrolled["thread"] > 0, site.scrolled
+    assert not [r for r in site.requests if "nextCursor" in r or "lastUpdatedBefore" in r]
+    assert "scrolls brought no new answer" in caplog.text
 
 
 async def test_older_pages_load_and_the_read_is_complete_against_since(origin: str) -> None:
@@ -339,7 +360,8 @@ async def test_older_pages_load_and_the_read_is_complete_against_since(origin: s
     spec = _spec(since=at(25), open_thread=True)
     delta, source = await _poll(origin, spec)
 
-    # since is reached on the first older page (conversation 14, minute 20): complete.
+    # since is reached on the first older page (conversation 14, minute 20), not at the
+    # list's end: complete comes from since.
     assert delta.complete
     assert {c.conversation_urn for c in delta.conversations} == {
         mp.conversation_urn(n) for n in (11, 12, 13)
@@ -356,15 +378,17 @@ async def test_older_pages_load_and_the_read_is_complete_against_since(origin: s
     assert len(opened.messages) == 3
     assert source.threads_opened == 1
 
-    # What the page asked for, and nothing netkeeper added: the document, the list, older
-    # pages in order from the first (the page itself may ask for one more than the read
-    # needs), then the thread's document and its answer.
+    # What the page asked for, and nothing netkeeper added: the list, the first older page
+    # only (``since`` was reached there, before the list's end: the second older page was
+    # never requested), then the thread's answer.
     older = site.pages[MESSAGING_PAGE_PATH]["older"]
+    assert len(older) == 2
     graphql = [r for r in site.requests if "/graphql" in r]
-    assert graphql[0] == _rel(mp.conversations_sync_url())
-    assert graphql[-1] == _rel(mp.messages_sync_url(11))
-    assert graphql[1:-1] == older[: len(graphql) - 2]
-    assert len(graphql) >= 3
+    assert graphql == [
+        _rel(mp.conversations_sync_url()),
+        older[0],
+        _rel(mp.messages_sync_url(11)),
+    ]
     documents = [r for r in site.requests if "/graphql" not in r]
     assert documents == [MESSAGING_PAGE_PATH, _rel(mp.thread_url(11))]
 
@@ -377,6 +401,16 @@ async def test_a_list_read_to_its_end_without_since_is_complete(origin: str) -> 
     assert len(delta.conversations) == 6
     assert source.threads_opened == 0
     assert len([r for r in site.requests if "category" in r.lower() or "cursor" in r]) == 2
+
+
+async def test_a_read_stopped_by_the_bound_before_the_end_is_not_complete(origin: str) -> None:
+    site = _site("wide-list", _conversations())
+    _install(site)
+    delta, _ = await _poll(origin, _spec(since=None, open_thread=False, max_conversations=3))
+    assert not delta.complete
+    assert len(delta.conversations) == 3
+    # The end was never reached either: the second older page was not requested.
+    assert len([r for r in site.requests if "nextCursor:invented-cursor-1" in r]) == 0
 
 
 # --- the failing polls: each stops, none completes -------------------------------------------
@@ -410,6 +444,18 @@ async def test_a_bad_thread_stops_the_poll_and_never_completes(origin: str, name
     _install(site)
     with pytest.raises(InboxReadStopped) as stopped:
         await _poll(origin, _spec(since=at(25), open_thread=True))
+    stopped_at = time.monotonic()
     assert stopped.value.outcome is Outcome.ROUTE_CHANGED
     # The thread was reached: the stop came from its answer, not from an earlier problem.
-    assert _rel(mp.messages_sync_url(11)) in site.requests
+    asked = site.requests.index(_rel(mp.messages_sync_url(11)))
+    # And it came at once, from the answer itself, not after the wait for a missing one.
+    assert stopped_at - site.stamps[asked] < THREAD_WAIT_S / 4
+
+
+async def test_an_older_page_that_fails_stops_the_poll(origin: str) -> None:
+    site = _site("wide-list", _conversations(), older_fail=Answer(500, "{}"))
+    _install(site)
+    with pytest.raises(InboxReadStopped) as stopped:
+        await _poll(origin, _spec(since=at(25), open_thread=False))
+    assert stopped.value.outcome is Outcome.ROUTE_CHANGED
+    assert site.pages[MESSAGING_PAGE_PATH]["older"][0] in site.requests
