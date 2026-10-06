@@ -283,6 +283,33 @@ def first_live_outreach(session: Session, user: User, *, now: datetime) -> datet
     return min(watched, default=None)
 
 
+# --- whose mailbox the page showed -----------------------------------------------------
+
+#: The ``settings_kv`` key holding the mailbox owner's URN the first poll saw, kept when
+#: the self contact has no LinkedIn URN of its own to compare against.
+OWNER_KEY: Final = "linkedin.inbox.owner_urn"
+
+
+def owner_matches(session: Session, user: User, owner_urn: str | None) -> bool:
+    """Whether the mailbox the page showed is this account's. Needs a writer.
+
+    The known owner is the self contact's ``li_urn`` when it has one, otherwise the URN
+    the first poll recorded under :data:`OWNER_KEY`. With neither, ``owner_urn`` is
+    recorded and the poll goes on: a person watched that first poll. A source that
+    does not know its owner (``None``) is not checked.
+    """
+    if owner_urn is None:
+        return True
+    from netkeeper.crm.self_contact import get_self_contact
+
+    me = get_self_contact(session, user)
+    known = me.li_urn if me is not None and me.li_urn else get_setting(session, user, OWNER_KEY)
+    if not known:
+        set_setting(session, user, OWNER_KEY, owner_urn)
+        return True
+    return known == owner_urn
+
+
 # --- a first poll that could not read back far enough ------------------------------------
 
 #: The ``settings_kv`` key holding the date a short first poll could not read back to.

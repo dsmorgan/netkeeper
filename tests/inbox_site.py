@@ -34,6 +34,8 @@ class Reply:
     status: int = 200
     body: str | bytes = b""
     tab_url: str | None = None
+    #: The body can't be read (Chrome lost it): the page's own client aborted the stream.
+    body_error: Exception | None = None
 
 
 @dataclass(slots=True)
@@ -56,6 +58,8 @@ class Behavior:
     older_replies: dict[int, Reply] = field(default_factory=dict)
     #: Replaces the thread answer for a thread number.
     thread_replies: dict[int, Reply] = field(default_factory=dict)
+    #: A refresh of the list (it names a syncToken) the page also loads at landing.
+    refresh_reply: Reply | None = None
     #: Thread numbers that load no messages when opened.
     silent_threads: frozenset[int] = frozenset()
     #: Applied to each older page's request url (a skipped page, a bad cursor).
@@ -151,6 +155,11 @@ class InboxSite(FakeContext):
                 self._send(tab, mp.conversations_sync_url(), 200, body)
             self._older_index = 0
             self._done = False
+            refresh = self.b.refresh_reply
+            if refresh is not None:
+                self._send(
+                    tab, mp.conversations_sync_url("invented-token"), refresh.status, refresh.body
+                )
             if self.b.auto_thread is not None:
                 self._send_thread(tab, self.b.auto_thread)
             return
@@ -172,7 +181,7 @@ class InboxSite(FakeContext):
         reply = self.b.thread_replies.get(n)
         url = mp.messages_sync_url(n)
         if reply is not None:
-            self._send(tab, url, reply.status, reply.body)
+            self._send(tab, url, reply.status, reply.body, error=reply.body_error)
             return
         self._send(tab, url, 200, mp.messages_by_sync_token(self.threads.get(n, ())))
 
@@ -214,11 +223,19 @@ class InboxSite(FakeContext):
             else:
                 self._send(tab, url, 200, body)
 
-    def _send(self, tab: InboxTab, url: str, status: int, body: str | bytes) -> None:
+    def _send(
+        self,
+        tab: InboxTab,
+        url: str,
+        status: int,
+        body: str | bytes,
+        *,
+        error: Exception | None = None,
+    ) -> None:
         raw = body.encode("utf-8") if isinstance(body, str) else body
         self.requests.append(("GET", url))
         request = FakeRequest("GET", "fetch", None)
-        tab.emit(FakeResponse(url, status, raw, request))
+        tab.emit(FakeResponse(url, status, raw, request, body_error=error))
 
 
 # --- building conversations ---------------------------------------------------------------

@@ -214,6 +214,10 @@ class JobOutcome(enum.Enum):
     DISARMED_AFTER_GATE = "disarmed_after_gate"
     """The same, for an account found disarmed after the gate let the fire through."""
 
+    FIRST_POLL_BY_HAND = "first_inbox_poll"
+    """The inbox poll's first run is a person's (P4-01): no inbox poll has completed
+    yet, so a scheduled fire starts nothing. The fire counts as skipped."""
+
     NOTHING_TO_WATCH = "nothing_to_watch"
     """The inbox poll's handler found no live enrollment with a LinkedIn contact
     (P4-08): it recorded no run and attached to nothing. The fire counts as skipped."""
@@ -221,7 +225,12 @@ class JobOutcome(enum.Enum):
 
 #: The outcomes that say the handler started nothing: the fire was skipped, not run.
 SKIPPED_AFTER_GATE: Final = frozenset(
-    {JobOutcome.PAUSED_AFTER_GATE, JobOutcome.DISARMED_AFTER_GATE, JobOutcome.NOTHING_TO_WATCH}
+    {
+        JobOutcome.PAUSED_AFTER_GATE,
+        JobOutcome.DISARMED_AFTER_GATE,
+        JobOutcome.NOTHING_TO_WATCH,
+        JobOutcome.FIRST_POLL_BY_HAND,
+    }
 )
 
 #: A handler returns ``None`` when the fire ran (whatever the run made of it),

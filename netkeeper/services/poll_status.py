@@ -481,6 +481,11 @@ def _linkedin(
             blocked = _breaker(session, user, account.id)
         if blocked is None and account is not None and kind is JobKind.ENRICH:
             blocked = _contact_info_breaker(session, user, account.id)
+        if blocked is None and kind is JobKind.INBOX and base.last_at is None:
+            blocked = (
+                CheckState.BLOCKED,
+                "The first LinkedIn inbox poll is run by hand: run `netkeeper linkedin inbox`",
+            )
         if blocked is None:
             blocked = _outside_hours(settings, now=now)
         if blocked is not None:

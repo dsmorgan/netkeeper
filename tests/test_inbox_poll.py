@@ -545,8 +545,9 @@ async def test_a_disarmed_scheduled_poll_is_refused_at_all_three_gates(
         assert result is not None and (result.fired, result.skipped_reason) == (False, "disarmed")
 
         # 2: past the gate, create_run refuses it.
+        # (No inbox poll has completed, so the first-poll gate answers before create_run.)
         outcome = await registry[JobKind.INBOX](_job(user_id, account))
-        assert outcome is scheduler.JobOutcome.DISARMED_AFTER_GATE
+        assert outcome is scheduler.JobOutcome.FIRST_POLL_BY_HAND
         await app.state.tasks.join()
         assert _rows(bare_engine) == []
 
@@ -595,11 +596,84 @@ async def test_serve_seeds_the_inbox_poll_and_a_fire_runs_it(
         with session_scope(factory) as session:
             user = _local(session)
             assert scheduler.stored_due(session, user, account, JobKind.INBOX) is not None
-    # The fake Chrome's page never loads a conversation list, so each fire is an unknown
-    # shape: aborted, never completed (#417 treats only a completed poll as fresh).
-    inbox_runs = [run for run in _rows(bare_engine) if run.kind is SyncRunKind.INBOX]
-    assert inbox_runs
-    assert all(run.status is SyncRunStatus.ABORTED for run in inbox_runs)
+    # No inbox poll has ever completed, so every scheduled fire is skipped: the first poll
+    # is a person's, by hand (P4-01). Nothing attached, nothing recorded.
+    assert [run for run in _rows(bare_engine) if run.kind is SyncRunKind.INBOX] == []
+
+
+def _complete_a_manual_poll(factory: sessionmaker[Session], user_id: int, at: datetime) -> None:
+    with session_scope(factory, write=True) as session:
+        user = _user(session, user_id)
+        run = runs.create_run(
+            session, user, SyncRunKind.INBOX, trigger=SyncRunTrigger.MANUAL, now=at
+        )
+        runs.finish_run(
+            session, user, run.id, status=SyncRunStatus.COMPLETED, now=at, stop_reason=READ
+        )
+
+
+async def test_once_a_poll_has_completed_a_scheduled_fire_runs(
+    bare_engine: Engine, settings: Settings
+) -> None:
+    provider, connector = fake_provider()
+    clock = Clock(START)
+    async with serving(
+        bare_engine, settings, worker_extractor(provider, settings, clock=clock)
+    ) as app:
+        factory = app.state.session_factory
+        with session_scope(factory, write=True) as session:
+            user = _local(session)
+            account = ensure_account(session, user).id
+            arm_scheduled_runs(session, user, now=START)
+            ada = factories.make_contact(session, user, li_urn=ADA)
+            factories.make_enrollment(session, factories.make_campaign(session, user), ada)
+            user_id = user.id
+        registry = serve_registry(factory, app.state.executor, app.state.tasks, clock=clock)
+        blocked = await registry[JobKind.INBOX](_job(user_id, account))
+        assert blocked is scheduler.JobOutcome.FIRST_POLL_BY_HAND
+        _complete_a_manual_poll(factory, user_id, START)
+        assert await registry[JobKind.INBOX](_job(user_id, account)) is None
+        await app.state.tasks.join()
+    scheduled = [
+        r
+        for r in _rows(bare_engine)
+        if r.kind is SyncRunKind.INBOX and r.trigger is SyncRunTrigger.SCHEDULED
+    ]
+    # The fake Chrome's page loads no conversation list: an unknown shape, aborted.
+    assert [(r.status, r.stop_reason) for r in scheduled] == [
+        (SyncRunStatus.ABORTED, "route_changed")
+    ]
+    assert connector.attaches == 1
+
+
+async def test_the_worker_refuses_a_scheduled_inbox_run_before_the_first_poll_completed(
+    bare_engine: Engine, settings: Settings
+) -> None:
+    provider, connector = fake_provider()
+    clock = Clock(START)
+    async with serving(
+        bare_engine, settings, worker_extractor(provider, settings, clock=clock)
+    ) as app:
+        factory = app.state.session_factory
+        with session_scope(factory, write=True) as session:
+            user = _local(session)
+            account = ensure_account(session, user).id
+            arm_scheduled_runs(session, user, now=START)
+            forged = SyncRun(
+                user_id=user.id,
+                linkedin_account_id=account,
+                kind=SyncRunKind.INBOX,
+                status=SyncRunStatus.RUNNING,
+                trigger=SyncRunTrigger.SCHEDULED,
+                started_at=clock.at,
+            )
+            session.add(forged)
+            session.flush()
+            forged_id, user_id = forged.id, user.id
+        await app.state.executor.execute(forged_id, user_id)
+    assert connector.attaches == 0
+    ((row),) = _rows(bare_engine)
+    assert (row.status, row.stop_reason) == (SyncRunStatus.FAILED, "first_inbox_poll")
 
 
 # --- by hand: the CLI and the API ---------------------------------------------------------
@@ -753,13 +827,45 @@ def test_the_linkedin_reply_poll_row_is_on_and_warns_only_for_a_short_first_poll
     report = _posture(session_factory, user_id)
     (row,) = [p for p in report.protections if p.name == "linkedin reply poll"]
     assert row.status is Status.ON and row.warnings == ()
-    assert row.value == "no complete poll yet" and row.notes == ()
+    assert row.value.startswith("no complete poll yet; scheduled polls wait") and row.notes == ()
     with session_scope(session_factory, write=True) as session:
         inbox_apply.record_short_first_poll(session, _user(session, user_id), NOW)
     report = _posture(session_factory, user_id)
     (row,) = [p for p in report.protections if p.name == "linkedin reply poll"]
     assert row.status is Status.ON and len(row.warnings) == 1
     assert not report.ok
+
+
+def test_a_late_poll_names_how_the_newest_one_ended(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    _complete_a_manual_poll(session_factory, user_id, NOW - timedelta(hours=10))
+    with session_scope(session_factory, write=True) as session:
+        user = _user(session, user_id)
+        run = runs.create_run(
+            session,
+            user,
+            SyncRunKind.INBOX,
+            trigger=SyncRunTrigger.MANUAL,
+            now=NOW - timedelta(hours=1),
+        )
+        runs.finish_run(
+            session,
+            user,
+            run.id,
+            status=SyncRunStatus.ABORTED,
+            now=NOW - timedelta(hours=1),
+            stop_reason="route_changed",
+        )
+    (row,) = [
+        p for p in _posture(session_factory, user_id).protections if p.name == "linkedin reply poll"
+    ]
+    (note,) = row.notes
+    assert "the newest poll ended route_changed" in note and "more than 3 times" in note
+
+
+def test_old_runs_keep_the_words_for_no_source() -> None:
+    assert runs.describe_stop_reason("no_source") != "no_source"
 
 
 async def test_a_first_poll_that_cannot_reach_a_far_since_completes_and_warns(

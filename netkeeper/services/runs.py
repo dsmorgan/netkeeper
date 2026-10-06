@@ -671,11 +671,19 @@ STOP_REASON_TEXT: Final[Mapping[str, str]] = {
     "answer_lost_breaker": "refused: the answer-lost limit is tripped",
     "contact_info_breaker": "refused: the Contact info breaker is tripped",
     "no_runner": "refused: no runner for this kind",
+    "no_source": "refused: the LinkedIn inbox poll has no page source yet",
+    "owner_mismatch": "the page showed another LinkedIn mailbox than this account's",
+    "first_inbox_poll": "refused: the first LinkedIn inbox poll is run by hand",
     "browser_busy": "the browser was busy with another run",
     "browser_unavailable": "Chrome was not reachable or went away mid-run",
     "interrupted": "the netkeeper process running it stopped",
     "error": "an error stopped it",
 }
+
+
+def has_completed_inbox_poll(session: Session, user: User) -> bool:
+    """Whether any inbox poll has completed, by hand or on schedule. Read-only."""
+    return latest_run(session, user, SyncRunKind.INBOX, status=SyncRunStatus.COMPLETED) is not None
 
 
 def describe_stop_reason(reason: str | None) -> str | None:

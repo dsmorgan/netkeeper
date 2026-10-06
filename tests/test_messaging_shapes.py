@@ -147,12 +147,48 @@ def test_a_sponsored_label_alone_does_not_skip_an_accepted_inmail() -> None:
     assert _kind_of(_with(mp.INMAIL_ACCEPTED, type_label=mp.SPONSORED_LABEL)) is Kind.ONE_TO_ONE
 
 
-def test_no_counterpart_is_skipped_as_other() -> None:
+def test_no_counterpart_is_an_unknown_shape_not_a_skipped_item() -> None:
+    """An owner-only conversation was never captured; if LinkedIn moved the counterpart,
+    every item would look like it, and skipping them all would read as "no replies"."""
     doc = _doc(mp.conversations_by_sync_token([mp.ONE_TO_ONE_INBOUND]))
     [item] = _field_items(doc)
     item["conversationParticipants"] = item["conversationParticipants"][:1]
-    [parsed] = shapes.parse_conversation_list(json.dumps(doc)).items
-    assert parsed.kind is Kind.OTHER and parsed.counterpart_urn is None
+    with pytest.raises(RouteChanged):
+        shapes.parse_conversation_list(json.dumps(doc))
+
+
+def test_an_owner_participant_not_marked_self_is_refused() -> None:
+    doc = _doc(mp.conversations_by_sync_token([mp.ONE_TO_ONE_INBOUND]))
+    [item] = _field_items(doc)
+    owner = item["conversationParticipants"][0]
+    assert owner["participantType"]["member"]["distance"] == "SELF"
+    owner["participantType"]["member"]["distance"] = "DISTANCE_1"
+    with pytest.raises(RouteChanged):
+        shapes.parse_conversation_list(json.dumps(doc))
+
+
+def test_self_marked_on_another_urn_than_the_conversation_owner_is_refused() -> None:
+    doc = _doc(mp.conversations_by_sync_token([mp.ONE_TO_ONE_INBOUND]))
+    [item] = _field_items(doc)
+    item["conversationParticipants"][1]["participantType"]["member"]["distance"] = "SELF"
+    item["conversationParticipants"][0]["participantType"]["member"]["distance"] = "DISTANCE_1"
+    with pytest.raises(RouteChanged):
+        shapes.parse_conversation_list(json.dumps(doc))
+
+
+def test_two_participants_marked_self_are_refused() -> None:
+    doc = _doc(mp.conversations_by_sync_token([mp.ONE_TO_ONE_INBOUND]))
+    [item] = _field_items(doc)
+    item["conversationParticipants"][1]["participantType"]["member"]["distance"] = "SELF"
+    with pytest.raises(RouteChanged):
+        shapes.parse_conversation_list(json.dumps(doc))
+
+
+def test_the_older_page_category_is_read_from_the_request() -> None:
+    assert shapes.request_category(mp.conversations_category_url(last_updated_before=1)) == (
+        "PRIMARY_INBOX"
+    )
+    assert shapes.request_category(mp.conversations_sync_url()) is None
 
 
 def test_hostUrnData_outside_inmail_is_skipped() -> None:

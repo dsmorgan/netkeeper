@@ -145,6 +145,9 @@ class InboxDelta:
     skipped_group: int
     skipped_other: int
     complete: bool
+    #: The mailbox owner's ``fsd_profile`` URN as the page showed it; ``None`` from a
+    #: source that does not know. The core refuses a poll whose owner is not the account's.
+    owner_urn: str | None = None
 
 
 class InboxReadStopped(Exception):

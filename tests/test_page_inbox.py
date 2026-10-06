@@ -33,6 +33,7 @@ from netkeeper.linkedin.inbox import (
     InboxJobSpec,
     InboxReadStopped,
 )
+from netkeeper.linkedin.observe import ObservationFailed
 from netkeeper.linkedin.pacing import ScrollProfile
 from netkeeper.linkedin.page_inbox import PageInbox
 from netkeeper.models import Interaction, InteractionKind, SyncRunStatus, User
@@ -232,19 +233,19 @@ async def test_kinds_are_counted_and_skipped_and_an_accepted_inmail_is_kept() ->
     assert delta.complete
 
 
-async def test_a_sender_who_is_neither_party_makes_it_a_group_the_list_did_not_mark() -> None:
+async def test_a_third_sender_in_a_one_to_one_thread_is_a_stop_not_a_skipped_group() -> None:
+    """The list said two participants: a third voice is an unknown shape, and a reply of the
+    contact's could be hiding in it."""
     who = people(1)[0]
-    stranger = mp.THADDEUS
     c = conv(100, who, 50)
     thread = [
         mp.Msg(100, 0, who, "Invented.", mp.T0 + 40 * mp.MINUTE_MS),
-        mp.Msg(100, 2, stranger, "Invented third voice.", mp.T0 + 45 * mp.MINUTE_MS),
+        mp.Msg(100, 2, mp.THADDEUS, "Invented third voice.", mp.T0 + 45 * mp.MINUTE_MS),
         _last(c),
     ]
     site = InboxSite([c], {100: thread}, Behavior(first=1))
-    delta, _ = await read(site, spec(open_for=frozenset({c.urn})))
-
-    assert delta.conversations == () and delta.skipped_group == 1
+    stop = await stopped(site, spec(open_for=frozenset({c.urn})))
+    assert stop.outcome is Outcome.ROUTE_CHANGED
 
 
 # --- opening threads ---------------------------------------------------------------------
@@ -324,12 +325,86 @@ async def test_a_thread_the_page_loaded_on_its_own_costs_no_navigation() -> None
     assert len(delta.conversations[0].messages) == 2
 
 
-async def test_a_thread_that_loads_nothing_leaves_the_list_item_standing() -> None:
+async def test_a_thread_that_loads_nothing_stops_the_poll() -> None:
     site, convs = _with_threads(3)
     site.b.silent_threads = frozenset({convs[0].n})
-    delta, _ = await read(site, spec(open_for=frozenset({convs[0].urn})))
+    stop = await stopped(site, spec(open_for=frozenset({convs[0].urn})))
+    assert stop.outcome is Outcome.ROUTE_CHANGED
 
-    assert len(delta.conversations[0].messages) == 1 and delta.complete
+
+async def test_a_thread_whose_body_is_lost_stops_the_poll() -> None:
+    site, convs = _with_threads(3)
+    site.b.thread_replies = {
+        convs[0].n: Reply(body_error=Exception("No resource with given identifier found"))
+    }
+    with pytest.raises(ObservationFailed):
+        await read(site, spec(open_for=frozenset({convs[0].urn})))
+
+
+async def test_a_thread_answered_with_an_error_status_stops_the_poll() -> None:
+    site, convs = _with_threads(3)
+    site.b.thread_replies = {convs[0].n: Reply(status=500)}
+    stop = await stopped(site, spec(open_for=frozenset({convs[0].urn})))
+    assert stop.outcome is Outcome.ROUTE_CHANGED
+
+
+async def test_a_thread_answer_under_a_renamed_field_stops_the_poll() -> None:
+    site, convs = _with_threads(3)
+    renamed = mp.messages_by_sync_token(site.threads[convs[0].n]).replace(
+        mp.MESSAGES_BY_SYNC_TOKEN, "messengerMessagesByRenamedQuery"
+    )
+    site.b.thread_replies = {convs[0].n: Reply(body=renamed)}
+    stop = await stopped(site, spec(open_for=frozenset({convs[0].urn})))
+    assert stop.outcome is Outcome.ROUTE_CHANGED
+
+
+async def test_an_item_with_no_message_whose_thread_was_not_opened_is_incomplete() -> None:
+    convs = descending(6)
+    bare = mp.Conv(
+        **{
+            **{f: getattr(convs[5], f) for f in mp.Conv.__dataclass_fields__},
+            "last": None,
+            "has_messages": False,
+        }
+    )
+    convs[5] = bare
+    threads = {
+        c.n: [mp.Msg(c.n, 0, mp.OWNER, "Invented opener.", mp.T0), _last(c)] for c in convs[:5]
+    }
+    site = InboxSite(convs, threads, Behavior(first=6))
+    job = spec()
+    object.__setattr__(job, "open_threads_for", frozenset(c.urn for c in convs))
+    delta, source = await read(site, job)
+
+    assert source.threads_opened == 5  # the cap: the bare one, the oldest, was not opened
+    assert not delta.complete and len(delta.conversations) == 5
+
+
+async def test_an_item_with_no_message_nobody_asked_about_leaves_the_read_complete() -> None:
+    convs = descending(2)
+    convs[1] = mp.Conv(
+        **{
+            **{f: getattr(convs[1], f) for f in mp.Conv.__dataclass_fields__},
+            "last": None,
+            "has_messages": False,
+        }
+    )
+    delta, _ = await read(InboxSite(convs, behavior=Behavior(first=2)), spec())
+    assert delta.complete and len(delta.conversations) == 1
+
+
+async def test_an_error_on_a_list_refresh_stops_the_poll_even_though_the_list_read() -> None:
+    """The list itself arrived whole; a failed answer of ours is still a stop."""
+    site = InboxSite(descending(3), behavior=Behavior(first=3, refresh_reply=Reply(status=500)))
+    assert (await stopped(site, spec())).outcome is Outcome.ROUTE_CHANGED
+
+
+async def test_an_older_page_of_another_category_is_a_stop() -> None:
+    def secondary(index: int, url: str) -> str:
+        return url.replace(mp.PRIMARY_INBOX, mp.SECONDARY_INBOX)
+
+    site = InboxSite(descending(9), behavior=Behavior(first=3, page_size=3, older_url=secondary))
+    assert (await stopped(site, spec(since=at(0)))).outcome is Outcome.ROUTE_CHANGED
 
 
 async def test_a_wall_at_a_thread_stops_with_the_outcome() -> None:
@@ -543,3 +618,64 @@ async def test_a_wall_aborts_the_poll_and_flags_the_session(
     status, reason = await _poll(session_factory, user_id, site)
 
     assert status is SyncRunStatus.ABORTED and reason == "checkpoint"
+
+
+# --- whose mailbox -------------------------------------------------------------------------
+
+
+def _set_self_urn(factory: sessionmaker[Session], user_id: int, urn: str | None) -> None:
+    from netkeeper.crm.self_contact import ensure_self_contact
+
+    with session_scope(factory, write=True) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        me = ensure_self_contact(session, user)
+        me.li_urn = urn
+
+
+async def test_a_page_showing_another_mailbox_than_the_self_contacts_aborts_and_writes_nothing(
+    session_factory: sessionmaker[Session],
+) -> None:
+    user_id = _watched(session_factory)
+    _set_self_urn(session_factory, user_id, mp.ZEPHYRINE.urn)
+    site = InboxSite([conv(100, people(1)[0], 50)], behavior=Behavior(first=1))
+    status, reason = await _poll(session_factory, user_id, site)
+
+    assert (status, reason) == (SyncRunStatus.ABORTED, "owner_mismatch")
+    assert _interactions(session_factory, user_id) == []
+
+
+async def test_a_page_showing_the_self_contacts_mailbox_completes(
+    session_factory: sessionmaker[Session],
+) -> None:
+    user_id = _watched(session_factory)
+    _set_self_urn(session_factory, user_id, mp.OWNER.urn)
+    site = InboxSite([conv(100, people(1)[0], 50)], behavior=Behavior(first=1))
+    status, reason = await _poll(session_factory, user_id, site)
+    assert (status, reason) == (SyncRunStatus.COMPLETED, "inbox_read")
+
+
+async def test_with_no_self_urn_the_first_polls_owner_is_recorded_and_held_to(
+    session_factory: sessionmaker[Session],
+) -> None:
+    user_id = _watched(session_factory)
+    site = InboxSite([conv(100, people(1)[0], 50)], behavior=Behavior(first=1))
+    assert (await _poll(session_factory, user_id, site))[0] is SyncRunStatus.COMPLETED
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        from netkeeper.services.settings_kv import get_setting
+
+        assert get_setting(session, user, "linkedin.inbox.owner_urn") == mp.OWNER.urn
+
+    # Later the recorded owner is somebody else's: the page shows another account.
+    before = len(_interactions(session_factory, user_id))
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        from netkeeper.services.settings_kv import set_setting
+
+        set_setting(session, user, "linkedin.inbox.owner_urn", mp.ZEPHYRINE.urn)
+    status, reason = await _poll(session_factory, user_id, site)
+    assert (status, reason) == (SyncRunStatus.ABORTED, "owner_mismatch")
+    assert len(_interactions(session_factory, user_id)) == before

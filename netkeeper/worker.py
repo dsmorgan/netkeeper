@@ -401,6 +401,17 @@ class BrowserWorker:
                     "contact_info_breaker",
                     "the Contact info breaker is tripped for this account",
                 )
+            if (
+                facts.trigger is SyncRunTrigger.SCHEDULED
+                and facts.kind is SyncRunKind.INBOX
+                and not runs.has_completed_inbox_poll(session, user)
+            ):
+                # P4-01: a second, independent check; the scheduled handler already
+                # skips the fire. The first inbox poll is a person's, by hand.
+                return (
+                    "first_inbox_poll",
+                    "no inbox poll has completed yet: run `netkeeper linkedin inbox` by hand first",
+                )
             try:
                 runs.refuse_if_flagged_or_hot(
                     session, user, facts.account_id, now=self._clock(), settings=self._settings
