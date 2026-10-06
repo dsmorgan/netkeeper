@@ -102,7 +102,7 @@ The list is ordered by `lastActivityAt`, newest first, in every captured answer.
 | `categories` | What else marks them | Fixture |
 |---|---|---|
 | `INBOX`, `PRIMARY_INBOX` | Ordinary one-to-one conversations, `state` `null`. Seen with a `file` render item (an attachment), with a `title`, and with an `EDITED` last message | `ONE_TO_ONE_INBOUND`, `ONE_TO_ONE_OUTBOUND`, `WITH_FILE`, `WITH_TITLE`, `EDITED` |
-| `INBOX`, `PRIMARY_INBOX`, `INMAIL` | Conversations that began as InMail. `state` `PENDING`, `ACCEPTED` or `DECLINED`; often a `subject`. Pending ones carried the `InMail` label and a `hostUrnData` render item (`type` `SALES_INMAIL` or `PREMIUM_INMAIL`); accepted ones had no label and no `hostUrnData`, and some carried a `conversationVerificationLabel`; one was sponsored (`state` `null`, the `Sponsored` label, a `messageAdRenderContent` item) | `INMAIL_ACCEPTED`, `INMAIL_ACCEPTED_VERIFIED`, `INMAIL_PENDING`, `INMAIL_DECLINED`, `PREMIUM_INMAIL`, `SPONSORED_IN_INBOX`; invented: `INMAIL_ACCEPTED_LABELLED` |
+| `INBOX`, `PRIMARY_INBOX`, `INMAIL` | Conversations that began as InMail. `state` `PENDING`, `ACCEPTED` or `DECLINED`; often a `subject`. Pending ones carried the `InMail` label and a `hostUrnData` render item (`type` `SALES_INMAIL` or `PREMIUM_INMAIL`); accepted ones had no label and no `hostUrnData`, and some carried a `conversationVerificationLabel`; sponsored ones also appear here (`state` `null`, the `Sponsored` label, a `messageAdRenderContent` item) | `INMAIL_ACCEPTED`, `INMAIL_ACCEPTED_VERIFIED`, `INMAIL_PENDING`, `INMAIL_DECLINED`, `PREMIUM_INMAIL`, `SPONSORED_IN_INBOX`; invented: `INMAIL_ACCEPTED_LABELLED` |
 | `INBOX`, `SECONDARY_INBOX`, `INMAIL` | Pending requests, with `hostUrnData` and no label | `SECONDARY_PENDING` |
 | `ARCHIVE`, `INMAIL` | Sponsored messages and `LinkedIn Offer` items | `SPONSORED`, `SPONSORED_MESSAGE`, `OFFER` |
 
@@ -110,7 +110,7 @@ The list is ordered by `lastActivityAt`, newest first, in every captured answer.
 - **InMail.** `INMAIL` in `categories`. It stays after the person accepts, so an accepted InMail with a contact sits in `PRIMARY_INBOX` beside ordinary conversations.
 - **An edited message.** `messageBodyRenderFormat` `EDITED`, seen in the capture on list messages; otherwise `DEFAULT`.
 - **A group.** `groupChat: true`, more than two participants, and probably a `title` (one-to-one items can have a `title` too). **No group was in the capture**; the fixture is invented from these key names.
-- **A system message.** **Not seen.** The nearest thing was the two `actor: null` messages.
+- **A system message.** **Not seen.** The nearest thing was the `actor: null` messages.
 
 `disabledFeatures[].disabledFeature` lists features off for a conversation (`ADD_PARTICIPANT`, `CREATE_GROUP_CHAT_LINK`, `REPLY`, and so on); on a one-to-one conversation `ADD_PARTICIPANT` and `REMOVE_PARTICIPANT` were always present.
 
@@ -273,11 +273,11 @@ The inbox page opens `GET /realtime/connect` (`text/event-stream`), subscribes w
 | A conversation | `entityUrn`, `lastActivityAt`, `categories`, `groupChat`, `conversationParticipants`, `messages.elements` | Captured | A missing key (other than `messages`): the whole answer is refused |
 | The counterpart | The one participant whose `hostIdentityUrn` isn't the owner's, and is a `urn:li:fsd_profile:` | Captured | More than one, or a company: skipped as a group or as other |
 | Kind (the rules apply in order; the first that matches decides), rule 1: a group | `groupChat: true`, or more than one counterpart | **Assumed**: no group in the capture | Counted as `skipped_group` |
-| Kind, rule 2: sponsored or an offer | Otherwise, any company participant, `contentMetadata.conversationAdContent`, or a `messageAdRenderContent` or `conversationAdsMessageContent` render item, whatever the categories, state or label (one captured sponsored item sat in `INBOX`/`PRIMARY_INBOX`/`INMAIL` with `state` `null`) | Captured | Counted as `skipped_other` |
+| Kind, rule 2: sponsored or an offer | Otherwise, any company participant, `contentMetadata.conversationAdContent`, or a `messageAdRenderContent` or `conversationAdsMessageContent` render item, whatever the categories, state or label (captured sponsored items also sit in `INBOX`/`PRIMARY_INBOX`/`INMAIL`, with `state` `null`). A `Sponsored` label alone doesn't trigger this rule; by design, an accepted InMail labelled `Sponsored` with no ad item, no company participant and no `conversationAdContent` falls to rule 3 and is read, since missing a reply is the dangerous direction | Captured | Counted as `skipped_other` |
 | Kind, rule 3: accepted InMail | Otherwise, `INMAIL` in `categories` with `state` `ACCEPTED` and one `fsd_profile` counterpart: **read as one-to-one**, whatever its `conversationTypeText`, `hostUrnData` or `conversationVerificationLabel` (maintainer's decision, #432 review: missing a reply is the dangerous direction). Captured accepted InMail had no label and no `hostUrnData`; some had a `conversationVerificationLabel` | Captured | |
 | Kind, rule 4: other InMail | Otherwise, `INMAIL` in `categories` (`state` `PENDING`, `DECLINED` or `null`) | Captured | Counted as `skipped_other` |
 | Kind, rule 5: labelled | Otherwise, a `conversationTypeText` or a `hostUrnData` render item | **Assumed**: not seen outside `INMAIL` | Counted as `skipped_other` |
-| Kind, rule 6: one-to-one | Everything else with one `fsd_profile` counterpart. A `file` render item, a `title`, a `conversationVerificationLabel`, or an `EDITED` message doesn't change that | Captured | |
+| Kind, rule 6: one-to-one | Everything else with one `fsd_profile` counterpart. A `file` render item, a `title`, a `conversationVerificationLabel`, or an `EDITED` message doesn't change that | Captured | An item with no counterpart (no participant but the owner) is counted as `skipped_other` |
 | A system message | `actor: null`; read `sender` instead | `actor: null`: captured. What a system message looks like: **assumed** | A message with no `sender`: the conversation is refused |
 | The last message | `messages.elements[0]`: `entityUrn`, `sender.hostIdentityUrn`, `deliveredAt`, `body.text` | Captured | No `messages` key or no element: the conversation has no message to report |
 | Outbound | `sender.hostIdentityUrn` is the owner | Captured; `originToken` agrees | |
