@@ -1641,6 +1641,8 @@ def _linkedin_reply_poll(session: Session, user: User, *, now: datetime) -> Prot
             why = ""
             if newest is not None and newest.status is not SyncRunStatus.COMPLETED:
                 why = f"; the newest poll ended {newest.stop_reason or newest.status.value}"
+                if newest.stop_reason == "owner_mismatch":
+                    why += " (if you changed accounts, run `netkeeper linkedin inbox-forget-owner`)"
             notes.append(
                 f"the last complete LinkedIn inbox poll was {_ago(age)}, more than"
                 f" {LINKEDIN_POLL_LATE_AFTER_POLLS} times its"

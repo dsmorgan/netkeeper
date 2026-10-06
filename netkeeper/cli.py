@@ -37,7 +37,7 @@ from netkeeper.crm.exports import ExportError, ExportFormat, ExportPreset, expor
 from netkeeper.crm.filters import FilterError, FilterTree, SortKey, parse_filter, parse_sort
 from netkeeper.crm.history import ImportReport, import_workbook
 from netkeeper.crm.history_workbook import WorkbookError, read_workbook
-from netkeeper.crm.inbox_apply import clear_short_first_poll
+from netkeeper.crm.inbox_apply import clear_short_first_poll, forget_owner
 from netkeeper.crm.lists import ListCount, find_list, list_lists, list_views, member_counts
 from netkeeper.crm.self_contact import ensure_self_contact
 from netkeeper.crm.tags import ensure_default_rules, find_tag, list_tags, run_rules
@@ -1248,6 +1248,43 @@ def linkedin_inbox_acknowledge(ctx: typer.Context) -> None:
         "cleared: the first inbox poll's warning is acknowledged"
         if cleared
         else "nothing to acknowledge: no first inbox poll fell short"
+    )
+
+
+@linkedin_app.command("inbox-forget-owner")
+def linkedin_inbox_forget_owner(
+    ctx: typer.Context,
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+) -> None:
+    """Forget which LinkedIn mailbox the inbox poll recorded, after you changed accounts.
+
+    A poll that shows another mailbox than the one it recorded stops as `owner_mismatch`
+    and writes nothing. If you moved netkeeper to a different LinkedIn account on
+    purpose, run this, then run `netkeeper linkedin inbox` by hand: that poll records the
+    new mailbox. It touches no browser and visits nothing. (A self contact with its own
+    LinkedIn URN is compared first; edit that instead if it is the one that changed.)
+    """
+    state = ctx.ensure_object(CliState)
+    _load_settings_or_exit(state)
+    if not yes and not typer.confirm(
+        "Forget the recorded LinkedIn mailbox? The next inbox poll records whichever"
+        " account the page shows.",
+        default=False,
+    ):
+        typer.echo("cancelled: the recorded mailbox stays")
+        return
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            cleared = forget_owner(session, _local_user_or_exit(session))
+    finally:
+        engine.dispose()
+    typer.echo(
+        "forgotten: the next inbox poll records the mailbox it shows"
+        if cleared
+        else "nothing to forget: no mailbox was recorded"
     )
 
 

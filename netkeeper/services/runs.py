@@ -672,7 +672,10 @@ STOP_REASON_TEXT: Final[Mapping[str, str]] = {
     "contact_info_breaker": "refused: the Contact info breaker is tripped",
     "no_runner": "refused: no runner for this kind",
     "no_source": "refused: the LinkedIn inbox poll has no page source yet",
-    "owner_mismatch": "the page showed another LinkedIn mailbox than this account's",
+    "owner_mismatch": (
+        "the page showed another LinkedIn mailbox than this account's; if you changed"
+        " accounts, run `netkeeper linkedin inbox-forget-owner`"
+    ),
     "first_inbox_poll": "refused: the first LinkedIn inbox poll is run by hand",
     "browser_busy": "the browser was busy with another run",
     "browser_unavailable": "Chrome was not reachable or went away mid-run",

@@ -176,6 +176,18 @@ def test_self_marked_on_another_urn_than_the_conversation_owner_is_refused() -> 
         shapes.parse_conversation_list(json.dumps(doc))
 
 
+def test_the_owner_listed_again_as_a_counterpart_is_refused() -> None:
+    """One participant marked SELF, plus the owner's URN again not marked SELF: it must not
+    parse as one-to-one with the owner as the counterpart."""
+    doc = _doc(mp.conversations_by_sync_token([mp.ONE_TO_ONE_INBOUND]))
+    [item] = _field_items(doc)
+    twin = deepcopy(item["conversationParticipants"][0])
+    twin["participantType"]["member"]["distance"] = "DISTANCE_1"
+    item["conversationParticipants"] = [item["conversationParticipants"][0], twin]
+    with pytest.raises(RouteChanged):
+        shapes.parse_conversation_list(json.dumps(doc))
+
+
 def test_two_participants_marked_self_are_refused() -> None:
     doc = _doc(mp.conversations_by_sync_token([mp.ONE_TO_ONE_INBOUND]))
     [item] = _field_items(doc)

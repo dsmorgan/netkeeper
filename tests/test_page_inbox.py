@@ -679,3 +679,44 @@ async def test_with_no_self_urn_the_first_polls_owner_is_recorded_and_held_to(
     status, reason = await _poll(session_factory, user_id, site)
     assert (status, reason) == (SyncRunStatus.ABORTED, "owner_mismatch")
     assert len(_interactions(session_factory, user_id)) == before
+
+
+async def test_after_a_mismatch_forgetting_the_owner_lets_the_next_poll_record_the_new_one(
+    session_factory: sessionmaker[Session],
+) -> None:
+    from netkeeper.crm import inbox_apply
+    from netkeeper.services.settings_kv import get_setting, set_setting
+
+    user_id = _watched(session_factory)
+    site = InboxSite([conv(100, people(1)[0], 50)], behavior=Behavior(first=1))
+    assert (await _poll(session_factory, user_id, site))[0] is SyncRunStatus.COMPLETED
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        set_setting(session, user, inbox_apply.OWNER_KEY, mp.ZEPHYRINE.urn)  # "the old account"
+    assert (await _poll(session_factory, user_id, site))[1] == "owner_mismatch"
+
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        assert inbox_apply.forget_owner(session, user)
+        assert get_setting(session, user, inbox_apply.OWNER_KEY) is None
+    assert (await _poll(session_factory, user_id, site))[0] is SyncRunStatus.COMPLETED
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        assert get_setting(session, user, inbox_apply.OWNER_KEY) == mp.OWNER.urn
+
+
+async def test_a_conversation_the_list_names_twice_is_handed_on_once() -> None:
+    """A conversation that moved while the list was read shows on two pages."""
+    convs = descending(3)
+    again = mp.conversations_by_category([convs[2]], next_cursor=None)
+    site = InboxSite(
+        convs,
+        behavior=Behavior(first=3, older_replies={0: Reply(body=again)}),
+    )
+    delta, _ = await read(site, spec())
+
+    urns = [c.conversation_urn for c in delta.conversations]
+    assert len(urns) == 3 and len(set(urns)) == 3 and delta.complete

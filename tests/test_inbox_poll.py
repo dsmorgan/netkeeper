@@ -59,6 +59,7 @@ from netkeeper.services.posture import PostureReport, Status, posture
 from netkeeper.services.runs import HeatSkipped, SessionFlagged
 from netkeeper.services.scheduled_runs import serve_registry
 from netkeeper.services.scheduler import SERVED_SCHEDULES, JobKind
+from netkeeper.services.settings_kv import get_setting, set_setting
 from netkeeper.services.users import ensure_local_user
 from netkeeper.worker import BrowserWorker, inbox_source
 
@@ -920,6 +921,34 @@ async def test_a_first_poll_that_reaches_its_since_completes_without_a_warning(
     )
     assert _run(session_factory, user_id, report.run_id).stop_reason == READ
     assert _posture_warnings(session_factory, user_id) == ()
+
+
+def test_the_cli_forgets_the_recorded_owner_after_confirmation(
+    cli_db: sessionmaker[Session],
+) -> None:
+    runner = CliRunner()
+    assert (
+        "nothing to forget"
+        in runner.invoke(cli, ["linkedin", "inbox-forget-owner", "--yes"]).output
+    )
+    with session_scope(cli_db, write=True) as session:
+        set_setting(session, session.scalars(select(User)).one(), inbox_apply.OWNER_KEY, "urn:x")
+    declined = runner.invoke(cli, ["linkedin", "inbox-forget-owner"], input="n\n")
+    assert "cancelled" in declined.output
+    with session_scope(cli_db) as session:
+        assert get_setting(session, session.scalars(select(User)).one(), inbox_apply.OWNER_KEY)
+    done = runner.invoke(cli, ["linkedin", "inbox-forget-owner"], input="y\n")
+    assert done.exit_code == 0 and "forgotten" in done.output
+    with session_scope(cli_db) as session:
+        assert (
+            get_setting(session, session.scalars(select(User)).one(), inbox_apply.OWNER_KEY) is None
+        )
+
+
+def test_a_skipped_first_poll_fire_is_a_skip_and_the_owner_stop_names_its_cure() -> None:
+    assert scheduler.JobOutcome.FIRST_POLL_BY_HAND in scheduler.SKIPPED_AFTER_GATE
+    assert scheduler.JobOutcome.FIRST_POLL_BY_HAND.value == "first_inbox_poll"
+    assert "inbox-forget-owner" in (runs.describe_stop_reason("owner_mismatch") or "")
 
 
 def test_the_cli_acknowledges_a_short_first_poll(cli_db: sessionmaker[Session]) -> None:

@@ -395,6 +395,9 @@ def _item(raw: object, index: int) -> ListItem:
         member = _obj(_get(participant, "participantType", where), f"{where} type").get("member")
         if isinstance(member, dict) and member.get("distance") == "SELF":
             selves.append(host)
+        elif host == owner:
+            # The owner again, not marked SELF: never the counterpart.
+            raise _fail(f"{where}: the owner takes part twice")
         else:
             others.append(host)
     if selves != [owner]:

@@ -310,6 +310,12 @@ def owner_matches(session: Session, user: User, owner_urn: str | None) -> bool:
     return known == owner_urn
 
 
+def forget_owner(session: Session, user: User) -> bool:
+    """Forget the recorded mailbox owner, so the next poll records the account's new one.
+    Needs a writer. ``True`` when one was recorded."""
+    return delete_setting(session, user, OWNER_KEY)
+
+
 # --- a first poll that could not read back far enough ------------------------------------
 
 #: The ``settings_kv`` key holding the date a short first poll could not read back to.
