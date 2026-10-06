@@ -133,8 +133,7 @@ def test_arming_shows_the_profile_view_notice_with_or_without_yes_and_still_arms
 def test_arming_seeds_each_served_kind_with_no_due_time(cli_db: sessionmaker[Session]) -> None:
     """#327: once ``serve`` has established a schedule, arming gives each kind it runs a
     due time if it has none, already armed or not, and leaves one that has a due time
-    alone. Before that, arming seeds nothing. The inbox poll has no page source yet
-    (P4-01), so it never gets one."""
+    alone. Before that, arming seeds nothing. The inbox poll is served since P4-01."""
 
     def dues() -> dict[JobKind, datetime | None]:
         with session_scope(cli_db) as session:
@@ -158,7 +157,7 @@ def test_arming_seeds_each_served_kind_with_no_due_time(cli_db: sessionmaker[Ses
             tz=user.timezone,
         )
     first = dues()
-    assert first[JobKind.INBOX] is None
+    assert first[JobKind.INBOX] is not None
     assert all(first[kind] is not None for kind in SERVED_SCHEDULES)
 
     with session_scope(cli_db, write=True) as session:  # a kind added after arming

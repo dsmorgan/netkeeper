@@ -32,6 +32,7 @@ from netkeeper.db import database_url, make_engine, make_session_factory, sessio
 from netkeeper.linkedin.browser import BrowserRun, BrowserUnavailable
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.inbox import BOOTSTRAP_MAX_CONVERSATIONS, InboxReadStopped, InboxSource
+from netkeeper.linkedin.page_inbox import PageInbox
 from netkeeper.models import (
     EnrollmentStatus,
     Interaction,
@@ -59,7 +60,7 @@ from netkeeper.services.runs import HeatSkipped, SessionFlagged
 from netkeeper.services.scheduled_runs import serve_registry
 from netkeeper.services.scheduler import SERVED_SCHEDULES, JobKind
 from netkeeper.services.users import ensure_local_user
-from netkeeper.worker import NO_INBOX_SOURCE, NO_SOURCE, BrowserWorker, inbox_source
+from netkeeper.worker import BrowserWorker, inbox_source
 
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
 SETTINGS = LinkedInSettings()
@@ -373,22 +374,11 @@ async def test_the_worker_routes_an_inbox_run_to_the_poll(
     assert _run(session_factory, user_id, run_id).stop_reason == READ
 
 
-async def test_with_no_page_source_yet_a_run_fails_saying_so_and_spends_nothing(
-    session_factory: sessionmaker[Session], user_id: int
-) -> None:
-    provider, connector = fake_provider()
-    worker = BrowserWorker(provider, session_factory, SETTINGS, clock=lambda: NOW, sleep=no_sleep)
-    run_id = _manual_inbox_run(session_factory, user_id)
-    await worker.execute(run_id, user_id)
-
-    assert connector.attaches == 0  # refused before the lock and the attach
-    run = _run(session_factory, user_id, run_id)
-    assert (run.status, run.stop_reason) == (SyncRunStatus.FAILED, NO_SOURCE)
-    assert run.error == NO_INBOX_SOURCE
-    assert runs.describe_stop_reason(NO_SOURCE) != NO_SOURCE  # has words for a person
-    assert _spent(session_factory, user_id) == 0
-    with pytest.raises(NotImplementedError, match="P4-01"):
-        inbox_source(object())  # type: ignore[arg-type]
+def test_the_worker_reads_an_inbox_run_through_the_page_source() -> None:
+    """P4-01: the default factory is the page source, built without touching the page."""
+    source = inbox_source(object(), sleep=no_sleep)  # type: ignore[arg-type]
+    assert isinstance(source, PageInbox)
+    assert source.threads_opened == 0
 
 
 async def test_a_disarmed_scheduled_inbox_run_reaching_the_worker_attaches_nothing(
@@ -425,8 +415,8 @@ async def test_a_disarmed_scheduled_inbox_run_reaching_the_worker_attaches_nothi
 # --- the scheduler -------------------------------------------------------------------------
 
 
-def test_the_inbox_kind_is_not_served_until_its_source_exists() -> None:
-    assert JobKind.INBOX not in SERVED_SCHEDULES
+def test_the_inbox_kind_is_served() -> None:
+    assert JobKind.INBOX in SERVED_SCHEDULES
     assert scheduler.DEFAULT_SCHEDULES[JobKind.INBOX].interval == timedelta(hours=3)
     assert scheduler.DEFAULT_SCHEDULES[JobKind.INBOX].respect_active_hours
     assert scheduler.JobOutcome.NOTHING_TO_WATCH in scheduler.SKIPPED_AFTER_GATE
@@ -583,7 +573,7 @@ async def test_a_disarmed_scheduled_poll_is_refused_at_all_three_gates(
     )
 
 
-async def test_serve_never_seeds_or_fires_the_inbox_poll(
+async def test_serve_seeds_the_inbox_poll_and_a_fire_runs_it(
     bare_engine: Engine, settings: Settings
 ) -> None:
     provider, _ = fake_provider()
@@ -604,8 +594,12 @@ async def test_serve_never_seeds_or_fires_the_inbox_poll(
             await app.state.tasks.join()
         with session_scope(factory) as session:
             user = _local(session)
-            assert scheduler.stored_due(session, user, account, JobKind.INBOX) is None
-    assert SyncRunKind.INBOX not in {run.kind for run in _rows(bare_engine)}
+            assert scheduler.stored_due(session, user, account, JobKind.INBOX) is not None
+    # The fake Chrome's page never loads a conversation list, so each fire is an unknown
+    # shape: aborted, never completed (#417 treats only a completed poll as fresh).
+    inbox_runs = [run for run in _rows(bare_engine) if run.kind is SyncRunKind.INBOX]
+    assert inbox_runs
+    assert all(run.status is SyncRunStatus.ABORTED for run in inbox_runs)
 
 
 # --- by hand: the CLI and the API ---------------------------------------------------------
@@ -676,9 +670,9 @@ async def test_the_api_starts_an_inbox_poll_and_answers_at_once(
         await app.state.tasks.join()
         run = (await client.get(f"/api/v1/linkedin/runs/{response.json()['run_id']}")).json()
     assert run["kind"] == "inbox"
-    # No page source yet: the run says so, and nothing was read.
-    assert (run["status"], run["stop_reason"]) == ("failed", "no_source")
-    assert "P4-01" in run["error"]
+    # The fake Chrome's page loads no conversation list: an unknown shape stops the poll
+    # as aborted, never completed.
+    assert (run["status"], run["stop_reason"]) == ("aborted", "route_changed")
 
 
 async def test_the_first_poll_reads_back_to_the_earliest_live_outreach(
@@ -747,25 +741,24 @@ def _posture(factory: sessionmaker[Session], user_id: int) -> PostureReport:
 
 
 def _posture_warnings(factory: sessionmaker[Session], user_id: int) -> tuple[str, ...]:
-    """The ``linkedin reply poll`` row's warnings; the row exists only with a short poll."""
-    rows = [p for p in _posture(factory, user_id).protections if p.name == "linkedin reply poll"]
-    if not rows:
-        return ()
-    (row,) = rows
-    assert row.status is Status.OFF  # never claimed on before P4-01
+    """The ``linkedin reply poll`` row's warnings (P4-01: the row is always there, and on)."""
+    (row,) = [p for p in _posture(factory, user_id).protections if p.name == "linkedin reply poll"]
+    assert row.status is Status.ON
     return row.warnings
 
 
-def test_without_a_short_first_poll_posture_has_no_linkedin_reply_poll_row(
+def test_the_linkedin_reply_poll_row_is_on_and_warns_only_for_a_short_first_poll(
     session_factory: sessionmaker[Session], user_id: int
 ) -> None:
     report = _posture(session_factory, user_id)
-    assert "linkedin reply poll" not in {p.name for p in report.protections}
+    (row,) = [p for p in report.protections if p.name == "linkedin reply poll"]
+    assert row.status is Status.ON and row.warnings == ()
+    assert row.value == "no complete poll yet" and row.notes == ()
     with session_scope(session_factory, write=True) as session:
         inbox_apply.record_short_first_poll(session, _user(session, user_id), NOW)
     report = _posture(session_factory, user_id)
     (row,) = [p for p in report.protections if p.name == "linkedin reply poll"]
-    assert row.status is Status.OFF and len(row.warnings) == 1
+    assert row.status is Status.ON and len(row.warnings) == 1
     assert not report.ok
 
 

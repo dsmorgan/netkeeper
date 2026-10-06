@@ -246,6 +246,7 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "answer-lost limit",
         "Contact info breaker",
         "network aging",
+        "linkedin reply poll",
     ]
 
 
@@ -1243,7 +1244,8 @@ def test_the_gap_lists_the_protections_nothing_enforces_yet(writer: Session, use
         assert name not in unwired, name
     assert "sync and enrichment runners are wired" in gaps
     assert "inbox poll's runner spends `inbox_polls`" in gaps
-    assert "no page source yet" in gaps
+    assert "no page source yet" not in gaps
+    assert "`netkeeper serve`'s scheduler reach it" in gaps
 
 
 _CONNECTION_PAGES = f"{_CONSUME}[netkeeper.services.budgets.ActionClass.CONNECTION_PAGES]"
@@ -1860,43 +1862,19 @@ def _served_user(writer: Session) -> User:
 
 
 def test_a_served_schedule_is_on_and_names_each_kind(writer: Session) -> None:
-    """#327: ``serve`` never schedules the inbox poll, so a schedule it established in
-    full is in force, and the row says which kind is which, rather than "3 of 4"."""
+    """#327, P4-01: every default kind is served, so a schedule established in full is in
+    force and the row names each kind."""
     report = _report(writer, _served_user(writer))
     row = _row(report, "scheduled jobs")
 
     assert row.status is Status.ON and row.warnings == ()
     assert row.value.startswith(
         "connections_incremental scheduled; connections_full scheduled; enrich scheduled;"
-        " inbox not applicable (the LinkedIn inbox poll has no page source yet"
+        " inbox scheduled; next "
     )
-    assert "Gmail replies are polled by the campaign engine; see the reply poll row" in row.value
     assert report.scheduler.unscheduled == ()
-    assert report.scheduler.not_applicable == (("inbox", NOT_SERVED_BECAUSE[JobKind.INBOX]),)
-    table = render(report)
-    assert "inbox" in table and "not applicable" in table
-
-
-def test_a_legacy_inbox_due_time_is_never_shown(writer: Session) -> None:
-    """A row written for the inbox poll before ``serve`` left it out is not a job that
-    runs: it is neither the next fire nor a due time in the table."""
-    user = _served_user(writer)
-    sync_account_schedule(
-        writer,
-        user,
-        ACCOUNT,
-        now=NOW - timedelta(hours=2, minutes=50),  # due in ten minutes, before any other
-        schedules={JobKind.INBOX: DEFAULT_SCHEDULES[JobKind.INBOX]},
-        rng=random.Random(4),
-        tz=ZONE,
-    )
-    report = _report(writer, user)
-    inbox_due = next(due for kind, _, due in report.scheduler.jobs if kind == "inbox")
-    assert inbox_due is not None
-    row = _row(report, "scheduled jobs")
-    assert row.status is Status.ON
-    assert f"{inbox_due:%Y-%m-%d %H:%M UTC}" not in row.value
-    assert f"{inbox_due:%Y-%m-%d %H:%M UTC}" not in render(report)
+    assert report.scheduler.not_applicable == ()
+    assert set(SERVED_SCHEDULES) == set(JobKind)
 
 
 def test_a_missing_served_kind_is_off_and_says_what_that_means(writer: Session) -> None:
@@ -1905,7 +1883,7 @@ def test_a_missing_served_kind_is_off_and_says_what_that_means(writer: Session) 
     row = _row(_report(writer, user), "scheduled jobs")
 
     assert row.status is Status.OFF
-    assert "enrich missing" in row.value and "inbox not applicable" in row.value
+    assert "enrich missing" in row.value and "inbox scheduled" in row.value
     [warning] = row.warnings
     assert "enrich: enrichment never runs on its own" in warning
     assert "`netkeeper linkedin schedule arm`" in warning
@@ -2004,8 +1982,7 @@ def test_the_long_rows_have_a_one_line_summary_and_keep_their_full_value(
     report = _report(writer, user)
 
     jobs = _row(report, "scheduled jobs")
-    assert jobs.summary.startswith("3 of 3 scheduled; next ")
-    assert "not applicable" not in jobs.summary and "not applicable" in jobs.value
+    assert jobs.summary.startswith("4 of 4 scheduled; next ")
 
     poll = _row(report, "reply poll")
     assert poll.summary == "every 10 min; 1 armed mailbox, polled 12 min ago"

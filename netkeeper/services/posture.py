@@ -210,18 +210,14 @@ SESSION_EVIDENCE_FRESH_FOR: Final = timedelta(hours=24)
 #: Why a job kind that ``netkeeper serve`` does not schedule is not applicable (#327).
 #: A kind outside :data:`~netkeeper.services.scheduler.SERVED_SCHEDULES` that is not
 #: named here reads as having no runner.
-NOT_SERVED_BECAUSE: Final[dict[JobKind, str]] = {
-    JobKind.INBOX: (
-        "the LinkedIn inbox poll has no page source yet, so `netkeeper serve` does not"
-        " schedule it; Gmail replies are polled by the campaign engine; see the reply poll row"
-    ),
-}
+NOT_SERVED_BECAUSE: Final[dict[JobKind, str]] = {}
 
 #: What a served job kind with no due time means: it never runs on its own (#327).
 MISSING_MEANS: Final[dict[JobKind, str]] = {
     JobKind.CONNECTIONS_FULL: "the weekly full sync never runs, so nobody is aged out",
     JobKind.CONNECTIONS_INCREMENTAL: "the daily sync never runs, so new connections wait",
     JobKind.ENRICH: "enrichment never runs on its own",
+    JobKind.INBOX: "the LinkedIn inbox poll never runs on its own, so LinkedIn replies wait",
 }
 
 #: The Gmail reply poll is late once a mailbox's last complete poll is older than this
@@ -230,6 +226,10 @@ MISSING_MEANS: Final[dict[JobKind, str]] = {
 #: running. The sender already holds follow-ups that start a new conversation past two
 #: (``campaign_replies.STALE_AFTER_POLLS``), so a late poll is a note, not a warning.
 REPLY_POLL_LATE_AFTER_POLLS: Final = 3
+
+#: The LinkedIn inbox poll is late once its last complete poll is older than this many
+#: of its schedule's intervals (P4-01). Like the Gmail poll: one missed poll is noise.
+LINKEDIN_POLL_LATE_AFTER_POLLS: Final = 3
 
 
 class Status(enum.StrEnum):
@@ -538,9 +538,7 @@ def posture(
         _contact_info_breaker(session, user, account_id),
         _network_aging(session, user),
     ]
-    linkedin_replies = _linkedin_reply_poll(session, user)
-    if linkedin_replies is not None:
-        protections.append(linkedin_replies)
+    protections.append(_linkedin_reply_poll(session, user, now=now))
     return PostureReport(
         checked_at=now,
         timezone=linkedin.timezone,
@@ -654,9 +652,10 @@ GAPS: Final[tuple[str, ...]] = (
     " of those limits is a setting rather than a brake until they do. The connections"
     " sync and enrichment runners are wired: `netkeeper linkedin sync` and `enrich`,"
     " the runs API, and `netkeeper serve`'s scheduler reach them. The inbox poll's"
-    " runner spends `inbox_polls` before every read and is reached by `netkeeper"
-    " linkedin inbox` and the runs API, but it has no page source yet, so a poll fails"
-    " before it reads anything and `netkeeper serve` does not schedule it.",
+    " runner spends `inbox_polls` before every read; `netkeeper linkedin inbox`, the"
+    " runs API, and `netkeeper serve`'s scheduler reach it. Its page source reads the"
+    " shapes of the 2026-10-05 capture, and the first supervised polls confirm the ones"
+    " the capture could not show.",
     "the activity lock binds netkeeper processes that share this data directory on"
     " this machine: it is a file lock under the data directory. A netkeeper started"
     " with a different NETKEEPER_DATA, a netkeeper on another machine, or any other"
@@ -667,8 +666,8 @@ GAPS: Final[tuple[str, ...]] = (
     " locking a file nobody else can open, so the next process claims a fresh one"
     " and attaches as a second CDP client. Nothing in netkeeper deletes it; only a"
     " manual `rm` can cause this, so leave `locks/` alone while `netkeeper serve` runs.",
-    "`netkeeper serve` runs the scheduler for the connections syncs and"
-    " enrichment; the inbox poll has no page source yet and is not scheduled. A"
+    "`netkeeper serve` runs the scheduler for the connections syncs,"
+    " enrichment, and the LinkedIn inbox poll. A"
     " scheduled run fires only while the scheduled-runs row above says armed;"
     " this report reads that flag from the database and cannot see a scheduler"
     " some process was started with differently.",
@@ -1610,31 +1609,54 @@ def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settin
     )
 
 
-def _linkedin_reply_poll(session: Session, user: User) -> Protection | None:
-    """The LinkedIn inbox poll's row, only while a short first poll stands (P4-08).
+def _linkedin_reply_poll(session: Session, user: User, *, now: datetime) -> Protection:
+    """The LinkedIn inbox poll's row: when it last completed, and whether it is late (P4-01).
 
-    Until P4-01 (#380) wires a page source, no poll can run, so there is no row: the
-    GAPS and the scheduled jobs row already say the poll has no page source, and a row
-    here could only claim a protection that does nothing. P4-01 adds the full row.
+    On once the page source is wired: a poll reads the inbox on each fire of its
+    schedule. The row names the last ``completed`` poll (an ``aborted`` one is not
+    fresh, #417), and notes, without warning, a last complete poll older than
+    :data:`LINKEDIN_POLL_LATE_AFTER_POLLS` of its intervals: the usual cause is that
+    ``netkeeper serve`` is not running, which is a choice. No poll yet is not a note: a
+    fresh install has not asked for one.
 
-    The one exception is a first poll that could not read back to the earliest
-    outreach it watches. It counted as complete anyway, so replies older than what it
-    read were never seen: that is a warning until a person checks them by hand and
-    acknowledges it (``netkeeper linkedin inbox-acknowledge``). The row is ``off``,
-    never ``on``, because those replies are not detected.
+    A first poll that could not read back to the earliest outreach it watches counted
+    as complete anyway, so replies older than what it read were never seen. That stays
+    a warning until a person checks them by hand and acknowledges it
+    (``netkeeper linkedin inbox-acknowledge``); no poll clears it.
     """
+    interval = DEFAULT_SCHEDULES[JobKind.INBOX].interval
+    late_after = interval * LINKEDIN_POLL_LATE_AFTER_POLLS
+    last = latest_run(session, user, SyncRunKind.INBOX, status=SyncRunStatus.COMPLETED)
+    notes: list[str] = []
+    held = (
+        "LinkedIn replies are noticed only when the poll completes, and LinkedIn follow-ups"
+        " wait for a fresh one. The poll runs in `netkeeper serve`"
+    )
+    if last is None:
+        value = "no complete poll yet"
+    else:
+        age = now - last.started_at
+        value = f"last complete poll {last.started_at:%Y-%m-%d %H:%M UTC} ({_ago(age)})"
+        if age > late_after:
+            notes.append(
+                f"the last complete LinkedIn inbox poll was {_ago(age)}, more than"
+                f" {LINKEDIN_POLL_LATE_AFTER_POLLS} times its {interval.total_seconds() / 3600:g} h"
+                f" interval. {held}: check that it is running"
+            )
+    warnings: tuple[str, ...] = ()
     short_of = short_first_poll(session, user)
-    if short_of is None:
-        return None
-    return Protection(
-        name="linkedin reply poll",
-        status=Status.OFF,
-        value=f"the first poll fell short of {short_of:%Y-%m-%d}",
-        warnings=(
+    if short_of is not None:
+        warnings = (
             f"the first LinkedIn inbox poll couldn't read back to {short_of:%Y-%m-%d};"
             " check older LinkedIn replies by hand, then run"
             " `netkeeper linkedin inbox-acknowledge`",
-        ),
+        )
+    return Protection(
+        name="linkedin reply poll",
+        status=Status.ON,
+        value=value,
+        notes=tuple(notes),
+        warnings=warnings,
     )
 
 

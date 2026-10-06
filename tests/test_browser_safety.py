@@ -169,6 +169,8 @@ OBSERVING_MODULES = (
     LINKEDIN / "flight.py",
     LINKEDIN / "page_profiles.py",
     LINKEDIN / "flagship_profile.py",
+    LINKEDIN / "messaging_shapes.py",
+    LINKEDIN / "page_inbox.py",
 )
 PAGE_DRIVERS = frozenset(
     {
@@ -335,6 +337,9 @@ BROWSER_MODULES = (
     "netkeeper.linkedin.page_connections",
     # #190: the profile source that scrolls, clicks Contact info, and waits on answers.
     "netkeeper.linkedin.page_profiles",
+    # #380: the inbox source that scrolls /messaging/, opens threads by navigation, and
+    # waits on the page's answers.
+    "netkeeper.linkedin.page_inbox",
 )
 
 # The modules that may reach the provider at all, as paths from the repository root.
@@ -348,6 +353,7 @@ BROWSER_CALLERS = frozenset(
         Path("netkeeper/linkedin/rehearse.py"),  # the rehearsal, inside a run
         Path("netkeeper/linkedin/page_connections.py"),  # PageConnections, inside a run (#187)
         Path("netkeeper/linkedin/page_profiles.py"),  # PageProfiles, inside a run (#190)
+        Path("netkeeper/linkedin/page_inbox.py"),  # PageInbox, inside a run (#380)
         # The run worker (P2-10): takes the lock, attaches, runs a recorded run. Not
         # under web/ or services/, and nothing under either imports it: the app and
         # the runs API hold it only as services.runs.RunExecutor.

@@ -31,7 +31,7 @@ from netkeeper.services.linkedin_accounts import (
     scheduled_runs_armed,
 )
 from netkeeper.services.linkedin_session import flag_session
-from netkeeper.services.scheduled_runs import RUN_KIND
+from netkeeper.services.scheduled_runs import INBOX_RUN_KIND, RUN_KIND
 
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
 ALL_DAY = (time(0, 0), time(23, 59))
@@ -64,8 +64,9 @@ def test_the_safety_constants_are_the_specs() -> None:
         scheduler.JobKind.CONNECTIONS_FULL,
         scheduler.JobKind.CONNECTIONS_INCREMENTAL,
         scheduler.JobKind.ENRICH,
+        scheduler.JobKind.INBOX,
     }
-    assert set(RUN_KIND) == set(scheduler.SERVED_SCHEDULES)
+    assert set(RUN_KIND) | set(INBOX_RUN_KIND) == set(scheduler.SERVED_SCHEDULES)
     assert {
         SyncRunKind.CONNECTIONS_FULL,
         SyncRunKind.CONNECTIONS_INCREMENTAL,

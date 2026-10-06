@@ -28,6 +28,8 @@ from voyager_pages import PEOPLE, Person
 from netkeeper.config import Settings
 from netkeeper.linkedin.browser import ActivityLocks, AttachBrowserProvider, BrowserRun
 from netkeeper.linkedin.enrich import ProfileSource
+from netkeeper.linkedin.inbox import InboxSource
+from netkeeper.linkedin.page_inbox import PageInbox
 from netkeeper.linkedin.page_profiles import PageProfiles
 from netkeeper.services import runs
 from netkeeper.services.events import EventBus
@@ -89,6 +91,17 @@ def fast_profiles(run: BrowserRun, *, sleep: Callable[[float], Awaitable[None]])
     return PageProfiles(run, sleep=sleep, landing_wait_s=FAKE_LANDING_WAIT_S)
 
 
+def fast_inbox(run: BrowserRun, *, sleep: Callable[[float], Awaitable[None]]) -> InboxSource:
+    """``netkeeper.worker.inbox_source`` with the fake waits (#380)."""
+    return PageInbox(
+        run,
+        sleep=sleep,
+        landing_wait_s=FAKE_LANDING_WAIT_S,
+        response_wait_s=FAKE_LANDING_WAIT_S,
+        thread_wait_s=FAKE_LANDING_WAIT_S,
+    )
+
+
 def worker_extractor(
     provider: AttachBrowserProvider,
     settings: Settings,
@@ -109,6 +122,7 @@ def worker_extractor(
             sleep=sleep,
             rng=rng,
             profiles=fast_profiles,
+            inbox_sources=fast_inbox,
         )
 
     return ServeExtractor(executor=executor, clock=clock, rng=rng or random.Random(0))

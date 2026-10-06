@@ -98,8 +98,7 @@ log = logging.getLogger(__name__)
 
 #: The kinds a run can be started for today: the two connections syncs (P2-06),
 #: enrichment (P2-07), and the inbox poll (P4-08). ``message_send`` has no runner yet.
-#: The inbox poll's page source arrives with P4-01 (#380); until then its run fails
-#: in the worker with the reason, and ``netkeeper serve`` does not schedule it.
+#: The inbox poll's page source is P4-01's (#380).
 RUNNABLE_KINDS: Final = frozenset(
     {
         SyncRunKind.CONNECTIONS_FULL,
@@ -672,7 +671,6 @@ STOP_REASON_TEXT: Final[Mapping[str, str]] = {
     "answer_lost_breaker": "refused: the answer-lost limit is tripped",
     "contact_info_breaker": "refused: the Contact info breaker is tripped",
     "no_runner": "refused: no runner for this kind",
-    "no_source": "refused: the LinkedIn inbox poll has no page source yet",
     "browser_busy": "the browser was busy with another run",
     "browser_unavailable": "Chrome was not reachable or went away mid-run",
     "interrupted": "the netkeeper process running it stopped",

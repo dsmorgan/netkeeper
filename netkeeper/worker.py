@@ -72,6 +72,7 @@ from netkeeper.linkedin.connections import ConnectionsSource, SyncMode
 from netkeeper.linkedin.enrich import ProfileSource
 from netkeeper.linkedin.inbox import InboxSource
 from netkeeper.linkedin.page_connections import PageConnections
+from netkeeper.linkedin.page_inbox import PageInbox
 from netkeeper.linkedin.page_profiles import PageProfiles
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
@@ -129,25 +130,17 @@ def profile_source(run: BrowserRun, *, sleep: Sleep = asyncio.sleep) -> PageProf
     return PageProfiles(run, sleep=sleep)
 
 
-#: The ``stop_reason`` of an inbox run refused because no page source exists yet (P4-08).
-NO_SOURCE: Final = "no_source"
-
-#: Why a live inbox poll cannot read yet: the one line its run's ``error`` carries.
-NO_INBOX_SOURCE: Final = (
-    "the LinkedIn inbox page source is not built yet (P4-01, #380); nothing was read"
-)
-
-
 def inbox_source(run: BrowserRun, *, sleep: Sleep = asyncio.sleep) -> InboxSource:
-    """The source a live inbox poll reads through: P4-01's page source (#380).
+    """The source a live inbox poll reads through (P4-01, #380, ADR 0006).
 
-    Not built yet. While a worker holds this default, it refuses an inbox run before
-    taking the lock or attaching (:data:`NO_SOURCE`), so the run ends ``failed`` having
-    attached to nothing, spent no budget, and loaded no page; ``netkeeper serve`` does
-    not schedule the poll either. Called anyway, this raises
-    :class:`NotImplementedError` with :data:`NO_INBOX_SOURCE`. P4-01 replaces it.
+    :class:`~netkeeper.linkedin.page_inbox.PageInbox`: ``/messaging/`` opened and its list
+    scrolled like a person, threads opened by navigation only, and everything read from
+    the answers the page itself loads. It loads the page inside its first ``read``,
+    which the runner calls only after its refusals and the budget, so a refused run
+    never loads a page. ``sleep`` waits out the scroll's pauses and the pause before
+    each thread.
     """
-    raise NotImplementedError(NO_INBOX_SOURCE)
+    return PageInbox(run, sleep=sleep)
 
 
 class InboxSourceFactory(Protocol):
@@ -408,10 +401,6 @@ class BrowserWorker:
                     "contact_info_breaker",
                     "the Contact info breaker is tripped for this account",
                 )
-            if facts.kind is SyncRunKind.INBOX and self._inbox_sources is inbox_source:
-                # P4-08: no page source exists yet, so the run is refused before the lock
-                # and the attach. P4-01 (#380) removes this check when it wires the source.
-                return NO_SOURCE, NO_INBOX_SOURCE
             try:
                 runs.refuse_if_flagged_or_hot(
                     session, user, facts.account_id, now=self._clock(), settings=self._settings
