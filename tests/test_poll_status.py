@@ -185,9 +185,25 @@ def test_without_serve_nothing_is_running(world: World) -> None:
     _no_times(checks)
 
 
+def test_the_first_inbox_poll_is_by_hand(world: World) -> None:
+    for session, user in world.write():
+        _arm_linkedin(session, user, kinds=(JobKind.INBOX,))
+
+    inbox = world.read()["linkedin_inbox"]
+
+    assert inbox.state is S.BLOCKED and inbox.next_at is None
+    assert "run by hand" in (inbox.reason or "")
+
+
 def test_the_inbox_is_scheduled_like_the_other_linkedin_kinds(world: World) -> None:
     for session, user in world.write():
         _arm_linkedin(session, user, kinds=(JobKind.INBOX,))
+        run = runs.create_run(
+            session, user, SyncRunKind.INBOX, trigger=SyncRunTrigger.MANUAL, now=NOW
+        )
+        runs.finish_run(
+            session, user, run.id, status=SyncRunStatus.COMPLETED, now=NOW, stop_reason="inbox_read"
+        )
 
     inbox = world.read()["linkedin_inbox"]
 

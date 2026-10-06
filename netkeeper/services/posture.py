@@ -1615,9 +1615,9 @@ def _linkedin_reply_poll(session: Session, user: User, *, now: datetime) -> Prot
     On once the page source is wired: a poll reads the inbox on each fire of its
     schedule. The row names the last ``completed`` poll (an ``aborted`` one is not
     fresh, #417), and notes, without warning, a last complete poll older than
-    :data:`LINKEDIN_POLL_LATE_AFTER_POLLS` of its intervals: the usual cause is that
-    ``netkeeper serve`` is not running, which is a choice. No poll yet is not a note: a
-    fresh install has not asked for one.
+    :data:`LINKEDIN_POLL_LATE_AFTER_POLLS` of its intervals, naming how the newest poll
+    ended when it did not complete. With no complete poll yet, the value says the first one
+    is run by hand: a scheduled poll starts nothing until one has completed.
 
     A first poll that could not read back to the earliest outreach it watches counted
     as complete anyway, so replies older than what it read were never seen. That stays
@@ -1627,21 +1627,25 @@ def _linkedin_reply_poll(session: Session, user: User, *, now: datetime) -> Prot
     interval = DEFAULT_SCHEDULES[JobKind.INBOX].interval
     late_after = interval * LINKEDIN_POLL_LATE_AFTER_POLLS
     last = latest_run(session, user, SyncRunKind.INBOX, status=SyncRunStatus.COMPLETED)
+    newest = latest_run(session, user, SyncRunKind.INBOX)
     notes: list[str] = []
-    held = (
-        "LinkedIn replies are noticed only when the poll completes, and LinkedIn follow-ups"
-        " wait for a fresh one. The poll runs in `netkeeper serve`"
-    )
     if last is None:
-        value = "no complete poll yet"
+        value = (
+            "no complete poll yet; scheduled polls wait for a first one you run by hand:"
+            " `netkeeper linkedin inbox`"
+        )
     else:
         age = now - last.started_at
         value = f"last complete poll {last.started_at:%Y-%m-%d %H:%M UTC} ({_ago(age)})"
         if age > late_after:
+            why = ""
+            if newest is not None and newest.status is not SyncRunStatus.COMPLETED:
+                why = f"; the newest poll ended {newest.stop_reason or newest.status.value}"
             notes.append(
                 f"the last complete LinkedIn inbox poll was {_ago(age)}, more than"
-                f" {LINKEDIN_POLL_LATE_AFTER_POLLS} times its {interval.total_seconds() / 3600:g} h"
-                f" interval. {held}: check that it is running"
+                f" {LINKEDIN_POLL_LATE_AFTER_POLLS} times its"
+                f" {interval.total_seconds() / 3600:g} h interval{why}. LinkedIn replies are"
+                " noticed only when a poll completes, and LinkedIn follow-ups wait for a fresh one"
             )
     warnings: tuple[str, ...] = ()
     short_of = short_first_poll(session, user)

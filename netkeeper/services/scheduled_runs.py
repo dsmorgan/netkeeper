@@ -134,6 +134,11 @@ def _handler(
             user = session.get(User, ctx.user_id)
             return user is None or not has_anything_to_watch(session, user)
 
+    def first_poll_is_unsupervised(ctx: JobContext) -> bool:
+        with session_scope(factory) as session:
+            user = session.get(User, ctx.user_id)
+            return user is not None and not runs.has_completed_inbox_poll(session, user)
+
     def record(ctx: JobContext) -> int | None:
         with session_scope(factory, write=True) as session:
             user = session.get(User, ctx.user_id)
@@ -154,6 +159,13 @@ def _handler(
                 run_kind.value,
             )
             return JobOutcome.NOTHING_TO_WATCH
+        if watch_check and await off_loop(first_poll_is_unsupervised, ctx):
+            log.info(
+                "scheduled %s not started: no inbox poll has completed, so the first is"
+                " run by hand (`netkeeper linkedin inbox`)",
+                run_kind.value,
+            )
+            return JobOutcome.FIRST_POLL_BY_HAND
         try:
             # Off the event loop, in one writer session as before (#259).
             run_id = await off_loop(record, ctx)

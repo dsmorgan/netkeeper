@@ -36,7 +36,10 @@ so a thread is opened by navigation to its own page, never a click, only for a
 conversation in ``spec.open_threads_for`` that the list showed one-to-one with activity
 after ``since``, and at most :data:`~netkeeper.linkedin.inbox.MAX_THREADS_OPENED` per
 poll, newest first. A thread answer the page loaded on its own counts and costs no
-navigation. A thread that loads no answer is left unread: its list item still counts.
+navigation. A thread opened for its replies that yields no parsed answer (a lost body, a non-200, a
+renamed field) stops the poll. A one-to-one item that carries no message, whose thread was
+asked for and not opened (the cap), makes the read incomplete. A third sender in a
+one-to-one thread is an unknown shape and stops the poll.
 
 **Nothing identifying is logged**: counts only, never a url, an id, or a text.
 """
@@ -67,6 +70,7 @@ from netkeeper.linkedin.messaging_shapes import (
     BY_SYNC_TOKEN,
     CONVERSATIONS_QUERY,
     GRAPHQL_PATH,
+    LIST_CATEGORY,
     MESSAGES_BY_SYNC_TOKEN,
     MESSAGES_QUERY,
     MESSAGING_PAGE_PATH,
@@ -78,6 +82,7 @@ from netkeeper.linkedin.messaging_shapes import (
     parse_conversation_list,
     parse_thread,
     query_name,
+    request_category,
     request_conversation,
     request_has_sync_token,
     request_last_updated_before,
@@ -274,7 +279,8 @@ class PageInbox:
             if urn not in named and (spec.since is None or item.last_activity_at >= spec.since):
                 considered.append(item)
         # A conversation the run named at an old place may have moved up in a refresh.
-        considered = [seen.latest[i.conversation_urn] for i in considered]
+        unique = {i.conversation_urn: seen.latest[i.conversation_urn] for i in considered}
+        considered = list(unique.values())
         considered.sort(key=lambda i: i.last_activity_at, reverse=True)
         return considered, complete
 
@@ -302,8 +308,10 @@ class PageInbox:
             while item.conversation_urn not in self._seen.threads:
                 response = await observation.next(self._thread_wait_s)
                 if response is None:
-                    log.info("inbox: a thread opened but loaded no messages; read from the list")
-                    break
+                    # A lost body, a non-200 and a renamed field all end here or earlier:
+                    # a thread opened for its replies that yields nothing parsed is a stop.
+                    log.warning("inbox: a thread opened but loaded no readable messages")
+                    raise RouteChanged("inbox", "an opened thread loaded no readable answer")
                 self._take(response)
 
     async def _pause(self) -> None:
@@ -319,7 +327,7 @@ class PageInbox:
     def _delta(self, spec: InboxJobSpec, complete: bool) -> InboxDelta:
         considered, _ = self._considered(spec)
         conversations: list[InboxConversation] = []
-        skipped_group = skipped_other = 0
+        skipped_group = skipped_other = unread = 0
         for item in considered:
             if item.kind is Kind.GROUP:
                 skipped_group += 1
@@ -337,10 +345,15 @@ class PageInbox:
                 item.counterpart_urn,
             }
             if strangers:
-                # Somebody besides the two took part: a group the list did not mark.
-                skipped_group += 1
-                continue
+                # The list said two participants: a third sender is an unknown shape, not
+                # a group to skip (a reply of the contact's could be hiding in it).
+                raise RouteChanged("inbox", "a one-to-one conversation has a third sender")
             if not messages:
+                # A one-to-one item with no message at all: counted. If its thread was
+                # asked for and not opened (the cap), the read is not complete.
+                unread += 1
+                if item.conversation_urn in spec.open_threads_for:
+                    complete = False
                 continue
             conversations.append(
                 InboxConversation(
@@ -351,9 +364,10 @@ class PageInbox:
                 )
             )
         log.info(
-            "inbox: read %d conversations, skipped %d group and %d other, opened %d threads,"
-            " complete=%s",
+            "inbox: read %d conversations, %d with no message, skipped %d group and %d other,"
+            " opened %d threads, complete=%s",
             len(conversations),
+            unread,
             skipped_group,
             skipped_other,
             self.threads_opened,
@@ -364,6 +378,7 @@ class PageInbox:
             skipped_group=skipped_group,
             skipped_other=skipped_other,
             complete=complete,
+            owner_urn=self._seen.owner,
         )
 
     # --- the page's answers -----------------------------------------------------------------
@@ -431,6 +446,8 @@ class PageInbox:
             return
         if not seen.first:
             raise RouteChanged("inbox", "an older page of the list arrived before the list")
+        if request_category(response.url) != LIST_CATEGORY:
+            raise RouteChanged("inbox", "an older page of the list is not of the primary inbox")
         cursor = request_next_cursor(response.url)
         if cursor is None:
             before = request_last_updated_before(response.url)

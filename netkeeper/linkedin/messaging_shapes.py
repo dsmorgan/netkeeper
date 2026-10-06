@@ -29,8 +29,9 @@ so the kind rules run in order and the first that matches decides (the shapes no
    message does not disqualify a conversation.
 
 A counterpart whose URN is neither ``fsd_profile`` nor ``fsd_company`` is an unknown
-shape: :class:`RouteChanged`. A conversation with nobody but the owner is skipped as
-other (no counterpart). A kept conversation is matched by URN like any other; the core
+shape: :class:`RouteChanged`. A conversation with nobody but the owner is an unknown
+shape too (never captured; if LinkedIn moved the counterpart, every item would look like it).
+A kept conversation is matched by URN like any other; the core
 ignores a stranger's.
 
 **The mailbox owner** is read three ways that must agree: the first part of every
@@ -181,6 +182,17 @@ def request_has_sync_token(url: str) -> bool:
 def request_next_cursor(url: str) -> str | None:
     found = _CURSOR_FIELD.search(variables(url))
     return unquote(found.group(1)) if found else None
+
+
+_CATEGORY_FIELD: Final = re.compile(r"conversationCategoryPredicate:\(category:([A-Z_]+)\)")
+#: The category the older pages of the inbox list are read from (captured 2026-10-05).
+LIST_CATEGORY: Final = "PRIMARY_INBOX"
+
+
+def request_category(url: str) -> str | None:
+    """The category an older-page request names, or ``None``."""
+    found = _CATEGORY_FIELD.search(variables(url))
+    return found.group(1) if found else None
 
 
 def request_last_updated_before(url: str) -> int | None:
@@ -383,8 +395,6 @@ def _item(raw: object, index: int) -> ListItem:
         member = _obj(_get(participant, "participantType", where), f"{where} type").get("member")
         if isinstance(member, dict) and member.get("distance") == "SELF":
             selves.append(host)
-        elif host == owner:
-            raise _fail(f"{where}: the owner is a participant not marked SELF")
         else:
             others.append(host)
     if selves != [owner]:
@@ -402,8 +412,9 @@ def _item(raw: object, index: int) -> ListItem:
     if group_chat or len(others) > 1:
         return ListItem(urn, thread_id, owner, last_activity, Kind.GROUP)
     if not others:
-        # No counterpart to attribute anything to: counted, never read.
-        return ListItem(urn, thread_id, owner, last_activity, Kind.OTHER)
+        # An owner-only conversation was never captured. If LinkedIn moved the
+        # counterpart, every item would look like this: refuse rather than skip them all.
+        raise _fail(f"{where}: nobody but the owner takes part")
     counterpart = others[0]
     # The kind rules, in order; the first that matches decides (the shapes note):
     # 1 a group (above), 2 sponsored or an offer, 3 an accepted InMail with one profile

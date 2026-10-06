@@ -74,6 +74,9 @@ MAX_CONVERSATIONS_PER_POLL: Final = 40
 #: The ``stop_reason`` of a poll whose page proved it read back to the last complete one.
 READ: Final = "inbox_read"
 
+#: The ``stop_reason`` of a poll whose page showed somebody else's mailbox: nothing written.
+OWNER_MISMATCH: Final = "owner_mismatch"
+
 #: The ``stop_reason`` of a poll whose page did not prove that: the next poll reads again.
 INCOMPLETE: Final = "inbox_incomplete"
 
@@ -248,10 +251,22 @@ async def poll_inbox(
 
     def apply_and_finish(
         delta: InboxDelta, reason: str, since: datetime | None
-    ) -> inbox_apply.InboxCounts:
+    ) -> inbox_apply.InboxCounts | None:
         try:
             with session_scope(factory, write=True) as session:
                 user = _load_user(session, user_id)
+                if not inbox_apply.owner_matches(session, user, delta.owner_urn):
+                    # The page is not this account's inbox: write nothing, end aborted.
+                    runs.finish_run(
+                        session,
+                        user,
+                        started_run_id,
+                        status=SyncRunStatus.ABORTED,
+                        now=clock(),
+                        stop_reason=OWNER_MISMATCH,
+                        counts=_zero_counts(),
+                    )
+                    return None
                 counts = inbox_apply.apply_delta(
                     session, user, delta, polled_at=clock(), settings=campaign_settings
                 )
@@ -319,6 +334,13 @@ async def poll_inbox(
             raise InboxPollFailed(f"reading the inbox failed: {type(exc).__name__}") from None
         reason = _ending(delta, plan)
         counts = await off_loop(apply_and_finish, delta, reason, spec.since)
+        if counts is None:
+            log.error(
+                "inbox poll %d: the page showed another mailbox; nothing written", started_run_id
+            )
+            return InboxPollReport(
+                run_id=started_run_id, account_id=account_id, stop_reason=OWNER_MISMATCH
+            )
     return InboxPollReport(
         run_id=started_run_id, account_id=account_id, stop_reason=reason, counts=counts
     )
