@@ -420,7 +420,8 @@ def kind_of(item: dict[str, Any]) -> str:
         return "group"
     # 2: sponsored or an offer, whatever the categories, state or label.
     company = any(p["hostIdentityUrn"].startswith("urn:li:fsd_company:") for p in others)
-    if company or item["contentMetadata"] is not None or _render_kinds(item) & _AD_RENDER:
+    ad_content = (item["contentMetadata"] or {}).get("conversationAdContent") is not None
+    if company or ad_content or _render_kinds(item) & _AD_RENDER:
         return "other"
     one_profile = len(others) == 1 and others[0]["hostIdentityUrn"].startswith(
         "urn:li:fsd_profile:"
@@ -431,7 +432,9 @@ def kind_of(item: dict[str, Any]) -> str:
     # 4 is the line above; 5: a label or hostUrnData outside InMail.
     if item["conversationTypeText"] is not None or "hostUrnData" in _render_kinds(item):
         return "other"
-    # 6: one-to-one.
+    # 6: one-to-one; an item with no counterpart is skipped as other. A ``Sponsored``
+    # label alone never reaches rule 2: an accepted InMail with that label and no ad
+    # item, company or ad content is read under rule 3, by design.
     return "one_to_one" if one_profile else "other"
 
 
