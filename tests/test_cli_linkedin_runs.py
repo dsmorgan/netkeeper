@@ -732,12 +732,12 @@ def test_reset_breaker_clears_the_contact_info_breaker(cli_db: sessionmaker[Sess
     declined = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="n\n")
     assert declined.exit_code == 1
     assert "3 Contact-info-lost enrich" in declined.output
-    assert "enrichment runs will be allowed to fire again" in declined.output
+    assert "inbox runs will be allowed to fire again" in declined.output
     assert _contact_info_count(cli_db, account_id) == 3
 
     confirmed = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="y\n")
     assert confirmed.exit_code == 0, confirmed.output
-    assert "Contact info breaker reset" in confirmed.output
+    assert "Contact info breaker, and inbox breaker reset" in confirmed.output
     assert _contact_info_count(cli_db, account_id) == 0
 
 
@@ -751,3 +751,61 @@ def test_reset_breaker_clears_a_corrupt_contact_info_row(cli_db: sessionmaker[Se
     assert "Contact-info-lost enrich unreadable" in result.output
     with session_scope(cli_db) as session:
         assert not route_breaker.contact_info_tripped(session, _user(session), account_id)
+
+
+def _inbox_changed(factory: sessionmaker[Session], polls_in_a_row: int) -> int:
+    with session_scope(factory, write=True) as session:
+        user = _user(session)
+        account_id = ensure_account(session, user).id
+        for _ in range(polls_in_a_row):
+            route_breaker.record_inbox(
+                session, user, account_id, route_changed=True, completed=False, now=NOW
+            )
+    return account_id
+
+
+def _inbox_count(factory: sessionmaker[Session], account_id: int) -> int:
+    with session_scope(factory) as session:
+        return route_breaker.inbox_state(session, _user(session), account_id).count
+
+
+def test_schedule_status_shows_the_inbox_breaker(cli_db: sessionmaker[Session]) -> None:
+    runner = CliRunner()
+    clear = runner.invoke(cli, ["linkedin", "schedule", "status"]).output
+    assert "inbox breaker: 0 of 2 route_changed inbox runs in a row" in clear
+
+    _inbox_changed(cli_db, 2)
+    tripped = runner.invoke(cli, ["linkedin", "schedule", "status"]).output
+    assert (
+        "inbox breaker: tripped, 2 of 2 route_changed inbox runs in a row;"
+        " scheduled inbox runs are skipped (`netkeeper linkedin schedule reset-breaker`)"
+    ) in tripped
+    # The connections lines are not the inbox's.
+    assert "route-changed breaker: 0 of 2 route_changed connections runs in a row" in tripped
+
+
+def test_reset_breaker_clears_the_inbox_breaker(cli_db: sessionmaker[Session]) -> None:
+    account_id = _inbox_changed(cli_db, 2)
+    runner = CliRunner()
+    declined = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="n\n")
+    assert declined.exit_code == 1
+    assert "2 `route_changed` inbox" in declined.output
+    assert "inbox runs will be allowed to fire again" in declined.output
+    assert _inbox_count(cli_db, account_id) == 2
+
+    confirmed = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="y\n")
+    assert confirmed.exit_code == 0, confirmed.output
+    assert "inbox breaker" in confirmed.output and "reset" in confirmed.output
+    assert _inbox_count(cli_db, account_id) == 0
+
+
+def test_reset_breaker_clears_a_corrupt_inbox_row(cli_db: sessionmaker[Session]) -> None:
+    with session_scope(cli_db, write=True) as session:
+        user = _user(session)
+        account_id = ensure_account(session, user).id
+        set_setting(session, user, f"linkedin.inbox_route_changed_breaker.{account_id}", "garbage")
+    result = CliRunner().invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "route_changed inbox unreadable" in result.output
+    with session_scope(cli_db) as session:
+        assert not route_breaker.inbox_tripped(session, _user(session), account_id)

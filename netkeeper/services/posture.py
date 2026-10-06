@@ -532,6 +532,7 @@ def posture(
         _route_changed_breaker(session, user, account_id),
         _answer_lost_limit(session, user, account_id),
         _contact_info_breaker(session, user, account_id),
+        _inbox_breaker(session, user, account_id),
         _network_aging(session, user),
     ]
     protections.append(_linkedin_reply_poll(session, user, now=now))
@@ -1890,6 +1891,66 @@ def _contact_info_breaker(session: Session, user: User, account_id: int) -> Prot
             " skipped until this clears. Run one by hand (`netkeeper linkedin enrich`) to"
             " check whether Contact info reads again, or clear it directly with"
             " `netkeeper linkedin schedule reset-breaker`",
+        ),
+    )
+
+
+def _inbox_breaker(session: Session, user: User, account_id: int) -> Protection:
+    """The inbox breaker's count (#437): consecutive LinkedIn inbox polls (by hand or by
+    schedule) that ended ``route_changed``, so the messaging page no longer reads. Its
+    own streak: connections syncs are never blocked by it. Reported the way
+    :func:`_contact_info_breaker` reports its own, an unreadable row included.
+
+    While it is tripped no scheduled poll refreshes the inbox, so #417's hold
+    (:func:`_linkedin_reply_poll`) keeps LinkedIn steps waiting once the inbox is stale;
+    the warning says so, and that a manual poll that completes releases both.
+    """
+    current = route_breaker.inbox_state(session, user, account_id)
+    since = f" (since {current.since:%Y-%m-%d %H:%M UTC})" if current.since is not None else ""
+    release = (
+        "run `netkeeper linkedin inbox` by hand: a poll that completes releases the breaker,"
+        " or clear it directly with `netkeeper linkedin schedule reset-breaker`"
+    )
+    waits = (
+        "Until a poll completes, the LinkedIn inbox goes stale and LinkedIn prefills and"
+        " steps for contacts you are watching wait (the inbox hold, shown on the linkedin"
+        " reply poll row)"
+    )
+    if not current.readable:
+        return Protection(
+            name="Inbox breaker",
+            status=Status.UNKNOWN,
+            value="stored state unreadable; treated as tripped",
+            warnings=(
+                "the inbox breaker's stored state is corrupt and could not be read."
+                " Scheduled inbox polls are skipped until it is next written (fail closed)."
+                f" {waits}. To check and repair it, {release}",
+            ),
+        )
+    if current.count == 0:
+        return Protection(
+            name="Inbox breaker",
+            status=Status.ON,
+            value="clear: no consecutive inbox polls have ended route_changed",
+        )
+    if not current.tripped:
+        return Protection(
+            name="Inbox breaker",
+            status=Status.ON,
+            value=(
+                f"{current.count} of {route_breaker.INBOX_THRESHOLD} route_changed inbox"
+                f" polls in a row{since}"
+            ),
+        )
+    return Protection(
+        name="Inbox breaker",
+        status=Status.ON,
+        value=f"tripped: {current.count} route_changed inbox polls in a row{since}",
+        warnings=(
+            f"{current.count} LinkedIn inbox polls in a row ended route_changed: the messaging"
+            f" page no longer reads as expected{since}. Scheduled inbox polls are skipped,"
+            f" and connections syncs are unaffected. {waits}. To check whether the page"
+            f" reads again, {release}",
         ),
     )
 

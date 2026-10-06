@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import random
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 
@@ -43,7 +44,7 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.scoping import install_scope_guard, scoped
-from netkeeper.services import budgets, runs, scheduler
+from netkeeper.services import budgets, route_breaker, runs, scheduler
 from netkeeper.services import heat as heat_service
 from netkeeper.services.budgets import ActionClass
 from netkeeper.services.inbox_poll import (
@@ -961,3 +962,135 @@ def test_the_cli_acknowledges_a_short_first_poll(cli_db: sessionmaker[Session]) 
     assert result.exit_code == 0 and "cleared" in result.output
     with session_scope(cli_db) as session:
         assert inbox_apply.short_first_poll(session, session.scalars(select(User)).one()) is None
+
+
+# --- #437: the inbox breaker at the runner ------------------------------------------------
+
+
+def _inbox_breaker(factory: sessionmaker[Session], user_id: int) -> route_breaker.BreakerState:
+    with session_scope(factory, write=True) as session:
+        user = _user(session, user_id)
+        return route_breaker.inbox_state(session, user, ensure_account(session, user).id)
+
+
+async def _poll(
+    factory: sessionmaker[Session], user_id: int, answer: object, *, at: datetime = NOW
+) -> str:
+    source = FakeInboxSource(answer)  # type: ignore[arg-type]
+    report = await poll_inbox(factory, user_id, source, settings=SETTINGS, clock=lambda: at)
+    return report.stop_reason
+
+
+OWNER_A = "urn:li:fsd_profile:INVENTEDA"
+OWNER_B = "urn:li:fsd_profile:INVENTEDB"
+_CHANGED = InboxReadStopped(Outcome.ROUTE_CHANGED, final_url="https://x.invalid/wall")
+
+
+async def test_route_changed_polls_trip_the_inbox_breaker_at_two(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    assert await _poll(session_factory, user_id, _CHANGED) == "route_changed"
+    state = _inbox_breaker(session_factory, user_id)
+    assert (state.count, state.tripped) == (1, False)
+    assert await _poll(session_factory, user_id, _CHANGED, at=NOW + timedelta(hours=3)) == (
+        "route_changed"
+    )
+    state = _inbox_breaker(session_factory, user_id)
+    assert (state.count, state.tripped, state.since) == (2, True, NOW)
+
+
+async def test_a_completed_poll_resets_the_inbox_streak_and_releases_a_trip(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    await _poll(session_factory, user_id, _CHANGED)
+    assert await _poll(session_factory, user_id, delta()) == READ
+    assert _inbox_breaker(session_factory, user_id).count == 0
+    # Only consecutive polls count: one more is a streak of 1.
+    await _poll(session_factory, user_id, _CHANGED)
+    assert _inbox_breaker(session_factory, user_id).count == 1
+    await _poll(session_factory, user_id, _CHANGED)
+    assert _inbox_breaker(session_factory, user_id).tripped
+    # A manual poll that completes releases it.
+    assert await _poll(session_factory, user_id, delta()) == READ
+    state = _inbox_breaker(session_factory, user_id)
+    assert (state.count, state.tripped) == (0, False)
+
+
+async def test_a_first_short_poll_counts_as_completed_for_the_breaker(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    await _poll(session_factory, user_id, _CHANGED)
+    assert _inbox_breaker(session_factory, user_id).count == 1
+    _outreach(session_factory, user_id, NOW - timedelta(days=60))
+    # A first poll that reaches its cap without its since ends completed, inbox_first_short.
+    short = delta(a_thread_with(ADA, NOW), complete=False)
+    assert await _poll(session_factory, user_id, short) == FIRST_SHORT
+    assert _inbox_breaker(session_factory, user_id).count == 0
+
+
+async def test_other_stops_leave_the_inbox_streak_where_it_was(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    # A completed poll records the mailbox owner; a later page showing another one ends
+    # owner_mismatch, which has its own fix (inbox-forget-owner) and counts for nothing.
+    assert await _poll(session_factory, user_id, replace(delta(), owner_urn=OWNER_A)) == READ
+    await _poll(session_factory, user_id, _CHANGED)
+    assert _inbox_breaker(session_factory, user_id).count == 1
+    mismatch = await _poll(session_factory, user_id, replace(delta(), owner_urn=OWNER_B))
+    assert mismatch == "owner_mismatch"
+    assert _inbox_breaker(session_factory, user_id).count == 1
+    # An incomplete read neither extends nor clears it.
+    assert await _poll(session_factory, user_id, delta(complete=False)) == INCOMPLETE
+    assert _inbox_breaker(session_factory, user_id).count == 1
+    # Nor does a throttle (which raises heat) or a log-out (which sets the session flag).
+    throttled = InboxReadStopped(Outcome.THROTTLED, final_url="https://x.invalid/t")
+    assert await _poll(session_factory, user_id, throttled) == "throttled"
+    assert _inbox_breaker(session_factory, user_id).count == 1
+
+
+async def test_a_log_out_leaves_the_inbox_streak_where_it_was(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    await _poll(session_factory, user_id, _CHANGED)
+    out = InboxReadStopped(Outcome.LOGGED_OUT, final_url="https://x.invalid/l")
+    assert await _poll(session_factory, user_id, out) == "logged_out"
+    assert _inbox_breaker(session_factory, user_id).count == 1
+
+
+async def test_a_session_flag_refusal_leaves_the_inbox_streak_alone(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    await _poll(session_factory, user_id, _CHANGED)
+    with session_scope(session_factory, write=True) as session:
+        flag_session(session, _user(session, user_id), Outcome.CHECKPOINT, url="https://x.invalid")
+    with pytest.raises(SessionFlagged):
+        await _poll(session_factory, user_id, delta())
+    assert _inbox_breaker(session_factory, user_id).count == 1
+
+
+async def test_inbox_polls_never_touch_the_connections_streaks(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    await _poll(session_factory, user_id, _CHANGED)
+    await _poll(session_factory, user_id, _CHANGED)
+    with session_scope(session_factory) as session:
+        user = _user(session, user_id)
+        account = ensure_account(session, user).id
+        assert route_breaker.state(session, user, account).count == 0
+        assert not route_breaker.answer_lost_tripped(session, user, account)
+        assert not route_breaker.contact_info_tripped(session, user, account)
+
+
+async def test_a_poll_by_another_user_never_moves_this_users_streak(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    with session_scope(session_factory, write=True) as session:
+        other = factories.make_user(session)
+        other_id = other.id
+        ensure_account(session, other)
+    await _poll(session_factory, other_id, _CHANGED)
+    await _poll(session_factory, other_id, _CHANGED)
+    assert _inbox_breaker(session_factory, other_id).tripped
+    assert _inbox_breaker(session_factory, user_id).count == 0
+    await _poll(session_factory, user_id, delta())
+    assert _inbox_breaker(session_factory, other_id).tripped

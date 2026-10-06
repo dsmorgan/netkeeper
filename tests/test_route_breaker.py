@@ -640,3 +640,163 @@ def test_a_corrupt_contact_info_row_reads_as_tripped_and_heals(
     assert (updated.readable, updated.count, updated.tripped) == (True, 3, True)
     _info_read(writer, user)
     assert not route_breaker.contact_info_tripped(writer, user, ACCOUNT)
+
+
+# --- #437: the inbox breaker, the inbox poll's own streak ---------------------------------
+
+
+def _inbox_key(account_id: int) -> str:
+    return f"linkedin.inbox_route_changed_breaker.{account_id}"
+
+
+def _inbox_changed(
+    writer: Session, user: User, account_id: int = ACCOUNT, now: datetime = NOW
+) -> route_breaker.BreakerState:
+    return route_breaker.record_inbox(
+        writer, user, account_id, route_changed=True, completed=False, now=now
+    )
+
+
+def _inbox_completed(writer: Session, user: User, account_id: int = ACCOUNT) -> None:
+    route_breaker.record_inbox(
+        writer, user, account_id, route_changed=False, completed=True, now=NOW
+    )
+
+
+def test_the_inbox_threshold_is_two() -> None:
+    assert route_breaker.INBOX_THRESHOLD == 2
+
+
+def test_a_never_recorded_account_has_no_inbox_streak(writer: Session, user: User) -> None:
+    state = route_breaker.inbox_state(writer, user, ACCOUNT)
+    assert (state.count, state.since, state.tripped) == (0, None, False)
+    assert not route_breaker.inbox_tripped(writer, user, ACCOUNT)
+
+
+def test_two_route_changed_inbox_polls_trip_it_and_one_does_not(
+    writer: Session, user: User
+) -> None:
+    _inbox_changed(writer, user)
+    assert not route_breaker.inbox_tripped(writer, user, ACCOUNT)
+    later = NOW + timedelta(hours=3)
+    _inbox_changed(writer, user, now=later)
+    state = route_breaker.inbox_state(writer, user, ACCOUNT)
+    assert (state.count, state.since, state.tripped) == (2, NOW, True)
+    assert route_breaker.inbox_tripped(writer, user, ACCOUNT)
+
+
+def test_a_completed_inbox_poll_resets_the_count_and_releases_a_trip(
+    writer: Session, user: User
+) -> None:
+    _inbox_changed(writer, user)
+    _inbox_completed(writer, user)
+    # The streak restarts: one more is a count of 1, not a trip.
+    _inbox_changed(writer, user)
+    assert route_breaker.inbox_state(writer, user, ACCOUNT).count == 1
+    _inbox_changed(writer, user)
+    assert route_breaker.inbox_tripped(writer, user, ACCOUNT)
+    _inbox_completed(writer, user)
+    state = route_breaker.inbox_state(writer, user, ACCOUNT)
+    assert (state.count, state.since, state.tripped) == (0, None, False)
+
+
+def test_any_other_inbox_ending_leaves_the_streak_where_it_was(writer: Session, user: User) -> None:
+    _inbox_changed(writer, user)
+    before = route_breaker.inbox_state(writer, user, ACCOUNT)
+    after = route_breaker.record_inbox(
+        writer, user, ACCOUNT, route_changed=False, completed=False, now=NOW + timedelta(hours=9)
+    )
+    assert after == before == route_breaker.inbox_state(writer, user, ACCOUNT)
+
+
+def test_an_inbox_poll_cannot_both_end_route_changed_and_complete(
+    writer: Session, user: User
+) -> None:
+    with pytest.raises(ValueError, match="both"):
+        route_breaker.record_inbox(
+            writer, user, ACCOUNT, route_changed=True, completed=True, now=NOW
+        )
+
+
+def test_record_inbox_requires_a_writer_session(
+    session_factory: sessionmaker[Session], writer: Session, user: User
+) -> None:
+    writer.flush()
+    with session_scope(session_factory) as reader, pytest.raises(RuntimeError, match="writer"):
+        route_breaker.record_inbox(
+            reader, user, ACCOUNT, route_changed=True, completed=False, now=NOW
+        )
+
+
+def test_the_inbox_breaker_and_every_other_streak_never_feed_each_other(
+    writer: Session, user: User
+) -> None:
+    for _ in range(route_breaker.INBOX_THRESHOLD):
+        _inbox_changed(writer, user)
+    # Inbox polls move none of the others.
+    assert not route_breaker.tripped(writer, user, ACCOUNT)
+    assert not route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+    assert not route_breaker.contact_info_tripped(writer, user, ACCOUNT)
+    # Connections streaks tripped and cleared never touch the inbox streak.
+    for _ in range(route_breaker.THRESHOLD):
+        route_breaker.record(writer, user, ACCOUNT, route_changed=True, succeeded=False, now=NOW)
+    assert route_breaker.tripped(writer, user, ACCOUNT)
+    route_breaker.record(writer, user, ACCOUNT, route_changed=False, succeeded=True, now=NOW)
+    for _ in range(route_breaker.CONTACT_INFO_THRESHOLD):
+        _info_lost(writer, user)
+    _info_read(writer, user)
+    assert route_breaker.inbox_state(writer, user, ACCOUNT).count == 2
+    # And clearing the inbox streak clears none of theirs.
+    route_breaker.record(writer, user, ACCOUNT, route_changed=True, succeeded=False, now=NOW)
+    route_breaker.record(writer, user, ACCOUNT, route_changed=True, succeeded=False, now=NOW)
+    _inbox_completed(writer, user)
+    assert route_breaker.tripped(writer, user, ACCOUNT)
+    assert not route_breaker.inbox_tripped(writer, user, ACCOUNT)
+
+
+def test_reset_clears_the_inbox_breaker_too(writer: Session, user: User) -> None:
+    for _ in range(route_breaker.INBOX_THRESHOLD):
+        _inbox_changed(writer, user)
+    route_breaker.reset(writer, user, ACCOUNT)
+    state = route_breaker.inbox_state(writer, user, ACCOUNT)
+    assert (state.count, state.since, state.tripped) == (0, None, False)
+
+
+def test_the_inbox_breaker_is_scoped_by_account_id(writer: Session, user: User) -> None:
+    for _ in range(route_breaker.INBOX_THRESHOLD):
+        _inbox_changed(writer, user, 1)
+    assert route_breaker.inbox_tripped(writer, user, 1)
+    assert not route_breaker.inbox_tripped(writer, user, 2)
+
+
+def test_the_inbox_breaker_is_scoped_by_user(writer: Session) -> None:
+    ada = factories.make_user(writer)
+    bob = factories.make_user(writer)
+    for _ in range(route_breaker.INBOX_THRESHOLD):
+        _inbox_changed(writer, ada)
+    assert route_breaker.inbox_tripped(writer, ada, ACCOUNT)
+    assert not route_breaker.inbox_tripped(writer, bob, ACCOUNT)
+    # Bob's completed poll leaves Ada's trip alone.
+    _inbox_completed(writer, bob)
+    assert route_breaker.inbox_tripped(writer, ada, ACCOUNT)
+    # Reset is per user too.
+    _inbox_changed(writer, bob)
+    _inbox_changed(writer, bob)
+    route_breaker.reset(writer, bob, ACCOUNT)
+    assert route_breaker.inbox_tripped(writer, ada, ACCOUNT)
+    assert not route_breaker.inbox_tripped(writer, bob, ACCOUNT)
+
+
+@pytest.mark.parametrize("raw", ["not an object", {"count": -1, "since": None}, {"since": None}])
+def test_a_corrupt_inbox_row_reads_as_tripped_and_heals(
+    writer: Session, user: User, raw: object
+) -> None:
+    set_setting(writer, user, _inbox_key(ACCOUNT), raw)  # type: ignore[arg-type]
+    state = route_breaker.inbox_state(writer, user, ACCOUNT)
+    assert (state.readable, state.tripped) == (False, True)
+    route_breaker.record_inbox(writer, user, ACCOUNT, route_changed=False, completed=False, now=NOW)
+    assert not route_breaker.inbox_state(writer, user, ACCOUNT).readable
+    updated = _inbox_changed(writer, user)
+    assert (updated.readable, updated.count, updated.tripped) == (True, 2, True)
+    _inbox_completed(writer, user)
+    assert not route_breaker.inbox_tripped(writer, user, ACCOUNT)

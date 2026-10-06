@@ -1686,6 +1686,7 @@ def linkedin_schedule_status(ctx: typer.Context) -> None:
             route = route_breaker.state(session, user, account_id)
             lost = route_breaker.answer_lost_states(session, user, account_id)
             info = route_breaker.contact_info_state(session, user, account_id)
+            inbox = route_breaker.inbox_state(session, user, account_id)
     finally:
         engine.dispose()
     if armed_at is None:
@@ -1711,6 +1712,7 @@ def linkedin_schedule_status(ctx: typer.Context) -> None:
     typer.echo(
         _streak_line("Contact info breaker", "Contact-info-lost", info, kind=SyncRunKind.ENRICH)
     )
+    typer.echo(_streak_line("inbox breaker", "route_changed", inbox, kind=SyncRunKind.INBOX))
 
 
 def _streak_line(
@@ -1721,10 +1723,17 @@ def _streak_line(
     kind: SyncRunKind | None = None,
 ) -> str:
     """One line of `schedule status` for a streak that skips scheduled runs: connections
-    runs, or enrichment runs for the Contact info breaker (#424)."""
+    runs, enrichment runs for the Contact info breaker (#424), or inbox polls for the
+    inbox breaker (#437)."""
     runs_of = "connections" if kind is None else kind.value
-    skipped = "enrichment" if kind is SyncRunKind.ENRICH else "connections"
-    if kind is not None and kind is not SyncRunKind.ENRICH:
+    skipped = (
+        "enrichment"
+        if kind is SyncRunKind.ENRICH
+        else "inbox"
+        if kind is SyncRunKind.INBOX
+        else "connections"
+    )
+    if kind is not None and kind not in (SyncRunKind.ENRICH, SyncRunKind.INBOX):
         name = f"{name} ({kind.value})"
     if not streak.readable:
         return (
@@ -1873,6 +1882,12 @@ def linkedin_schedule_reset_breaker(
     enrichment runs; this clears it too. A manual enrichment run (`netkeeper
     linkedin enrich`) that reaches its end and reads Contact info clears it the
     same way.
+
+    Two LinkedIn inbox polls in a row ending `route_changed` trip the inbox
+    breaker (#437), which skips scheduled inbox polls (and, once the inbox is
+    stale, holds LinkedIn steps for watched contacts); this clears it too. A manual
+    `netkeeper linkedin inbox` that completes clears it the same way. Connections
+    syncs are never affected by it.
     """
     engine = make_engine(database_url())
     try:
@@ -1884,16 +1899,19 @@ def linkedin_schedule_reset_breaker(
             current = route_breaker.state(session, user, account_id)
             lost = route_breaker.answer_lost_states(session, user, account_id)
             info = route_breaker.contact_info_state(session, user, account_id)
+            inbox = route_breaker.inbox_state(session, user, account_id)
         if (
             current.readable
             and current.count == 0
             and all(s.readable and s.count == 0 for s in lost.values())
             and info.readable
             and info.count == 0
+            and inbox.readable
+            and inbox.count == 0
         ):
             typer.echo(
-                "none of the route-changed breaker, the answer-lost limit, and the Contact"
-                " info breaker has a count; nothing to reset"
+                "none of the route-changed breaker, the answer-lost limit, the Contact"
+                " info breaker, and the inbox breaker has a count; nothing to reset"
             )
             return
         # A corrupt row reads as tripped (fail closed), and posture tells the
@@ -1913,16 +1931,22 @@ def linkedin_schedule_reset_breaker(
                 f"{info.count} Contact-info-lost enrich"
                 if info.readable
                 else "Contact-info-lost enrich unreadable",
+                f"{inbox.count} `route_changed` inbox"
+                if inbox.readable
+                else "route_changed inbox unreadable",
             ]
         )
         question = (
-            "reset the route-changed breaker, the answer-lost limit, and the Contact info"
-            f" breaker ({counts} run(s) in a row)? scheduled connections and enrichment runs"
-            " will be allowed to fire again"
-            if current.readable and all(s.readable for s in lost.values()) and info.readable
+            "reset the route-changed breaker, the answer-lost limit, the Contact info breaker,"
+            f" and the inbox breaker ({counts} run(s) in a row)? scheduled connections,"
+            " enrichment, and inbox runs will be allowed to fire again"
+            if current.readable
+            and all(s.readable for s in lost.values())
+            and info.readable
+            and inbox.readable
             else f"a stored breaker state is unreadable, so it reads as tripped ({counts})."
-            " reset them all? scheduled connections and enrichment runs will be allowed to"
-            " fire again"
+            " reset them all? scheduled connections, enrichment, and inbox runs will be"
+            " allowed to fire again"
         )
         if not yes and not typer.confirm(question):
             typer.echo("cancelled: the breaker stays as it is")
@@ -1932,8 +1956,8 @@ def linkedin_schedule_reset_breaker(
     finally:
         engine.dispose()
     typer.echo(
-        "route-changed breaker, answer-lost limit, and Contact info breaker reset; scheduled"
-        " connections and enrichment runs may fire again when due"
+        "route-changed breaker, answer-lost limit, Contact info breaker, and inbox breaker"
+        " reset; scheduled connections, enrichment, and inbox runs may fire again when due"
     )
 
 
