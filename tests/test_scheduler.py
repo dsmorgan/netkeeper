@@ -964,6 +964,121 @@ async def test_the_contact_info_breaker_does_not_skip_connections(
     assert result is not None and result.fired is True
 
 
+# --- the inbox breaker: the inbox poll only (#437) --------------------------------------
+
+
+def _inbox_runs(session_factory: sessionmaker[Session], owner: User, runs: int) -> None:
+    with session_scope(session_factory, write=True) as session:
+        for _ in range(runs):
+            route_breaker.record_inbox(
+                session, owner, ACCOUNT, route_changed=True, completed=False, now=NOW
+            )
+
+
+async def test_a_tripped_inbox_breaker_skips_an_inbox_fire(
+    session_factory: sessionmaker[Session],
+) -> None:
+    result, calls = await _fire_after(
+        session_factory,
+        scheduler.JobKind.INBOX,
+        lambda owner: _inbox_runs(session_factory, owner, route_breaker.INBOX_THRESHOLD),
+    )
+    assert calls == 0
+    assert result is not None and result.fired is False
+    assert result.skipped_reason == "inbox_route_changed_breaker"
+    # the cadence still advances -- a skip is not a stall
+    assert result.next_due is not None
+    assert result.next_due > NOW + DEFAULT_SCHEDULES[scheduler.JobKind.INBOX].interval
+
+
+async def test_an_inbox_streak_below_the_threshold_does_not_skip(
+    session_factory: sessionmaker[Session],
+) -> None:
+    result, calls = await _fire_after(
+        session_factory,
+        scheduler.JobKind.INBOX,
+        lambda owner: _inbox_runs(session_factory, owner, route_breaker.INBOX_THRESHOLD - 1),
+    )
+    assert calls == 1
+    assert result is not None and result.fired is True
+
+
+async def test_a_corrupt_inbox_row_skips_an_inbox_fire(
+    session_factory: sessionmaker[Session],
+) -> None:
+    def corrupt(owner: User) -> None:
+        with session_scope(session_factory, write=True) as session:
+            set_setting(
+                session, owner, f"linkedin.inbox_route_changed_breaker.{ACCOUNT}", "not an object"
+            )
+
+    result, calls = await _fire_after(session_factory, scheduler.JobKind.INBOX, corrupt)
+    assert calls == 0
+    assert result is not None and result.skipped_reason == "inbox_route_changed_breaker"
+
+
+@pytest.mark.parametrize("kind", [*_CONNECTIONS, scheduler.JobKind.ENRICH])
+async def test_the_inbox_breaker_does_not_skip_any_other_kind(
+    session_factory: sessionmaker[Session], kind: scheduler.JobKind
+) -> None:
+    result, calls = await _fire_after(
+        session_factory,
+        kind,
+        lambda owner: _inbox_runs(session_factory, owner, route_breaker.INBOX_THRESHOLD),
+    )
+    assert calls == 1
+    assert result is not None and result.fired is True
+
+
+@pytest.mark.parametrize("trip", ["route_changed", "answer_lost", "contact_info"])
+async def test_no_other_breaker_skips_an_inbox_fire(
+    session_factory: sessionmaker[Session], trip: str
+) -> None:
+    def setup(owner: User) -> None:
+        with session_scope(session_factory, write=True) as session:
+            if trip == "route_changed":
+                for _ in range(route_breaker.THRESHOLD):
+                    route_breaker.record(
+                        session, owner, ACCOUNT, route_changed=True, succeeded=False, now=NOW
+                    )
+            elif trip == "answer_lost":
+                for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
+                    route_breaker.record_answer_lost(
+                        session,
+                        owner,
+                        ACCOUNT,
+                        kind=SyncRunKind.CONNECTIONS_FULL,
+                        answer_lost=True,
+                        clean_end=False,
+                        now=NOW,
+                    )
+            else:
+                for _ in range(route_breaker.CONTACT_INFO_THRESHOLD):
+                    route_breaker.record_contact_info(
+                        session, owner, ACCOUNT, answer_lost=True, clean_end=False, now=NOW
+                    )
+
+    result, calls = await _fire_after(session_factory, scheduler.JobKind.INBOX, setup)
+    assert calls == 1
+    assert result is not None and result.fired is True
+
+
+async def test_the_inbox_breaker_is_per_user(session_factory: sessionmaker[Session]) -> None:
+    """Another user's tripped inbox breaker never skips this user's fire."""
+
+    def setup(owner: User) -> None:
+        with session_scope(session_factory, write=True) as session:
+            other = factories.make_user(session)
+            for _ in range(route_breaker.INBOX_THRESHOLD):
+                route_breaker.record_inbox(
+                    session, other, ACCOUNT, route_changed=True, completed=False, now=NOW
+                )
+
+    result, calls = await _fire_after(session_factory, scheduler.JobKind.INBOX, setup)
+    assert calls == 1
+    assert result is not None and result.fired is True
+
+
 # --- poll_and_fire: not-yet-due and never-established are both no-ops -------
 
 

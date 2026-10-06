@@ -56,7 +56,7 @@ from netkeeper.linkedin.inbox import (
 )
 from netkeeper.linkedin.observe import ObservationFailed
 from netkeeper.models import JsonValue, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
-from netkeeper.services import budgets, runs
+from netkeeper.services import budgets, route_breaker, runs
 from netkeeper.services import heat as heat_service
 from netkeeper.services.budgets import ActionClass, BudgetExceeded
 from netkeeper.services.linkedin_session import flag_session
@@ -249,6 +249,19 @@ async def poll_inbox(
                 flagged = True
         return heat_raised, flagged
 
+    def record_breaker(*, route_changed: bool, completed: bool) -> None:
+        """#437: the inbox's own streak, in its own writer session, before the ending is
+        written (as connections_sync does). Never touches the connections streaks."""
+        with session_scope(factory, write=True) as session:
+            route_breaker.record_inbox(
+                session,
+                _load_user(session, user_id),
+                account_id,
+                route_changed=route_changed,
+                completed=completed,
+                now=clock(),
+            )
+
     def apply_and_finish(
         delta: InboxDelta, reason: str, since: datetime | None
     ) -> inbox_apply.InboxCounts | None:
@@ -313,6 +326,8 @@ async def poll_inbox(
             delta = await source.read(spec)
         except InboxReadStopped as stop:
             heat_raised, flagged = await off_loop(record_response, stop.outcome, stop.final_url)
+            if stop.outcome is Outcome.ROUTE_CHANGED:
+                await off_loop(record_breaker, route_changed=True, completed=False)
             await off_loop(
                 finish, SyncRunStatus.ABORTED, stop.outcome.value, _zero_counts(), error=None
             )
@@ -334,6 +349,9 @@ async def poll_inbox(
             raise InboxPollFailed(f"reading the inbox failed: {type(exc).__name__}") from None
         reason = _ending(delta, plan)
         counts = await off_loop(apply_and_finish, delta, reason, spec.since)
+        if counts is not None and reason != INCOMPLETE:
+            # The poll completed: a poll that reads again clears the inbox breaker.
+            await off_loop(record_breaker, route_changed=False, completed=True)
         if counts is None:
             log.error(
                 "inbox poll %d: the page showed another mailbox; nothing written", started_run_id

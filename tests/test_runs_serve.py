@@ -1170,3 +1170,128 @@ async def test_the_worker_refuses_only_a_scheduled_enrichment_run_for_the_contac
             "contact_info_breaker",
         )
         assert stored.error == "the Contact info breaker is tripped for this account"
+
+
+# --- #437: the inbox breaker at the worker ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "trigger", "refused"),
+    [
+        (SyncRunKind.INBOX, SyncRunTrigger.SCHEDULED, True),
+        # Manual runs are never refused for it: a poll by hand is how a person releases it.
+        (SyncRunKind.INBOX, SyncRunTrigger.MANUAL, False),
+        # The inbox's streak never stops any other kind.
+        (SyncRunKind.ENRICH, SyncRunTrigger.SCHEDULED, False),
+        (SyncRunKind.CONNECTIONS_FULL, SyncRunTrigger.SCHEDULED, False),
+        (SyncRunKind.CONNECTIONS_INCREMENTAL, SyncRunTrigger.SCHEDULED, False),
+    ],
+)
+async def test_the_worker_refuses_only_a_scheduled_inbox_run_for_the_inbox_breaker(
+    session_factory: Any,
+    settings: Settings,
+    kind: SyncRunKind,
+    trigger: SyncRunTrigger,
+    refused: bool,
+) -> None:
+    import factories
+
+    from netkeeper.linkedin.browser import BrowserUnavailable
+    from netkeeper.worker import BrowserWorker
+
+    provider, connector = fake_provider(error=BrowserUnavailable("Chrome is not running"))
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        account = ensure_account(session, user)
+        arm_scheduled_runs(session, user, now=START)
+        for _ in range(route_breaker.INBOX_THRESHOLD):
+            route_breaker.record_inbox(
+                session, user, account.id, route_changed=True, completed=False, now=START
+            )
+        run = SyncRun(
+            user_id=user.id,
+            linkedin_account_id=account.id,
+            kind=kind,
+            trigger=trigger,
+            started_at=START,
+        )
+        session.add(run)
+        session.flush()
+        run_id, user_id = run.id, user.id
+    worker = BrowserWorker(provider, session_factory, settings.linkedin)
+
+    await worker.execute(run_id, user_id)
+
+    with session_scope(session_factory) as session:
+        owner = session.get(User, user_id)
+        assert owner is not None
+        stored = runs.get_run(session, owner, run_id)
+        if not refused:
+            assert stored.stop_reason != "inbox_route_changed_breaker"
+            assert connector.attaches == 1
+            return
+        assert connector.attaches == 0
+        assert (stored.status, stored.stop_reason) == (
+            SyncRunStatus.FAILED,
+            "inbox_route_changed_breaker",
+        )
+        assert stored.error == "the inbox breaker is tripped for this account"
+
+
+async def test_a_tripped_connections_breaker_does_not_refuse_a_scheduled_inbox_run(
+    session_factory: Any, settings: Settings
+) -> None:
+    """The reverse direction: an inbox poll that has completed before is not refused for
+    any connections or enrichment streak."""
+    import factories
+
+    from netkeeper.linkedin.browser import BrowserUnavailable
+    from netkeeper.worker import BrowserWorker
+
+    provider, connector = fake_provider(error=BrowserUnavailable("Chrome is not running"))
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        account = ensure_account(session, user)
+        arm_scheduled_runs(session, user, now=START)
+        for _ in range(route_breaker.THRESHOLD):
+            route_breaker.record(
+                session, user, account.id, route_changed=True, succeeded=False, now=START
+            )
+        for kind in route_breaker.ANSWER_LOST_KINDS:
+            for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
+                route_breaker.record_answer_lost(
+                    session,
+                    user,
+                    account.id,
+                    kind=kind,
+                    answer_lost=True,
+                    clean_end=False,
+                    now=START,
+                )
+        done = runs.create_run(
+            session, user, SyncRunKind.INBOX, trigger=SyncRunTrigger.MANUAL, now=START
+        )
+        runs.finish_run(
+            session,
+            user,
+            done.id,
+            status=SyncRunStatus.COMPLETED,
+            now=START,
+            stop_reason="inbox_read",
+        )
+        run = SyncRun(
+            user_id=user.id,
+            linkedin_account_id=account.id,
+            kind=SyncRunKind.INBOX,
+            trigger=SyncRunTrigger.SCHEDULED,
+            started_at=START,
+        )
+        session.add(run)
+        session.flush()
+        run_id, user_id = run.id, user.id
+    worker = BrowserWorker(provider, session_factory, settings.linkedin)
+
+    outcome = await worker.execute(run_id, user_id)
+
+    assert connector.attaches == 1
+    assert outcome is runs.RunOutcome.RETRY_LATER

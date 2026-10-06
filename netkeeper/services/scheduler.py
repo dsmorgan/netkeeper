@@ -106,7 +106,9 @@ as ``"route_changed_breaker"`` the same way, with no off switch at all, and
 once three of one kind in a row have ended ``answer_lost`` (#199), as ``"answer_lost_breaker"``.
 For enrichment it asks the Contact info breaker (#424): once three enrichment
 runs in a row have ended ``answer_lost`` (the Contact info caps, #405), a due
-enrichment fire is skipped as ``"contact_info_breaker"``. A
+enrichment fire is skipped as ``"contact_info_breaker"``. For the inbox poll it asks
+the inbox breaker (#437): once two inbox polls in a row have ended ``route_changed``,
+a due fire is skipped as ``"inbox_route_changed_breaker"``. A
 handler that could not reach the browser answers
 :attr:`JobOutcome.RETRY_LATER`, and :func:`park_retry` parks one retry 20 to 50
 minutes out (spec 9.9).
@@ -1152,6 +1154,10 @@ async def poll_and_fire(
                 # Three enrichment runs in a row stopped on lost Contact info bodies
                 # (#424): the body tap is not working, so scheduled runs stop clicking.
                 skipped_reason = "contact_info_breaker"
+            elif kind is JobKind.INBOX and route_breaker.inbox_tripped(session, user, account_id):
+                # Two inbox polls in a row ended route_changed (#437): the messaging page
+                # changed shape, and a poll every interval would only load it again.
+                skipped_reason = "inbox_route_changed_breaker"
             next_due = record_fired(
                 session,
                 user,

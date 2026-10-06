@@ -245,6 +245,7 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "route-changed breaker",
         "answer-lost limit",
         "Contact info breaker",
+        "Inbox breaker",
         "network aging",
         "linkedin reply poll",
     ]
@@ -2221,3 +2222,61 @@ def test_an_upgraded_campaign_approved_today_shows_the_next_opening_at_nine_pm(
     row = _row(_report(writer, user, now=nine_pm), "next campaign send")
     assert "(2026-09-24 13:00 UTC)" in row.value, row.value  # 09:00 New York, Thursday
     assert "(2026-09-24 01:00 UTC)" not in row.value
+
+
+# --- #437: the inbox breaker --------------------------------------------------------------
+
+
+def _inbox_changed(writer: Session, user: User, polls: int) -> None:
+    for _ in range(polls):
+        route_breaker.record_inbox(
+            writer, user, ACCOUNT, route_changed=True, completed=False, now=NOW
+        )
+
+
+def test_a_clear_inbox_breaker_shows_no_warning(writer: Session, user: User) -> None:
+    row = _row(_report(writer, user), "Inbox breaker")
+    assert row.status is Status.ON and row.warnings == ()
+    assert row.value == "clear: no consecutive inbox polls have ended route_changed"
+
+
+def test_an_inbox_streak_below_the_breaker_shows_its_count(writer: Session, user: User) -> None:
+    _inbox_changed(writer, user, 1)
+    row = _row(_report(writer, user), "Inbox breaker")
+    assert row.status is Status.ON and row.warnings == ()
+    assert row.value == "1 of 2 route_changed inbox polls in a row (since 2026-09-23 18:00 UTC)"
+
+
+def test_a_tripped_inbox_breaker_warns_why_and_how_to_release_it(
+    writer: Session, user: User
+) -> None:
+    _inbox_changed(writer, user, 2)
+    report = _report(writer, user)
+    row = _row(report, "Inbox breaker")
+    assert row.status is Status.ON
+    assert row.value == "tripped: 2 route_changed inbox polls in a row (since 2026-09-23 18:00 UTC)"
+    (warning,) = row.warnings
+    assert "Scheduled inbox polls are skipped" in warning
+    assert "connections syncs are unaffected" in warning
+    # The link to #417's hold, and the release.
+    assert "inbox hold" in warning and "LinkedIn prefills and steps" in warning
+    assert "netkeeper linkedin inbox" in warning and "releases the breaker" in warning
+    assert "reset-breaker" in warning
+    assert not report.ok
+
+
+def test_the_inbox_breaker_leaves_the_connections_rows_alone(writer: Session, user: User) -> None:
+    _inbox_changed(writer, user, 2)
+    report = _report(writer, user)
+    for name in ("Contact info breaker",):
+        assert _row(report, name).warnings == ()
+
+
+def test_a_corrupt_inbox_row_warns_unknown(writer: Session, user: User) -> None:
+    set_setting(writer, user, f"linkedin.inbox_route_changed_breaker.{ACCOUNT}", "not an object")
+    report = _report(writer, user)
+    row = _row(report, "Inbox breaker")
+    assert row.status is Status.UNKNOWN
+    assert row.value == "stored state unreadable; treated as tripped"
+    assert row.warnings and "Scheduled inbox polls are skipped" in row.warnings[0]
+    assert not report.ok

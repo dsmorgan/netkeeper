@@ -484,6 +484,8 @@ def _linkedin(
             blocked = _breaker(session, user, account.id)
         if blocked is None and account is not None and kind is JobKind.ENRICH:
             blocked = _contact_info_breaker(session, user, account.id)
+        if blocked is None and account is not None and kind is JobKind.INBOX:
+            blocked = _inbox_breaker(session, user, account.id)
         if blocked is None and kind is JobKind.INBOX and base.last_at is None:
             blocked = (
                 CheckState.BLOCKED,
@@ -592,5 +594,17 @@ def _contact_info_breaker(
             CheckState.BLOCKED,
             "Enrichment is stopped after several runs lost too many Contact info answers;"
             " see Posture on the Settings page",
+        )
+    return None
+
+
+def _inbox_breaker(session: Session, user: User, account_id: int) -> tuple[CheckState, str] | None:
+    if route_breaker.inbox_tripped(session, user, account_id):
+        return (
+            CheckState.BLOCKED,
+            "The LinkedIn inbox poll is stopped after several polls found the messaging page"
+            " changed; run `netkeeper linkedin inbox` by hand to release it. LinkedIn steps"
+            " for watched contacts wait until a poll completes. See Posture on the Settings"
+            " page",
         )
     return None

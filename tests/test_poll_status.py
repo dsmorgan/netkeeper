@@ -788,3 +788,53 @@ async def test_endpoint_reads_the_running_sender_and_never_runs_a_check(
         assert row is not None and row.replies_polled_at == polled
         counted = scoped(again, SettingKV).with_only_columns(func.count(SettingKV.id))
         assert session.scalar(counted) == settings_rows
+
+
+def _trip_inbox(session: Session, user: User, account_id: int) -> None:
+    for _ in range(2):
+        route_breaker.record_inbox(
+            session, user, account_id, route_changed=True, completed=False, now=NOW
+        )
+    assert route_breaker.inbox_tripped(session, user, account_id)
+
+
+def test_a_tripped_inbox_breaker_blocks_the_inbox_poll_only(world: World) -> None:
+    """#437: the inbox's own streak blocks the inbox poll, with how to release it."""
+    kinds = (JobKind.INBOX, JobKind.ENRICH, JobKind.CONNECTIONS_INCREMENTAL)
+    for session, user in world.write():
+        _trip_inbox(session, user, _arm_linkedin(session, user, kinds=kinds))
+
+    checks = world.read()
+
+    inbox = checks["linkedin_inbox"]
+    assert inbox.state is S.BLOCKED
+    assert inbox.next_at is None
+    reason = inbox.reason or ""
+    assert "messaging page changed" in reason
+    assert "netkeeper linkedin inbox" in reason
+    assert "LinkedIn steps for watched contacts wait" in reason
+    for key in ("linkedin_enrich", "linkedin_incremental_sync"):
+        assert checks[key].state in (S.SCHEDULED, S.DUE)
+        assert checks[key].reason is None
+
+
+def test_an_inbox_streak_below_the_threshold_leaves_the_inbox_poll_scheduled(
+    world: World,
+) -> None:
+    for session, user in world.write():
+        account_id = _arm_linkedin(session, user, kinds=(JobKind.INBOX,))
+        route_breaker.record_inbox(
+            session, user, account_id, route_changed=True, completed=False, now=NOW
+        )
+
+    assert "messaging page changed" not in (world.read()["linkedin_inbox"].reason or "")
+
+
+def test_the_connections_breakers_leave_the_inbox_poll_alone(world: World) -> None:
+    for session, user in world.write():
+        account_id = _arm_linkedin(session, user, kinds=(JobKind.INBOX,))
+        _trip_route_breaker(session, user, account_id)
+        _trip_answer_lost(session, user, account_id)
+        _trip_contact_info(session, user, account_id)
+
+    assert "messaging page changed" not in (world.read()["linkedin_inbox"].reason or "")

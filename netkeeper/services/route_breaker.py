@@ -79,6 +79,22 @@ than two overlays) leaves the count where it was. The runner decides which of
 these a run is (``services.enrichment.contact_info_lost_again`` and
 ``contact_info_read_again``); this module only counts.
 
+**The inbox breaker** (#437) is a fourth, separate streak, for the LinkedIn inbox
+poll (``inbox`` runs), which reads the messaging page, a different route from the
+connections list's. :data:`INBOX_THRESHOLD` consecutive inbox polls, by hand or by
+schedule, ending ``aborted`` with ``route_changed`` trip it, and the scheduler (and
+the worker's second check) then skip every scheduled inbox fire as
+``"inbox_route_changed_breaker"``. An inbox shape change never blocks a connections
+sync, and the connections streaks never skip an inbox poll: the two counters never
+feed each other. The streak clears when an inbox poll ends ``completed``
+(:func:`record_inbox`), whatever its trigger, so a manual ``netkeeper linkedin
+inbox`` that completes releases it; :func:`reset` clears it with the others. Every
+other ending leaves the count where it was: ``owner_mismatch`` (the page read fine
+and showed another mailbox, which has its own fix, ``inbox-forget-owner``),
+``inbox_incomplete``, a budget refusal, a cancel, a checkpoint, a throttle, a
+log-out, or an exception. While it is tripped, #417's hold keeps LinkedIn steps
+waiting once the inbox goes stale, because no scheduled poll refreshes it.
+
 Persisted like :mod:`netkeeper.services.heat`: a ``settings_kv`` row keyed by
 account id, read and written through a session and a ``User`` -- the
 extractor boundary (ADR 0005, spec 9.10) keeps this off the ``linkedin/``
@@ -131,6 +147,15 @@ _CONTACT_INFO_KEY_PREFIX: Final = "linkedin.contact_info_breaker"
 #: hour; three in a row, on three separate fires, is the body tap not working.
 CONTACT_INFO_THRESHOLD: Final = 3
 
+_INBOX_KEY_PREFIX: Final = "linkedin.inbox_route_changed_breaker"
+
+#: Consecutive inbox polls ending ``route_changed`` that trip the inbox breaker (#437).
+#: Pinned literally. The same bar as the connections breaker's :data:`THRESHOLD`, for
+#: the same reason: one ``route_changed`` poll can be a render hiccup a retry would not
+#: repeat; two in a row, a whole 3-hour interval apart, is the messaging page's shape
+#: having changed. A higher bar would only buy more page loads against a changed page.
+INBOX_THRESHOLD: Final = 2
+
 
 @dataclass(frozen=True, slots=True)
 class BreakerState:
@@ -152,7 +177,8 @@ class BreakerState:
     readable: bool = True
     #: The count that trips this streak: :data:`THRESHOLD` for the route-changed
     #: breaker, :data:`ANSWER_LOST_THRESHOLD` for the answer-lost limit,
-    #: :data:`CONTACT_INFO_THRESHOLD` for the Contact info breaker.
+    #: :data:`CONTACT_INFO_THRESHOLD` for the Contact info breaker,
+    #: :data:`INBOX_THRESHOLD` for the inbox breaker.
     threshold: int = THRESHOLD
 
     @property
@@ -332,11 +358,59 @@ def record_contact_info(
     return updated
 
 
+def inbox_state(session: Session, user: User, account_id: int) -> BreakerState:
+    """The inbox breaker's streak (#437): how many consecutive inbox polls have ended
+    ``route_changed``, and when the streak started. Read-only."""
+    return _load_streak(session, user, account_id, _INBOX)
+
+
+def inbox_tripped(session: Session, user: User, account_id: int) -> bool:
+    """Whether the inbox breaker is tripped: the streak is at or above
+    :data:`INBOX_THRESHOLD`, or unreadable (fail closed). Read-only. The scheduler and
+    the worker ask it before a scheduled inbox poll."""
+    return inbox_state(session, user, account_id).tripped
+
+
+def record_inbox(
+    session: Session,
+    user: User,
+    account_id: int,
+    *,
+    route_changed: bool,
+    completed: bool,
+    now: datetime,
+) -> BreakerState:
+    """Record one inbox poll's outcome on the inbox breaker (#437). Needs a writer
+    session.
+
+    ``route_changed`` (the poll ended ``aborted`` with ``route_changed``) extends the
+    streak by one. ``completed`` (the poll ended ``completed``) clears it, whatever the
+    trigger: that is how a manual poll shows the messaging page reads again. Neither
+    leaves the count where it was (``owner_mismatch`` included: that page read fine),
+    and a corrupt row stays as it is (still read as tripped).
+    """
+    _require_writer(session, "route_breaker.record_inbox")
+    if route_changed and completed:
+        raise ValueError("a poll cannot both end route_changed and complete")
+    current = _load_streak(session, user, account_id, _INBOX)
+    if completed:
+        updated = BreakerState(count=0, since=None, threshold=INBOX_THRESHOLD)
+    elif route_changed:
+        # Fail closed as record() does: a corrupt row stays tripped, not count=1.
+        count = current.count + 1 if current.readable else INBOX_THRESHOLD
+        updated = BreakerState(count=count, since=current.since or now, threshold=INBOX_THRESHOLD)
+    else:
+        return current
+    _store_streak(session, user, account_id, _INBOX, updated)
+    return updated
+
+
 def reset(session: Session, user: User, account_id: int) -> BreakerState:
     """Clear the breaker directly (``netkeeper linkedin schedule reset-breaker``),
-    and every answer-lost streak with it (#199), and the Contact info breaker (#424):
-    one command clears whatever skips scheduled LinkedIn runs after failed runs. Needs
-    a writer session. Idempotent. Returns the route-changed breaker's cleared state."""
+    and every answer-lost streak with it (#199), the Contact info breaker (#424), and the
+    inbox breaker (#437): one command clears whatever skips scheduled LinkedIn runs after
+    failed runs. Needs a writer session. Idempotent. Returns the route-changed breaker's
+    cleared state."""
     _require_writer(session, "route_breaker.reset")
     cleared = BreakerState(count=0, since=None)
     _store(session, user, account_id, cleared)
@@ -354,6 +428,13 @@ def reset(session: Session, user: User, account_id: int) -> BreakerState:
         account_id,
         _CONTACT_INFO,
         BreakerState(count=0, since=None, threshold=CONTACT_INFO_THRESHOLD),
+    )
+    _store_streak(
+        session,
+        user,
+        account_id,
+        _INBOX,
+        BreakerState(count=0, since=None, threshold=INBOX_THRESHOLD),
     )
     return cleared
 
@@ -376,6 +457,7 @@ class _Streak:
 _CONTACT_INFO: Final = _Streak(
     _CONTACT_INFO_KEY_PREFIX, CONTACT_INFO_THRESHOLD, "Contact info breaker"
 )
+_INBOX: Final = _Streak(_INBOX_KEY_PREFIX, INBOX_THRESHOLD, "inbox breaker")
 
 
 def _streak(lost_kind: SyncRunKind | None) -> _Streak:
