@@ -30,6 +30,7 @@ from messaging_pages import (
     Member,
     compose_href,
     compose_option_answer,
+    compose_option_url,
     conversation_urn,
     existing_bubble_html,
     message_control_html,
@@ -1092,7 +1093,7 @@ async def test_a_late_second_compose_option_refuses_the_authorizing_pass() -> No
     site = MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, late_compose_after_reads=1))
     ran = await prefill(site)
     assert_no_keys(ran)
-    assert ran.result.outcome.reason == "more than one compose option was loaded"
+    assert ran.result.outcome.reason == "another_compose"
 
 
 ANN = Member(150, "Ann", "Example", "Invented")
@@ -1277,3 +1278,64 @@ async def test_option_a_stays_one_switch_away(monkeypatch: pytest.MonkeyPatch) -
     ran = await prefill(MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, focus_composer=False)))
     assert_no_keys(ran)
     assert ran.tab.focus_calls == []
+
+
+# --- #434 check at 9a0e169 ---------------------------------------------------------------
+
+
+async def test_a_second_compose_option_before_the_seam_means_no_focus_call() -> None:
+    """B13: the pass before the seam also refuses a later compose option, so the one
+    focus() is never spent on a bubble the run won't type into."""
+    bubble = Bubble(ZEPHYRINE, focus_composer=False, late_compose_after_reads=1)
+    ran = await prefill(MessagingSite(ZEPHYRINE, bubble=bubble))
+    assert_no_keys(ran)
+    assert ran.result.outcome.reason == "another_compose"
+    assert ran.tab.focus_calls == []
+
+
+async def test_a_compose_option_arriving_mid_type_stops_with_no_further_key() -> None:
+    def another(tab: MessagingTab) -> None:
+        tab.emit(
+            compose_option_url(ZEPHYRINE), compose_option_answer(ZEPHYRINE, existing_conversation=7)
+        )
+
+    ran = await prefill(_after(3, another))
+    assert ran.kind is MessageOutcomeKind.PARTIALLY_TYPED
+    assert ran.result.outcome.reason == "another_compose"
+    assert len(ran.tab.attempts) == 3
+
+
+async def test_focus_elsewhere_on_the_page_is_not_the_composer_holding_it() -> None:
+    """B11: the seam asks whether the composer holds focus, not whether anything does."""
+    site = MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, focus_composer=False))
+    original = site.open_bubble
+
+    def opened(tab: MessagingTab, bubble: Bubble) -> None:
+        original(tab, bubble)
+        tab.focused = next(e for e in tab.document.elements() if e.tag == "button")
+
+    site.open_bubble = opened  # type: ignore[method-assign]
+    ran = await prefill(site)
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert ran.tab.focus_calls == [ran.tab.composer]
+
+
+async def test_a_failed_focus_still_uses_the_one_call() -> None:
+    """B12: the seam is spent before the attempt, and stays spent after a failure."""
+    site = MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, focus_composer=False))
+    site.focus_error = RuntimeError("focus failed")
+    provider, _ = fake_provider(site)
+    async with provider.run() as run:
+        await run.goto(f"https://www.linkedin.com/in/{ZEPHYRINE.slug}/")
+        click = await run.click_message(f"/in/{ZEPHYRINE.slug}/", ZEPHYRINE.profile_id, pause_s=0)
+        assert click.clicked
+        tab = site.tab
+        composer = tab.get_by_role(
+            "textbox", name=browser_module.COMPOSER_NAME, exact=True, include_hidden=True
+        )
+        await run._focus_seam(tab, composer)  # type: ignore[arg-type]
+        assert len(tab.focus_calls) == 1 and tab.focused is not tab.composer
+        with pytest.raises(RuntimeError, match="at most once"):
+            await run._focus_seam(tab, composer)  # type: ignore[arg-type]
+        assert len(tab.focus_calls) == 1
+        await run.hand_over()
