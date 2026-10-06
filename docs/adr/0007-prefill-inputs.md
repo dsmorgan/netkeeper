@@ -136,7 +136,7 @@ The composer's `aria-label` doesn't name the recipient, so the recipient comes f
    No compose option seen, or more than one, means `not_typed`. The type decides which bubble layout the next check expects.
 3. **The bubble.** At most one `role="dialog"` named `Messaging` may be on the page in either layout. Then:
    - **`REPLY`, an existing conversation.** Exactly one `role="dialog"` named `Messaging` holds the composer. Its header `h2` holds exactly one link, and that link is `/in/<profile id>/`, where the id is the contact's bare profile id (the same id as in the URN, not the vanity slug). **The other layout** is any `New message` heading anywhere on the page; one refuses.
-   - **`CONNECTION_MESSAGE`, never messaged.** This check doesn't rely on `role="dialog"`, which the capture didn't confirm. The scope is the innermost element that contains both the `New message` heading and the verified composer (for example, `locator("*").filter(has=heading).filter(has=composer).last`). Exactly one `New message` heading is on the page. Inside the scope there's exactly one chip (a button whose name starts `Remove `), exactly one recipient field named `Enter message recipients`, and exactly one `/in/` link, the card's, whose slug is the contact's public id. Zero chips, two chips, two cards, or a card for anyone else is refused. Scoping matters: the profile page around the bubble links its own slug too, so a page-wide search would find the right slug whatever the bubble said. When the profile page had exactly one `h1`, the chip's name must also be `Remove ` followed by that `h1`'s text, LinkedIn's own name for the profile, never netkeeper's stored name; a mismatch refuses. **The other layout** is a `role="dialog"` named `Messaging` that doesn't contain the `New message` heading; one refuses. A dialog that does contain it is this bubble's own root, so it never makes this layout refuse itself.
+   - **`CONNECTION_MESSAGE`, never messaged.** This check doesn't rely on `role="dialog"`, which the capture didn't confirm. The scope is the innermost element that contains both the `New message` heading and the verified composer. P4-03 finds it from the composer upward, with an XPath ancestor such as `xpath=ancestor::*[.//h2[normalize-space()='New message']][1]` (the nearest ancestor that holds the heading), rather than `locator("*").filter(has=heading).filter(has=composer).last`, which tests every element on the page. Every `has=` filter and inner locator in these checks includes hidden elements. Exactly one `New message` heading is on the page. Inside the scope there's exactly one chip (a button whose name starts `Remove `), exactly one recipient field named `Enter message recipients`, and exactly one `/in/` link, the card's, whose slug is the contact's public id. Zero chips, two chips, two cards, or a card for anyone else is refused. Scoping matters: the profile page around the bubble links its own slug too, so a page-wide search would find the right slug whatever the bubble said. When the profile page had exactly one `h1`, the chip's name must also be `Remove ` followed by that `h1`'s name, LinkedIn's own name for the profile, never netkeeper's stored name. Both sides are Playwright's accessible names, with whitespace collapsed to single spaces, trimmed, and normalized to NFC. A mismatch refuses with its own reason, `recipient_name_mismatch`, so CP8 can tell it from the other refusals. With zero `h1` elements, or two or more, this check is skipped, and the scoped card's slug still binds the recipient. The known risk: a badge, pronouns, or a former name inside the `h1` would make every prefill to that person refuse, and two refusals in a row park the enrollment. That's the safe direction; CP8 checks for it, and #429 tracks it. **The other layout** is a `role="dialog"` named `Messaging` that doesn't contain the `New message` heading; one refuses. A dialog that does contain it is this bubble's own root, so it never makes this layout refuse itself.
 
 The bubble's DOM alone never authorizes typing, and neither does the compose answer alone. The draft's earlier rule ("no observed conversation means `not_typed`") is replaced: a contact you've never messaged has no conversation, and the compose option names the recipient either way.
 
@@ -149,7 +149,7 @@ The composer is a `contenteditable` element, and its text is read with Playwrigh
 - Each paragraph (`p`) inside the composer is read with `inner_text`. A paragraph boundary is one newline, and a `<br>` inside a paragraph is one newline.
 - A paragraph that holds only a `<br>` is an empty line, and a trailing `<br>` at the end of a paragraph adds nothing. So the empty composer the capture shows, `<p><br></p>`, reads as the empty string.
 - A no-break space (U+00A0) reads as a space. A browser may write one for a typed space.
-- Anything in the composer the rule can't read this way, such as an element other than `p` and `br`, makes the text unreadable. Unreadable text fails the check.
+- Anything in the composer the rule can't read this way, such as an element other than `p` and `br`, makes the text unreadable. Unreadable text fails the check. If LinkedIn renders an inserted emoji as an `<img>`, the composer becomes unreadable after that emoji and the run ends `partially_typed`. That's fail-safe; CP8 watches for it.
 
 The expected text is the typed prefix with each newline step as `\n`. P4-03's smoke replica uses a real `contenteditable`, so the rule is tested against a browser's own editing, not a fake.
 
@@ -170,7 +170,7 @@ The run checks for cancel at each step's checks, and stops when the tab closes o
 
 The checks above don't run only once. Playwright sends keys to whatever has focus and doesn't check where that is. If focus moved mid-type, to the Send button for example, a Shift+Enter could send the message, and the rest of the body could land in the wrong place. In the never-messaged layout, focus could also move to the recipient field, and the rest of the body would become a people search.
 
-- Right before every chunk and every Shift+Enter, after the step's delay, `type_into_composer` checks again that exactly one composer is on the page, that the bubble's recipient is unchanged (the dialog's header link, or the one chip and its card's link in the scope), that the verified composer holds focus, that the tab's URL is unchanged, and that the composer's text equals the prefix typed so far.
+- Right before every chunk and every Shift+Enter, after the step's delay, `type_into_composer` checks again that exactly one composer is on the page, that the bubble's recipient is unchanged (the dialog's header link, or the one chip and its card's link in the scope), that the tab's URL is unchanged, that the composer's text equals the prefix typed so far, and, last, that the verified composer holds focus. The focus check is the last read before the key, so the window between it and the key is as short as it can be.
 - Any failed check stops typing at once, with the outcome `partially_typed`.
 - Before the hand-over, the composer's text must equal the body, or the outcome is `partially_typed`.
 - The prefill UI tells the person not to type or click in Chrome while the prefill types.
@@ -216,7 +216,7 @@ The Send click isn't authorized here. Auto-send (P4-04, #384) needs its own amen
 
 At the end of a prefill run (spec 11.6), `BrowserRun.hand_over()` drops the run's reference to its tab and detaches without closing it, so the provider's later `close()` closes nothing. It changes no focus (see [Bringing the tab to the front](#bringing-the-tab-to-the-front)). From then on the tab isn't netkeeper's: no later run reuses it, navigates it, or closes it. `hand_over` is a new ending, distinct from `close()`, and is reached only from `netkeeper/linkedin/page_messaging.py`. The run releases the browser lock after typing; it doesn't wait for the send.
 
-Every run that got as far as the Message click hands its tab over, whatever the outcome:
+Every run that attempted the Message click hands its tab over, whatever the outcome. A click that raised may still have opened a bubble, so an attempted click counts as a click:
 
 - **After typing,** the bubble holds the body or part of it. The capture shows it keeps its draft if the person minimizes it or moves to another page.
 - **After a `not_typed` refusal that followed the click,** the bubble is open and empty. Closing it would be safe, since it holds no draft, but it's an input this ADR doesn't authorize, and closing the tab may not clear it, because a bubble persists across pages. So the tab is handed over like any other, and the UI shows the refusal's reason and asks the person to close the empty bubble.
@@ -265,12 +265,12 @@ Runtime pins, against a fake page:
 - A `CONNECTION_MESSAGE` page with a `Messaging` dialog that doesn't contain the `New message` heading gives `not_typed`. One whose bubble root is a `Messaging` dialog containing the heading proceeds.
 - Two `Messaging` dialogs, including a hidden or minimized one, give `not_typed` in either layout.
 - A never-messaged bubble with zero chips, two chips, two `New message` headings, two `/in/` links in the scope, or a card for another slug gives `not_typed`, with or without a `role="dialog"` root. A page whose profile links the contact's slug while the bubble's card links another slug gives `not_typed`.
-- A chip whose name doesn't match the profile's `h1` gives `not_typed`.
+- A chip whose name doesn't match the profile's `h1` gives `not_typed` with the reason `recipient_name_mismatch`; the comparison collapses whitespace and normalizes to NFC. With zero or two `h1` elements, the check is skipped and the card still decides.
 - A second composer on the page before the first key, including a hidden one, gives `not_typed`; one appearing mid-type stops typing.
 - A non-empty composer gives `not_typed`; `<p><br></p>` reads as empty; a no-break space reads as a space.
 - Focus not in the composer before the first key gives `not_typed`; focus moving away after chunk k gives zero further keys. Under option B, `focus()` is called at most once, only after the checks, and focus is checked again after it.
 - A space is sent with `insert_text`, never with `keyboard.type`.
-- No delay is awaited between a step's checks and its key.
+- No delay is awaited between a step's checks and its key, and the focus check is the last read before each key.
 - A URL change before the first key gives `not_typed`; a URL change mid-type gives `partially_typed` with zero further keys.
 - A cancel mid-type gives `partially_typed` with zero further keys.
 - An exception from a check's read after the first key call was attempted gives `partially_typed` or `unknown`, never `not_typed`.
@@ -279,6 +279,7 @@ Runtime pins, against a fake page:
 - A final composer text that differs from the body gives `partially_typed`, never `prefilled`.
 - A `prefilled` outcome records a `prefilled_at` no later than the first key call.
 - A `not_typed` refusal after the click hands the tab over and leaves the bubble open.
+- A Message click that raises hands the tab over.
 - After `hand_over()`, the provider's exit leaves the page open.
 
 P4-03's loopback replica (`tests/smoke/test_prefill_smoke.py`) copies the capture's layout:
