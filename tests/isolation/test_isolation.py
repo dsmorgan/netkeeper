@@ -27,6 +27,8 @@ from netkeeper.models import (
     InteractionKind,
     ListKind,
     ListMember,
+    MessageStatus,
+    TemplateChannel,
     User,
     UserKind,
 )
@@ -340,3 +342,38 @@ async def test_one_campaigns_linkedin_waiting_list_is_isolated(running_app: Fast
     assert mine["total"] == 2
     assert {item["campaign_id"] for item in mine["items"]} == {campaign_id}
     assert await _get(running_app, b_id, path) == {"items": [], "total": 0}
+
+
+async def test_a_partly_typed_row_is_listed_only_for_its_owner(running_app: FastAPI) -> None:
+    """#383 (B1): ``GET /campaigns/linkedin/waiting`` lists a user's own partly typed
+    message and never another user's."""
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        a = User(kind=UserKind.HOSTED, display_name="A")
+        b = User(kind=UserKind.HOSTED, display_name="B")
+        session.add_all([a, b])
+        session.flush()
+        for user in (a, b):
+            campaign = factories.make_campaign(session, user, channels=(TemplateChannel.LINKEDIN,))
+            enrollment = factories.make_enrollment(
+                session,
+                campaign,
+                factories.make_contact(session, user),
+                next_action_at=None,
+            )
+            factories.make_message(
+                session,
+                enrollment,
+                status=MessageStatus.FAILED,
+                error="partially_typed: fixed words",
+                sent_at=None,
+            )
+        a_id, b_id = a.id, b.id
+
+    mine = await _get(running_app, a_id, "/campaigns/linkedin/waiting")
+    assert [(item["status"], item["partly_typed"]) for item in mine["items"]] == [("failed", True)]
+    theirs = await _get(running_app, b_id, "/campaigns/linkedin/waiting")
+    assert theirs["total"] == 1
+    assert {item["campaign_id"] for item in mine["items"]}.isdisjoint(
+        {item["campaign_id"] for item in theirs["items"]}
+    )

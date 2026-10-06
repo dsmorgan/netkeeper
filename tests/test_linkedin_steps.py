@@ -1446,3 +1446,90 @@ def test_reschedule_step_counts_from_a_discard(
     due = lane.write(change)
     assert due is not None
     assert NOW + timedelta(days=2) <= due < NOW + timedelta(days=3)
+
+
+# --- a partly typed prefill stays visible, holds the slot, and is discarded (B1) --------
+
+
+@pytest.mark.parametrize("kind", [MessageOutcomeKind.PARTIALLY_TYPED, MessageOutcomeKind.UNKNOWN])
+def test_a_partly_typed_message_is_listed_holds_the_slot_and_discard_releases_it(
+    lane: Lane, kind: MessageOutcomeKind
+) -> None:
+    first, second = lane.enroll(), lane.enroll()
+    claim = lane.claim(first)
+    assert claim.message_id is not None
+    lane.record(claim.message_id, kind)
+    lane.finish_runs()
+
+    [row], total = lane.read(lambda s, u: waiting_for_you(s, u, limit=10))
+    assert (row.message.id, row.partly_typed, row.interrupted, total) == (
+        claim.message_id,
+        True,
+        False,
+        1,
+    )
+    refused = lane.claim(second)
+    assert refused.reasons == (Refusal.PREFILL_OPEN,)
+    assert refused.detail == f"message {claim.message_id} is failed; send or discard it first"
+
+    lane.write(lambda s, u: discard(s, u, claim.message_id or 0, settings=lane.settings, now=NOW))
+    message = lane.message(claim.message_id)
+    assert message is not None
+    assert (message.status, message.error) == (MessageStatus.DISCARDED, None)
+    enrollment = lane.enrollment(first)
+    assert enrollment.next_action_at is not None and enrollment.next_action_at > NOW
+    assert lane.read(lambda s, u: waiting_for_you(s, u, limit=10)) == ([], 0)
+    assert lane.claim(second).claimed
+
+
+def test_a_partly_typed_message_cannot_be_checked_as_sent(lane: Lane) -> None:
+    enrollment_id = lane.enroll()
+    claim = lane.claim(enrollment_id)
+    assert claim.message_id is not None
+    lane.record(claim.message_id, MessageOutcomeKind.PARTIALLY_TYPED)
+    lane.finish_runs()
+    with pytest.raises(linkedin_steps.PrefillNotWaiting):
+        lane.write(
+            lambda s, u: linkedin_steps.check_sent(
+                s, u, claim.message_id or 0, now=NOW, settings=lane.settings
+            )
+        )
+
+
+def test_only_a_partly_typed_failure_that_still_waits_is_listed_and_holds_the_slot(
+    lane: Lane,
+) -> None:
+    """Another failure, or a partly typed one whose enrollment has a next time, neither
+    shows nor blocks."""
+    first, second, third = lane.enroll(), lane.enroll(), lane.enroll()
+
+    def failed(enrollment_id: int, error: str, next_action_at: datetime | None) -> None:
+        def make(session: Session, user: User) -> None:
+            enrollment = get_scoped(session, user, Enrollment, enrollment_id)
+            assert enrollment is not None
+            enrollment.next_action_at = next_action_at
+            factories.make_message(
+                session, enrollment, status=MessageStatus.FAILED, error=error, sent_at=None
+            )
+
+        lane.write(make)
+
+    failed(first, "not a prefill outcome", None)
+    failed(second, "partially_typed: fixed words", NOW)
+    assert lane.read(lambda s, u: waiting_for_you(s, u, limit=10)) == ([], 0)
+    assert lane.claim(third).claimed
+
+
+def test_a_partly_typed_row_of_another_user_is_never_listed_or_blocking(
+    lane: Lane, session_factory: sessionmaker[Session]
+) -> None:
+    other = make_lane(session_factory)
+    theirs = other.enroll()
+    claim = other.claim(theirs)
+    assert claim.message_id is not None
+    other.record(claim.message_id, MessageOutcomeKind.PARTIALLY_TYPED)
+    other.finish_runs()
+
+    assert other.read(lambda s, u: waiting_for_you(s, u, limit=10))[1] == 1
+    assert lane.read(lambda s, u: waiting_for_you(s, u, limit=10)) == ([], 0)
+    assert lane.claim(lane.enroll()).claimed

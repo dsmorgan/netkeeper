@@ -2152,7 +2152,7 @@ class ProtectionOut(BaseModel):
     name: str
     key: str | None = None
     """A stable id for a row the UI acts on (#383): ``manual_linkedin_sends``,
-    ``linkedin_first_poll_short``; null for the rest. ``name`` is for reading."""
+    ``linkedin_reply_poll``; null for the rest. ``name`` is for reading."""
     status: str
     value: str
     summary: str

@@ -98,7 +98,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import Select, and_, func, or_
+from sqlalchemy import ColumnElement, Select, and_, exists, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -169,6 +169,25 @@ WAITING_STATUSES: Final[frozenset[MessageStatus]] = frozenset(
     {MessageStatus.PREFILLED, MessageStatus.STALE}
 )
 """A LinkedIn message in one of these waits for the person: to send it, or to discard it."""
+
+
+PARTLY_TYPED_PREFIXES: Final = ("partially_typed:", "unknown:")
+"""How a ``failed`` LinkedIn message's ``error`` starts when the prefill stopped part way
+through typing (``partially_typed``) or lost track of the composer (``unknown``)
+(:func:`record_prefill_outcome`). Part of the body may sit in an open message bubble."""
+
+
+def _is_partly_typed(enrollment_waits: ColumnElement[bool]) -> ColumnElement[bool]:
+    """SQL: a ``failed`` LinkedIn message that stopped part way, whose enrollment still
+    waits for a person (``next_action_at`` cleared). It holds the one-prefill slot and is
+    listed in "waiting for you" until the person discards it (#383, ADR 0007)."""
+    return and_(
+        Message.status == MessageStatus.FAILED,
+        or_(
+            *(Message.error.startswith(prefix, autoescape=True) for prefix in PARTLY_TYPED_PREFIXES)
+        ),
+        enrollment_waits,
+    )
 
 
 class Refusal(enum.StrEnum):
@@ -351,6 +370,14 @@ def _open_prefill(session: Session, user: User, now: datetime) -> Message | None
                         Message.prefilled_at.is_(None),
                         Message.prefilled_at > now - PREFILL_STALE_AFTER,
                     ),
+                ),
+                # Half-typed text may sit in an open bubble until the person discards it.
+                _is_partly_typed(
+                    exists().where(
+                        Enrollment.id == Message.enrollment_id,
+                        Enrollment.user_id == user.id,
+                        Enrollment.next_action_at.is_(None),
+                    )
                 ),
             ),
         )
@@ -822,13 +849,18 @@ class WaitingPrefill:
     def interrupted(self) -> bool:
         return self.message.status is MessageStatus.SCHEDULED
 
+    @property
+    def partly_typed(self) -> bool:
+        return self.message.status is MessageStatus.FAILED
+
 
 def waiting_for_you(
     session: Session, user: User, *, limit: int, offset: int = 0, campaign_id: int | None = None
 ) -> tuple[list[WaitingPrefill], int]:
-    """``prefilled``, ``stale`` and interrupted LinkedIn messages (claimed, their run not
-    running), oldest first, and how many; one campaign's with ``campaign_id`` (#383). An
-    interrupted one blocks every later prefill (one open at a time) until the person
+    """``prefilled``, ``stale``, interrupted (claimed, their run not running) and partly
+    typed LinkedIn messages (:data:`PARTLY_TYPED_PREFIXES`), oldest first, and how many;
+    one campaign's with ``campaign_id`` (#383). An interrupted or
+    partly typed one blocks every later prefill (one open at a time) until the person
     discards it. Read-only."""
     run_running = and_(
         SyncRun.id == Message.sync_run_id,
@@ -851,6 +883,7 @@ def waiting_for_you(
             or_(
                 Message.status.in_(WAITING_STATUSES),
                 and_(Message.status == MessageStatus.SCHEDULED, SyncRun.id.is_(None)),
+                _is_partly_typed(Enrollment.next_action_at.is_(None)),
             ),
         )
     )
@@ -876,8 +909,8 @@ def _waiting_message(
     """The user's LinkedIn message ``message_id``, if it waits for the person.
 
     ``also_unrun`` also takes a claimed message whose run ended without recording an
-    outcome (a crash, or no runner yet): nobody knows what its composer holds, so only a
-    person can let it go."""
+    outcome (a crash, or no runner yet), and a partly typed one: nobody knows what its
+    composer holds, so only a person can let it go."""
     message = session.scalars(
         scoped(user, Message)
         .where(Message.id == message_id)
@@ -897,7 +930,26 @@ def _waiting_message(
         and not _run_running(session, user, message.sync_run_id)
     ):
         return message
+    if (
+        also_unrun
+        and message.status is MessageStatus.FAILED
+        and (message.error or "").startswith(PARTLY_TYPED_PREFIXES)
+        and _enrollment_waits(session, user, message.enrollment_id)
+    ):
+        return message
     raise PrefillNotWaiting(f"message {message_id} is {message.status}; nothing waits on it")
+
+
+def _enrollment_waits(session: Session, user: User, enrollment_id: int) -> bool:
+    """Whether the enrollment has no next time: it waits for a person."""
+    return (
+        session.scalar(
+            scoped(user, Enrollment)
+            .with_only_columns(Enrollment.id)
+            .where(Enrollment.id == enrollment_id, Enrollment.next_action_at.is_(None))
+        )
+        is not None
+    )
 
 
 def _run_running(session: Session, user: User, run_id: int | None) -> bool:

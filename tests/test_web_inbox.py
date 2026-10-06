@@ -189,6 +189,32 @@ async def test_a_linkedin_reply_carries_its_conversation(
     assert (item["subject"], item["snippet"]) == (None, "Sounds good")
 
 
+async def test_an_email_item_never_exposes_a_conversation_urn(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """#383: only a LinkedIn item carries a conversation, even if an email row somehow
+    holds one, so the page can't build a LinkedIn link for an email."""
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = session.scalars(select(User).where(User.kind == UserKind.LOCAL)).one()
+        campaign = factories.make_campaign(session, user)
+        enrollment = factories.make_enrollment(
+            session, campaign, factories.make_contact(session, user)
+        )
+        _reply(
+            session,
+            enrollment,
+            3,
+            channel=TemplateChannel.EMAIL,
+            li_conversation_urn="urn:li:msg_conversation:INVENTEDSTRAY",
+        )
+
+    [item] = (await client.get("/api/v1/inbox")).json()["items"]
+
+    assert item["channel"] == "email"
+    assert item["li_conversation_urn"] is None
+
+
 async def test_filters_by_kind_handled_and_enrollment(
     running_app: FastAPI, client: httpx.AsyncClient
 ) -> None:

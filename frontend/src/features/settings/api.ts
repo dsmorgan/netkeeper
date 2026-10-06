@@ -41,7 +41,7 @@ function failure(error: unknown, response: Response, what: string): Error {
 }
 
 /** The posture row's `key` whose warning **Acknowledge** clears (#383). */
-export const FIRST_POLL_SHORT_KEY = 'linkedin_first_poll_short'
+export const REPLY_POLL_KEY = 'linkedin_reply_poll'
 /** The `key` of ADR 0004's manual LinkedIn sends row: off means auto-send is on. */
 export const MANUAL_SENDS_KEY = 'manual_linkedin_sends'
 

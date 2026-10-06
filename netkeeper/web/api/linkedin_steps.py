@@ -102,11 +102,16 @@ class WaitingOut(BaseModel):
 
     message_id: int
     status: MessageStatus
-    """``prefilled``, ``stale`` three days after its prefill, or ``scheduled`` when
-    ``interrupted``."""
+    """``prefilled``, ``stale`` three days after its prefill, ``scheduled`` when
+    ``interrupted``, or ``failed`` when ``partly_typed``."""
     interrupted: bool
     """Claimed, and its run ended without recording what it typed (a crash): nobody knows
     what the composer holds. It blocks every later prefill until you discard it."""
+    partly_typed: bool
+    """The prefill stopped part way through typing (``partially_typed``), or lost track of
+    the composer (``unknown``): part of the message may sit in an open bubble. The message
+    is ``failed``. It blocks every later prefill until you discard it, which says you
+    cleared the composer."""
     enrollment_id: int
     campaign_id: int
     campaign_name: str
@@ -225,6 +230,7 @@ def list_waiting(
                 message_id=row.message.id,
                 status=row.message.status,
                 interrupted=row.interrupted,
+                partly_typed=row.partly_typed,
                 enrollment_id=row.enrollment.id,
                 campaign_id=row.campaign.id,
                 campaign_name=row.campaign.name,

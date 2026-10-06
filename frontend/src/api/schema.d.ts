@@ -7817,6 +7817,8 @@ export interface components {
             interrupted: boolean;
             /** Message Id */
             message_id: number;
+            /** Partly Typed */
+            partly_typed: boolean;
             /** Prefilled At */
             prefilled_at: string | null;
             status: components["schemas"]["MessageStatus"];

@@ -147,6 +147,8 @@ def record(
     settings: Settings,
     now: datetime,
     prefilled_at: datetime | None = None,
+    click_attempted: bool = False,
+    clicked: bool = False,
 ) -> PrefillReport:
     """Record ``outcome`` on run ``run_id``'s claimed message, and end the run, in one
     writer transaction. A run with no claimed message only ends ``failed``."""
@@ -189,6 +191,10 @@ def record(
                 "typed_chars": outcome.typed_chars,
                 # For CP8: how often the never-messaged chip was checked against the h1.
                 "recipient_name_checked": outcome.recipient_name_checked,
+                # For the UI: whether a message bubble may be open (ADR 0007). False on
+                # every path that ended before the Message click.
+                "message_click_attempted": click_attempted,
+                "message_clicked": clicked,
             },
             error=None if prefilled else outcome.reason,
         )
@@ -209,10 +215,21 @@ def record_quietly(
     *,
     settings: Settings,
     now: datetime,
+    click_attempted: bool = False,
+    clicked: bool = False,
 ) -> None:
     """:func:`record` on the way out of a refusal or a cancel: a failed write is logged."""
     try:
-        record(factory, user_id, run_id, outcome, settings=settings, now=now)
+        record(
+            factory,
+            user_id,
+            run_id,
+            outcome,
+            settings=settings,
+            now=now,
+            click_attempted=click_attempted,
+            clicked=clicked,
+        )
     except Exception:
         log.exception("could not record how prefill run %d ended", run_id)
 
@@ -372,6 +389,8 @@ async def run_prefill(
             _after_failure(source.keys_sent, "interrupted"),
             settings=settings,
             now=clock(),
+            click_attempted=source.message_click_attempted,
+            clicked=source.message_clicked,
         )
         raise
     except Exception as exc:
@@ -390,6 +409,8 @@ async def run_prefill(
         settings=settings,
         now=clock(),
         prefilled_at=result.typing_started_at,
+        click_attempted=source.message_click_attempted,
+        clicked=source.message_clicked,
     )
 
 

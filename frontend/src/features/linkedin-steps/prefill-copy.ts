@@ -22,8 +22,8 @@ export const TYPING_WARNING =
   'The person you are writing to may see "typing…" while netkeeper types. Don\'t type or click in Chrome until the prefill finishes.'
 
 /** The first poll hasn't run: scheduled polls wait for one you run by hand. */
-export const FIRST_POLL_NOTE =
-  'netkeeper has not read your LinkedIn inbox yet, so LinkedIn prefills are held until it has. Run `netkeeper linkedin inbox` by hand, or click Check inbox now on the LinkedIn page. Scheduled polls start after the first one.'
+export const FIRST_POLL_COMMAND = 'netkeeper linkedin inbox'
+export const FIRST_POLL_NOTE = `netkeeper has not read your LinkedIn inbox yet, so LinkedIn prefills are held until it has. Run ${FIRST_POLL_COMMAND} by hand in a terminal, or use Check inbox now. Scheduled polls start after the first one.`
 
 /** Close the bubble a refusal that followed the Message click can leave open. */
 export const CLOSE_BUBBLE =
@@ -33,7 +33,15 @@ export const MAYBE_CLOSE_BUBBLE =
 
 /** Part of the message is in the composer (ADR 0007's wording). */
 export const PARTLY_TYPED =
-  'Part of a message is in the composer and may be kept as a draft. Clear it, or close the message bubble, which deletes the draft.'
+  "Part of a message is in the composer and may be kept as a draft. Don't click Send. Clear it, or close the message bubble, which deletes the draft."
+
+/** After the prefill typed the whole message. */
+export const TYPED_WHOLE =
+  'The prefill typed the message. It waits for you below: review it in Chrome and click Send yourself.'
+
+/** A message bubble already held text, so netkeeper typed nothing. */
+export const DRAFT_IN_BUBBLE =
+  'A message bubble in Chrome already holds text, and netkeeper left it alone. Clear the text or close the bubble before you prefill again.'
 
 /** The outcomes a prefill run records as `stop_reason`. */
 export type PrefillOutcome = 'prefilled' | 'not_typed' | 'too_long' | 'partially_typed' | 'unknown'
@@ -60,7 +68,7 @@ export const OUTCOME_TEXT: Readonly<Record<PrefillOutcome, string>> = {
 }
 
 /** Whether the refusal followed the Message click, so a bubble may be open. */
-type Bubble = 'closed' | 'open' | 'maybe'
+type Bubble = 'closed' | 'open' | 'maybe' | 'draft'
 
 interface Rule {
   match: string | RegExp
@@ -125,6 +133,32 @@ const BEFORE_CLICK: readonly Rule[] = [
     bubble: 'closed',
   },
   {
+    match: "the tab is not on the contact's profile",
+    text: "The tab wasn't on the contact's profile, so netkeeper didn't click Message.",
+    bubble: 'closed',
+  },
+  {
+    match: 'the tab left the profile before the click',
+    text: "The tab left the contact's profile before netkeeper clicked Message.",
+    bubble: 'closed',
+  },
+  {
+    match: 'the Message control could not be read',
+    text: "netkeeper couldn't read the Message button, so it didn't click it.",
+    bubble: 'closed',
+  },
+  {
+    match: 'no Message control is visible',
+    text: "The profile's Message button isn't visible, so netkeeper didn't click it.",
+    bubble: 'closed',
+  },
+  { match: 'the browser was busy', text: 'Chrome was busy with another run.', bubble: 'closed' },
+  {
+    match: 'the browser was unavailable',
+    text: "netkeeper couldn't reach Chrome.",
+    bubble: 'closed',
+  },
+  {
     match: "a Message control opens something other than this contact's compose",
     text: "A Message button on the profile doesn't open a message to this contact.",
     bubble: 'closed',
@@ -133,6 +167,16 @@ const BEFORE_CLICK: readonly Rule[] = [
 
 /** The refusals that follow the click, and the ones that can't say. */
 const AFTER_CLICK: readonly Rule[] = [
+  {
+    match: 'the Message control was already clicked',
+    text: 'netkeeper had already clicked Message in this run.',
+    bubble: 'maybe',
+  },
+  {
+    match: 'the Message control could not be clicked',
+    text: "Chrome didn't take netkeeper's click on Message.",
+    bubble: 'maybe',
+  },
   {
     match: 'the Message control was not clicked',
     text: "netkeeper didn't click Message.",
@@ -191,8 +235,8 @@ const AFTER_CLICK: readonly Rule[] = [
   },
   {
     match: 'the composer is not empty',
-    text: 'The message box already holds text, so netkeeper left it alone. Clear the draft, or close the bubble.',
-    bubble: 'open',
+    text: 'The message box already holds text, so netkeeper left it alone.',
+    bubble: 'draft',
   },
   {
     match: "the composer's text changed",
@@ -262,6 +306,23 @@ function lowerFirst(text: string): string {
 }
 
 /** What a finished prefill run tells you, ready to show. */
+/**
+ * Whether a bubble may be open, from what the run recorded (`message_click_attempted`
+ * and `message_clicked` in its counts): no click, no bubble; a click that landed, an
+ * open one; a click that was sent but raised, maybe. Without both, `fallback`.
+ */
+export function bubbleFromCounts(
+  counts: Readonly<Record<string, unknown>> | null,
+  fallback: Bubble,
+): Bubble {
+  const attempted = counts?.message_click_attempted
+  const clicked = counts?.message_clicked
+  if (typeof attempted !== 'boolean' || typeof clicked !== 'boolean') return fallback
+  if (!attempted) return 'closed'
+  if (fallback === 'draft') return 'draft'
+  return clicked ? 'open' : 'maybe'
+}
+
 export interface PrefillEnding {
   title: string
   reason: string | null
@@ -278,6 +339,7 @@ export interface PrefillEnding {
 export function prefillEnding(
   stopReason: string | null,
   error: string | null,
+  counts: Readonly<Record<string, unknown>> | null = null,
 ): PrefillEnding | null {
   if (!isPrefillOutcome(stopReason) || stopReason === 'prefilled') return null
   const why = prefillReason(error)
@@ -295,8 +357,11 @@ export function prefillEnding(
   if (stopReason === 'too_long') {
     steps.push('netkeeper parked the enrollment, so it waits for you. Shorten the template first.')
   }
-  if (why.bubble === 'open') steps.push(CLOSE_BUBBLE)
-  if (why.bubble === 'maybe') steps.push(MAYBE_CLOSE_BUBBLE)
+  // The run's own record of the click wins; the phrase table is for older runs.
+  const bubble = bubbleFromCounts(counts, why.bubble)
+  if (bubble === 'draft') steps.push(DRAFT_IN_BUBBLE)
+  if (bubble === 'open') steps.push(CLOSE_BUBBLE)
+  if (bubble === 'maybe') steps.push(MAYBE_CLOSE_BUBBLE)
   return {
     title: 'Not prefilled. Nothing was typed in Chrome.',
     reason: why.text,

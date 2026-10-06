@@ -7,7 +7,7 @@ import { renderInlineMarkdown } from '@/lib/inline-markdown'
 import { cn } from '@/lib/utils'
 
 import {
-  FIRST_POLL_SHORT_KEY,
+  REPLY_POLL_KEY,
   MANUAL_SENDS_KEY,
   acknowledgeInboxFirstPoll,
   postureQuery,
@@ -184,7 +184,7 @@ function ReplyPollAcknowledge({ rows }: { rows: readonly Protection[] }) {
     mutationFn: acknowledgeInboxFirstPoll,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: postureQuery.queryKey }),
   })
-  const row = rows.find((r) => r.key === FIRST_POLL_SHORT_KEY && r.warnings.length > 0)
+  const row = rows.find((r) => r.key === REPLY_POLL_KEY && r.warnings.length > 0)
   if (row === undefined) {
     // Only right after an Acknowledge that found nothing; a row that comes back later
     // shows its button again.
