@@ -82,8 +82,9 @@ these a run is (``services.enrichment.contact_info_lost_again`` and
 **The inbox breaker** (#437) is a fourth, separate streak, for the LinkedIn inbox
 poll (``inbox`` runs), which reads the messaging page, a different route from the
 connections list's. :data:`INBOX_THRESHOLD` consecutive inbox polls, by hand or by
-schedule, ending ``aborted`` with ``route_changed`` trip it, and the scheduler (and
-the worker's second check) then skip every scheduled inbox fire as
+schedule, ending ``aborted`` with ``route_changed`` or ``not_found`` (a moved page or a
+retired query), or failing with ``ObservationFailed`` (the page could not be read),
+trip it, and the scheduler (and the worker's second check) then skip every scheduled inbox fire as
 ``"inbox_route_changed_breaker"``. An inbox shape change never blocks a connections
 sync, and the connections streaks never skip an inbox poll: the two counters never
 feed each other. The streak clears when an inbox poll ends ``completed``
@@ -383,7 +384,8 @@ def record_inbox(
     """Record one inbox poll's outcome on the inbox breaker (#437). Needs a writer
     session.
 
-    ``route_changed`` (the poll ended ``aborted`` with ``route_changed``) extends the
+    ``route_changed`` (the poll ended ``aborted`` with ``route_changed`` or ``not_found``,
+    or failed with ``ObservationFailed``) extends the
     streak by one. ``completed`` (the poll ended ``completed``) clears it, whatever the
     trigger: that is how a manual poll shows the messaging page reads again. Neither
     leaves the count where it was (``owner_mismatch`` included: that page read fine),

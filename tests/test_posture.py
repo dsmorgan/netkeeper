@@ -2259,7 +2259,9 @@ def test_a_tripped_inbox_breaker_warns_why_and_how_to_release_it(
     assert "Scheduled inbox polls are skipped" in warning
     assert "connections syncs are unaffected" in warning
     # The link to #417's hold, and the release.
-    assert "inbox hold" in warning and "LinkedIn prefills and steps" in warning
+    # No LinkedIn campaign here, so no hold applies and the warning claims none; the
+    # linked text is tested where a LinkedIn campaign exists (test_inbox_poll.py).
+    assert "inbox hold" not in warning
     assert "netkeeper linkedin inbox" in warning and "releases the breaker" in warning
     assert "reset-breaker" in warning
     assert not report.ok

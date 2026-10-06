@@ -812,7 +812,7 @@ def test_a_tripped_inbox_breaker_blocks_the_inbox_poll_only(world: World) -> Non
     reason = inbox.reason or ""
     assert "messaging page changed" in reason
     assert "netkeeper linkedin inbox" in reason
-    assert "LinkedIn steps for watched contacts wait" in reason
+    assert "LinkedIn steps" not in reason  # #431's hold text says that, when true
     for key in ("linkedin_enrich", "linkedin_incremental_sync"):
         assert checks[key].state in (S.SCHEDULED, S.DUE)
         assert checks[key].reason is None
@@ -838,3 +838,20 @@ def test_the_connections_breakers_leave_the_inbox_poll_alone(world: World) -> No
         _trip_contact_info(session, user, account_id)
 
     assert "messaging page changed" not in (world.read()["linkedin_inbox"].reason or "")
+
+
+def test_a_tripped_inbox_breaker_after_a_fresh_poll_has_no_hold_text(world: World) -> None:
+    """#437 review: the breaker reason names the cause and the release, and says nothing
+    about held steps; #431's hold text appears only when the inbox is stale."""
+    from inbox_fakes import record_poll
+
+    for session, user in world.write():
+        account_id = _arm_linkedin(session, user, kinds=(JobKind.INBOX,))
+        record_poll(session, user, NOW - timedelta(minutes=30))
+        _trip_inbox(session, user, account_id)
+
+    reason = world.read()["linkedin_inbox"].reason or ""
+
+    assert reason.startswith("The LinkedIn inbox poll is stopped after two polls found")
+    assert "netkeeper linkedin inbox" in reason
+    assert "LinkedIn steps" not in reason and "held" not in reason

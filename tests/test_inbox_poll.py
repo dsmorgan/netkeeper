@@ -33,6 +33,7 @@ from netkeeper.db import database_url, make_engine, make_session_factory, sessio
 from netkeeper.linkedin.browser import BrowserRun, BrowserUnavailable
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.inbox import BOOTSTRAP_MAX_CONVERSATIONS, InboxReadStopped, InboxSource
+from netkeeper.linkedin.observe import ObservationFailed
 from netkeeper.linkedin.page_inbox import PageInbox
 from netkeeper.models import (
     EnrollmentStatus,
@@ -41,6 +42,7 @@ from netkeeper.models import (
     SyncRunKind,
     SyncRunStatus,
     SyncRunTrigger,
+    TemplateChannel,
     User,
 )
 from netkeeper.scoping import install_scope_guard, scoped
@@ -1094,3 +1096,113 @@ async def test_a_poll_by_another_user_never_moves_this_users_streak(
     assert _inbox_breaker(session_factory, user_id).count == 0
     await _poll(session_factory, user_id, delta())
     assert _inbox_breaker(session_factory, other_id).tripped
+
+
+def _inbox_breaker_warning(factory: sessionmaker[Session], user_id: int) -> str:
+    (row,) = [p for p in _posture(factory, user_id).protections if p.name == "Inbox breaker"]
+    (warning,) = row.warnings
+    return warning
+
+
+def _trip_inbox(factory: sessionmaker[Session], user_id: int) -> None:
+    with session_scope(factory, write=True) as session:
+        user = _user(session, user_id)
+        for _ in range(route_breaker.INBOX_THRESHOLD):
+            route_breaker.record_inbox(
+                session,
+                user,
+                ensure_account(session, user).id,
+                route_changed=True,
+                completed=False,
+                now=NOW,
+            )
+
+
+def test_the_posture_warning_names_the_hold_only_while_it_applies(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    # A running campaign with a LinkedIn step puts LinkedIn in use.
+    with session_scope(session_factory, write=True) as session:
+        user = _user(session, user_id)
+        ben = factories.make_contact(session, user, li_urn=profile_urn("ben"))
+        campaign = factories.make_campaign(session, user, channels=(TemplateChannel.LINKEDIN,))
+        factories.make_enrollment(session, campaign, ben)
+    # A tripped breaker after a poll that completed an hour ago: the inbox is not stale.
+    _complete_a_manual_poll(session_factory, user_id, NOW - timedelta(hours=1))
+    _trip_inbox(session_factory, user_id)
+    fresh = _inbox_breaker_warning(session_factory, user_id)
+    assert "netkeeper linkedin inbox" in fresh and "Scheduled inbox polls are skipped" in fresh
+    assert "held until a poll completes" not in fresh
+
+    # Ten hours on, the inbox is stale and the hold applies: the warning links to it.
+    with session_scope(session_factory, write=True) as session:
+        user = _user(session, user_id)
+        for run in session.scalars(scoped(user, SyncRun)).all():
+            run.started_at = NOW - timedelta(hours=10)
+            run.completed_at = NOW - timedelta(hours=10)
+    stale = _inbox_breaker_warning(session_factory, user_id)
+    assert "held until a poll completes" in stale and "inbox hold" in stale
+
+
+def test_the_posture_warning_omits_the_hold_when_linkedin_is_not_in_use(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)  # no campaign: nothing waits on the inbox
+        other_id = user.id
+    _trip_inbox(session_factory, other_id)
+    assert "held until a poll completes" not in _inbox_breaker_warning(session_factory, other_id)
+
+
+def test_the_stop_reason_has_words() -> None:
+    text = runs.describe_stop_reason("inbox_route_changed_breaker")
+    assert text == "refused: the inbox breaker is tripped"
+
+
+async def test_a_checkpoint_stop_leaves_the_inbox_streak_alone(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    await _poll(session_factory, user_id, _CHANGED)
+    wall = InboxReadStopped(Outcome.CHECKPOINT, final_url="https://x.invalid/c")
+    assert await _poll(session_factory, user_id, wall) == "checkpoint"
+    assert _inbox_breaker(session_factory, user_id).count == 1
+
+
+async def test_a_not_found_page_counts_toward_the_inbox_streak(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    gone = InboxReadStopped(Outcome.NOT_FOUND, final_url="https://x.invalid/gone")
+    assert await _poll(session_factory, user_id, gone) == "not_found"
+    assert _inbox_breaker(session_factory, user_id).count == 1
+    assert await _poll(session_factory, user_id, gone, at=NOW + timedelta(hours=3)) == "not_found"
+    assert _inbox_breaker(session_factory, user_id).tripped
+
+
+async def test_an_observation_failure_counts_and_still_fails_the_run(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    for hours in (0, 3):
+        source = FakeInboxSource(ObservationFailed("a response was dropped"))
+        with pytest.raises(ObservationFailed):
+            await poll_inbox(
+                session_factory,
+                user_id,
+                source,
+                settings=SETTINGS,
+                clock=lambda hours=hours: NOW + timedelta(hours=hours),
+            )
+        expected = 1 if hours == 0 else 2
+        assert _inbox_breaker(session_factory, user_id).count == expected
+    assert _inbox_breaker(session_factory, user_id).tripped
+    with session_scope(session_factory) as session:
+        runs_ = session.scalars(scoped(_user(session, user_id), SyncRun)).all()
+        assert [(r.status, r.stop_reason) for r in runs_] == [(SyncRunStatus.FAILED, "error")] * 2
+
+
+async def test_a_lost_browser_leaves_the_inbox_streak_alone(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    await _poll(session_factory, user_id, _CHANGED)
+    with pytest.raises(BrowserUnavailable):
+        await _poll(session_factory, user_id, BrowserUnavailable("the tab went away"))
+    assert _inbox_breaker(session_factory, user_id).count == 1
