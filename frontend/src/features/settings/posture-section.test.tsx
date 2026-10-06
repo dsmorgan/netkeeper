@@ -285,7 +285,7 @@ describe('PostureSection: LinkedIn sends and the first inbox poll (#383)', () =>
     ' `netkeeper linkedin inbox-acknowledge`'
   const SHORT_POLL = {
     name: 'linkedin reply poll',
-    key: 'linkedin_first_poll_short',
+    key: 'linkedin_reply_poll',
     status: 'on',
     value: 'last complete poll 2030-01-03 09:00 UTC (1 h ago)',
     summary: 'last complete poll 2030-01-03 09:00 UTC (1 h ago)',

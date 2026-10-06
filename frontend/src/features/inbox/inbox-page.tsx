@@ -143,8 +143,8 @@ export function InboxPage({ enrollment }: { enrollment?: number }) {
   return (
     <div className="flex max-w-5xl flex-col gap-4">
       <p className="text-sm text-muted-foreground">
-        Replies, unsubscribes and bounces the campaigns detected, by email and on LinkedIn. Only an
-        email&apos;s subject and a snippet are stored; each item says where to read the rest.
+        Replies, unsubscribes and bounces the campaigns detected, by email and on LinkedIn. Only a
+        snippet is stored, and an email&apos;s subject; each item says where to read the rest.
       </p>
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <Select

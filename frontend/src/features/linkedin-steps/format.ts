@@ -20,7 +20,7 @@ export const STALE_AFTER_DAYS = 3
  * A reason not here is shown as the backend sent it.
  */
 export const REASON_TEXT: Readonly<Record<string, string>> = {
-  run_refused: "netkeeper can't run a prefill yet, so nothing was typed in Chrome",
+  run_refused: "netkeeper couldn't start the prefill run, so nothing was typed in Chrome",
   linkedin_inbox_stale:
     "held until the inbox is read: netkeeper hasn't read your LinkedIn inbox recently enough to know about replies",
   run_in_progress: 'another LinkedIn run is going; wait for it to finish',
@@ -55,6 +55,9 @@ export const REASON_TEXT: Readonly<Record<string, string>> = {
   self: "that's you",
   needs_review: 'the contact needs review first',
   contacted_recently: 'you contacted them recently',
+  disconnected: "you're no longer connected to this contact on LinkedIn",
+  campaign_at_cap: "the campaign has reached today's cap",
+  campaign_blocked: 'the campaign is blocked, for example because it has no steps',
   in_another_campaign: "they're in another active campaign",
 }
 
@@ -88,10 +91,11 @@ export function ageText(iso: string | null, now: Date): string {
   return format.format(-Math.floor(hours / 24), 'day')
 }
 
-/** What a waiting message needs from you: send it, a stale one, or a stopped prefill. */
-export type WaitingState = 'prefilled' | 'stale' | 'interrupted'
+/** What a waiting message needs from you: send it, a stale one, a stopped prefill, or a partly typed one. */
+export type WaitingState = 'prefilled' | 'stale' | 'interrupted' | 'partly_typed'
 
 export function waitingState(item: WaitingItem, now: Date): WaitingState {
+  if (item.partly_typed) return 'partly_typed'
   if (item.interrupted) return 'interrupted'
   if (item.status === 'stale') return 'stale'
   // The tick marks it `stale` within a minute; until then the age says it already is.

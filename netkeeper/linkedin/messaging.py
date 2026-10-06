@@ -354,10 +354,18 @@ class PrefillSource(Protocol):
     """The page side of one prefill: :class:`netkeeper.linkedin.page_messaging.PagePrefill`.
 
     ``keys_sent`` is how many keys reached the page so far, so a runner that sees an
-    exception can tell ``not_typed`` (none) from ``unknown``."""
+    exception can tell ``not_typed`` (none) from ``unknown``. ``message_click_attempted``
+    is whether the Message click was sent, and ``message_clicked`` whether it landed: the
+    run records both, so the UI knows whether a message bubble may be open (ADR 0007)."""
 
     @property
     def keys_sent(self) -> int: ...
+
+    @property
+    def message_click_attempted(self) -> bool: ...
+
+    @property
+    def message_clicked(self) -> bool: ...
 
     async def prefill(
         self, spec: MessageJobSpec, plan: TypingPlan, *, cancelled: Cancelled

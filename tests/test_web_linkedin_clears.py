@@ -474,7 +474,7 @@ async def test_acknowledge_clears_the_first_polls_warning(
         record_short_first_poll(session, _local(session), short_of)
 
     posture = (await client.get("/api/v1/posture")).json()
-    [row] = [r for r in posture["protections"] if r["key"] == "linkedin_first_poll_short"]
+    [row] = [r for r in posture["protections"] if r["key"] == "linkedin_reply_poll"]
     assert row["name"] == "linkedin reply poll"
     assert "click Acknowledge in Settings, Posture" in row["warnings"][0]
     [manual] = [r for r in posture["protections"] if r["key"] == "manual_linkedin_sends"]
@@ -487,7 +487,7 @@ async def test_acknowledge_clears_the_first_polls_warning(
         assert short_first_poll(session, _local(session)) is None
     posture = (await client.get("/api/v1/posture")).json()
     # The row stays (the inbox poll's value and hold note); only its warning is gone.
-    [after] = [r for r in posture["protections"] if r["key"] == "linkedin_first_poll_short"]
+    [after] = [r for r in posture["protections"] if r["key"] == "linkedin_reply_poll"]
     assert after["warnings"] == []
 
     again = await client.post(INBOX_ACK_URL, headers=HEADERS)

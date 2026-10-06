@@ -12839,6 +12839,10 @@
             "title": "Message Id",
             "type": "integer"
           },
+          "partly_typed": {
+            "title": "Partly Typed",
+            "type": "boolean"
+          },
           "prefilled_at": {
             "anyOf": [
               {
@@ -12859,6 +12863,7 @@
           "message_id",
           "status",
           "interrupted",
+          "partly_typed",
           "enrollment_id",
           "campaign_id",
           "campaign_name",

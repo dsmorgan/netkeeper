@@ -28,12 +28,15 @@ import { jsonResponse, mockFetch } from '@/test/fetch'
 import type { ReadyItem, ReadyPage, WaitingItem, WaitingPage } from './api'
 import { ONE_AT_A_TIME, REVIEW_AND_SEND, ageText, reasonText, threadUrl } from './format'
 import { LinkedInStepsSection } from './linkedin-steps-section'
+import reasons from './prefill-reasons.json'
 import {
   CLOSE_BUBBLE,
   FIRST_POLL_NOTE,
   MAYBE_CLOSE_BUBBLE,
+  DRAFT_IN_BUBBLE,
   PARTLY_TYPED,
   PREFILL_NOTE,
+  TYPED_WHOLE,
   TYPING,
   TYPING_WARNING,
   prefillEnding,
@@ -69,6 +72,7 @@ function waitingItem(overrides: Partial<WaitingItem> = {}): WaitingItem {
     message_id: 71,
     status: 'prefilled',
     interrupted: false,
+    partly_typed: false,
     enrollment_id: 32,
     campaign_id: 5,
     campaign_name: 'Autumn reconnect',
@@ -209,7 +213,7 @@ describe('the LinkedIn queue', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Prefill Rosalind Quillfeather' }))
 
     expect(await screen.findByText('Not prefilled. Nothing was typed in Chrome.')).toBeVisible()
-    expect(screen.getByText(/netkeeper can't run a prefill yet/)).toBeVisible()
+    expect(screen.getByText(/netkeeper couldn't start the prefill run/)).toBeVisible()
     expect(screen.getByText('no runner exists for message_send runs yet')).toBeVisible()
     expect(screen.queryByText(TYPING)).toBeNull()
     expect(screen.queryByRole('button', { name: /retry/i })).toBeNull()
@@ -624,7 +628,9 @@ describe('the prefill notes (#383, ADR 0007)', () => {
 
     const note = await screen.findByRole('note')
     expect(note).toHaveTextContent('held until it has')
-    expect(note).toHaveTextContent('Run `netkeeper linkedin inbox` by hand')
+    expect(note).toHaveTextContent('Run netkeeper linkedin inbox by hand')
+    expect(within(note).getByText('netkeeper linkedin inbox').tagName).toBe('CODE')
+    expect(note).not.toHaveTextContent('`')
     expect(note).toHaveTextContent(FIRST_POLL_NOTE)
   })
 
@@ -716,6 +722,183 @@ describe('how a prefill that typed nothing ended', () => {
     const alert = await finishPrefill('not_typed', 'a phrase from a newer netkeeper')
     expect(alert).toHaveTextContent('a phrase from a newer netkeeper')
     expect(alert).toHaveTextContent(MAYBE_CLOSE_BUBBLE)
+  })
+})
+
+describe('the click recorded in the run (S3)', () => {
+  async function finishWith(counts: Record<string, unknown> | null, error: string) {
+    let state = STATUS_CLEAR
+    let current = run({ id: 81, kind: 'message_send', status: 'running' })
+    const { source } = renderSection({
+      'GET /api/v1/linkedin/status': () => jsonResponse(state),
+      [`POST ${PREFILL}`]: () => {
+        state = { ...STATUS_CLEAR, running_run_id: 81 }
+        return jsonResponse({ enrollment_id: 31, message_id: 71, run_id: 81, task_id: 't' }, 202)
+      },
+      'GET /api/v1/linkedin/runs/81': () => jsonResponse(current),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Prefill Rosalind Quillfeather' }))
+    await screen.findByText(TYPING)
+    state = STATUS_CLEAR
+    current = run({
+      id: 81,
+      kind: 'message_send',
+      status: 'aborted',
+      stop_reason: 'not_typed',
+      stop_reason_text: 'not_typed',
+      error,
+      counts,
+    })
+    act(() => source.emit('run.finished', { run_id: 81, status: 'aborted' }))
+    return screen.findByRole('alert')
+  }
+
+  it('says a click that landed left a bubble open, whatever the phrase says', async () => {
+    const alert = await finishWith(
+      { message_click_attempted: true, message_clicked: true },
+      'cancelled',
+    )
+    expect(alert).toHaveTextContent(CLOSE_BUBBLE)
+  })
+
+  it('says no bubble when no click was sent, even for a phrase that could mean one', async () => {
+    const alert = await finishWith(
+      { message_click_attempted: false, message_clicked: false },
+      'the Message control could not be clicked',
+    )
+    expect(alert).not.toHaveTextContent('bubble')
+  })
+
+  it('says a bubble may be open when the click was sent but did not land', async () => {
+    const alert = await finishWith(
+      { message_click_attempted: true, message_clicked: false },
+      'the profile opened somewhere else',
+    )
+    expect(alert).toHaveTextContent(MAYBE_CLOSE_BUBBLE)
+  })
+
+  it('falls back to the phrase table for an older run with no click counts', async () => {
+    const alert = await finishWith({ typed_chars: 0 }, 'recipient_name_mismatch')
+    expect(alert).toHaveTextContent(CLOSE_BUBBLE)
+  })
+
+  it('does not say the bubble is empty when it already held text, and gives that its own step', async () => {
+    const alert = await finishWith(
+      { message_click_attempted: true, message_clicked: true },
+      'the composer is not empty',
+    )
+    expect(alert).toHaveTextContent(DRAFT_IN_BUBBLE)
+    expect(alert).not.toHaveTextContent('It is empty')
+    expect(alert).not.toHaveTextContent(CLOSE_BUBBLE)
+  })
+})
+
+describe('a prefill that typed the whole message', () => {
+  it('says plainly that it was typed', async () => {
+    let state = STATUS_CLEAR
+    let current = run({ id: 81, kind: 'message_send', status: 'running' })
+    const { source } = renderSection({
+      'GET /api/v1/linkedin/status': () => jsonResponse(state),
+      [`POST ${PREFILL}`]: () => {
+        state = { ...STATUS_CLEAR, running_run_id: 81 }
+        return jsonResponse({ enrollment_id: 31, message_id: 71, run_id: 81, task_id: 't' }, 202)
+      },
+      'GET /api/v1/linkedin/runs/81': () => jsonResponse(current),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Prefill Rosalind Quillfeather' }))
+    await screen.findByText(TYPING)
+    state = STATUS_CLEAR
+    current = run({ id: 81, kind: 'message_send', status: 'completed', stop_reason: 'prefilled' })
+    act(() => source.emit('run.finished', { run_id: 81, status: 'completed' }))
+    expect(await screen.findByText(TYPED_WHOLE)).toBeVisible()
+    expect(TYPED_WHOLE).toMatch(/typed the message/)
+  })
+})
+
+describe('a partly typed prefill in Waiting for you (B1)', () => {
+  const PARTLY = waitingItem({
+    status: 'failed',
+    partly_typed: true,
+    prefilled_at: null,
+    message_id: 72,
+  })
+
+  it('shows a red row from the API, so it survives a reload, with only Discard', async () => {
+    renderSection({
+      'GET /api/v1/campaigns/linkedin/waiting': () => jsonResponse(waitingPage([PARTLY])),
+    })
+
+    const row = await screen.findByRole('listitem', { name: /Tobias Marrowbone, partly_typed/ })
+    expect(row).toHaveAttribute('data-state', 'partly_typed')
+    expect(row.className).toMatch(/destructive/)
+    expect(row).toHaveTextContent(PARTLY_TYPED)
+    expect(row).toHaveTextContent("Don't click Send")
+    expect(within(row).queryByRole('button', { name: 'I sent it, check now' })).toBeNull()
+    expect(within(row).getByRole('button', { name: 'I cleared it, discard' })).toBeVisible()
+    expect(within(row).getAllByRole('button')).toHaveLength(1)
+  })
+
+  it('holds the one-prefill slot: every Prefill button is off', async () => {
+    renderSection({
+      'GET /api/v1/campaigns/linkedin/waiting': () => jsonResponse(waitingPage([PARTLY])),
+    })
+    expect(await screen.findByText(ONE_AT_A_TIME)).toBeVisible()
+    for (const button of screen.getAllByRole('button', { name: /^Prefill/ })) {
+      expect(button).toBeDisabled()
+    }
+  })
+
+  it('discards after you confirm that you cleared it', async () => {
+    let waiting = waitingPage([PARTLY])
+    const { calls } = renderSection({
+      'GET /api/v1/campaigns/linkedin/waiting': () => jsonResponse(waiting),
+      'POST /api/v1/campaigns/linkedin/messages/72/discard': () => {
+        waiting = waitingPage([])
+        return jsonResponse({ message_id: 72, status: 'discarded' })
+      },
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'I cleared it, discard' }))
+    const dialog = await screen.findByRole('alertdialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'I cleared it, discard' }))
+
+    await waitFor(() =>
+      expect(posts(calls, '/api/v1/campaigns/linkedin/messages/72/discard')).toHaveLength(1),
+    )
+    expect(await screen.findByText('Nothing waits for you.')).toBeVisible()
+  })
+})
+
+describe('every recorded phrase has words (S1 drift guard)', () => {
+  // prefill-reasons.json is checked against the backend's source by
+  // tests/test_prefill_reason_phrases.py.
+  it.each(reasons)('%s', (phrase) => {
+    const sample = phrase.replace(
+      '{}',
+      phrase.startsWith('after typing') ? 'the composer does not hold focus' : 'x',
+    )
+    const words = prefillReason(sample)
+    expect(words.text).not.toBe(sample)
+    expect(words.text).toMatch(/^(netkeeper |[A-Z])/)
+    expect(words.text).not.toMatch(/_/)
+  })
+
+  it('places each click-stage refusal', () => {
+    for (const phrase of [
+      "the tab is not on the contact's profile",
+      'the tab left the profile before the click',
+      'the Message control could not be read',
+      'no Message control is visible',
+    ]) {
+      expect(prefillReason(phrase).bubble).toBe('closed')
+    }
+    expect(prefillReason('the Message control could not be clicked').bubble).toBe('maybe')
+    expect(prefillReason('the Message control was already clicked').bubble).toBe('maybe')
+  })
+
+  it('has words for the engine reasons that had none', () => {
+    for (const reason of ['disconnected', 'campaign_at_cap', 'campaign_blocked']) {
+      expect(reasonText(reason)).not.toBe(reason.replace(/_/g, ' '))
+    }
   })
 })
 

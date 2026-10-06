@@ -1001,6 +1001,8 @@ class BrowserRun:
         #: ADR 0007: set once the Message click is sent. From then on the run never
         #: opens, reopens, or navigates a tab (:meth:`_ensure_page` refuses).
         self._message_clicked = False
+        #: Whether that click landed (the page took it without an error).
+        self._message_click_landed = False
         #: The tab's url when the Message click was sent; any change stops typing.
         self._click_url: str | None = None
         #: How many times :meth:`bring_tab_forward` ran: at most once per run.
@@ -1021,6 +1023,11 @@ class BrowserRun:
         """Whether this run sent its Message click (ADR 0007): from then on its tab is
         handed over, never closed, whatever the click's result."""
         return self._message_clicked
+
+    @property
+    def message_clicked(self) -> bool:
+        """Whether the Message click landed: sent, and the page took it without an error."""
+        return self._message_click_landed
 
     @property
     def fronted(self) -> int:
@@ -1533,6 +1540,7 @@ class BrowserRun:
         except Exception as exc:
             log.warning("the Message control could not be clicked (%s)", type(exc).__name__)
             return MessageClick(False, True, "the Message control could not be clicked")
+        self._message_click_landed = True
         return MessageClick(True, True)
 
     async def type_into_composer(

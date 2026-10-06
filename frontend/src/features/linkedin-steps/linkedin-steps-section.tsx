@@ -51,7 +51,14 @@ import {
   waitingState,
   type WaitingState,
 } from './format'
-import { PREFILL_NOTE, TYPING, TYPING_WARNING, prefillEnding } from './prefill-copy'
+import {
+  PARTLY_TYPED,
+  PREFILL_NOTE,
+  TYPED_WHOLE,
+  TYPING,
+  TYPING_WARNING,
+  prefillEnding,
+} from './prefill-copy'
 import { FirstPollNote } from './first-poll-note'
 import { usePrefillRun, useRunGoing, type PrefillRun } from './use-prefill-run'
 
@@ -308,14 +315,14 @@ function FinishedPrefill({ runId, onDismiss }: { runId: number; onDismiss: () =>
   if (run.data.status === 'completed') {
     return (
       <p role="status" className="text-muted-foreground">
-        The prefill finished. If it typed the message, it waits for you below.{' '}
+        {TYPED_WHOLE}{' '}
         <Button size="sm" variant="ghost" onClick={onDismiss}>
           Dismiss
         </Button>
       </p>
     )
   }
-  const ending = prefillEnding(run.data.stop_reason, run.data.error)
+  const ending = prefillEnding(run.data.stop_reason, run.data.error, run.data.counts)
   if (ending !== null) {
     return (
       <Callout tone="warning" role="alert" title={ending.title}>
@@ -350,6 +357,7 @@ const STATE_TEXT: Record<WaitingState, string> = {
     'Stale: prefilled three days ago or more. The tab stays open; send it, or discard it to move on.',
   interrupted:
     'The prefill stopped before it recorded what it typed. Check the composer in Chrome, clear it, then discard this.',
+  partly_typed: PARTLY_TYPED,
 }
 
 export function WaitingForYouCard({ campaignId }: { campaignId?: number }) {
@@ -420,7 +428,9 @@ function WaitingRow({
       className={cn(
         'flex flex-col gap-1.5 rounded-lg border p-3',
         state === 'stale' && 'border-amber-500/60 bg-amber-500/10',
-        state === 'interrupted' && 'border-destructive/40 bg-destructive/5',
+        (state === 'interrupted' || state === 'partly_typed') &&
+          'border-destructive/40 bg-destructive/5',
+        state === 'partly_typed' && 'border-destructive bg-destructive/10',
       )}
     >
       <div className="flex flex-wrap items-center gap-2">
@@ -445,21 +455,26 @@ function WaitingRow({
         )}
         {state === 'stale' && <Badge variant="outline">Stale</Badge>}
         {state === 'interrupted' && <Badge variant="destructive">Stopped</Badge>}
-        {state !== 'interrupted' && (
+        {state === 'partly_typed' && <Badge variant="destructive">Part typed</Badge>}
+        {state === 'prefilled' || state === 'stale' ? (
           <span className="ml-auto text-muted-foreground">
             Prefilled {ageText(item.prefilled_at, now)}
           </span>
-        )}
+        ) : null}
       </div>
       <p>{STATE_TEXT[state]}</p>
       <div className="flex flex-wrap items-center gap-2">
-        {state !== 'interrupted' && (
+        {(state === 'prefilled' || state === 'stale') && (
           <Button size="sm" disabled={check.isPending || checking} onClick={() => check.mutate()}>
             I sent it, check now
           </Button>
         )}
-        <Button size="sm" variant="outline" onClick={() => setConfirming(true)}>
-          Discard
+        <Button
+          size="sm"
+          variant={state === 'partly_typed' ? 'default' : 'outline'}
+          onClick={() => setConfirming(true)}
+        >
+          {state === 'partly_typed' ? 'I cleared it, discard' : 'Discard'}
         </Button>
       </div>
       {check.isSuccess && <CheckStarted runId={check.data.run_id} />}
@@ -468,7 +483,7 @@ function WaitingRow({
         open={confirming}
         onOpenChange={setConfirming}
         title={`Discard the message to ${name}?`}
-        confirmLabel="Discard"
+        confirmLabel={state === 'partly_typed' ? 'I cleared it, discard' : 'Discard'}
         onConfirm={() => drop.mutateAsync()}
         pending={drop.isPending}
         error={drop.isError ? drop.error.message : null}

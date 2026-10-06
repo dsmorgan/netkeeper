@@ -8,6 +8,7 @@ the message the way P4-09 records it.
 
 from __future__ import annotations
 
+import asyncio
 import random
 from datetime import datetime, timedelta
 from typing import Any
@@ -172,6 +173,8 @@ async def test_a_prefill_types_the_message_and_records_it_from_the_typing_start(
     assert run.counts_json == {
         "typed_chars": len(message.body_rendered or ""),
         "recipient_name_checked": None,  # an existing conversation has no chip
+        "message_click_attempted": True,
+        "message_clicked": True,
     }
 
 
@@ -291,6 +294,7 @@ async def test_a_spent_budget_records_not_typed_before_the_navigation(lane: Lane
     await f.execute()
     assert f.site.navigations == []
     _given_back(f, "budget")
+    assert _click_counts(f) == NO_CLICK
 
 
 async def test_a_wall_flags_the_session_and_types_nothing(lane: Lane) -> None:
@@ -333,18 +337,38 @@ async def test_a_refusal_after_the_click_gives_the_claim_back_and_hands_the_tab_
 
 
 class RaisingSource:
-    """A source that raises after ``keys`` keys."""
+    """A source that raises after ``keys`` keys, having clicked as told."""
 
-    def __init__(self, keys: int) -> None:
+    def __init__(
+        self,
+        keys: int,
+        *,
+        attempted: bool | None = None,
+        clicked: bool | None = None,
+        error: BaseException | None = None,
+    ) -> None:
         self._keys = keys
+        self._attempted = keys > 0 if attempted is None else attempted
+        self._clicked = keys > 0 if clicked is None else clicked
+        self._error = error
 
     @property
     def keys_sent(self) -> int:
         return self._keys
 
+    @property
+    def message_click_attempted(self) -> bool:
+        return self._attempted
+
+    @property
+    def message_clicked(self) -> bool:
+        return self._clicked
+
     async def prefill(
         self, spec: MessageJobSpec, plan: TypingPlan, *, cancelled: Any
     ) -> PrefillResult:
+        if self._error is not None:
+            raise self._error
         raise RuntimeError(f"failed with {spec.body}")
 
 
@@ -364,6 +388,72 @@ async def test_a_source_that_raises_is_not_typed_before_a_key_and_unknown_after(
         assert message is not None and message.status is status
         assert (message.error or "").startswith("unknown")
         assert "Zephyrine" not in (message.error or "")
+
+
+# --- the click is recorded on every path (S3) ---------------------------------------------
+
+NO_CLICK = {"message_click_attempted": False, "message_clicked": False}
+
+
+def _click_counts(f: Fixture) -> dict[str, Any]:
+    counts = f.run().counts_json or {}
+    return {key: counts.get(key) for key in NO_CLICK}
+
+
+async def test_a_run_that_ended_before_the_click_records_no_click(lane: Lane) -> None:
+    f = Fixture(lane, MessagingSite(ZEPHYRINE), clock=Clock(NOW + timedelta(seconds=61)))
+    await f.execute()  # the claim lapsed: nothing opened
+    assert _click_counts(f) == NO_CLICK
+
+
+async def test_a_refusal_before_the_click_records_no_click(lane: Lane) -> None:
+    site = MessagingSite(ZEPHYRINE, profile_html="<html><body><h1>Nobody</h1></body></html>")
+    f = Fixture(lane, site)
+    await f.execute()
+    run = f.run()
+    assert (run.stop_reason, _click_counts(f)) == ("not_typed", NO_CLICK)
+
+
+async def test_a_refusal_after_a_click_that_landed_records_both(lane: Lane) -> None:
+    site = MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, focus_composer=False))
+    site.focus_ignored = True
+    f = Fixture(lane, site)
+    await f.execute()
+    run = f.run()
+    assert (run.stop_reason, _click_counts(f)) == (
+        "not_typed",
+        {"message_click_attempted": True, "message_clicked": True},
+    )
+
+
+async def test_a_click_that_raised_records_attempted_but_not_clicked(lane: Lane) -> None:
+    site = MessagingSite(ZEPHYRINE)
+    site.click_error = RuntimeError("the page refused the click")
+    f = Fixture(lane, site)
+    await f.execute()
+    assert _click_counts(f) == {"message_click_attempted": True, "message_clicked": False}
+
+
+@pytest.mark.parametrize(("attempted", "clicked"), [(False, False), (True, False), (True, True)])
+async def test_a_source_that_raises_records_what_it_clicked(
+    lane: Lane, attempted: bool, clicked: bool
+) -> None:
+    f = Fixture(lane, MessagingSite(ZEPHYRINE))
+    f.worker._prefill_sources = lambda run, *, sleep, clock: RaisingSource(
+        0, attempted=attempted, clicked=clicked
+    )
+    await f.execute()
+    assert _click_counts(f) == {"message_click_attempted": attempted, "message_clicked": clicked}
+
+
+async def test_a_cancelled_run_records_what_it_clicked(lane: Lane) -> None:
+    f = Fixture(lane, MessagingSite(ZEPHYRINE))
+    f.worker._prefill_sources = lambda run, *, sleep, clock: RaisingSource(
+        0, attempted=True, clicked=True, error=asyncio.CancelledError()
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await f.execute()
+    assert _click_counts(f) == {"message_click_attempted": True, "message_clicked": True}
 
 
 # --- recording ---------------------------------------------------------------------------
@@ -457,6 +547,8 @@ class RecordingSource:
     """A source that must never be reached."""
 
     keys_sent = 0
+    message_click_attempted = False
+    message_clicked = False
 
     def __init__(self) -> None:
         self.calls = 0

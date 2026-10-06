@@ -245,7 +245,7 @@ class Status(enum.StrEnum):
 
 KEY_MANUAL_LINKEDIN_SENDS: Final = "manual_linkedin_sends"
 """The key of ADR 0004's row: off means auto-send is on."""
-KEY_LINKEDIN_FIRST_POLL_SHORT: Final = "linkedin_first_poll_short"
+KEY_LINKEDIN_REPLY_POLL: Final = "linkedin_reply_poll"
 """The key of the row a short first LinkedIn inbox poll raises; Settings acknowledges it."""
 
 
@@ -272,7 +272,7 @@ class Protection:
     brief: str | None = None
     key: str | None = None
     """A stable id for a row the UI acts on (#383): :data:`KEY_MANUAL_LINKEDIN_SENDS`,
-    :data:`KEY_LINKEDIN_FIRST_POLL_SHORT`. None for the rest; ``name`` is for reading."""
+    :data:`KEY_LINKEDIN_REPLY_POLL`. None for the rest; ``name`` is for reading."""
 
     @property
     def summary(self) -> str:
@@ -1680,7 +1680,7 @@ def _linkedin_reply_poll(session: Session, user: User, *, now: datetime) -> Prot
         )
     return Protection(
         name="linkedin reply poll",
-        key=KEY_LINKEDIN_FIRST_POLL_SHORT,
+        key=KEY_LINKEDIN_REPLY_POLL,
         status=Status.ON,
         value=value,
         notes=tuple(notes),

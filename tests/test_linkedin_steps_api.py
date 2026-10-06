@@ -257,6 +257,43 @@ async def test_waiting_and_discard(
     assert (await client.get(f"{BASE}/waiting")).json()["total"] == 0
 
 
+async def test_a_partly_typed_prefill_stays_listed_blocks_a_claim_and_discard_clears_it(
+    client: httpx.AsyncClient, running_app: FastAPI, executor: FakeExecutor, with_runner: None
+) -> None:
+    """B1: the list comes from the API, so a reload still shows it."""
+    enrollment_id, other = _seed(running_app, people=2)
+    claimed = await client.post(
+        f"{BASE}/prefill", json={"enrollment_id": enrollment_id}, headers=HEADERS
+    )
+    message_id = claimed.json()["message_id"]
+    with session_scope(running_app.state.session_factory, write=True) as session:
+        user = _local(session)
+        outcome = MessageOutcome(MessageOutcomeKind.PARTIALLY_TYPED, "fixed words", None, 5)
+        assert record_prefill_outcome(
+            session, user, message_id, outcome, settings=running_app.state.settings, now=NOW
+        )
+        for run in session.scalars(scoped(user, SyncRun)):
+            runs.finish_run(session, user, run.id, status=SyncRunStatus.FAILED, now=NOW)
+
+    for _ in range(2):  # a reload asks again and gets the same answer
+        [item] = (await client.get(f"{BASE}/waiting")).json()["items"]
+        assert (item["message_id"], item["status"], item["partly_typed"]) == (
+            message_id,
+            "failed",
+            True,
+        )
+        assert item["interrupted"] is False
+    blocked = await client.post(f"{BASE}/prefill", json={"enrollment_id": other}, headers=HEADERS)
+    assert blocked.status_code == 409
+    assert "prefill_open" in blocked.json()["detail"]["reasons"]
+    checked = await client.post(f"{BASE}/messages/{message_id}/check", headers=HEADERS)
+    assert checked.status_code == 409  # nothing was sent; only Discard applies
+
+    discarded = await client.post(f"{BASE}/messages/{message_id}/discard", headers=HEADERS)
+    assert discarded.status_code == 200 and discarded.json()["status"] == "discarded"
+    assert (await client.get(f"{BASE}/waiting")).json()["items"] == []
+
+
 async def test_check_asks_for_an_inbox_poll(
     client: httpx.AsyncClient,
     running_app: FastAPI,

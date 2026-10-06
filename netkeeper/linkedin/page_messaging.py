@@ -166,6 +166,14 @@ class PagePrefill:
     def keys_sent(self) -> int:
         return self._run.keys_sent
 
+    @property
+    def message_click_attempted(self) -> bool:
+        return self._run.message_click_attempted
+
+    @property
+    def message_clicked(self) -> bool:
+        return self._run.message_clicked
+
     async def prefill(
         self, spec: MessageJobSpec, plan: TypingPlan, *, cancelled: Cancelled
     ) -> PrefillResult:
