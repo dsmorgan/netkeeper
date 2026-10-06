@@ -1189,7 +1189,7 @@ async def test_an_observation_failure_counts_and_still_fails_the_run(
                 user_id,
                 source,
                 settings=SETTINGS,
-                clock=lambda hours=hours: NOW + timedelta(hours=hours),
+                clock=lambda: NOW + timedelta(hours=hours),  # noqa: B023
             )
         expected = 1 if hours == 0 else 2
         assert _inbox_breaker(session_factory, user_id).count == expected
