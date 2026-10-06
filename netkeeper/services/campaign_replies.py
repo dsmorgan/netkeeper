@@ -184,9 +184,10 @@ person discarded and sent anyway (#416 review)."""
 
 CONFIRM_SKEW: Final = timedelta(seconds=30)
 """How long before a prefill's ``prefilled_at`` a sent message may be dated and still
-confirm it. ``prefilled_at`` is this machine's clock when the outcome was recorded, after
-the last key and any wait for the write lock; a message's time is LinkedIn's clock, and a
-stored interaction's is truncated to the second. Nothing else goes out in that thread
+confirm it. ``prefilled_at`` is this machine's clock when typing started, taken before the
+first key (#382, ADR 0007), so a send can only come after it; a message's time is
+LinkedIn's clock, and a stored interaction's is truncated to the second, which is what the
+skew allows for. Nothing else goes out in that thread
 while the prefill types into its composer, so a message that close is the prefill's own.
 Kept short: confirming a send that did not happen would let a follow-up go early."""
 

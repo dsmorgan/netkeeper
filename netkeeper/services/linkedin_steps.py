@@ -59,8 +59,9 @@ again. The run left ``running`` is failed at the next start.
 
 **Recording** (:func:`record_prefill_outcome`, called by P4-03's runner):
 
-- ``prefilled``: ``prefilled_at``, the conversation if the page loaded it, and the
-  step counts as fired. The enrollment waits until the message is seen sent (P4-02).
+- ``prefilled``: ``prefilled_at`` (when typing started, before the first key), the
+  conversation if the page loaded it, and the step counts as fired. The enrollment
+  waits until the message is seen sent (P4-02).
 - ``not_typed`` or ``too_long`` (refused before any key): the claim is given back, as
   an email send that sent nothing is: the message row is deleted, the reason goes on
   the enrollment, and it is ready again :func:`~netkeeper.services.campaign_engine.retry_after`
@@ -677,15 +678,24 @@ def record_prefill_outcome(
     *,
     settings: Settings,
     now: datetime,
+    prefilled_at: datetime | None = None,
 ) -> bool:
     """Record what the ``message_send`` run did with a claimed message (P4-03 calls this).
 
-    See the module docstring for each outcome. False when the message is not a claimed
+    See the module docstring for each outcome. ``prefilled_at`` is when typing started,
+    taken before the first key (#382, ADR 0007): a ``prefilled`` message's
+    ``prefilled_at`` is set to it, so a send the person makes while the run is still
+    recording is dated after it. P4-03's runner always passes it; ``None`` falls back to
+    ``now``. It may not be later than ``now``. False when the message is not a claimed
     (``scheduled``) LinkedIn message of ``user``'s: nothing changes. Needs a writer
     session."""
     engine._require_writer(session, "record_prefill_outcome")
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
+    if prefilled_at is not None and (
+        prefilled_at.tzinfo is None or prefilled_at.utcoffset() is None or prefilled_at > now
+    ):
+        raise ValueError("prefilled_at must be timezone-aware and no later than now")
     message = _claimed_message(session, user, message_id)
     if message is None:
         return False
@@ -693,7 +703,7 @@ def record_prefill_outcome(
     kind = outcome.kind
     if kind is MessageOutcomeKind.PREFILLED:
         message.status = MessageStatus.PREFILLED
-        message.prefilled_at = now
+        message.prefilled_at = now if prefilled_at is None else prefilled_at
         message.li_conversation_urn = outcome.conversation_urn or message.li_conversation_urn
         message.error = None
         session.flush()

@@ -154,7 +154,7 @@ def _refusal(text: str, seed: int) -> type[TypingPlanError] | None:
 
 def test_the_flag_lint_reads_is_the_one_the_plan_defaults_to() -> None:
     assert vars(render_module)["SHIFT_ENTER_NEWLINES_ALLOWED"] is SHIFT_ENTER_NEWLINES_ALLOWED
-    assert SHIFT_ENTER_NEWLINES_ALLOWED is False
+    assert SHIFT_ENTER_NEWLINES_ALLOWED is True  # set by P4-03 (#382), ADR 0007
 
 
 @pytest.mark.parametrize("text", TEXTS.values(), ids=TEXTS.keys())
@@ -167,7 +167,8 @@ def test_lint_flags_exactly_the_characters_the_plan_refuses(text: str) -> None:
     # And rule by rule: the newline rule is the plan's newline refusal, the character
     # rule the plan's character refusal, whichever the plan happens to meet first.
     has_newline = any(char in NEWLINE_CHARS for char in text)
-    assert (LintRule.LINKEDIN_NEWLINE in char_errors) == has_newline
+    newline_refused = has_newline and not SHIFT_ENTER_NEWLINES_ALLOWED
+    assert (LintRule.LINKEDIN_NEWLINE in char_errors) == newline_refused
     plan_without_newlines = text.replace("\r", " ").replace("\n", " ")
     assert (LintRule.LINKEDIN_UNTYPABLE in char_errors) == (
         _refusal(plan_without_newlines, 0) is UnsupportedCharacter
@@ -230,10 +231,14 @@ def test_the_length_margin_is_real() -> None:
 
 
 @pytest.mark.parametrize("char", sorted(LINE_BREAK_CHARS), ids=lambda c: f"U+{ord(c):04X}")
-def test_every_line_break_is_a_lint_error(char: str) -> None:
+def test_every_line_break_but_cr_and_lf_is_a_lint_error(char: str) -> None:
     text = f"Hi{char}Bo"
-    rule = LintRule.LINKEDIN_NEWLINE if char in NEWLINE_CHARS else LintRule.LINKEDIN_UNTYPABLE
-    assert _errors(_rendered(text)) == {rule}
+    if char in NEWLINE_CHARS:
+        # CR and LF follow the newline flag, which P4-03 (#382) set: a Shift+Enter step.
+        expected = set() if SHIFT_ENTER_NEWLINES_ALLOWED else {LintRule.LINKEDIN_NEWLINE}
+    else:
+        expected = {LintRule.LINKEDIN_UNTYPABLE}
+    assert _errors(_rendered(text)) == expected
     assert render_module._LINE_BREAKS.fullmatch(char)  # a header splits on it too
 
 

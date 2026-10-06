@@ -940,12 +940,25 @@ def test_the_linkedin_limits_are_pinned() -> None:
     assert TYPING_LINT_SECONDS == 240
 
 
+@pytest.fixture
+def newlines_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flag as it was before P4-03 (#382), and as it goes back to if a later capture
+    shows Shift+Enter sending: these tests pin that refusing branch."""
+    monkeypatch.setattr(render_module, "SHIFT_ENTER_NEWLINES_ALLOWED", False)
+
+
+def test_a_multi_line_linkedin_body_lints_clean_with_the_real_flag() -> None:
+    """P4-03 (#382): with Shift+Enter allowed, a multi-line LinkedIn body is clean."""
+    assert lint(LINKEDIN, None, "Hi {{ first_name }},\n\nthanks\r\nagain") == []
+
+
 def test_lint_reads_the_newline_flag_from_the_pacing_module() -> None:
     # The one flag P4-03 flips: lint holds no copy of its own.
     assert (
         vars(render_module)["SHIFT_ENTER_NEWLINES_ALLOWED"] is pacing.SHIFT_ENTER_NEWLINES_ALLOWED
     )
-    assert pacing.SHIFT_ENTER_NEWLINES_ALLOWED is False
+    # P4-03 (#382) set it, with the Shift+Enter press and its pins (ADR 0007).
+    assert pacing.SHIFT_ENTER_NEWLINES_ALLOWED is True
     assert not hasattr(render_module, "LINKEDIN_ALLOW_NEWLINES")
     assert not hasattr(render_module, "LINKEDIN_MESSAGE_LONG_CHARS")
 
@@ -1055,6 +1068,7 @@ def test_a_linkedin_body_over_the_hard_limit_is_an_error() -> None:
         ('Hi {{ first_name }}{{ company | default("a\\r\\nb") }}', 1),
     ],
 )
+@pytest.mark.usefixtures("newlines_refused")
 def test_a_multi_line_linkedin_body_is_an_error(body: str, line: int) -> None:
     issues = lint(LINKEDIN, None, body)
     assert _lines(issues) == [(LintRule.LINKEDIN_NEWLINE, None, line)]
@@ -1064,6 +1078,7 @@ def test_a_multi_line_linkedin_body_is_an_error(body: str, line: int) -> None:
     )
 
 
+@pytest.mark.usefixtures("newlines_refused")
 def test_a_line_break_is_reported_on_the_line_it_ends() -> None:
     body = "Hi {{ first_name }}, one\ntwo\nthree"
     assert _lines(lint(LINKEDIN, None, body)) == [(LintRule.LINKEDIN_NEWLINE, None, 1)]
@@ -1109,6 +1124,7 @@ def test_the_newline_flag_decides_only_about_cr_and_lf(monkeypatch: pytest.Monke
     assert lint(LINKEDIN, None, "Hi {{ first_name }},\r\nthanks\n") == []
 
 
+@pytest.mark.usefixtures("newlines_refused")
 def test_the_line_of_a_long_body_is_where_it_passes_the_limit() -> None:
     first = "Hi {{ first_name }} " + "x" * 600
     issues = lint(LINKEDIN, None, first + "\n" + "y" * 500)
@@ -1118,6 +1134,7 @@ def test_the_line_of_a_long_body_is_where_it_passes_the_limit() -> None:
     ]
 
 
+@pytest.mark.usefixtures("newlines_refused")
 def test_the_line_of_a_too_long_body_is_where_it_passes_the_limit() -> None:
     lines = ["Hi {{ first_name }}", "x" * 3000, "y" * 3000, "z" * 3000]
     issues = lint(LINKEDIN, None, "\n".join(lines))
@@ -1136,6 +1153,7 @@ def test_an_email_template_is_unaffected_by_the_linkedin_rules() -> None:
     assert rendered.issues == ()
 
 
+@pytest.mark.usefixtures("newlines_refused")
 def test_a_merge_value_that_adds_a_line_break_fails_the_rendered_linkedin_message() -> None:
     rendered = render(
         LINKEDIN,
@@ -1241,6 +1259,7 @@ def test_a_slow_template_warning_never_hides_a_rendered_message_too_slow_to_type
 
 
 @pytest.mark.parametrize("newline", ["\r", "\r\n", "\n"], ids=["cr", "crlf", "lf"])
+@pytest.mark.usefixtures("newlines_refused")
 def test_an_untypable_character_is_reported_on_its_own_line(newline: str) -> None:
     body = "{{ first_name }} a" + newline + "b" + newline + "c\td"
     issues = lint(LINKEDIN, None, body)
@@ -1255,6 +1274,7 @@ def test_the_lf_of_a_crlf_is_on_the_line_the_crlf_ends() -> None:
     assert [render_module._line_of(source, offset) for offset in range(5)] == [1, 1, 1, 2, 2]
 
 
+@pytest.mark.usefixtures("newlines_refused")
 def test_a_linkedin_finding_in_the_template_is_not_repeated_for_the_render() -> None:
     body = "Hi {{ first_name }}\n" + "x" * (LINKEDIN_MESSAGE_MAX_CHARS + 1)
     rendered = render(LINKEDIN, None, body, _values(first_name="Bo"), today=TODAY)

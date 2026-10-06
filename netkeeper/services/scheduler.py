@@ -159,10 +159,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.config import HeatSettings, LinkedInSettings
 from netkeeper.db import is_writer, off_loop, session_scope
 from netkeeper.linkedin import pacing
-from netkeeper.models import JsonValue, User
+from netkeeper.models import JsonValue, SyncRunKind, User
 from netkeeper.models.base import utcnow
 from netkeeper.services import heat as heat_service
-from netkeeper.services import route_breaker
+from netkeeper.services import route_breaker, runs
 from netkeeper.services.linkedin_accounts import schedule_paused, scheduled_runs_armed
 from netkeeper.services.linkedin_session import session_flag
 from netkeeper.services.settings_kv import get_setting, set_setting
@@ -1287,7 +1287,9 @@ async def poll_once(
     for user, account_id in accounts:
         tz = user.timezone
         due_now = await off_loop(_due_now, session_factory, user, account_id, schedules, now)
-        last_fired_at: datetime | None = None
+        # Spec 9.5's gap also follows a LinkedIn prefill (P4-03): a person starts those,
+        # never this scheduler, so the gap is measured from the prefill run's end.
+        last_fired_at = await off_loop(_last_message_send, session_factory, user, now)
         for kind in sorted(due_now, key=lambda k: (due_now[k], k.value)):
             if last_fired_at is not None and now - last_fired_at < MIN_JOB_KIND_GAP:
                 await off_loop(
@@ -1321,6 +1323,19 @@ async def poll_once(
             if result.fired:
                 last_fired_at = now
     return fired
+
+
+def _last_message_send(
+    session_factory: sessionmaker[Session], user: User, now: datetime
+) -> datetime | None:
+    """When the user's newest ``message_send`` run ended (``now`` while it still runs),
+    or ``None`` when that is :data:`MIN_JOB_KIND_GAP` or more ago, or there is none."""
+    with session_scope(session_factory) as session:
+        run = runs.latest_run(session, user, SyncRunKind.MESSAGE_SEND)
+        if run is None:
+            return None
+        ended = run.completed_at if run.completed_at is not None else now
+    return ended if now - ended < MIN_JOB_KIND_GAP else None
 
 
 def _due_now(

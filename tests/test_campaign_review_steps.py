@@ -487,6 +487,15 @@ def _linkedin_reviewing(
         return user, campaign.id
 
 
+@pytest.fixture
+def newlines_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The newline flag as it was before P4-03 (#382), and as it goes back to if a later
+    capture shows Shift+Enter sending: the tests that use it pin the refusing branch."""
+    from netkeeper.campaigns import render as render_module
+
+    monkeypatch.setattr(render_module, "SHIFT_ENTER_NEWLINES_ALLOWED", False)
+
+
 @pytest.mark.parametrize(
     ("subject", "body", "rule"),
     [
@@ -496,6 +505,7 @@ def _linkedin_reviewing(
     ],
     ids=["subject", "newline", "too_long"],
 )
+@pytest.mark.usefixtures("newlines_refused")
 def test_a_linkedin_step_that_fails_lint_blocks_activation(
     session_factory: sessionmaker[Session], subject: str | None, body: str, rule: LintRule
 ) -> None:
@@ -544,6 +554,7 @@ def test_a_linkedin_subject_with_a_long_body_gives_only_the_subject_error(
         assert [i.rule for i in activation_errors(template)] == [LintRule.LINKEDIN_SUBJECT]
 
 
+@pytest.mark.usefixtures("newlines_refused")
 def test_a_message_whose_render_has_a_lint_error_cannot_be_approved(
     session_factory: sessionmaker[Session],
 ) -> None:

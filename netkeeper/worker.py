@@ -71,12 +71,14 @@ from netkeeper.linkedin.browser import (
 from netkeeper.linkedin.connections import ConnectionsSource, SyncMode
 from netkeeper.linkedin.enrich import ProfileSource
 from netkeeper.linkedin.inbox import InboxSource
+from netkeeper.linkedin.messaging import MessageOutcome, MessageOutcomeKind, PrefillSource
 from netkeeper.linkedin.page_connections import PageConnections
 from netkeeper.linkedin.page_inbox import PageInbox
+from netkeeper.linkedin.page_messaging import PagePrefill
 from netkeeper.linkedin.page_profiles import PageProfiles
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
-from netkeeper.services import route_breaker, runs
+from netkeeper.services import message_send, route_breaker, runs
 from netkeeper.services.budgets import profile_visit_risk_warning
 from netkeeper.services.connections_sync import sync_connections
 from netkeeper.services.enrichment import enrich_contacts
@@ -143,6 +145,20 @@ def inbox_source(run: BrowserRun, *, sleep: Sleep = asyncio.sleep) -> InboxSourc
     return PageInbox(run, sleep=sleep)
 
 
+def prefill_source(
+    run: BrowserRun, *, sleep: Sleep = asyncio.sleep, clock: Clock = _utcnow
+) -> PrefillSource:
+    """The source a LinkedIn prefill types through (P4-03, ADR 0007):
+    :class:`~netkeeper.linkedin.page_messaging.PagePrefill` on the run's tab."""
+    return PagePrefill(run, sleep=sleep, clock=clock)
+
+
+class PrefillSourceFactory(Protocol):
+    """Builds a prefill's :class:`PrefillSource`: :func:`prefill_source`'s shape."""
+
+    def __call__(self, run: BrowserRun, *, sleep: Sleep, clock: Clock) -> PrefillSource: ...
+
+
 class InboxSourceFactory(Protocol):
     """Builds an inbox poll's :class:`InboxSource`: :func:`inbox_source`'s shape."""
 
@@ -192,6 +208,7 @@ class BrowserWorker:
         profiles: ProfileSourceFactory = profile_source,
         inbox_sources: InboxSourceFactory = inbox_source,
         campaign_settings: Settings | None = None,
+        prefill_sources: PrefillSourceFactory = prefill_source,
     ) -> None:
         self.provider = provider
         self._factory = factory
@@ -210,6 +227,8 @@ class BrowserWorker:
         # The whole config, for the inbox poll's reply hook (P4-02): a prefilled message
         # seen sent schedules the next step by the campaign settings. None: the defaults.
         self._campaign_settings = campaign_settings
+        # The prefill's page source (P4-03): a test passes a fake.
+        self._prefill_sources = prefill_sources
 
     async def execute(self, run_id: int, user_id: int) -> runs.RunOutcome:
         """Run ``run_id`` to its end and record how it ended. See the module docstring.
@@ -223,19 +242,58 @@ class BrowserWorker:
             return runs.RunOutcome.DONE
         refusal = await off_loop(self._refusal, run_id, user_id, facts)
         if refusal is not None:
+            if facts.kind is SyncRunKind.MESSAGE_SEND:
+                await self._prefill_not_typed(run_id, user_id, refusal[1])
             await off_loop(
                 self._finish, run_id, user_id, SyncRunStatus.FAILED, refusal[0], refusal[1]
             )
             self._publish("run.finished", run_id, user_id, {"status": "failed"})
             return runs.RunOutcome.DONE
+        prepared: message_send.PreparedPrefill | None = None
+        if facts.kind is SyncRunKind.MESSAGE_SEND:
+            # ADR 0007: the claim's lapse and the whole typing plan, before the lock, the
+            # attach, any budget, or any navigation. A refusal is recorded there.
+            ready = await off_loop(
+                message_send.prepare,
+                self._factory,
+                user_id,
+                run_id,
+                settings=self._prefill_settings(),
+                clock=self._clock,
+            )
+            if isinstance(ready, message_send.PrefillReport):
+                status = await off_loop(self._status, run_id, user_id)
+                self._publish("run.finished", run_id, user_id, {"status": status})
+                return runs.RunOutcome.DONE
+            prepared = ready
         self._publish("run.started", run_id, user_id, {"kind": facts.kind.value})
         outcome = runs.RunOutcome.DONE
         try:
+            # wait=False, the default: a prefill never waits for the lock (ADR 0007).
             async with self.provider.run(activity_lock.account_key(facts.account_id)) as browser:
-                await self._run_job(run_id, user_id, facts, browser)
+                if prepared is not None:
+                    await message_send.run_prefill(
+                        self._factory,
+                        user_id,
+                        prepared,
+                        self._prefill_sources(browser, sleep=self._sleep, clock=self._clock),
+                        settings=self._prefill_settings(),
+                        clock=self._clock,
+                    )
+                else:
+                    await self._run_job(run_id, user_id, facts, browser)
         except (BrowserBusy, BrowserUnavailable) as exc:
             reason = "browser_busy" if isinstance(exc, BrowserBusy) else "browser_unavailable"
             log.warning("run %d could not use the browser: %s", run_id, exc)
+            if prepared is not None:
+                # The runner never ran, so no key was sent: the claim goes back.
+                await self._prefill_not_typed(
+                    run_id,
+                    user_id,
+                    "the browser was busy"
+                    if isinstance(exc, BrowserBusy)
+                    else "the browser was unavailable",
+                )
             await off_loop(
                 self._finish, run_id, user_id, SyncRunStatus.FAILED, reason, runs.describe(exc)
             )
@@ -269,6 +327,23 @@ class BrowserWorker:
         status = await off_loop(self._status, run_id, user_id)
         self._publish("run.finished", run_id, user_id, {"status": status})
         return outcome
+
+    def _prefill_settings(self) -> Settings:
+        """The whole config a prefill records with, carrying this worker's LinkedIn settings."""
+        base = self._campaign_settings if self._campaign_settings is not None else Settings()
+        return dataclasses.replace(base, linkedin=self._settings)
+
+    async def _prefill_not_typed(self, run_id: int, user_id: int, reason: str) -> None:
+        """Give a prefill's claim back, ``not_typed``, when its run ended before any key."""
+        await off_loop(
+            message_send.record_quietly,
+            self._factory,
+            user_id,
+            run_id,
+            MessageOutcome(MessageOutcomeKind.NOT_TYPED, reason, None, 0),
+            settings=self._prefill_settings(),
+            now=self._clock(),
+        )
 
     async def _run_job(
         self, run_id: int, user_id: int, facts: _RunFacts, browser: BrowserRun

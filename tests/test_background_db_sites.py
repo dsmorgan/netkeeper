@@ -300,7 +300,7 @@ async def test_worker_finish_after_an_error_before_the_runner_stays_off_the_loop
     assert run.error == "RuntimeError: the attach broke"
 
 
-async def test_worker_finish_for_a_kind_with_no_runner_stays_off_the_loop(
+async def test_worker_prefill_without_a_claim_stays_off_the_loop(
     engine: Engine, session_factory: sessionmaker[Session]
 ) -> None:
     with session_scope(session_factory, write=True) as session:
@@ -320,7 +320,9 @@ async def test_worker_finish_for_a_kind_with_no_runner_stays_off_the_loop(
     async with watched(engine):
         await _worker(fake_provider()[0], session_factory).execute(run_id, user_id)
 
-    assert _run(session_factory, run_id, user_id).stop_reason == "no_runner"
+    # P4-03 (#382): message_send has a runner; one with no claimed message is recorded
+    # by the runner's preparation, off the loop like every other write.
+    assert _run(session_factory, run_id, user_id).stop_reason == "no_claim"
 
 
 # --- enrichment: _start, _plan, the gate, apply_harvest, record_progress, finish -------

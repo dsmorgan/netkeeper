@@ -677,9 +677,9 @@ def plan_enrichment(
 # * No step ever carries a line break in its ``chunk``. A plain Enter sends the
 #   message, so a newline (CR, LF, or CRLF: :data:`NEWLINE_CHARS`) is its own step
 #   with ``newline=True`` and an empty chunk, for the replay to press as
-#   Shift+Enter. Even that step is refused unless ``allow_newlines`` is set, and its
-#   default, :data:`SHIFT_ENTER_NEWLINES_ALLOWED`, stays ``False`` until P4-06
-#   (#374) shows that Shift+Enter never sends. Every other line break (VT, FF, FS,
+#   Shift+Enter. Even that step is refused unless ``allow_newlines`` is set; its
+#   default, :data:`SHIFT_ENTER_NEWLINES_ALLOWED`, is ``True`` since P4-06 (#374)
+#   showed that Shift+Enter never sends. Every other line break (VT, FF, FS,
 #   GS, RS, NEL, U+2028, U+2029) is refused whatever the flag says.
 # * No step carries a code point :func:`is_untypable` refuses: a control character
 #   (a tab moves focus), a line or paragraph separator, a lone surrogate, a
@@ -701,12 +701,15 @@ TYPING_WARN_CHARS: Final = 1000
 #: lint flags a body. Set with a margin under :data:`MAX_TYPING_SECONDS`, so a body
 #: the lint passes practically never draws a plan over the ceiling.
 TYPING_LINT_SECONDS: Final = 240.0
-#: Whether a newline may be typed (as Shift+Enter). ``False`` until P4-06 (#374)
-#: shows that Shift+Enter never sends a LinkedIn message; until then a multi-line
-#: body is refused. This is the single source of truth for the newline flag: P4-11's
-#: (#377) lint imports it rather than keeping its own, and P4-03 (#382) flips this
-#: one flag, here, when P4-06's finding allows it.
-SHIFT_ENTER_NEWLINES_ALLOWED: Final = False
+#: Whether a newline may be typed (as Shift+Enter). P4-06's capture (#374,
+#: ``docs/linkedin-messaging-shapes.md``) showed that Shift+Enter never sends a
+#: LinkedIn message, whatever the "Press Enter to Send" setting, and ADR 0007 lets
+#: P4-03 (#382) set this to ``True`` in the same change that adds the one Shift+Enter
+#: press and its pins (``tests/test_browser_safety.py``). This is the single source of
+#: truth for the newline flag: P4-11's (#377) lint imports it rather than keeping its
+#: own, and the prefill never passes ``allow_newlines``. If a later capture shows
+#: Shift+Enter sending, this goes back to ``False`` and multi-line bodies are refused.
+SHIFT_ENTER_NEWLINES_ALLOWED: Final = True
 
 #: Every code point treated as a line break, the same set
 #: ``netkeeper.campaigns.render`` splits a header on. For reference: only

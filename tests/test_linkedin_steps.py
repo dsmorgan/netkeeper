@@ -1132,6 +1132,15 @@ def _set_body(lane: Lane, body: str) -> None:
 _SIX_COMPANIES: Final = "Hi {{ first_name }}, " + " ".join(["{{ company }}"] * 6)
 
 
+@pytest.fixture
+def newlines_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The newline flag as it was before P4-03 (#382), and as it goes back to if a later
+    capture shows Shift+Enter sending: the tests that use it pin the refusing branch."""
+    from netkeeper.campaigns import render as render_module
+
+    monkeypatch.setattr(render_module, "SHIFT_ENTER_NEWLINES_ALLOWED", False)
+
+
 @pytest.mark.parametrize(
     ("body", "company", "rule"),
     [
@@ -1139,6 +1148,7 @@ _SIX_COMPANIES: Final = "Hi {{ first_name }}, " + " ".join(["{{ company }}"] * 6
         (_SIX_COMPANIES, ("Widgets " * 38)[:300], "linkedin_typing_time"),
     ],
 )
+@pytest.mark.usefixtures("newlines_refused")
 def test_a_rendered_linkedin_error_parks_it_on_the_real_path(
     lane: Lane, body: str, company: str, rule: str
 ) -> None:
@@ -1161,6 +1171,7 @@ def test_a_rendered_linkedin_error_parks_it_on_the_real_path(
     assert (lane.messages(enrollment_id), lane.runs()) == ([], [])
 
 
+@pytest.mark.usefixtures("newlines_refused")
 def test_a_linkedin_template_with_a_source_error_parks_via_block_reason(lane: Lane) -> None:
     """A line break in an active campaign's LinkedIn template (#387's newline rule): the
     step is blocked before anything renders, and the enrollment says so."""

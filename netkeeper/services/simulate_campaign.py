@@ -229,7 +229,13 @@ class SimulatedLinkedIn:
                     len(message.body_rendered or ""),
                 )
                 record_prefill_outcome(
-                    session, user, claim.message_id, outcome, settings=settings, now=now
+                    session,
+                    user,
+                    claim.message_id,
+                    outcome,
+                    settings=settings,
+                    now=now,
+                    prefilled_at=now,
                 )
                 if claim.run_id is not None:
                     runs.finish_run(
