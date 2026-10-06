@@ -89,7 +89,7 @@ This adjusts the maintainer's "brought to the front" wording, which placed it at
 
 ### One click on Message
 
-Before the click, the run reads the profile page's `h1`, if there's exactly one, for the chip check below. It also opens the observation (`BrowserRun.observe`, ADR 0006) for the compose option the click will load, so the answer can't arrive before anyone listens.
+Before the click, the run reads the profile page's `h1`, if there's exactly one, for the chip check below. It also opens the observations (`BrowserRun.observe`, ADR 0006) for the two requests the click causes: the compose option, and the page's own `messengerMessages` thread request. So neither answer can arrive before anyone listens.
 
 `BrowserRun.click_message` clicks the **Message** control once per prefill, on the contact's profile, modeled on `BrowserRun.click_contact_info`:
 
@@ -117,6 +117,8 @@ Once `click_message` returns, the run never calls `ensure_page`, `goto`, `new_pa
 
 `BrowserRun.type_into_composer` types the rendered body into the composer the click opened. Before the first key, it verifies all of these, and types nothing if any fails. Every count includes hidden elements (`include_hidden=True`), so a minimized bubble counts.
 
+**The composer wait.** The bubble and the compose option arrive a moment after the click. So before the first key, `type_into_composer` polls the full set of read-only checks below (the compose option seen, one composer, empty, the recipient, and focus, which under option B of decision 5 follows its one focus call) until they all pass, for at most `COMPOSER_WAIT_S` (5 seconds, a module constant pinned to its literal). The wait is read-only: it gives no input. If the checks haven't all passed by then, the prefill ends `not_typed`.
+
 - **Exactly one composer is on the page.** The composer is found by role and name: role `textbox`, name `Write a message…` (with U+2026, the ellipsis character), exact, never by a CSS class or the `msg-form-…` id. It must sit in the bubble the recipient checks verified (see the next subsection). Any other composer on the page, such as a minimized bubble left from an earlier prefill or opened by the person, means more than one, and the prefill refuses with a reason that asks the person to close the other message bubbles. netkeeper never closes a bubble: closing one deletes its draft, and it's an input this ADR doesn't authorize.
 - **The composer is empty.** It reads as empty under [the text rule](#reading-the-composers-text). The capture shows that a minimized bubble keeps its draft across pages, so the Message click can restore a bubble that already holds a draft for this contact. The prefill refuses, and the person clears the draft.
 - **The composer's recipient is this contact.** See the next subsection.
@@ -140,7 +142,7 @@ The composer's `aria-label` doesn't name the recipient, so the recipient comes f
 
 The bubble's DOM alone never authorizes typing, and neither does the compose answer alone. The draft's earlier rule ("no observed conversation means `not_typed`") is replaced: a contact you've never messaged has no conversation, and the compose option names the recipient either way.
 
-For an existing conversation, the outcome's `conversation_urn` comes from `existingConversationUrn`. Its thread id is the same one the page's following `messengerMessages` request names, so P4-03 reports it in the form the inbox poll (P4-01) matches.
+For an existing conversation, the outcome's `conversation_urn` comes from the page's own `messengerMessages` thread request, observed through the observation opened before the click. Its `conversationUrn` variable is the `urn:li:msg_conversation:(…)` form that the inbox poll (#433) matches, and it's used only when its thread id matches `existingConversationUrn`'s. When that request isn't seen, or its thread id differs, `conversation_urn` is `None`. The fallback is never the `fsd_conversation` form from the compose option, which the poll can't match. A never-messaged contact has no conversation yet, so its `conversation_urn` is `None`.
 
 #### Reading the composer's text
 
@@ -149,9 +151,10 @@ The composer is a `contenteditable` element, and its text is read with Playwrigh
 - Each paragraph (`p`) inside the composer is read with `inner_text`. A paragraph boundary is one newline, and a `<br>` inside a paragraph is one newline.
 - A paragraph that holds only a `<br>` is an empty line, and a trailing `<br>` at the end of a paragraph adds nothing. So the empty composer the capture shows, `<p><br></p>`, reads as the empty string.
 - A no-break space (U+00A0) reads as a space. A browser may write one for a typed space.
-- Anything in the composer the rule can't read this way, such as an element other than `p` and `br`, makes the text unreadable. Unreadable text fails the check. If LinkedIn renders an inserted emoji as an `<img>`, the composer becomes unreadable after that emoji and the run ends `partially_typed`. That's fail-safe; CP8 watches for it.
+- Text outside a paragraph makes the composer unreadable: a bare text node directly in the composer, or text before a `<p>`. The check is that the composer's whole `text_content()` equals its paragraphs' `text_content()` joined with nothing between them. In real Chrome, selecting all, pressing Backspace, and typing leaves bare text, which the paragraph rule alone would read as empty.
+- Anything else in the composer the rule can't read this way, such as an element other than `p` and `br`, also makes the text unreadable. Unreadable text fails the check: before the first key the prefill refuses (`not_typed`), and after it typing stops (`partially_typed`). If LinkedIn renders an inserted emoji as an `<img>`, the composer becomes unreadable after that emoji and the run ends `partially_typed`. That's fail-safe; CP8 watches for it.
 
-The expected text is the typed prefix with each newline step as `\n`. P4-03's smoke replica uses a real `contenteditable`, so the rule is tested against a browser's own editing, not a fake.
+The expected text is the typed prefix with each newline step as `\n`, with the same mapping applied: a no-break space in the body becomes a space before the two are compared. P4-03's smoke replica uses a real `contenteditable`, so the rule is tested against a browser's own editing, not a fake.
 
 #### The replay
 
@@ -180,7 +183,7 @@ The checks above don't run only once. Playwright sends keys to whatever has focu
 Where focus lands after the Message click is unknown (#429, item 5). The maintainer chooses one option at acceptance; either is a one-line change to this subsection, and the rest of this ADR holds under both.
 
 - **Option A: no focus input.** netkeeper never focuses the composer. If focus isn't in it after the recipient checks, the prefill ends `not_typed`. If #429 shows focus doesn't land there, every prefill refuses until an amendment adds option B.
-- **Option B (the safety review's recommendation): one `Locator.focus()`.** `type_into_composer` may call `focus()` on the verified composer's locator, never a click. It's called at most once per run, only after every recipient, emptiness, and single-composer check has passed, and only when the composer doesn't already hold focus. Focus is then checked again, and if the composer still doesn't hold it, the prefill ends `not_typed`. The call is pinned in `ALLOWED_INPUTS` like the others.
+- **Option B (the safety review's recommendation): one `Locator.focus()`.** `type_into_composer` may call `BrowserRun._focus_seam`, which calls `focus()` on the verified composer's locator, never a click. It's called at most once per run, only after every recipient, emptiness, and single-composer check has passed, and only when the composer doesn't already hold focus. Focus is then checked again, and if the composer still doesn't hold it, the prefill ends `not_typed`. `ALLOWED_INPUTS` names `focus` at `_focus_seam`, which only `type_into_composer` calls.
 
 **Chosen: to be decided at acceptance.**
 
@@ -214,7 +217,7 @@ The Send click isn't authorized here. Auto-send (P4-04, #384) needs its own amen
 
 ### Handing the tab over
 
-At the end of a prefill run (spec 11.6), `BrowserRun.hand_over()` drops the run's reference to its tab and detaches without closing it, so the provider's later `close()` closes nothing. It changes no focus (see [Bringing the tab to the front](#bringing-the-tab-to-the-front)). From then on the tab isn't netkeeper's: no later run reuses it, navigates it, or closes it. `hand_over` is a new ending, distinct from `close()`, and is reached only from `netkeeper/linkedin/page_messaging.py`. The run releases the browser lock after typing; it doesn't wait for the send.
+Once the Message click has been attempted, the run's tab is never closed: not by `close()`, not on an error, and not when the run is cancelled (including `asyncio.CancelledError`). At the end of a prefill run (spec 11.6), `BrowserRun.hand_over()` drops the run's reference to its tab and detaches without closing it, so the provider's later `close()` closes nothing. It changes no focus (see [Bringing the tab to the front](#bringing-the-tab-to-the-front)). From then on the tab isn't netkeeper's: no later run reuses it, navigates it, or closes it. `hand_over` is a new ending, distinct from `close()`, and is reached only from `netkeeper/linkedin/page_messaging.py`. The run releases the browser lock after typing; it doesn't wait for the send.
 
 Every run that attempted the Message click hands its tab over, whatever the outcome. A click that raised may still have opened a bubble, so an attempted click counts as a click:
 
@@ -237,11 +240,11 @@ P4-03 (#382) changes `tests/test_browser_safety.py` in the same pull request as 
 
 Static pins:
 
-- `ALLOWED_INPUTS` entries for exactly two methods: `click` in `BrowserRun.click_message`; and `keyboard` (read once, into a local), `type`, `insert_text`, and `press` in `BrowserRun.type_into_composer`. Under option B of decision 5, `focus` in `type_into_composer` too, at one call site.
+- `ALLOWED_INPUTS` entries for exactly two methods: `click` in `BrowserRun.click_message`; and `keyboard` (read once, into a local), `type`, `insert_text`, and `press` in `BrowserRun.type_into_composer`. Under option B of decision 5, also `focus` in `BrowserRun._focus_seam`, called only from `type_into_composer`.
 - A literal check that the only `press` argument anywhere is `"Shift+Enter"`.
-- No `keyboard.down` and no `keyboard.up` anywhere. No `focus()` anywhere, except option B's one call.
+- No `keyboard.down` and no `keyboard.up` anywhere. No `focus()` anywhere, except option B's one call in `_focus_seam`.
 - `keyboard.type` is never called with a space, or with a chunk that isn't one printable ASCII character other than a space.
-- The Message link's role and name (`"link"`, `"Message"`), the composer's role and name (`"textbox"`, `"Write a message…"`), the dialog's name (`"Messaging"`), the `"New message"` heading, the `"Enter message recipients"` field, and the `"Remove "` chip prefix are module constants pinned to literals.
+- The Message link's role and name (`"link"`, `"Message"`), the composer's role and name (`"textbox"`, `"Write a message…"`), the dialog's name (`"Messaging"`), the `"New message"` heading, the `"Enter message recipients"` field, the `"Remove "` chip prefix, and `COMPOSER_WAIT_S` (`5`) are module constants pinned to literals.
 - No string argument to a locator-building call (`get_by_role`, `get_by_text`, `get_by_label`, `get_by_title`, `locator`, `filter`, or a `has_text` or `name` keyword) under `netkeeper/linkedin/` matches "send" or "submit", ignoring case.
 - The `click` in `click_message` is on a locator built with the contact's `href`, never on a bare `nth` of the role locator.
 - No code under `netkeeper/` passes `allow_newlines=` to `typing_plan`.
@@ -259,7 +262,7 @@ Runtime pins, against a fake page:
 - Three Message links with the contact's `href` give one click, on the first visible one, through a locator that matches the `href`.
 - A link named Message that names another profile, mismatched `profileUrn` and `recipient`, a repeated query parameter, no link, or no visible link gives `not_typed` with no click.
 - A `button` named Message beside the links is ignored: the prefill proceeds and never clicks it.
-- The compose-option observation is opened before the click; after the click, no `observe`, `scroll`, `ensure_page`, `new_page`, or `goto` is called.
+- The compose-option and `messengerMessages` observations are opened before the click; after the click, no `observe`, `scroll`, `ensure_page`, `new_page`, or `goto` is called.
 - A compose option whose path id or `recipientUrns` isn't the contact's, with more than one recipient, with an unknown `composeOptionType`, or missing, gives `not_typed`.
 - A `REPLY` bubble whose header `h2` links to another profile id, or holds two links, gives `not_typed`. A `REPLY` page with any `New message` heading gives `not_typed`.
 - A `CONNECTION_MESSAGE` page with a `Messaging` dialog that doesn't contain the `New message` heading gives `not_typed`. One whose bubble root is a `Messaging` dialog containing the heading proceeds.
@@ -267,12 +270,16 @@ Runtime pins, against a fake page:
 - A never-messaged bubble with zero chips, two chips, two `New message` headings, two `/in/` links in the scope, or a card for another slug gives `not_typed`, with or without a `role="dialog"` root. A page whose profile links the contact's slug while the bubble's card links another slug gives `not_typed`.
 - A chip whose name doesn't match the profile's `h1` gives `not_typed` with the reason `recipient_name_mismatch`; the comparison collapses whitespace and normalizes to NFC. With zero or two `h1` elements, the check is skipped and the card still decides.
 - A second composer on the page before the first key, including a hidden one, gives `not_typed`; one appearing mid-type stops typing.
-- A non-empty composer gives `not_typed`; `<p><br></p>` reads as empty; a no-break space reads as a space.
-- Focus not in the composer before the first key gives `not_typed`; focus moving away after chunk k gives zero further keys. Under option B, `focus()` is called at most once, only after the checks, and focus is checked again after it.
+- A non-empty composer gives `not_typed`; `<p><br></p>` reads as empty; a no-break space reads as a space, in the read and in the expected text.
+- A bare text node in the composer, or text before a `<p>`, makes the composer unreadable: `not_typed` before the first key, `partially_typed` after.
+- Checks that haven't all passed after `COMPOSER_WAIT_S` give `not_typed` with zero keys; checks that pass during the wait proceed, and the wait gives no input.
+- An existing conversation's `conversation_urn` is the `urn:li:msg_conversation:(…)` URN from the observed `messengerMessages` request; with no such request, or a different thread id, it's `None`, never the `fsd_conversation` form.
+- Focus not in the composer before the first key gives `not_typed`; focus moving away after chunk k gives zero further keys. Under option B, `_focus_seam` is called at most once, only after the checks, and focus is checked again after it.
 - A space is sent with `insert_text`, never with `keyboard.type`.
 - No delay is awaited between a step's checks and its key, and the focus check is the last read before each key.
 - A URL change before the first key gives `not_typed`; a URL change mid-type gives `partially_typed` with zero further keys.
 - A cancel mid-type gives `partially_typed` with zero further keys.
+- A cancellation, or a call to `close()`, at any point after the Message click was attempted leaves the tab open.
 - An exception from a check's read after the first key call was attempted gives `partially_typed` or `unknown`, never `not_typed`.
 - Composer text that diverges from the typed prefix stops typing.
 - A recipient (header link, or chip and card) that changes mid-type stops typing.
