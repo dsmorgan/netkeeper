@@ -107,7 +107,7 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>replica</titl
 <main>
   <div id="list-pane" class="pane">
     <a href="/messaging/thread/hidden/" style="display:none">x</a>
-    <a href="/messaging/thread/offscreen/" style="position:absolute;left:-9999px">x</a>
+    <a href="/messaging/thread/offscreen/" style="position:absolute;left:-9999px;top:200px">x</a>
     <div id="list"></div><div style="height:800px"></div></div>
   <div id="thread-pane" class="pane"><div id="thread"></div><div style="height:3000px"></div></div>
 </main>
