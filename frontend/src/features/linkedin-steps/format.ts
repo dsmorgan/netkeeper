@@ -7,7 +7,7 @@ import { WHY_IT_MATTERS, type LintRule } from '@/features/templates/lint'
 import type { WaitingItem } from './api'
 
 export const ONE_AT_A_TIME = 'One prefill at a time: send or discard the open one first.'
-export const TYPING = 'Typing in Chrome… watch the netkeeper Chrome window.'
+export { TYPING } from './prefill-copy'
 export const REVIEW_AND_SEND = 'Review it in Chrome and click Send yourself.'
 
 /** A prefilled message this old is stale (spec 11.6): it no longer holds the one slot. */
@@ -21,6 +21,8 @@ export const STALE_AFTER_DAYS = 3
  */
 export const REASON_TEXT: Readonly<Record<string, string>> = {
   run_refused: "netkeeper can't run a prefill yet, so nothing was typed in Chrome",
+  linkedin_inbox_stale:
+    "held until the inbox is read: netkeeper hasn't read your LinkedIn inbox recently enough to know about replies",
   run_in_progress: 'another LinkedIn run is going; wait for it to finish',
   prefill_open: 'another prefill is open: send or discard it first',
   outside_active_hours: "it's outside your LinkedIn active hours",

@@ -281,13 +281,14 @@ describe('PostureSection: LinkedIn sends and the first inbox poll (#383)', () =>
     ' action LinkedIn restricts hardest'
   const SHORT_POLL_WARNING =
     "the first LinkedIn inbox poll couldn't read back to 2030-01-02; check older LinkedIn" +
-    ' replies by hand, then run `netkeeper linkedin inbox-acknowledge`'
+    ' replies by hand, then click Acknowledge in Settings, Posture, or run' +
+    ' `netkeeper linkedin inbox-acknowledge`'
   const SHORT_POLL = {
     name: 'linkedin reply poll',
     key: 'linkedin_first_poll_short',
-    status: 'off',
-    value: 'the first poll fell short of 2030-01-02',
-    summary: 'the first poll fell short of 2030-01-02',
+    status: 'on',
+    value: 'last complete poll 2030-01-03 09:00 UTC (1 h ago)',
+    summary: 'last complete poll 2030-01-03 09:00 UTC (1 h ago)',
     warnings: [SHORT_POLL_WARNING],
     notes: [],
   }
@@ -295,6 +296,31 @@ describe('PostureSection: LinkedIn sends and the first inbox poll (#383)', () =>
   function withRows(rows: Posture['protections']): Posture {
     return { ...CLEAN, protections: [...CLEAN.protections, ...rows] }
   }
+
+  it('shows the LinkedIn inbox hold before the first poll, with no Acknowledge button', async () => {
+    renderSection(
+      withRows([
+        {
+          ...SHORT_POLL,
+          value:
+            'no complete poll yet; scheduled polls wait for a first one you run by hand: `netkeeper linkedin inbox`',
+          summary: 'no complete poll yet',
+          warnings: [],
+          notes: [
+            'the LinkedIn inbox has not been read: no poll has completed yet; run `netkeeper linkedin inbox` by hand; scheduled polls wait for a first one. LinkedIn prefills wait until a poll completes; nothing is skipped or failed',
+          ],
+        },
+      ]),
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Show details' }))
+    const notes = (await screen.findAllByRole('list', { name: 'Notes' })).find((list) =>
+      list.textContent?.includes('no poll has completed yet'),
+    )
+    expect(notes).toHaveTextContent('run netkeeper linkedin inbox by hand')
+    expect(notes).toHaveTextContent('LinkedIn prefills wait until a poll completes')
+    expect(screen.queryByRole('button', { name: 'Acknowledge' })).toBeNull()
+  })
 
   it('shows manual LinkedIn sends first and plainly while auto-send is off', async () => {
     renderSection(withRows([MANUAL_ON]))
