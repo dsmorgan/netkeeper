@@ -147,8 +147,8 @@ def record(
     settings: Settings,
     now: datetime,
     prefilled_at: datetime | None = None,
-    click_attempted: bool = False,
-    clicked: bool = False,
+    click_attempted: bool | None = None,
+    clicked: bool | None = None,
 ) -> PrefillReport:
     """Record ``outcome`` on run ``run_id``'s claimed message, and end the run, in one
     writer transaction. A run with no claimed message only ends ``failed``."""
@@ -191,10 +191,14 @@ def record(
                 "typed_chars": outcome.typed_chars,
                 # For CP8: how often the never-messaged chip was checked against the h1.
                 "recipient_name_checked": outcome.recipient_name_checked,
-                # For the UI: whether a message bubble may be open (ADR 0007). False on
-                # every path that ended before the Message click.
-                "message_click_attempted": click_attempted,
-                "message_clicked": clicked,
+                # For the UI: whether a message bubble may be open (ADR 0007). Left out
+                # when the path doesn't know, so the UI falls back to the reason's words
+                # instead of reading "no bubble". Only a source that ran says either.
+                **(
+                    {}
+                    if click_attempted is None or clicked is None
+                    else {"message_click_attempted": click_attempted, "message_clicked": clicked}
+                ),
             },
             error=None if prefilled else outcome.reason,
         )
@@ -215,8 +219,8 @@ def record_quietly(
     *,
     settings: Settings,
     now: datetime,
-    click_attempted: bool = False,
-    clicked: bool = False,
+    click_attempted: bool | None = None,
+    clicked: bool | None = None,
 ) -> None:
     """:func:`record` on the way out of a refusal or a cancel: a failed write is logged."""
     try:
@@ -325,6 +329,8 @@ async def run_prefill(
             _not_typed("the claim lapsed"),
             settings=settings,
             now=clock(),
+            click_attempted=False,
+            clicked=False,
         )
 
     def spend() -> str | None:
@@ -360,7 +366,15 @@ async def run_prefill(
     refused = await off_loop(spend)
     if refused is not None:
         return await off_loop(
-            record, factory, user_id, run_id, _not_typed(refused), settings=settings, now=clock()
+            record,
+            factory,
+            user_id,
+            run_id,
+            _not_typed(refused),
+            settings=settings,
+            now=clock(),
+            click_attempted=False,
+            clicked=False,
         )
 
     asked_at = 0.0

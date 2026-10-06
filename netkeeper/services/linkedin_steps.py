@@ -98,7 +98,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import ColumnElement, Select, and_, exists, func, or_
+from sqlalchemy import ColumnElement, Select, and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -177,16 +177,17 @@ through typing (``partially_typed``) or lost track of the composer (``unknown``)
 (:func:`record_prefill_outcome`). Part of the body may sit in an open message bubble."""
 
 
-def _is_partly_typed(enrollment_waits: ColumnElement[bool]) -> ColumnElement[bool]:
-    """SQL: a ``failed`` LinkedIn message that stopped part way, whose enrollment still
-    waits for a person (``next_action_at`` cleared). It holds the one-prefill slot and is
-    listed in "waiting for you" until the person discards it (#383, ADR 0007)."""
+def _is_partly_typed() -> ColumnElement[bool]:
+    """SQL: a ``failed`` message that stopped part way. It holds the one-prefill slot and
+    is listed in "waiting for you" until the person discards it (#383, ADR 0007). Keyed on
+    the message alone, never on its enrollment: re-advancing the enrollment or merging
+    its contact must not hide a bubble that may still hold the text. Callers add the
+    LinkedIn outbound conditions."""
     return and_(
         Message.status == MessageStatus.FAILED,
         or_(
             *(Message.error.startswith(prefix, autoescape=True) for prefix in PARTLY_TYPED_PREFIXES)
         ),
-        enrollment_waits,
     )
 
 
@@ -372,13 +373,7 @@ def _open_prefill(session: Session, user: User, now: datetime) -> Message | None
                     ),
                 ),
                 # Half-typed text may sit in an open bubble until the person discards it.
-                _is_partly_typed(
-                    exists().where(
-                        Enrollment.id == Message.enrollment_id,
-                        Enrollment.user_id == user.id,
-                        Enrollment.next_action_at.is_(None),
-                    )
-                ),
+                _is_partly_typed(),
             ),
         )
         .order_by(Message.id)
@@ -883,7 +878,7 @@ def waiting_for_you(
             or_(
                 Message.status.in_(WAITING_STATUSES),
                 and_(Message.status == MessageStatus.SCHEDULED, SyncRun.id.is_(None)),
-                _is_partly_typed(Enrollment.next_action_at.is_(None)),
+                _is_partly_typed(),
             ),
         )
     )
@@ -934,22 +929,9 @@ def _waiting_message(
         also_unrun
         and message.status is MessageStatus.FAILED
         and (message.error or "").startswith(PARTLY_TYPED_PREFIXES)
-        and _enrollment_waits(session, user, message.enrollment_id)
     ):
         return message
     raise PrefillNotWaiting(f"message {message_id} is {message.status}; nothing waits on it")
-
-
-def _enrollment_waits(session: Session, user: User, enrollment_id: int) -> bool:
-    """Whether the enrollment has no next time: it waits for a person."""
-    return (
-        session.scalar(
-            scoped(user, Enrollment)
-            .with_only_columns(Enrollment.id)
-            .where(Enrollment.id == enrollment_id, Enrollment.next_action_at.is_(None))
-        )
-        is not None
-    )
 
 
 def _run_running(session: Session, user: User, run_id: int | None) -> bool:
@@ -967,7 +949,9 @@ def discard(
     """The person will not send it: ``discarded`` at ``now`` (``discarded_at``). The step
     counts as fired (never twice, as for a discarded Gmail draft), and the enrollment
     moves to its next step, due its delay after the discard (or after a later send), or
-    completes. netkeeper changes nothing in LinkedIn: the composer is the person's.
+    completes. netkeeper changes nothing in LinkedIn: the composer is the person's. A
+    partly typed message is the exception to "moves on": when its enrollment has already
+    moved on (a due time, a merge, an end), the discard only releases the message.
 
     Raises :class:`LookupError` for a message that is not ``user``'s, and
     :class:`PrefillNotWaiting` for one that does not wait for them. Needs a writer
@@ -976,10 +960,16 @@ def discard(
     message = _waiting_message(session, user, message_id, also_unrun=True)
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
+    partly_typed = message.status is MessageStatus.FAILED
     message.status = MessageStatus.DISCARDED
     message.discarded_at = now
     message.error = None
     session.flush()
+    if partly_typed and engine._enrollment(session, user, message.enrollment_id).next_action_at:
+        # The enrollment has moved on since (a send seen, a new due time, a merge): the
+        # discard only lets the bubble go. It never advances the enrollment again.
+        log.info("message %d discarded; its enrollment had already moved on", message.id)
+        return message
     engine._after_settling(session, user, settings, message, fired=True)
     log.info("message %d discarded by the person; its step counts as fired", message.id)
     return message

@@ -400,9 +400,30 @@ def _click_counts(f: Fixture) -> dict[str, Any]:
     return {key: counts.get(key) for key in NO_CLICK}
 
 
-async def test_a_run_that_ended_before_the_click_records_no_click(lane: Lane) -> None:
+async def test_a_run_refused_before_the_runner_says_nothing_about_a_click(lane: Lane) -> None:
+    """The claim lapsed at prepare(): no source ran, so the keys are left out and the UI
+    falls back to the reason's words instead of reading "no bubble"."""
     f = Fixture(lane, MessagingSite(ZEPHYRINE), clock=Clock(NOW + timedelta(seconds=61)))
-    await f.execute()  # the claim lapsed: nothing opened
+    await f.execute()
+    assert _click_counts(f) == {"message_click_attempted": None, "message_clicked": None}
+    assert "message_click_attempted" not in (f.run().counts_json or {})
+
+
+async def test_a_claim_that_lapsed_in_the_runner_records_no_click(lane: Lane) -> None:
+    f = Fixture(lane, MessagingSite(ZEPHYRINE))
+    prepared = message_send.prepare(
+        lane.factory, lane.user_id, f.run_id, settings=lane.settings, clock=lambda: NOW
+    )
+    assert isinstance(prepared, message_send.PreparedPrefill)
+    late = Clock(NOW + timedelta(seconds=61))
+    await message_send.run_prefill(
+        lane.factory,
+        lane.user_id,
+        prepared,
+        RecordingSource(),
+        settings=lane.settings,
+        clock=late,
+    )
     assert _click_counts(f) == NO_CLICK
 
 

@@ -53,6 +53,7 @@ import {
 } from './format'
 import {
   PARTLY_TYPED,
+  PARTLY_TYPED_SENT_ANYWAY,
   PREFILL_NOTE,
   TYPED_WHOLE,
   TYPING,
@@ -463,6 +464,7 @@ function WaitingRow({
         ) : null}
       </div>
       <p>{STATE_TEXT[state]}</p>
+      {state === 'partly_typed' && <p>{PARTLY_TYPED_SENT_ANYWAY}</p>}
       <div className="flex flex-wrap items-center gap-2">
         {(state === 'prefilled' || state === 'stale') && (
           <Button size="sm" disabled={check.isPending || checking} onClick={() => check.mutate()}>

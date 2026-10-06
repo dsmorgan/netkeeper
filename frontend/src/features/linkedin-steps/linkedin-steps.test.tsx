@@ -833,6 +833,7 @@ describe('a partly typed prefill in Waiting for you (B1)', () => {
     expect(row.className).toMatch(/destructive/)
     expect(row).toHaveTextContent(PARTLY_TYPED)
     expect(row).toHaveTextContent("Don't click Send")
+    expect(row).toHaveTextContent('If you finished and sent it yourself, discard this.')
     expect(within(row).queryByRole('button', { name: 'I sent it, check now' })).toBeNull()
     expect(within(row).getByRole('button', { name: 'I cleared it, discard' })).toBeVisible()
     expect(within(row).getAllByRole('button')).toHaveLength(1)
