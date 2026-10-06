@@ -772,12 +772,12 @@ def _inbox_count(factory: sessionmaker[Session], account_id: int) -> int:
 def test_schedule_status_shows_the_inbox_breaker(cli_db: sessionmaker[Session]) -> None:
     runner = CliRunner()
     clear = runner.invoke(cli, ["linkedin", "schedule", "status"]).output
-    assert "inbox breaker: 0 of 2 route_changed inbox runs in a row" in clear
+    assert "inbox breaker: 0 of 2 unreadable inbox runs in a row" in clear
 
     _inbox_changed(cli_db, 2)
     tripped = runner.invoke(cli, ["linkedin", "schedule", "status"]).output
     assert (
-        "inbox breaker: tripped, 2 of 2 route_changed inbox runs in a row;"
+        "inbox breaker: tripped, 2 of 2 unreadable inbox runs in a row;"
         " scheduled inbox runs are skipped (`netkeeper linkedin schedule reset-breaker`)"
     ) in tripped
     # The connections lines are not the inbox's.
@@ -789,7 +789,7 @@ def test_reset_breaker_clears_the_inbox_breaker(cli_db: sessionmaker[Session]) -
     runner = CliRunner()
     declined = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="n\n")
     assert declined.exit_code == 1
-    assert "2 `route_changed` inbox" in declined.output
+    assert "2 unreadable inbox" in declined.output
     assert "inbox runs will be allowed to fire again" in declined.output
     assert _inbox_count(cli_db, account_id) == 2
 
@@ -806,6 +806,6 @@ def test_reset_breaker_clears_a_corrupt_inbox_row(cli_db: sessionmaker[Session])
         set_setting(session, user, f"linkedin.inbox_route_changed_breaker.{account_id}", "garbage")
     result = CliRunner().invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="y\n")
     assert result.exit_code == 0, result.output
-    assert "route_changed inbox unreadable" in result.output
+    assert "inbox breaker state unreadable" in result.output
     with session_scope(cli_db) as session:
         assert not route_breaker.inbox_tripped(session, _user(session), account_id)
