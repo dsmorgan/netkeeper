@@ -534,9 +534,7 @@ def posture(
         _contact_info_breaker(session, user, account_id),
         _network_aging(session, user),
     ]
-    linkedin_replies = _linkedin_reply_poll(session, user, now=now)
-    if linkedin_replies is not None:
-        protections.append(linkedin_replies)
+    protections.append(_linkedin_reply_poll(session, user, now=now))
     return PostureReport(
         checked_at=now,
         timezone=linkedin.timezone,
@@ -1642,11 +1640,10 @@ def _linkedin_reply_poll(session: Session, user: User, *, now: datetime) -> Prot
             " `netkeeper linkedin inbox`"
         )
     else:
-        hours = inbox_hold.stale_after().total_seconds() / 3600
-        value = (
-            f"last complete poll {last:%Y-%m-%d %H:%M UTC} ({_ago(now - last)});"
-            f" holds past {hours:.1f} h"
-        )
+        value = f"last complete poll {last:%Y-%m-%d %H:%M UTC} ({_ago(now - last)})"
+        if in_use:
+            hours = inbox_hold.stale_after().total_seconds() / 3600
+            value += f"; holds past {hours:.1f} h"
     if inbox_hold.is_stale(last, now=now, linkedin_live=in_use):
         newest = latest_run(session, user, SyncRunKind.INBOX)
         why = ""
