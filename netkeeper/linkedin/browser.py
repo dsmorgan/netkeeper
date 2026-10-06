@@ -439,6 +439,8 @@ PROFILE_HEADING: Final = "h1"
 NEW_MESSAGE_SCOPE: Final = "xpath=ancestor::*[.//h2[normalize-space()='New message']][1]"
 #: The refusal a chip whose name isn't ``Remove <the profile's h1>`` gives (ADR 0007).
 RECIPIENT_NAME_MISMATCH: Final = "recipient_name_mismatch"
+#: The refusal a compose option that arrived after the verified one gives (ADR 0007).
+ANOTHER_COMPOSE: Final = "another_compose"
 #: The refusal a chip whose accessible name the matcher can't confirm gives.
 RECIPIENT_NAME_UNREADABLE: Final = "recipient_name_unreadable"
 #: Elements whose text is not part of an accessible name.
@@ -1603,7 +1605,7 @@ class BrowserRun:
         refusal."""
         page = cast(PageLike, tab)
         if another_compose is not None and another_compose():
-            return "more than one compose option was loaded"
+            return ANOTHER_COMPOSE
         if self._lost(page):
             return "the tab or the browser went away"
         if page.url != self._click_url:
@@ -1617,6 +1619,10 @@ class BrowserRun:
                 return (
                     "the composer is not empty" if not expected else "the composer's text changed"
                 )
+            # Again after the page reads, so a compose option that arrived during them
+            # refuses this pass (it isn't a page read: focus stays the last one).
+            if another_compose is not None and another_compose():
+                return ANOTHER_COMPOSE
             # Last, so the window between this read and the key is as short as it can be.
             if focus and await composer.and_(tab.locator(FOCUSED)).count() != 1:
                 return "the composer does not hold focus"
