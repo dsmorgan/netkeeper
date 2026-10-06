@@ -85,6 +85,11 @@ INCOMPLETE: Final = "inbox_incomplete"
 #: posture warning to check older replies by hand (#388 review, S3).
 FIRST_SHORT: Final = "inbox_first_short"
 
+#: The walls that count toward the inbox breaker (#437): an unknown shape, or a page
+#: that moved or a retired query (``not_found``). Throttles, checkpoints and log-outs
+#: have their own handling (heat, the session flag).
+_ROUTE_OUTCOMES: Final = frozenset({Outcome.ROUTE_CHANGED, Outcome.NOT_FOUND})
+
 _HEAT_OUTCOMES: Final = frozenset({Outcome.THROTTLED, Outcome.CHECKPOINT})
 _FLAG_OUTCOMES: Final = frozenset({Outcome.CHECKPOINT, Outcome.LOGGED_OUT})
 
@@ -250,8 +255,10 @@ async def poll_inbox(
         return heat_raised, flagged
 
     def record_breaker(*, route_changed: bool, completed: bool) -> None:
-        """#437: the inbox's own streak, in its own writer session, before the ending is
-        written (as connections_sync does). Never touches the connections streaks."""
+        """#437: the inbox's own streak, in its own writer session. A ``route_changed``
+        stop is recorded before the run's ending is written (as connections_sync does);
+        a completed poll clears it after the apply has committed. Never touches the
+        connections streaks."""
         with session_scope(factory, write=True) as session:
             route_breaker.record_inbox(
                 session,
@@ -326,7 +333,7 @@ async def poll_inbox(
             delta = await source.read(spec)
         except InboxReadStopped as stop:
             heat_raised, flagged = await off_loop(record_response, stop.outcome, stop.final_url)
-            if stop.outcome is Outcome.ROUTE_CHANGED:
+            if stop.outcome in _ROUTE_OUTCOMES:
                 await off_loop(record_breaker, route_changed=True, completed=False)
             await off_loop(
                 finish, SyncRunStatus.ABORTED, stop.outcome.value, _zero_counts(), error=None
@@ -340,7 +347,14 @@ async def poll_inbox(
                 heat_raised=heat_raised,
                 session_flagged=flagged,
             )
-        except (BrowserError, ObservationFailed):
+        except ObservationFailed:
+            # #437 review: the observation mechanism failing to read the page says the
+            # route could not be read, as in connections_sync (#191 F1). Count it, then
+            # let ``runs_recording`` finish the run failed. BrowserError stays out: a
+            # local browser or tab problem says nothing about the messaging page.
+            await off_loop(record_breaker, route_changed=True, completed=False)
+            raise
+        except BrowserError:
             raise
         except Exception as exc:
             log.error(

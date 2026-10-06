@@ -1883,11 +1883,13 @@ def linkedin_schedule_reset_breaker(
     linkedin enrich`) that reaches its end and reads Contact info clears it the
     same way.
 
-    Two LinkedIn inbox polls in a row ending `route_changed` trip the inbox
-    breaker (#437), which skips scheduled inbox polls (and, once the inbox is
-    stale, holds LinkedIn steps for watched contacts); this clears it too. A manual
-    `netkeeper linkedin inbox` that completes clears it the same way. Connections
-    syncs are never affected by it.
+    Two LinkedIn inbox polls in a row ending `route_changed` or `not_found`, or
+    failing to observe the page, trip the inbox breaker (#437), which skips
+    scheduled inbox polls. This clears only that count, so scheduled polls may
+    run again; it does not refresh the inbox. The hold on LinkedIn steps for
+    watched contacts (#417) lifts only when a poll completes. A manual `netkeeper
+    linkedin inbox` that completes clears both. Connections syncs are never
+    affected by it.
     """
     engine = make_engine(database_url())
     try:

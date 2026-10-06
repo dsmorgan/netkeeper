@@ -602,9 +602,8 @@ def _inbox_breaker(session: Session, user: User, account_id: int) -> tuple[Check
     if route_breaker.inbox_tripped(session, user, account_id):
         return (
             CheckState.BLOCKED,
-            "The LinkedIn inbox poll is stopped after several polls found the messaging page"
-            " changed; run `netkeeper linkedin inbox` by hand to release it. LinkedIn steps"
-            " for watched contacts wait until a poll completes. See Posture on the Settings"
-            " page",
+            "The LinkedIn inbox poll is stopped after two polls found the messaging page"
+            " changed; run `netkeeper linkedin inbox` by hand to release it. See Posture on"
+            " the Settings page",
         )
     return None
