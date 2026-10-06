@@ -18,7 +18,7 @@ So P4-01 reads Voyager GraphQL JSON, not flight, and P4-03 finds a `flagship-web
 
 ## The requests
 
-Every list and thread answer comes from one path. The `queryId` is `<name>.<hash>`; the hash differs for each variant of a query (4 hashes for `messengerConversations`, 3 for `messengerMessages`) and changes with LinkedIn's releases, so a reader matches the **name** and the field under `data` that names the variant, never the hash. `variables` is Rest.li syntax, `(key:value,...)`, with each URN percent-encoded inside it (`urn%3Ali%3Afsd_profile%3A<id>`; a compound URN's parentheses and comma are encoded too).
+Every list and thread answer comes from one path. The `queryId` is `<name>.<hash>`; the hash differs for each variant of a query and changes with LinkedIn's releases, so a reader matches the **name** and the field under `data` that names the variant, never the hash. `variables` is Rest.li syntax, `(key:value,...)`, with each URN percent-encoded inside it (`urn%3Ali%3Afsd_profile%3A<id>`; a compound URN's parentheses and comma are encoded too).
 
 | What | Method and path | `queryId` name | `variables` keys | Answer field under `data` |
 |---|---|---|---|---|
@@ -102,7 +102,7 @@ The list is ordered by `lastActivityAt`, newest first, in every captured answer.
 | `categories` | What else marks them | Fixture |
 |---|---|---|
 | `INBOX`, `PRIMARY_INBOX` | Ordinary one-to-one conversations, `state` `null`. Seen with a `file` render item (an attachment), with a `title`, and with an `EDITED` last message | `ONE_TO_ONE_INBOUND`, `ONE_TO_ONE_OUTBOUND`, `WITH_FILE`, `WITH_TITLE`, `EDITED` |
-| `INBOX`, `PRIMARY_INBOX`, `INMAIL` | Conversations that began as InMail. `state` `PENDING`, `ACCEPTED` or `DECLINED`; often a `subject`. Pending ones carried the `InMail` label and a `hostUrnData` render item (`type` `SALES_INMAIL` or `PREMIUM_INMAIL`); some were sponsored, with the `Sponsored` label and a `messageAdRenderContent` item | `INMAIL_ACCEPTED`, `INMAIL_PENDING`, `INMAIL_DECLINED`, `PREMIUM_INMAIL` |
+| `INBOX`, `PRIMARY_INBOX`, `INMAIL` | Conversations that began as InMail. `state` `PENDING`, `ACCEPTED` or `DECLINED`; often a `subject`. Pending ones carried the `InMail` label and a `hostUrnData` render item (`type` `SALES_INMAIL` or `PREMIUM_INMAIL`); accepted ones had no label and no `hostUrnData`, and some carried a `conversationVerificationLabel`; one was sponsored (`state` `null`, the `Sponsored` label, a `messageAdRenderContent` item) | `INMAIL_ACCEPTED`, `INMAIL_ACCEPTED_VERIFIED`, `INMAIL_PENDING`, `INMAIL_DECLINED`, `PREMIUM_INMAIL`, `SPONSORED_IN_INBOX`; invented: `INMAIL_ACCEPTED_LABELLED` |
 | `INBOX`, `SECONDARY_INBOX`, `INMAIL` | Pending requests, with `hostUrnData` and no label | `SECONDARY_PENDING` |
 | `ARCHIVE`, `INMAIL` | Sponsored messages and `LinkedIn Offer` items | `SPONSORED`, `SPONSORED_MESSAGE`, `OFFER` |
 
@@ -122,9 +122,9 @@ So under the 2026-10-03 decision, the poll opens threads **by navigation only** 
 
 ## A thread
 
-Opening a thread sends `messengerMessages` with `conversationUrn`, answered by `messengerMessagesBySyncToken`. The captured answers held 1 to 5 messages, **newest first**. Each is a `com.linkedin.messenger.Message` with the keys `entityUrn`, `backendUrn`, `backendConversationUrn`, `conversation`, `body`, `subject`, `deliveredAt`, `actor`, `sender`, `originToken`, `messageBodyRenderFormat` (`DEFAULT`, or `EDITED` for an edited message), `renderContent`, `renderContentFallbackText`, `reactionSummaries`, `footer`, `inlineWarning`, and `incompleteRetriableData`: the same shape as the list's last message.
+Opening a thread sends `messengerMessages` with `conversationUrn`, answered by `messengerMessagesBySyncToken`. The captured answers held a few messages each, **newest first**. Each is a `com.linkedin.messenger.Message` with the keys `entityUrn`, `backendUrn`, `backendConversationUrn`, `conversation`, `body`, `subject`, `deliveredAt`, `actor`, `sender`, `originToken`, `messageBodyRenderFormat` (`DEFAULT`, or `EDITED` for an edited message), `renderContent`, `renderContentFallbackText`, `reactionSummaries`, `footer`, `inlineWarning`, and `incompleteRetriableData`: the same shape as the list's last message.
 
-Scrolling up sent `messengerMessagesByAnchorTimestamp` with `countBefore:20`; both captured answers were empty, since the thread was short. The order of a non-empty answer is assumed to match the sync answer's.
+Scrolling up sent `messengerMessagesByAnchorTimestamp` with `countBefore:20`; the captured answers were empty, since the thread was short. The order of a non-empty answer is assumed to match the sync answer's.
 
 ## The Message control
 
@@ -193,7 +193,7 @@ Neither bubble's HTML has `autofocus`, and the `role="textbox"` element has no `
 
 ## Typing
 
-While the person types in an existing conversation's composer, the page sends `POST /voyager/api/voyagerMessagingDashMessengerConversations?action=typing` with a `text/plain` JSON body of one key, `{"conversationUrn": "<msg_conversation urn>"}`, answered `202` with no body. In the captured typing, the posts came about **5 seconds apart** while typing went on (4 in one session, in two pairs; 2 before the send): the page throttles them, it doesn't post per key. The recipient's client presumably shows "typing…" while they arrive; the capture can't show the other side.
+While the person types in an existing conversation's composer, the page sends `POST /voyager/api/voyagerMessagingDashMessengerConversations?action=typing` with a `text/plain` JSON body of one key, `{"conversationUrn": "<msg_conversation urn>"}`, answered `202` with no body. In the captured typing, the posts came about **5 seconds apart** while typing went on: the page throttles them, it doesn't post per key. The recipient's client presumably shows "typing…" while they arrive; the capture can't show the other side.
 
 No other messaging request appeared while typing: no draft save. The category answer's `draftMessages` collection suggests LinkedIn can hold server-side drafts, but every captured one was empty.
 
@@ -272,10 +272,12 @@ The inbox page opens `GET /realtime/connect` (`text/event-stream`), subscribes w
 | The mailbox owner | The first part of each conversation URN, the participant with `distance: SELF`, and the request's `mailboxUrn`; all must agree. The `conversationIds` request has no `mailboxUrn`, so for it only the first two | Captured | Disagreement: `RouteChanged` |
 | A conversation | `entityUrn`, `lastActivityAt`, `categories`, `groupChat`, `conversationParticipants`, `messages.elements` | Captured | A missing key (other than `messages`): the whole answer is refused |
 | The counterpart | The one participant whose `hostIdentityUrn` isn't the owner's, and is a `urn:li:fsd_profile:` | Captured | More than one, or a company: skipped as a group or as other |
-| One-to-one | `groupChat: false`; exactly one counterpart, an `fsd_profile`; no `conversationTypeText`, no `hostUrnData` or ad render item, no `contentMetadata`; and either no `INMAIL` in `categories`, or `INMAIL` with `state` `ACCEPTED`. A `file` render item, a `title`, or an `EDITED` message doesn't change that | Captured | |
-| A group | `groupChat: true`, or more than two participants | **Assumed**: no group in the capture | Counted as `skipped_group` |
-| Accepted InMail | `INMAIL` in `categories`, `state` `ACCEPTED`, a single `fsd_profile` counterpart: **read as one-to-one**, for replies and send matching (maintainer's decision, #432 review: missing a reply is the dangerous direction) | Captured | |
-| Pending or declined InMail, sponsored, offers | `INMAIL` with `state` `PENDING`, `DECLINED` or `null`; a `conversationTypeText`; an organization participant; `contentMetadata.conversationAdContent`; or a `hostUrnData` or ad render item | Captured | Counted as `skipped_other` |
+| Kind (the rules apply in order; the first that matches decides), rule 1: a group | `groupChat: true`, or more than one counterpart | **Assumed**: no group in the capture | Counted as `skipped_group` |
+| Kind, rule 2: sponsored or an offer | Otherwise, any company participant, `contentMetadata.conversationAdContent`, or a `messageAdRenderContent` or `conversationAdsMessageContent` render item, whatever the categories, state or label (one captured sponsored item sat in `INBOX`/`PRIMARY_INBOX`/`INMAIL` with `state` `null`) | Captured | Counted as `skipped_other` |
+| Kind, rule 3: accepted InMail | Otherwise, `INMAIL` in `categories` with `state` `ACCEPTED` and one `fsd_profile` counterpart: **read as one-to-one**, whatever its `conversationTypeText`, `hostUrnData` or `conversationVerificationLabel` (maintainer's decision, #432 review: missing a reply is the dangerous direction). Captured accepted InMail had no label and no `hostUrnData`; some had a `conversationVerificationLabel` | Captured | |
+| Kind, rule 4: other InMail | Otherwise, `INMAIL` in `categories` (`state` `PENDING`, `DECLINED` or `null`) | Captured | Counted as `skipped_other` |
+| Kind, rule 5: labelled | Otherwise, a `conversationTypeText` or a `hostUrnData` render item | **Assumed**: not seen outside `INMAIL` | Counted as `skipped_other` |
+| Kind, rule 6: one-to-one | Everything else with one `fsd_profile` counterpart. A `file` render item, a `title`, a `conversationVerificationLabel`, or an `EDITED` message doesn't change that | Captured | |
 | A system message | `actor: null`; read `sender` instead | `actor: null`: captured. What a system message looks like: **assumed** | A message with no `sender`: the conversation is refused |
 | The last message | `messages.elements[0]`: `entityUrn`, `sender.hostIdentityUrn`, `deliveredAt`, `body.text` | Captured | No `messages` key or no element: the conversation has no message to report |
 | Outbound | `sender.hostIdentityUrn` is the owner | Captured; `originToken` agrees | |
@@ -284,7 +286,7 @@ The inbox page opens `GET /realtime/connect` (`text/event-stream`), subscribes w
 | The end of the list | `nextCursor` null or no elements | **Assumed** | Neither: not the end |
 | Opening a thread | Navigate to `conversationUrl` (`/messaging/thread/<thread id>/`); read `messengerMessagesBySyncToken` whose request names that `conversationUrn` | Captured | No answer for that conversation: the thread unread, the list item still counts |
 | A thread's messages | `elements`, newest first, the list message's shape | Captured | |
-| Older messages | `messengerMessagesByAnchorTimestamp` | Shape **assumed** (both captured answers were empty) | |
+| Older messages | `messengerMessagesByAnchorTimestamp` | Shape **assumed** (the captured answers were empty) | |
 | The Message control | Every `<a>` named `Message` must have the `href` `/messaging/compose/?profileUrn=urn:li:fsd_profile:<id>&recipient=<id>&…`, with both ids the contact's; the prefill clicks the first visible one (ADR 0007) | Captured (three identical controls); which is visible: **assumed** | None, or any control naming someone else: nothing is clicked |
 | The bubble opened | The compose option answer's `composeNavigationContext.recipientUrns` is `[contact's urn]` | Captured | Another recipient, or none: no key |
 | Existing or new | `existingConversationUrn` present (`REPLY`) or absent (`CONNECTION_MESSAGE`) | Captured | |

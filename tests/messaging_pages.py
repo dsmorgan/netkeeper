@@ -306,7 +306,7 @@ class Msg:
     sender: Member | Organization
     text: str
     at_ms: int
-    #: ``True`` gives the message ``actor: null`` (with a ``sender``), as two captured
+    #: ``True`` gives the message ``actor: null`` (with a ``sender``), as some captured
     #: list messages had.
     actorless: bool = False
     subject: str | None = None
@@ -374,9 +374,10 @@ class Conv:
     state: str | None = None
     type_label: str | None = None
     title: str | None = None
+    verification_label: str | None = None
     ad_content: bool = False
     creator: Member | Organization = OWNER
-    #: ``False`` leaves out the ``messages`` key, as two captured list items did.
+    #: ``False`` leaves out the ``messages`` key, as some captured list items did.
     has_messages: bool = True
     #: The category answer carries an (empty) ``draftMessages`` collection; the sync one does not.
     drafts_key: bool = False
@@ -400,7 +401,7 @@ def conversation(c: Conv) -> dict[str, Any]:
         "state": c.state,
         "title": c.title,
         "conversationTypeText": _text(c.type_label),
-        "conversationVerificationLabel": None,
+        "conversationVerificationLabel": _text(c.verification_label),
         "conversationVerificationExplanation": None,
         "headlineText": None,
         "shortHeadlineText": None,
@@ -998,7 +999,7 @@ WITH_FILE: Final = Conv(
     ),
     creator=ZEPHYRINE,
 )
-#: One-to-one with a ``title`` (7 captured one-to-one items had one).
+#: One-to-one with a ``title`` (some captured one-to-one items had one).
 WITH_TITLE: Final = Conv(
     25,
     (THADDEUS,),
@@ -1007,12 +1008,59 @@ WITH_TITLE: Final = Conv(
     creator=THADDEUS,
 )
 #: One-to-one whose last message was edited: ``messageBodyRenderFormat`` ``EDITED``
-#: (seen on 3 captured list messages).
+#: (seen on captured list messages).
 EDITED: Final = Conv(
     26,
     (MARISOL,),
     Msg(26, 1, MARISOL, "Invented edited note.", _at(11), edited=True),
     creator=MARISOL,
+)
+#: An accepted InMail with a ``conversationVerificationLabel``, as some captured ones had.
+INMAIL_ACCEPTED_VERIFIED: Final = Conv(
+    27,
+    (BRIXTON,),
+    Msg(27, 1, BRIXTON, "Invented accepted pitch.", _at(10), subject="Invented accepted subject"),
+    categories=(INBOX, PRIMARY_INBOX, INMAIL),
+    state="ACCEPTED",
+    verification_label="Invented verification note",
+    creator=BRIXTON,
+)
+#: **Invented:** an accepted InMail that kept the ``InMail`` label and ``hostUrnData``.
+#: The capture had none; it pins that rule 3 reads accepted InMail whatever its label.
+INMAIL_ACCEPTED_LABELLED: Final = Conv(
+    28,
+    (QUILLON,),
+    Msg(
+        28,
+        1,
+        QUILLON,
+        "Invented labelled accepted pitch.",
+        _at(9),
+        subject="Invented labelled subject",
+        render_content=(host_urn_render_content("SALES_INMAIL", QUILLON),),
+    ),
+    categories=(INBOX, PRIMARY_INBOX, INMAIL),
+    state="ACCEPTED",
+    type_label=INMAIL_LABEL,
+    creator=QUILLON,
+)
+#: A sponsored message in the primary inbox: ``INBOX``/``PRIMARY_INBOX``/``INMAIL``,
+#: ``state`` ``null`` (as captured), ``Sponsored``, ``messageAdRenderContent``.
+SPONSORED_IN_INBOX: Final = Conv(
+    29,
+    (SAFFRON,),
+    Msg(
+        29,
+        1,
+        SAFFRON,
+        "Invented sponsored inbox text.",
+        _at(8),
+        subject="Invented sponsored inbox subject",
+        render_content=(message_ad_render_content(),),
+    ),
+    categories=(INBOX, PRIMARY_INBOX, INMAIL),
+    type_label=SPONSORED_LABEL,
+    creator=SAFFRON,
 )
 #: **Invented:** a group. The capture had none; ``groupChat`` true, three or more participants.
 GROUP: Final = Conv(
@@ -1023,7 +1071,7 @@ GROUP: Final = Conv(
     title="Invented group title",
     creator=QUILLON,
 )
-#: A list item with no ``messages`` key, as two captured items had.
+#: A list item with no ``messages`` key, as some captured items had.
 NO_MESSAGES: Final = Conv(17, (THADDEUS,), None, has_messages=False)
 
 #: The first page (by sync token) and the next (by category), each newest first.
@@ -1038,6 +1086,9 @@ INBOX_OLDER_PAGE: Final = (
     WITH_FILE,
     WITH_TITLE,
     EDITED,
+    INMAIL_ACCEPTED_VERIFIED,
+    INMAIL_ACCEPTED_LABELLED,
+    SPONSORED_IN_INBOX,
     GROUP,
     NO_MESSAGES,
 )
@@ -1050,6 +1101,8 @@ READ_AS_ONE_TO_ONE: Final = (
     WITH_FILE,
     WITH_TITLE,
     EDITED,
+    INMAIL_ACCEPTED_VERIFIED,
+    INMAIL_ACCEPTED_LABELLED,
 )
 #: Counted as ``skipped_other``.
 SKIPPED_OTHER: Final = (
@@ -1060,11 +1113,12 @@ SKIPPED_OTHER: Final = (
     SECONDARY_PENDING,
     INMAIL_DECLINED,
     PREMIUM_INMAIL,
+    SPONSORED_IN_INBOX,
 )
 #: Counted as ``skipped_group``.
 SKIPPED_GROUP: Final = (GROUP,)
 
-#: A list message with ``actor: null`` and a ``sender``, as captured twice in ordinary
+#: A list message with ``actor: null`` and a ``sender``, as captured in ordinary
 #: conversations. **Invented:** a system message; this is the nearest captured thing.
 ACTORLESS: Final = Msg(18, 1, ZEPHYRINE, "Invented notice text.", _at(2), actorless=True)
 

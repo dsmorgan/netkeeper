@@ -406,24 +406,70 @@ def test_title_and_edited_are_one_to_one_markers_only() -> None:
     assert plain["messageBodyRenderFormat"] == "DEFAULT"
 
 
+_AD_RENDER = {"messageAdRenderContent", "conversationAdsMessageContent"}
+
+
+def kind_of(item: dict[str, Any]) -> str:
+    """The shape note's kind rules, in order; the first that matches decides.
+
+    ``"group"``, ``"other"`` or ``"one_to_one"``. P4-01's parser must agree.
+    """
+    others = [p for p in item["conversationParticipants"] if p["hostIdentityUrn"] != mp.OWNER.urn]
+    # 1: a group.
+    if item["groupChat"] or len(others) > 1:
+        return "group"
+    # 2: sponsored or an offer, whatever the categories, state or label.
+    company = any(p["hostIdentityUrn"].startswith("urn:li:fsd_company:") for p in others)
+    if company or item["contentMetadata"] is not None or _render_kinds(item) & _AD_RENDER:
+        return "other"
+    one_profile = len(others) == 1 and others[0]["hostIdentityUrn"].startswith(
+        "urn:li:fsd_profile:"
+    )
+    # 3: accepted InMail, whatever its label (maintainer's decision, #432 review).
+    if "INMAIL" in item["categories"]:
+        return "one_to_one" if item["state"] == "ACCEPTED" and one_profile else "other"
+    # 4 is the line above; 5: a label or hostUrnData outside InMail.
+    if item["conversationTypeText"] is not None or "hostUrnData" in _render_kinds(item):
+        return "other"
+    # 6: one-to-one.
+    return "one_to_one" if one_profile else "other"
+
+
 def test_the_kind_groups_cover_every_canned_conversation_once() -> None:
     groups = mp.READ_AS_ONE_TO_ONE + mp.SKIPPED_OTHER + mp.SKIPPED_GROUP
     assert len(set(c.n for c in groups)) == len(groups)
     pages = {c.n for c in mp.INBOX_FIRST_PAGE + mp.INBOX_OLDER_PAGE} - {mp.NO_MESSAGES.n}
     assert {c.n for c in groups} == pages
-    for c in mp.READ_AS_ONE_TO_ONE:
-        item = _item(c)
-        assert item["groupChat"] is False and item["conversationTypeText"] is None
-        assert item["contentMetadata"] is None and item["state"] in (None, "ACCEPTED")
-        assert not _render_kinds(item) & {
-            "hostUrnData",
-            "messageAdRenderContent",
-            "conversationAdsMessageContent",
-        }
-        others = [
-            p for p in item["conversationParticipants"] if p["hostIdentityUrn"] != mp.OWNER.urn
-        ]
-        assert len(others) == 1 and others[0]["hostIdentityUrn"].startswith("urn:li:fsd_profile:")
+
+
+def test_the_kind_rules_sort_every_canned_conversation_into_its_group() -> None:
+    assert [kind_of(_item(c)) for c in mp.READ_AS_ONE_TO_ONE] == ["one_to_one"] * len(
+        mp.READ_AS_ONE_TO_ONE
+    )
+    assert [kind_of(_item(c)) for c in mp.SKIPPED_OTHER] == ["other"] * len(mp.SKIPPED_OTHER)
+    assert [kind_of(_item(c)) for c in mp.SKIPPED_GROUP] == ["group"] * len(mp.SKIPPED_GROUP)
+
+
+def test_accepted_inmail_is_read_as_one_to_one_whatever_its_label() -> None:
+    """The maintainer's decision (#432 review): missing a reply is the dangerous direction."""
+    for c in (mp.INMAIL_ACCEPTED, mp.INMAIL_ACCEPTED_VERIFIED, mp.INMAIL_ACCEPTED_LABELLED):
+        assert c in mp.READ_AS_ONE_TO_ONE and c not in mp.SKIPPED_OTHER
+        assert c.state == "ACCEPTED" and "INMAIL" in c.categories
+    assert mp.INMAIL_ACCEPTED_LABELLED.type_label == "InMail"
+    assert _item(mp.INMAIL_ACCEPTED_VERIFIED)["conversationVerificationLabel"] is not None
+
+
+def test_a_sponsored_item_in_the_primary_inbox_is_skipped() -> None:
+    item = _item(mp.SPONSORED_IN_INBOX)
+    assert item["categories"] == ["INBOX", "PRIMARY_INBOX", "INMAIL"]
+    assert _render_kinds(item) == {"messageAdRenderContent"}
+    assert mp.SPONSORED_IN_INBOX in mp.SKIPPED_OTHER and kind_of(item) == "other"
+
+
+def test_the_outbound_conversations_last_message_is_the_owners() -> None:
+    (m,) = _item(mp.ONE_TO_ONE_OUTBOUND)["messages"]["elements"]
+    assert m["sender"]["hostIdentityUrn"] == mp.OWNER.urn
+    assert m["originToken"] is not None
 
 
 def test_the_older_page_is_newest_first() -> None:
