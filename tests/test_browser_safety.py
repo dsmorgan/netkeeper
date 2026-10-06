@@ -1813,3 +1813,37 @@ def test_the_one_focus_is_the_seams_and_nothing_holds_a_key() -> None:
     assert seams == [(LINKEDIN / "browser.py", "BrowserRun.type_into_composer")]
     clicks = [i for i in package_inputs() if i.function == "BrowserRun._focus_seam"]
     assert [i.name for i in clicks] == ["focus"]
+
+
+# --- #439: the inbox poll's rest target ----------------------------------------------------
+
+#: The only caller that gives ``scroll`` a ``rest_over`` selector.
+REST_OVER_CALLERS = (LINKEDIN / "page_inbox.py",)
+
+
+def test_only_the_inbox_poll_gives_scroll_a_rest_target() -> None:
+    """#439: ``rest_over`` picks where the pointer rests; it is a selector for a geometry
+    read, never an input. Only ``PageInbox._scroll`` passes one, so the connections,
+    profile and messaging scrolls keep resting over ``<main>``."""
+    passing = [
+        path
+        for path in python_files(PACKAGE)
+        for _where, call in _calls_named(path.read_text(encoding="utf-8"), "scroll")
+        if any(keyword.arg == "rest_over" for keyword in call.keywords)
+    ]
+    assert sorted(set(passing)) == sorted(REST_OVER_CALLERS)
+
+
+def test_the_rest_target_is_not_a_new_input() -> None:
+    """The new code reads boxes (``bounding_box``, ``count``) and moves nothing itself:
+    ``move`` is still reached only inside ``_rest_pointer_over_content``."""
+    source = (LINKEDIN / "browser.py").read_text(encoding="utf-8")
+    assert not [
+        item
+        for item in page_inputs(source)
+        if item.function != "BrowserRun._rest_pointer_over_content" and item.name == "move"
+    ]
+    helper = "async def _first_visible_box"
+    body = source[source.index(helper) : source.index("def _viewport_size")]
+    for banned in (".hover(", ".click(", ".evaluate(", ".focus(", ".move("):
+        assert banned not in body
