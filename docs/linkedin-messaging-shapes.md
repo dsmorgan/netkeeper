@@ -2,7 +2,7 @@
 
 This note records the structure of what LinkedIn's messaging pages load and which controls they show, as the maintainer's capture of **2026-10-05** showed it (#374; 2026-10-06 UTC). It records **structure only**: paths, query names, keys, `_type` names, enum values, how identifiers nest, counts, and the roles and accessible names of controls. It holds no name, slug, profile or member id, URN value, message text, token, or header value. The capture stays in the maintainer's private folder; nothing in this repository was copied from it.
 
-[ADR 0006](adr/0006-observe-dont-request.md) records why netkeeper reads these answers rather than requesting anything itself. The hand-built fixtures that follow these shapes, with invented people, are `tests/messaging_pages.py`; `tests/test_messaging_pages.py` checks that none of their values appears in the capture. That check is opt-in, so no ordinary test run reads the private folder: it runs only with `NETKEEPER_CAPTURE_DIR` set to the capture folder (`NETKEEPER_CAPTURE_DIR=~/code/netkeeper-private/messaging-capture .venv/bin/python -m pytest tests/test_messaging_pages.py`), and skips otherwise. Only the maintainer, or an analysis session he approves, sets it. The inbox poll (P4-01, #380) and the prefill (P4-03, #382) are built from this note. Where the capture was silent, this note says so, and [What P4 reads, and what it assumes](#what-p4-reads-and-what-it-assumes) lists what the first supervised runs must confirm.
+[ADR 0006](adr/0006-observe-dont-request.md) records why netkeeper reads these answers rather than requesting anything itself. The hand-built fixtures that follow these shapes, with invented people, are `tests/messaging_pages.py`; `tests/test_messaging_pages.py` checks that none of their values appears in the capture. That check is opt-in, so no ordinary test run reads the private folder: it runs only with `NETKEEPER_CAPTURE_DIR` set to the capture folder (`NETKEEPER_CAPTURE_DIR=~/code/netkeeper-private/messaging-capture .venv/bin/python -m pytest tests/test_messaging_pages.py`), and skips otherwise. Only the maintainer, or an analysis session he approves, sets it, and never with `-l`/`--showlocals` or `--pdb`, which would print the capture. The inbox poll (P4-01, #380) and the prefill (P4-03, #382) are built from this note. Where the capture was silent, this note says so, and [What P4 reads, and what it assumes](#what-p4-reads-and-what-it-assumes) lists what the first supervised runs must confirm.
 
 The capture holds five HAR files and four HTML files: the inbox, older conversations, one thread and a profile; opening the bubble from a profile and typing; the **Message** click for a connection never messaged; one real send; the **Message** control; and both kinds of bubble.
 
@@ -33,7 +33,7 @@ Every list and thread answer comes from one path. The `queryId` is `<name>.<hash
 | Several threads | same | `messengerMessages` | `criteria:List((conversationUrn,syncToken))` | `messengerMessagesBySyncTokensInBatch` |
 | Counts, receipts, quick replies | same | `messengerMailboxCounts`, `messengerSeenReceipts`, `messengerQuickReplies` | `mailboxUrn` or `conversationUrn` | not read |
 
-The inbox capture had 8 list requests, 9 thread requests, and 3 counts requests, each answered `200` with a whole body; none was aborted. They are `fetch` requests answered `application/graphql`.
+Every captured list and thread request was answered `200` with a whole body; none was aborted. They are `fetch` requests answered `application/graphql`.
 
 Around them the page also sends `POST /voyager/api/voyagerMessagingDashMessagingBadge?action=markAllMessagesAsSeen`, `POST .../voyagerMessagingDashMessengerMessageDeliveryAcknowledgements?action=sendDeliveryAcknowledgement`, `POST /voyager/api/messaging/dash/presenceStatuses`, `GET .../voyagerMessagingDashConversationNudges`, `GET .../voyagerMessagingDashSecondaryInbox?q=previewBanner`, and `/realtime/` traffic (below). Opening the inbox marks messages as seen; that's the page's own doing, and a poll can't avoid it.
 
@@ -85,37 +85,38 @@ The compose requests below are Voyager's normalized form instead: `application/v
 | The compose option | path segment | `urn:li:fsd_composeOption:(<recipient's bare profile id>,NON_SELF_PROFILE_VIEW,<24-character token>)` |
 | An existing conversation, from the compose option | `composeNavigationContext.existingConversationUrn` | `urn:li:fsd_conversation:<thread id>` (the same thread id, without the mailbox) |
 
-A conversation's participants include the mailbox owner: in all 122 captured list items, exactly one participant had `participantType.member.distance` `SELF`, and its `hostIdentityUrn` was the owner in the conversation URN. The others carry `DISTANCE_1`, `DISTANCE_2` or `DISTANCE_3`. **The counterpart is the participant that isn't the owner**; the mailbox owner is the first part of every conversation and message URN, and the `mailboxUrn` the page sends.
+A conversation's participants include the mailbox owner: in every captured list item, exactly one participant had `participantType.member.distance` `SELF`, and its `hostIdentityUrn` was the owner in the conversation URN. The others carry `DISTANCE_1`, `DISTANCE_2` or `DISTANCE_3`. **The counterpart is the participant that isn't the owner**; the mailbox owner is the first part of every conversation and message URN, and the `mailboxUrn` the page sends.
 
-A message's `actor` and `sender` named the same participant in every captured message that had both. **Two list messages had `actor: null`** with a `sender` and a body, in ordinary conversations; read `sender`, never `actor`.
+A message's `actor` and `sender` named the same participant in every captured message that had both. **Some list messages had `actor: null`** with a `sender` and a body, in ordinary conversations; read `sender`, never `actor`.
 
-The owner's own messages carry `originToken`, a 36-character uuid; everyone else's carry `originToken: null`. In the capture this held for all 50 outbound and 70 inbound list messages and all 19 thread messages, so `outbound` is `sender.hostIdentityUrn == mailbox owner`, and `originToken` agrees with it.
+The owner's own messages carry `originToken`, a 36-character uuid; everyone else's carry `originToken: null`. This held for every captured list and thread message, so `outbound` is `sender.hostIdentityUrn == mailbox owner`, and `originToken` agrees with it.
 
 ## A conversation, and its kinds
 
-Each list item is a `com.linkedin.messenger.Conversation` with these keys: `entityUrn`, `backendUrn`, `conversationUrl`, `categories`, `groupChat`, `state`, `title`, `conversationTypeText`, `conversationVerificationLabel`, `conversationVerificationExplanation`, `headlineText`, `shortHeadlineText`, `descriptionText`, `contentMetadata`, `conversationParticipants`, `creator`, `createdAt`, `lastActivityAt`, `lastReadAt`, `read`, `unreadCount`, `notificationStatus` (`ACTIVE`), `disabledFeatures`, `hostConversationActions`, `incompleteRetriableData`, and `messages`. The category answer adds `draftMessages` (an empty collection in all 60 items). Two items had no `messages` key at all.
+Each list item is a `com.linkedin.messenger.Conversation` with these keys: `entityUrn`, `backendUrn`, `conversationUrl`, `categories`, `groupChat`, `state`, `title`, `conversationTypeText`, `conversationVerificationLabel`, `conversationVerificationExplanation`, `headlineText`, `shortHeadlineText`, `descriptionText`, `contentMetadata`, `conversationParticipants`, `creator`, `createdAt`, `lastActivityAt`, `lastReadAt`, `read`, `unreadCount`, `notificationStatus` (`ACTIVE`), `disabledFeatures`, `hostConversationActions`, `incompleteRetriableData`, and `messages`. The category answer adds `draftMessages` (always an empty collection in the capture). A few items had no `messages` key at all.
 
 The list is ordered by `lastActivityAt`, newest first, in every captured answer.
 
-**How kinds are marked.** The capture had 122 list items: every one had `groupChat: false` and exactly two participants. Four category sets appeared:
+**How kinds are marked.** Every captured list item had `groupChat: false` and exactly two participants. Four category sets appeared:
 
-| `categories` | Count | What else marks them |
+| `categories` | What else marks them | Fixture |
 |---|---|---|
-| `INBOX`, `PRIMARY_INBOX` | 58 | Ordinary one-to-one conversations. `state` `null`. One message had a `file` render item |
-| `INBOX`, `PRIMARY_INBOX`, `INMAIL` | 40 | Conversations that began as InMail. `state` `PENDING`, `ACCEPTED` or `DECLINED`; often a `subject` on the message; 14 pending ones had the `InMail` label (below) and a `hostUrnData` render item (`type` `SALES_INMAIL` or `PREMIUM_INMAIL`); 5 were sponsored, with the `Sponsored` label and a `messageAdRenderContent` item |
-| `INBOX`, `SECONDARY_INBOX`, `INMAIL` | 3 | Pending requests, with `hostUrnData` |
-| `ARCHIVE`, `INMAIL` | 21 | Sponsored messages (18) and `LinkedIn Offer` items (3) |
+| `INBOX`, `PRIMARY_INBOX` | Ordinary one-to-one conversations, `state` `null`. Seen with a `file` render item (an attachment), with a `title`, and with an `EDITED` last message | `ONE_TO_ONE_INBOUND`, `ONE_TO_ONE_OUTBOUND`, `WITH_FILE`, `WITH_TITLE`, `EDITED` |
+| `INBOX`, `PRIMARY_INBOX`, `INMAIL` | Conversations that began as InMail. `state` `PENDING`, `ACCEPTED` or `DECLINED`; often a `subject`. Pending ones carried the `InMail` label and a `hostUrnData` render item (`type` `SALES_INMAIL` or `PREMIUM_INMAIL`); some were sponsored, with the `Sponsored` label and a `messageAdRenderContent` item | `INMAIL_ACCEPTED`, `INMAIL_PENDING`, `INMAIL_DECLINED`, `PREMIUM_INMAIL` |
+| `INBOX`, `SECONDARY_INBOX`, `INMAIL` | Pending requests, with `hostUrnData` and no label | `SECONDARY_PENDING` |
+| `ARCHIVE`, `INMAIL` | Sponsored messages and `LinkedIn Offer` items | `SPONSORED`, `SPONSORED_MESSAGE`, `OFFER` |
 
-- **Sponsored.** 23 items had `conversationTypeText.text` `Sponsored`, and 3 `LinkedIn Offer`; 14 had `InMail`. These are LinkedIn's own labels. A sponsored item also carries a `messageAdRenderContent` render item (`status`, `sponsoredCampaignUrn`, `subContent`, and tracking keys), or a `conversationAdsMessageContent` render item with `contentMetadata.conversationAdContent`. Six items had an **organization** participant: `participantType.organization` (`com.linkedin.messenger.OrganizationParticipantInfo`), `hostIdentityUrn` `urn:li:fsd_company:<n>`, `participantType.member: null`.
+- **Sponsored and offers.** `conversationTypeText.text` is `Sponsored` or `LinkedIn Offer` (`InMail` on pending InMail); these are LinkedIn's own labels. A sponsored item also carries a `messageAdRenderContent` render item (`status`, `sponsoredCampaignUrn`, `subContent`, and tracking keys), or a `conversationAdsMessageContent` render item with `contentMetadata.conversationAdContent`. Some had an **organization** participant: `participantType.organization` (`com.linkedin.messenger.OrganizationParticipantInfo`), `hostIdentityUrn` `urn:li:fsd_company:<n>`, `participantType.member: null`.
 - **InMail.** `INMAIL` in `categories`. It stays after the person accepts, so an accepted InMail with a contact sits in `PRIMARY_INBOX` beside ordinary conversations.
-- **A group.** `groupChat: true`, more than two participants, and probably a `title` (7 one-to-one items had a `title` too). **No group was in the capture**; the fixture is invented from these key names.
+- **An edited message.** `messageBodyRenderFormat` `EDITED`, seen in the capture on list messages; otherwise `DEFAULT`.
+- **A group.** `groupChat: true`, more than two participants, and probably a `title` (one-to-one items can have a `title` too). **No group was in the capture**; the fixture is invented from these key names.
 - **A system message.** **Not seen.** The nearest thing was the two `actor: null` messages.
 
 `disabledFeatures[].disabledFeature` lists features off for a conversation (`ADD_PARTICIPANT`, `CREATE_GROUP_CHAT_LINK`, `REPLY`, and so on); on a one-to-one conversation `ADD_PARTICIPANT` and `REMOVE_PARTICIPANT` were always present.
 
 ## The list carries only the last message
 
-Every list item held **at most one message**: 120 held exactly one, and 2 had no `messages` key. That message's `deliveredAt` equalled the item's `lastActivityAt` in all 120. Earlier messages come only from `messengerMessages`.
+Every list item held **at most one message**; a few had no `messages` key at all. That message's `deliveredAt` always equalled the item's `lastActivityAt`. Earlier messages come only from `messengerMessages`.
 
 So under the 2026-10-03 decision, the poll opens threads **by navigation only** (to `conversationUrl`), only for conversations in `InboxJobSpec.open_threads_for` (a prefilled message or a live enrollment), and **at most 5 per poll** (`netkeeper/linkedin/inbox.py`, `MAX_THREADS_OPENED`). A reply that arrived after another newer message, in a conversation the poll doesn't open, is seen only as the last message.
 
@@ -135,7 +136,7 @@ On a profile, **Message** is an `<a>` with no `aria-label`; its accessible name 
 
 where `recipient` is the same bare id as in `profileUrn`. The server-rendered profile writes the `href` relative; the copy taken from the live page (`message-control-2.html`) had it absolute, `https://www.linkedin.com/messaging/compose/?…`. The `<a>` carries `aria-disabled="false"` and a `componentkey`. A sibling `<button type="button" aria-expanded="false">` whose text is **More** holds the overflow menu.
 
-**There is more than one Message control.** The captured profile document rendered **three** `<a>` elements whose text is exactly `Message`, each with its own `componentkey`, all with the same compose `href` naming the profile's own id. Its flight data named the compose url six more times, and one lazy card (`actions/component`) once more, all for the same recipient. Which of the three a person sees (the top card, the sticky header that appears on scroll, or a hidden layout variant) is CSS, which the capture can't show. A rule of "exactly one control named Message" would refuse every profile; P4-03 must pick one by where it sits, and check that it names this profile.
+**There is more than one Message control.** The captured profile document rendered **three** `<a>` elements whose text is exactly `Message`, each with its own `componentkey`, all with the same compose `href` naming the profile's own id. Its flight data and one lazy card (`actions/component`) named the same compose url again, for the same recipient. Which of the three a person sees (the top card, the sticky header that appears on scroll, or a hidden layout variant) is CSS, which the capture can't show. A rule of "exactly one control named Message" would refuse every profile. Under ADR 0007 (#385), every Message control on the page must carry the contact's compose `href`, and the prefill clicks the first visible one.
 
 Clicking **Message** opens a bubble at the bottom of the profile page; the tab stays on the profile. The click loads two requests.
 
@@ -268,12 +269,13 @@ The inbox page opens `GET /realtime/connect` (`text/event-stream`), subscribes w
 | What | How P4 reads it | Captured or assumed | When it doesn't read |
 |---|---|---|---|
 | Which answers are the list | `voyagerMessagingGraphQL/graphql` with a `queryId` named `messengerConversations`, and `data` holding `messengerConversationsBySyncToken` or `messengerConversationsByCategoryQuery` | Captured | Any other field under `data`: not the list. A list answer whose shape doesn't parse: `RouteChanged` |
-| The mailbox owner | The first part of each conversation URN, the participant with `distance: SELF`, and the request's `mailboxUrn`; all three must agree | Captured | Disagreement: `RouteChanged` |
+| The mailbox owner | The first part of each conversation URN, the participant with `distance: SELF`, and the request's `mailboxUrn`; all must agree. The `conversationIds` request has no `mailboxUrn`, so for it only the first two | Captured | Disagreement: `RouteChanged` |
 | A conversation | `entityUrn`, `lastActivityAt`, `categories`, `groupChat`, `conversationParticipants`, `messages.elements` | Captured | A missing key (other than `messages`): the whole answer is refused |
 | The counterpart | The one participant whose `hostIdentityUrn` isn't the owner's, and is a `urn:li:fsd_profile:` | Captured | More than one, or a company: skipped as a group or as other |
-| One-to-one | `groupChat: false`, two participants, `categories` without `INMAIL`, no `conversationTypeText`, no ad render content | Captured | |
+| One-to-one | `groupChat: false`; exactly one counterpart, an `fsd_profile`; no `conversationTypeText`, no `hostUrnData` or ad render item, no `contentMetadata`; and either no `INMAIL` in `categories`, or `INMAIL` with `state` `ACCEPTED`. A `file` render item, a `title`, or an `EDITED` message doesn't change that | Captured | |
 | A group | `groupChat: true`, or more than two participants | **Assumed**: no group in the capture | Counted as `skipped_group` |
-| InMail, sponsored, offers | `INMAIL` in `categories`, a `conversationTypeText`, an organization participant, `contentMetadata.conversationAdContent`, or an ad render item | Captured | Counted as `skipped_other`. An accepted InMail with a contact is skipped too; P4-01 can revisit that |
+| Accepted InMail | `INMAIL` in `categories`, `state` `ACCEPTED`, a single `fsd_profile` counterpart: **read as one-to-one**, for replies and send matching (maintainer's decision, #432 review: missing a reply is the dangerous direction) | Captured | |
+| Pending or declined InMail, sponsored, offers | `INMAIL` with `state` `PENDING`, `DECLINED` or `null`; a `conversationTypeText`; an organization participant; `contentMetadata.conversationAdContent`; or a `hostUrnData` or ad render item | Captured | Counted as `skipped_other` |
 | A system message | `actor: null`; read `sender` instead | `actor: null`: captured. What a system message looks like: **assumed** | A message with no `sender`: the conversation is refused |
 | The last message | `messages.elements[0]`: `entityUrn`, `sender.hostIdentityUrn`, `deliveredAt`, `body.text` | Captured | No `messages` key or no element: the conversation has no message to report |
 | Outbound | `sender.hostIdentityUrn` is the owner | Captured; `originToken` agrees | |
@@ -283,7 +285,7 @@ The inbox page opens `GET /realtime/connect` (`text/event-stream`), subscribes w
 | Opening a thread | Navigate to `conversationUrl` (`/messaging/thread/<thread id>/`); read `messengerMessagesBySyncToken` whose request names that `conversationUrn` | Captured | No answer for that conversation: the thread unread, the list item still counts |
 | A thread's messages | `elements`, newest first, the list message's shape | Captured | |
 | Older messages | `messengerMessagesByAnchorTimestamp` | Shape **assumed** (both captured answers were empty) | |
-| The Message control | An `<a>` named `Message` whose `href` is `/messaging/compose/?profileUrn=urn:li:fsd_profile:<id>&recipient=<id>&…`, with both ids the contact's | Captured | No control naming the contact: nothing is clicked. **Three identical controls** were captured: choose by position, never by count alone |
+| The Message control | Every `<a>` named `Message` must have the `href` `/messaging/compose/?profileUrn=urn:li:fsd_profile:<id>&recipient=<id>&…`, with both ids the contact's; the prefill clicks the first visible one (ADR 0007) | Captured (three identical controls); which is visible: **assumed** | None, or any control naming someone else: nothing is clicked |
 | The bubble opened | The compose option answer's `composeNavigationContext.recipientUrns` is `[contact's urn]` | Captured | Another recipient, or none: no key |
 | Existing or new | `existingConversationUrn` present (`REPLY`) or absent (`CONNECTION_MESSAGE`) | Captured | |
 | The existing bubble | One `role="dialog"` named `Messaging`, whose header `h2` link is `/in/<contact's profile id>/` | Captured | Another id, or two dialogs: no key |

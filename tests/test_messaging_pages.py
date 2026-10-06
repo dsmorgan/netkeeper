@@ -10,7 +10,8 @@ Only the maintainer, or an analysis session he approves, sets the variable::
         .venv/bin/python -m pytest tests/test_messaging_pages.py
 
 A failure names where the fixture value sits, never the value: if it matched, it is
-real data.
+real data. **Never run it with ``-l``/``--showlocals`` or ``--pdb``**: the test holds the whole
+capture in a local, and either would print it.
 """
 
 from __future__ import annotations
@@ -266,14 +267,210 @@ def test_the_profile_has_three_identical_message_controls() -> None:
     assert page.count(f"recipient={mp.ZEPHYRINE.profile_id}") == 3
 
 
+def _item(c: mp.Conv) -> dict[str, Any]:
+    return mp.conversation(c)
+
+
+def _render_kinds(item: dict[str, Any]) -> set[str]:
+    return {
+        key
+        for m in item.get("messages", {}).get("elements", [])
+        for r in m["renderContent"]
+        for key, value in r.items()
+        if value is not None
+    }
+
+
+@pytest.mark.parametrize(
+    ("conv", "categories", "state", "label", "render", "ad_content", "company"),
+    [
+        (mp.ONE_TO_ONE_INBOUND, ["INBOX", "PRIMARY_INBOX"], None, None, set(), False, False),
+        (
+            mp.INMAIL_ACCEPTED,
+            ["INBOX", "PRIMARY_INBOX", "INMAIL"],
+            "ACCEPTED",
+            None,
+            set(),
+            False,
+            False,
+        ),
+        (
+            mp.INMAIL_PENDING,
+            ["INBOX", "PRIMARY_INBOX", "INMAIL"],
+            "PENDING",
+            "InMail",
+            {"hostUrnData"},
+            False,
+            False,
+        ),
+        (
+            mp.INMAIL_DECLINED,
+            ["INBOX", "PRIMARY_INBOX", "INMAIL"],
+            "DECLINED",
+            None,
+            set(),
+            False,
+            False,
+        ),
+        (
+            mp.PREMIUM_INMAIL,
+            ["INBOX", "PRIMARY_INBOX", "INMAIL"],
+            "PENDING",
+            "InMail",
+            {"hostUrnData"},
+            False,
+            False,
+        ),
+        (
+            mp.SECONDARY_PENDING,
+            ["INBOX", "SECONDARY_INBOX", "INMAIL"],
+            "PENDING",
+            None,
+            {"hostUrnData"},
+            False,
+            False,
+        ),
+        (
+            mp.SPONSORED,
+            ["ARCHIVE", "INMAIL"],
+            None,
+            "Sponsored",
+            {"conversationAdsMessageContent"},
+            True,
+            True,
+        ),
+        (
+            mp.SPONSORED_MESSAGE,
+            ["ARCHIVE", "INMAIL"],
+            None,
+            "Sponsored",
+            {"messageAdRenderContent"},
+            False,
+            False,
+        ),
+        (
+            mp.OFFER,
+            ["ARCHIVE", "INMAIL"],
+            None,
+            "LinkedIn Offer",
+            {"conversationAdsMessageContent"},
+            True,
+            True,
+        ),
+        (mp.WITH_FILE, ["INBOX", "PRIMARY_INBOX"], None, None, {"file"}, False, False),
+    ],
+)
+def test_each_kind_carries_the_captured_markers(
+    conv: mp.Conv,
+    categories: list[str],
+    state: str | None,
+    label: str | None,
+    render: set[str],
+    ad_content: bool,
+    company: bool,
+) -> None:
+    item = _item(conv)
+    assert item["categories"] == categories
+    assert item["state"] == state
+    assert (item["conversationTypeText"] or {}).get("text") == label
+    assert _render_kinds(item) == render
+    assert (item["contentMetadata"] is not None) == ad_content
+    if ad_content:
+        assert set(item["contentMetadata"]) == {"conversationAdContent"}
+    hosts = [p["hostIdentityUrn"] for p in item["conversationParticipants"]]
+    assert any(h.startswith("urn:li:fsd_company:") for h in hosts) == company
+    assert item["groupChat"] is False and len(hosts) == 2
+
+
+def test_the_hostUrnData_types_are_the_captured_ones() -> None:
+    def kind(c: mp.Conv) -> str:
+        (m,) = _item(c)["messages"]["elements"]
+        return str(m["renderContent"][0]["hostUrnData"]["type"])
+
+    assert kind(mp.INMAIL_PENDING) == "SALES_INMAIL"
+    assert kind(mp.SECONDARY_PENDING) == "SALES_INMAIL"
+    assert kind(mp.PREMIUM_INMAIL) == "PREMIUM_INMAIL"
+
+
+def test_the_group_is_marked_by_groupchat_and_three_participants() -> None:
+    item = _item(mp.GROUP)
+    assert item["groupChat"] is True and len(item["conversationParticipants"]) == 3
+
+
+def test_title_and_edited_are_one_to_one_markers_only() -> None:
+    titled, edited = _item(mp.WITH_TITLE), _item(mp.EDITED)
+    assert titled["title"] and titled["groupChat"] is False
+    assert len(titled["conversationParticipants"]) == 2
+    assert edited["messages"]["elements"][0]["messageBodyRenderFormat"] == "EDITED"
+    plain = _item(mp.ONE_TO_ONE_INBOUND)["messages"]["elements"][0]
+    assert plain["messageBodyRenderFormat"] == "DEFAULT"
+
+
+def test_the_kind_groups_cover_every_canned_conversation_once() -> None:
+    groups = mp.READ_AS_ONE_TO_ONE + mp.SKIPPED_OTHER + mp.SKIPPED_GROUP
+    assert len(set(c.n for c in groups)) == len(groups)
+    pages = {c.n for c in mp.INBOX_FIRST_PAGE + mp.INBOX_OLDER_PAGE} - {mp.NO_MESSAGES.n}
+    assert {c.n for c in groups} == pages
+    for c in mp.READ_AS_ONE_TO_ONE:
+        item = _item(c)
+        assert item["groupChat"] is False and item["conversationTypeText"] is None
+        assert item["contentMetadata"] is None and item["state"] in (None, "ACCEPTED")
+        assert not _render_kinds(item) & {
+            "hostUrnData",
+            "messageAdRenderContent",
+            "conversationAdsMessageContent",
+        }
+        others = [
+            p for p in item["conversationParticipants"] if p["hostIdentityUrn"] != mp.OWNER.urn
+        ]
+        assert len(others) == 1 and others[0]["hostIdentityUrn"].startswith("urn:li:fsd_profile:")
+
+
+def test_the_older_page_is_newest_first() -> None:
+    page = json.loads(mp.conversations_by_category(mp.INBOX_OLDER_PAGE, next_cursor=None))
+    times = [c["lastActivityAt"] for c in page["data"][mp.BY_CATEGORY]["elements"]]
+    assert times == sorted(times, reverse=True)
+
+
+def test_the_actorless_message_has_a_sender_and_no_actor() -> None:
+    (m,) = mp.actorless_list_item()["messages"]["elements"]
+    assert m["actor"] is None
+    assert m["sender"]["hostIdentityUrn"] == mp.ZEPHYRINE.urn
+    (normal,) = _item(mp.ONE_TO_ONE_INBOUND)["messages"]["elements"]
+    assert normal["actor"]["entityUrn"] == normal["sender"]["entityUrn"]
+
+
+def test_a_thread_is_newest_first() -> None:
+    thread = json.loads(mp.messages_by_sync_token(mp.THREAD_ONE_TO_ONE))["data"]
+    times = [m["deliveredAt"] for m in thread[mp.MESSAGES_BY_SYNC_TOKEN]["elements"]]
+    assert len(times) == 3 and times == sorted(times, reverse=True)
+
+
+def test_the_never_messaged_card_links_by_slug() -> None:
+    html = mp.never_messaged_bubble_html([mp.THADDEUS])
+    assert f'href="/in/{mp.THADDEUS.slug}/"' in html
+    assert mp.THADDEUS.profile_id not in html
+
+
 # --- on the maintainer's machine: nothing was copied ------------------------------------
 
 
 def _har_text(path: Path) -> Iterator[str]:
+    """Every part of a HAR that can carry a value: urls, query strings, headers,
+    cookies, request bodies, and response bodies (base64 decoded)."""
     entries = json.loads(path.read_text(encoding="utf-8"))["log"]["entries"]
     for entry in entries:
-        yield entry["request"]["url"]
-        yield (entry["request"].get("postData") or {}).get("text") or ""
+        for side in (entry["request"], entry["response"]):
+            yield side.get("url") or ""
+            yield side.get("redirectURL") or ""
+            for key in ("headers", "queryString", "cookies"):
+                for item in side.get(key) or []:
+                    yield str(item.get("name") or "")
+                    yield str(item.get("value") or "")
+        post = entry["request"].get("postData") or {}
+        yield post.get("text") or ""
+        for param in post.get("params") or []:
+            yield str(param.get("value") or "")
         content = entry["response"].get("content") or {}
         text = content.get("text") or ""
         if content.get("encoding") == "base64":
@@ -281,16 +478,25 @@ def _har_text(path: Path) -> Iterator[str]:
         yield text
 
 
-def _capture_corpus(capture_dir: Path) -> bytes:
+#: A string every messaging capture holds; without it the folder is not the capture.
+_CAPTURE_MARKER = b"messengerConversations"
+
+
+def _capture_corpus(capture_dir: Path) -> tuple[bytes, int]:
+    """The capture's text, every file under the folder at any depth, and its HAR count."""
     parts: list[str] = []
-    for path in sorted(capture_dir.iterdir()):
+    hars = 0
+    for path in sorted(capture_dir.rglob("*")):
+        if not path.is_file():
+            continue
         if path.suffix == ".har":
+            hars += 1
             parts.extend(_har_text(path))
-        elif path.is_file():
+        else:
             parts.append(path.read_text(encoding="utf-8", errors="replace"))
     corpus = "\n".join(parts)
     # A url or a body may carry a value percent-encoded; search the decoded form too.
-    return (corpus + "\n" + unquote(corpus)).encode("utf-8")
+    return (corpus + "\n" + unquote(corpus)).encode("utf-8"), hars
 
 
 @pytest.mark.slow
@@ -300,7 +506,12 @@ def test_no_fixture_value_appears_in_the_capture() -> None:
         pytest.skip(f"opt-in: set {CAPTURE_ENV} to the capture folder to run it")
     if not capture_dir.is_dir():
         pytest.fail(f"{CAPTURE_ENV} is set but is not a folder")
-    corpus = _capture_corpus(capture_dir)
+    corpus, hars = _capture_corpus(capture_dir)
+    # A wrong or empty folder must not pass for a clean one.
+    if hars == 0:
+        pytest.fail(f"{CAPTURE_ENV} holds no .har file: not the capture")
+    if _CAPTURE_MARKER not in corpus:
+        pytest.fail(f"{CAPTURE_ENV} holds no messaging answer: not the capture")
     # Every alphanumeric run of a value that occurs in the corpus is inside one of the
     # corpus's runs, so this cheap check rules most values out before the full search.
     runs = b"\n".join(set(re.findall(rb"[A-Za-z0-9]+", corpus)))
@@ -310,4 +521,5 @@ def test_no_fixture_value_appears_in_the_capture() -> None:
         parts = re.findall(rb"[A-Za-z0-9]+", needle)
         if all(p in runs for p in parts) and needle in corpus:
             found.append(where)
+    del corpus, runs
     assert not found, f"fixture values that appear in the capture, at: {sorted(set(found))}"
