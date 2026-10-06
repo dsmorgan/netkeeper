@@ -28,9 +28,10 @@ so the kind rules run in order and the first that matches decides (the shapes no
 6. Everything else is one-to-one. A ``file`` render item, a ``title``, or an ``EDITED``
    message does not disqualify a conversation.
 
-A counterpart whose URN is neither ``fsd_profile`` nor ``fsd_company``, or a conversation
-with nobody but the owner, is an unknown shape: :class:`RouteChanged`. A kept conversation
-is matched by URN like any other; the core ignores a stranger's.
+A counterpart whose URN is neither ``fsd_profile`` nor ``fsd_company`` is an unknown
+shape: :class:`RouteChanged`. A conversation with nobody but the owner is skipped as
+other (no counterpart). A kept conversation is matched by URN like any other; the core
+ignores a stranger's.
 
 **The mailbox owner** is read three ways that must agree: the first part of every
 conversation URN, the participant whose ``member.distance`` is ``SELF``, and the
@@ -339,7 +340,8 @@ def _is_inmail(item: Mapping[str, Any]) -> bool:
 def _is_ad(item: Mapping[str, Any], last_raw: Mapping[str, Any] | None) -> bool:
     """Sponsored or an offer: ``contentMetadata`` or an ad item on the last message,
     whatever the category, state, or label (rule 2)."""
-    if item.get("contentMetadata") is not None:
+    content = item.get("contentMetadata")
+    if isinstance(content, dict) and content.get("conversationAdContent") is not None:
         return True
     return last_raw is not None and bool(AD_RENDER_KEYS & _render_keys(last_raw))
 
@@ -400,7 +402,8 @@ def _item(raw: object, index: int) -> ListItem:
     if group_chat or len(others) > 1:
         return ListItem(urn, thread_id, owner, last_activity, Kind.GROUP)
     if not others:
-        raise _fail(f"{where}: nobody but the owner takes part")
+        # No counterpart to attribute anything to: counted, never read.
+        return ListItem(urn, thread_id, owner, last_activity, Kind.OTHER)
     counterpart = others[0]
     # The kind rules, in order; the first that matches decides (the shapes note):
     # 1 a group (above), 2 sponsored or an offer, 3 an accepted InMail with one profile

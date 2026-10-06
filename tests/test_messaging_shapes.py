@@ -135,6 +135,38 @@ def test_an_ad_render_item_on_the_last_message_skips(render: dict[str, Any]) -> 
     assert item.kind is Kind.OTHER
 
 
+def test_other_contentmetadata_is_not_an_ad_mark() -> None:
+    doc = _doc(mp.conversations_by_sync_token([mp.ONE_TO_ONE_INBOUND]))
+    [item] = _field_items(doc)
+    item["contentMetadata"] = {"somethingElse": {"_type": "com.linkedin.invented"}}
+    [parsed] = shapes.parse_conversation_list(json.dumps(doc)).items
+    assert parsed.kind is Kind.ONE_TO_ONE
+
+
+def test_a_sponsored_label_alone_does_not_skip_an_accepted_inmail() -> None:
+    assert _kind_of(_with(mp.INMAIL_ACCEPTED, type_label=mp.SPONSORED_LABEL)) is Kind.ONE_TO_ONE
+
+
+def test_no_counterpart_is_skipped_as_other() -> None:
+    doc = _doc(mp.conversations_by_sync_token([mp.ONE_TO_ONE_INBOUND]))
+    [item] = _field_items(doc)
+    item["conversationParticipants"] = item["conversationParticipants"][:1]
+    [parsed] = shapes.parse_conversation_list(json.dumps(doc)).items
+    assert parsed.kind is Kind.OTHER and parsed.counterpart_urn is None
+
+
+def test_hostUrnData_outside_inmail_is_skipped() -> None:
+    item = mp.host_urn_render_content("SALES_INMAIL", mp.ZEPHYRINE)
+    last = mp.Msg(11, 3, mp.ZEPHYRINE, "Invented.", mp.T0, render_content=(item,))
+    assert _kind_of(_with(mp.ONE_TO_ONE_INBOUND, last=last)) is Kind.OTHER
+
+
+def test_a_file_render_item_does_not_disqualify_a_conversation() -> None:
+    file_item = {"file": {"_type": "com.linkedin.messenger.File", "name": "invented.pdf"}}
+    last = mp.Msg(11, 3, mp.ZEPHYRINE, "Invented.", mp.T0, render_content=(file_item,))
+    assert _kind_of(_with(mp.ONE_TO_ONE_INBOUND, last=last)) is Kind.ONE_TO_ONE
+
+
 def test_the_group_flag_alone_makes_a_group() -> None:
     conv = _with(mp.ONE_TO_ONE_INBOUND, group_chat=True)
     [item] = shapes.parse_conversation_list(mp.conversations_by_sync_token([conv])).items
@@ -264,7 +296,6 @@ BAD_LISTS: dict[str, Callable[[dict[str, Any]], None]] = {
     "no SELF participant": _set(
         (*_ITEM, "conversationParticipants", 0, "participantType"), {"member": None}
     ),
-    "nobody but the owner": _set((*_ITEM, "conversationParticipants"), []),
     "no conversationUrl": _drop((*_ITEM, "conversationUrl")),
     "conversationUrl another thread": _set(
         (*_ITEM, "conversationUrl"), "https://www.linkedin.com/messaging/thread/2-other/"
