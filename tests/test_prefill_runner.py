@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from campaign_fakes import NOW
+from inbox_fakes import FIXTURE_NOTE
 from messaging_dom import Bubble, MessagingSite, MessagingTab
 from messaging_pages import ZEPHYRINE, conversation_urn
 from run_fakes import fake_provider
@@ -441,9 +442,8 @@ def test_the_interleave_gap_follows_a_prefill_run(lane: Lane) -> None:
     ended(NOW - timedelta(seconds=30))
     assert scheduler._last_message_send(lane.factory, user, NOW) == NOW - timedelta(seconds=30)
     with session_scope(lane.factory) as session:
-        assert all(
-            r.kind is SyncRunKind.MESSAGE_SEND for r in session.scalars(scoped(user, SyncRun))
-        )
+        made = [r for r in session.scalars(scoped(user, SyncRun)) if r.notes != FIXTURE_NOTE]
+        assert made and all(r.kind is SyncRunKind.MESSAGE_SEND for r in made)
 
 
 def test_settings_carry_the_workers_linkedin_section(lane: Lane) -> None:
