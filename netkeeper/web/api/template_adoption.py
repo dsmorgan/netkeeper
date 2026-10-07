@@ -82,7 +82,8 @@ class AdoptionOut(BaseModel):
     affected: list[EnrollmentRefOut]
     """The first hundred of them."""
     released: int
-    """Of those, enrollments the template parked, due again once it is adopted."""
+    """Of those, enrollments the template parked (a ``blocked:`` or ``too_long:`` reason),
+    due again once it is adopted."""
     kept: dict[MessageStatus, int]
     """The step's messages by status. Each keeps the text it was rendered with."""
     open_messages: list[OpenMessageOut]
@@ -94,6 +95,9 @@ class AdoptionOut(BaseModel):
     render, has a lint error once rendered, or a guard excludes the contact): never sent."""
     blocked: list[MessagePreviewOut]
     """The first hundred of them, each with why."""
+    blocked_capped: bool
+    """True when more enrollments are affected than the preview renders (2,000), so
+    ``blocked_total`` counts only the first 2,000."""
     fingerprint: str
     """What ``POST .../adopt`` takes back."""
 
@@ -157,6 +161,7 @@ def _preview_out(p: service.AdoptionPreview) -> AdoptionOut:
         samples=[_message_out(m) for m in p.samples],
         blocked_total=p.blocked_total,
         blocked=[_message_out(m) for m in p.blocked],
+        blocked_capped=p.blocked_capped,
         fingerprint=p.fingerprint,
     )
 

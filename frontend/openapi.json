@@ -119,6 +119,10 @@
             "title": "Blocked",
             "type": "array"
           },
+          "blocked_capped": {
+            "title": "Blocked Capped",
+            "type": "boolean"
+          },
           "blocked_total": {
             "title": "Blocked Total",
             "type": "integer"
@@ -225,6 +229,7 @@
           "samples",
           "blocked_total",
           "blocked",
+          "blocked_capped",
           "fingerprint"
         ],
         "title": "AdoptionOut",

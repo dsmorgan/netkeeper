@@ -35,6 +35,9 @@ interface ConfirmDialogProps {
    * deletes something".
    */
   confirmVariant?: VariantProps<typeof buttonVariants>['variant']
+  /** Disables the confirm button (not Cancel) while the action cannot be taken, such as
+   *  while what it acts on is loading or was refused. */
+  confirmDisabled?: boolean
 }
 
 /**
@@ -52,6 +55,7 @@ export function ConfirmDialog({
   pending = false,
   error = null,
   confirmVariant = 'destructive',
+  confirmDisabled = false,
 }: ConfirmDialogProps) {
   // `disabled={pending}` alone is not enough: `pending` only flips after the
   // caller's mutation reports back, one render later, so two clicks inside the
@@ -119,7 +123,11 @@ export function ConfirmDialog({
             <AlertDialog.Close render={<Button variant="outline" />} disabled={pending}>
               Cancel
             </AlertDialog.Close>
-            <Button variant={confirmVariant} onClick={handleConfirm} disabled={pending}>
+            <Button
+              variant={confirmVariant}
+              onClick={handleConfirm}
+              disabled={pending || confirmDisabled}
+            >
               {pending ? 'Working…' : confirmLabel}
             </Button>
           </div>
