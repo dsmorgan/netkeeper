@@ -271,14 +271,14 @@ def test_a_file_value_above_the_hard_max_is_warned_about() -> None:
     assert "asks for 80 a day, above the hard max of 50" in warning
 
 
-def test_a_restart_only_value_says_when_serve_still_has_another() -> None:
+def test_no_editable_value_needs_a_restart() -> None:
+    """#464: serve reads each user's values as it runs, so none waits for a restart."""
     started = ui_settings.apply(Settings(), {})
     views = ui_settings.describe(
         Settings(), {"campaigns.reply_poll_minutes": 5, PREFILLS: 30}, started=started
     )
-    assert _view(views, "campaigns.reply_poll_minutes").restart_pending is True
-    assert _view(views, PREFILLS).restart_pending is False  # applies now
-    assert _view(views, WINDOW).restart_pending is False  # unchanged
+    assert not any(view.restart_pending for view in views)
+    assert not any(view.spec.applies == "restart" and view.spec.editable for view in views)
 
 
 # --- review follow-ups ------------------------------------------------------------

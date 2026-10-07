@@ -22,9 +22,11 @@ ignored, with a log line, so the default applies: it never reaches enforcement.
 **Taking effect.** :func:`resolve` is cheap (one scoped query), so every reader
 calls it where it uses the value: each request, each campaign tick for each user,
 and each LinkedIn run as it starts. A change therefore applies from the next
-request, tick or run. The few values a running ``serve`` reads once at startup
-(:attr:`FieldSpec.applies` ``"restart"``) say so, and :func:`describe` reports when
-the running process still has the old one.
+request, tick or run. ``serve``'s scheduler, mailbox poll and reply poll read each
+user's own values at each heartbeat or tick (#464), so those apply without a restart
+too. A value a running ``serve`` reads once at startup would say so
+(:attr:`FieldSpec.applies` ``"restart"``), and :func:`describe` reports when the
+running process still has the old one; none is left but file-only ``linkedin_auto_send``.
 
 **What is not here.** ``linkedin_auto_send`` is shown, never written: turning it on
 from a web page would need a confirm step as deliberate as ``schedule arm``. Secrets
@@ -203,12 +205,13 @@ FIELDS: Final[tuple[FieldSpec, ...]] = (
             " you are usually online."
         ),
         kind="window",
-        applies="restart",
+        applies="now",
         applies_note=(
             "Applies from the next run: each run checks the hours as it starts, and an"
             " enrichment run keeps the window it started with. A scheduled run outside"
-            " narrowed hours is refused at once; after widening, scheduled runs keep the"
-            " old timetable until you restart netkeeper serve."
+            " narrowed hours is refused at once. netkeeper serve reads your hours at each"
+            " heartbeat, so no restart is needed; a widened window shows in the due times"
+            " netkeeper plans after the next scheduled run."
         ),
     ),
     FieldSpec(
@@ -278,8 +281,11 @@ FIELDS: Final[tuple[FieldSpec, ...]] = (
         label="Check Gmail for replies every (minutes)",
         help="How often netkeeper looks for replies to campaign email.",
         kind="int",
-        applies="restart",
-        applies_note="Takes effect when you restart netkeeper serve.",
+        applies="now",
+        applies_note=(
+            "Applies from the next minute: netkeeper serve reads your interval at each tick,"
+            " so no restart is needed."
+        ),
         minimum=1,
         maximum=1440,
     ),

@@ -21,7 +21,7 @@ import importlib
 import json
 import logging
 import pkgutil
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import timedelta
 from types import ModuleType
@@ -42,6 +42,7 @@ from netkeeper.crm.lists import ensure_validated_list
 from netkeeper.crm.self_contact import ensure_self_contact
 from netkeeper.crm.tags import ensure_default_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
+from netkeeper.models import User
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import install_scope_guard
 from netkeeper.services import ui_settings
@@ -56,7 +57,11 @@ from netkeeper.services.events import EventBus
 from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.mailboxes import MailboxMonitor, PendingAuthorizations, open_gmail
 from netkeeper.services.runs import fail_interrupted_runs
-from netkeeper.services.scheduled_runs import ServeExtractor, start_serve_scheduler
+from netkeeper.services.scheduled_runs import (
+    ServeExtractor,
+    start_serve_scheduler,
+    user_active_hours,
+)
 from netkeeper.services.tasks import TaskRunner
 from netkeeper.services.users import ensure_local_user
 from netkeeper.web import api as api_package
@@ -117,9 +122,8 @@ def create_app(
             tasks = _start(app, active, resolved)
             teardown.push_async_callback(tasks.cancel_all)
             app.state.gmail_endpoints = gmail
-            # What serve reads once, at startup, comes from the local user's settings in
-            # force (#343): config.toml, then the Settings page. Everything else
-            # resolves per request, tick or run.
+            # Everything a user's page can change resolves per user, at each request, tick,
+            # heartbeat and run (#343, #464); this reading is only for startup log lines.
             started: Settings = app.state.started_settings
             if extractor is not None:
                 serving = start_serve_scheduler(
@@ -129,6 +133,7 @@ def create_app(
                     tasks,
                     started.linkedin,
                     campaign_settings=started,
+                    active_hours=user_active_hours(app.state.session_factory, resolved),
                 )
                 teardown.callback(serving.stop)
                 app.state.executor = serving.executor
@@ -136,8 +141,9 @@ def create_app(
                 monitor = MailboxMonitor(
                     app.state.session_factory,
                     app.state.bus,
-                    interval_s=_poll_minutes(started) * 60,
+                    interval_s=_poll_minutes(resolved) * 60,
                     endpoints=gmail,
+                    interval_for=_per_user_poll_s(app.state.session_factory, resolved),
                 )
                 teardown.push_async_callback(monitor.stop)
                 monitor.start()
@@ -145,7 +151,7 @@ def create_app(
                 sender = (
                     campaign_sender
                     if campaign_sender is not None
-                    else _gmail_sender(app.state.session_factory, gmail, started)
+                    else _gmail_sender(app.state.session_factory, gmail, resolved)
                 )
                 campaigns = CampaignEngine(app.state.session_factory, resolved, sender)
                 teardown.push_async_callback(campaigns.stop)
@@ -190,7 +196,6 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
         # process (a `netkeeper linkedin sync` in a terminal) and is left alone.
         fail_interrupted_runs(session, now=utcnow())
         started = ui_settings.resolve(session, user, settings)
-        local_user_id = user.id
         _log_settings_page_risks(settings, started)
         log.info(
             "database at revision %s, local user %d", migrations.current_revision(engine), user.id
@@ -198,12 +203,10 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     bus = EventBus()
     tasks = TaskRunner(bus)
     app.state.settings = settings
-    # The local user's settings in force at startup (#343): what the scheduler, the
-    # mailbox poll and the reply interval run with until serve restarts. These are the
-    # first local user's values, used for every user: right for one user.
-    # TODO(#464): per-user values for the timetable, the monitor and the reply interval.
+    # The local user's settings in force at startup (#343), for startup log lines only.
+    # The scheduler, the mailbox poll and the reply poll read each user's own values
+    # as they run (#464).
     app.state.started_settings = started
-    app.state.started_user_id = local_user_id
     app.state.engine = engine
     app.state.session_factory = factory
     app.state.bus = bus
@@ -249,7 +252,24 @@ def _gmail_sender(
             factory, user_id, mailbox_id, endpoints=endpoints
         ),
         replies_every=timedelta(minutes=_poll_minutes(settings)),
+        replies_every_for=lambda user_id: timedelta(
+            minutes=_user_poll_minutes(factory, settings, user_id)
+        ),
     )
+
+
+def _user_poll_minutes(factory: sessionmaker[Session], file: Settings, user_id: int) -> int:
+    """``user_id``'s own reply poll minutes (#464): the file's, else their Settings-page
+    value, else the default. Raises for a user that is gone, so a caller fails closed."""
+    with session_scope(factory) as session:
+        user = session.get(User, user_id)
+        if user is None:
+            raise LookupError(f"no user {user_id}")
+        return _poll_minutes(ui_settings.resolve(session, user, file))
+
+
+def _per_user_poll_s(factory: sessionmaker[Session], file: Settings) -> Callable[[int], float]:
+    return lambda user_id: _user_poll_minutes(factory, file, user_id) * 60.0
 
 
 def _poll_minutes(settings: Settings) -> int:
