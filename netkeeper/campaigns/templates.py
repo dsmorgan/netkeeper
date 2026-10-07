@@ -146,8 +146,9 @@ def _clean_subject(subject: str | None) -> str | None:
 
 def _subject_for(channel: TemplateChannel, subject: str | None) -> str | None:
     """The subject to store: a LinkedIn message has none, so any subject is dropped (#448)."""
-    cleaned = _clean_subject(subject)
-    return None if channel is TemplateChannel.LINKEDIN else cleaned
+    if channel is TemplateChannel.LINKEDIN:
+        return None  # before the length check: nothing is kept, so nothing is too long
+    return _clean_subject(subject)
 
 
 def _check_body(body: str) -> str:
@@ -569,7 +570,8 @@ def render_preview(
         raise ValueError("a template can only be previewed against its own user's contact")
     day = local_today(timezone, utcnow()) if today is None else today
     values = MergeValues(contact=contact_fields(contact, day), personal_line=personal_line)
-    return render(row.channel, row.subject, row.body, values, today=day)
+    subject = None if row.channel is TemplateChannel.LINKEDIN else row.subject
+    return render(row.channel, subject, row.body, values, today=day)
 
 
 # --- the editor's field list --------------------------------------------------------

@@ -142,11 +142,21 @@ export function TemplateEditor({
     },
   })
 
+  // The subject typed for email, kept while the channel is LinkedIn so switching back restores it.
+  const emailSubject = useRef('')
   const set = (patch: Partial<TemplateDraft>) => {
     setUndo(null) // an edit ends the chance to undo a paste
     const next = { ...draft, ...patch }
-    // A LinkedIn message has no subject: it is dropped, so it is never linted, saved or sent.
-    onDraftChange(next.channel === 'linkedin' ? { ...next, subject: '' } : next)
+    if (draft.channel === 'email') emailSubject.current = next.subject
+    if (next.channel === 'linkedin') {
+      // A LinkedIn message has no subject: it is dropped from the draft, so it is never
+      // linted, saved or sent.
+      onDraftChange({ ...next, subject: '' })
+    } else if (draft.channel === 'linkedin' && patch.subject === undefined) {
+      onDraftChange({ ...next, subject: emailSubject.current })
+    } else {
+      onDraftChange(next)
+    }
   }
 
   const fieldOf = (which: InsertTarget) =>

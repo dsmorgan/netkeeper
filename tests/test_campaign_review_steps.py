@@ -19,7 +19,7 @@ import pytest
 from campaign_fakes import ARMED_FOR_SEND, NOW, SETTINGS, FakeSender, make_mailbox
 from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.campaigns.render import LintRule
+from netkeeper.campaigns.render import LintRule, lint
 from netkeeper.campaigns.templates import activation_errors
 from netkeeper.crm import do_not_send
 from netkeeper.crm import lists as list_service
@@ -499,11 +499,10 @@ def newlines_refused(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     ("subject", "body", "rule"),
     [
-        ("Hello", "Hi {{ first_name }}", LintRule.LINKEDIN_SUBJECT),
         (None, "Hi {{ first_name }},\nthanks", LintRule.LINKEDIN_NEWLINE),
         (None, "Hi {{ first_name }} " + "x" * 8000, LintRule.LINKEDIN_TOO_LONG),
     ],
-    ids=["subject", "newline", "too_long"],
+    ids=["newline", "too_long"],
 )
 @pytest.mark.usefixtures("newlines_refused")
 def test_a_linkedin_step_that_fails_lint_blocks_activation(
@@ -537,21 +536,25 @@ def test_a_long_linkedin_message_is_a_warning_that_does_not_block_lint(
         assert result.steps == ((1, ()),)
 
 
-def test_a_linkedin_subject_with_a_long_body_gives_only_the_subject_error(
+def test_a_legacy_linkedin_subject_is_a_warning_that_does_not_block_activation(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """The long-message warning is never listed among the errors that block activation."""
+    """#448: a LinkedIn template saved with a subject before the rule shows the warning, and
+    neither lint nor activation refuses it (even a removed ``me.*`` field inside it)."""
     user, campaign_id = _linkedin_reviewing(
-        session_factory, subject="Hello", body="Hi {{ first_name }} " + "x" * 1100
+        session_factory, subject="Hi {{ me.first_name }}", body="Hi {{ first_name }}"
     )
     with session_scope(session_factory, write=True) as session:
         result = campaign_review.record_lint(session, user, campaign_id, now=NOW)
-        assert not result.clean
-        [(_position, issues)] = result.steps
-        assert [issue.rule for issue in issues] == [LintRule.LINKEDIN_SUBJECT]
+        assert result.clean
         campaign = campaign_review.get_campaign(session, user, campaign_id)
         template = campaign.steps[0].template
-        assert [i.rule for i in activation_errors(template)] == [LintRule.LINKEDIN_SUBJECT]
+        assert activation_errors(template) == []
+        assert [i.rule for i in lint(template.channel, template.subject, template.body)] == [
+            LintRule.LINKEDIN_SUBJECT
+        ]
+        gaps = campaign_review.missing(session, user, campaign, now=NOW)
+        assert "lint" not in {g.requirement for g in gaps}
 
 
 @pytest.mark.usefixtures("newlines_refused")

@@ -18,6 +18,9 @@ from netkeeper.campaigns.render import (
     Severity,
     TemplateRenderError,
 )
+from netkeeper.campaigns.render import (
+    lint as render_lint,
+)
 from netkeeper.campaigns.templates import (
     UNSET,
     DuplicateTemplateName,
@@ -123,10 +126,23 @@ def test_a_save_clears_the_subject_a_linkedin_template_had_before(
     row = _create(writer, user, channel=LINKEDIN, subject=None)
     row.subject = "Left over"
     writer.flush()
-    assert [i.rule for i in activation_errors(row)] == [LintRule.LINKEDIN_SUBJECT]
+    assert activation_errors(row) == []  # the leftover subject is a warning: it does not block
+    assert [i.rule for i in render_lint(LINKEDIN, row.subject, row.body)] == [
+        LintRule.LINKEDIN_SUBJECT
+    ]
     healed = update_template(writer, user, row.id, body="Hi {{ first_name }}, again")
     assert healed.subject is None
     assert activation_errors(healed) == []
+
+
+def test_an_over_long_subject_on_a_linkedin_template_is_dropped_not_refused(
+    writer: Session, user: User
+) -> None:
+    """The channel is checked first, so the subject length limit applies to email only."""
+    row = _create(writer, user, channel=LINKEDIN, subject="s" * 501)
+    assert row.subject is None
+    with pytest.raises(InvalidTemplateValue, match="longer than 500"):
+        _create(writer, user, "other", channel=EMAIL, subject="s" * 501)
 
 
 @pytest.mark.parametrize(
