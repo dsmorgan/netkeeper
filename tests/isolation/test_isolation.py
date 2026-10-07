@@ -34,6 +34,7 @@ from netkeeper.models import (
 )
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import scoped, scoped_count
+from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.linkedin_session import flag_session
 from netkeeper.web.app import API_PREFIX
 from netkeeper.web.security import CLIENT_HEADER, CLIENT_HEADER_VALUE
@@ -300,6 +301,34 @@ async def test_inbound_this_week_is_isolated(running_app: FastAPI) -> None:
 
     assert (await _get(running_app, a_id, "/dashboard/inbound"))["count"] == 1
     assert (await _get(running_app, b_id, "/dashboard/inbound"))["count"] == 0
+
+
+async def test_gmail_activity_is_isolated(running_app: FastAPI) -> None:
+    """``GET /gmail/activity`` mixes a count and a list, so it is not in ``REGISTRY``: its
+    sends and its recent email are one user's own (#449)."""
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        a = User(kind=UserKind.HOSTED, display_name="A")
+        b = User(kind=UserKind.HOSTED, display_name="B")
+        session.add_all([a, b])
+        session.flush()
+        box = mailbox_service.connect(session, a, "a@example.test", "rt-a", daily_cap=80)
+        campaign = factories.make_campaign(session, a, mailbox_id=box.id)
+        enrollment = factories.make_enrollment(
+            session, campaign, factories.make_contact(session, a)
+        )
+        factories.make_message(session, enrollment)
+        a_id, b_id = a.id, b.id
+
+    mine = await _get(running_app, a_id, "/gmail/activity")
+    theirs = await _get(running_app, b_id, "/gmail/activity")
+
+    assert (len(mine["mailboxes"]), mine["mailboxes"][0]["sent_today"], len(mine["recent"])) == (
+        1,
+        1,
+        1,
+    )
+    assert (theirs["mailboxes"], theirs["recent"]) == ([], [])
 
 
 async def test_one_campaigns_linkedin_queue_is_isolated(running_app: FastAPI) -> None:

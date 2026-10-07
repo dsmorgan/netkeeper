@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ExportsRouteImport } from './routes/exports'
+import { Route as GmailRouteImport } from './routes/gmail'
 import { Route as ImportsRouteImport } from './routes/imports'
 import { Route as InboxRouteImport } from './routes/inbox'
 import { Route as LinkedinRouteImport } from './routes/linkedin'
@@ -35,6 +36,11 @@ const IndexRoute = IndexRouteImport.update({
 const ExportsRoute = ExportsRouteImport.update({
   id: '/exports',
   path: '/exports',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const GmailRoute = GmailRouteImport.update({
+  id: '/gmail',
+  path: '/gmail',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ImportsRoute = ImportsRouteImport.update({
@@ -116,6 +122,7 @@ const ImportsRunsRunIdRoute = ImportsRunsRunIdRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/exports': typeof ExportsRoute
+  '/gmail': typeof GmailRoute
   '/imports': typeof ImportsRouteWithChildren
   '/inbox': typeof InboxRoute
   '/linkedin': typeof LinkedinRoute
@@ -135,6 +142,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/exports': typeof ExportsRoute
+  '/gmail': typeof GmailRoute
   '/inbox': typeof InboxRoute
   '/linkedin': typeof LinkedinRoute
   '/lists': typeof ListsRoute
@@ -154,6 +162,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/exports': typeof ExportsRoute
+  '/gmail': typeof GmailRoute
   '/imports': typeof ImportsRouteWithChildren
   '/inbox': typeof InboxRoute
   '/linkedin': typeof LinkedinRoute
@@ -175,6 +184,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/exports'
+    | '/gmail'
     | '/imports'
     | '/inbox'
     | '/linkedin'
@@ -194,6 +204,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/exports'
+    | '/gmail'
     | '/inbox'
     | '/linkedin'
     | '/lists'
@@ -212,6 +223,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/exports'
+    | '/gmail'
     | '/imports'
     | '/inbox'
     | '/linkedin'
@@ -232,6 +244,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ExportsRoute: typeof ExportsRoute
+  GmailRoute: typeof GmailRoute
   ImportsRoute: typeof ImportsRouteWithChildren
   InboxRoute: typeof InboxRoute
   LinkedinRoute: typeof LinkedinRoute
@@ -260,6 +273,13 @@ declare module '@tanstack/react-router' {
       path: '/exports'
       fullPath: '/exports'
       preLoaderRoute: typeof ExportsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/gmail': {
+      id: '/gmail'
+      path: '/gmail'
+      fullPath: '/gmail'
+      preLoaderRoute: typeof GmailRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/imports': {
@@ -388,6 +408,7 @@ const ImportsRouteWithChildren =
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ExportsRoute: ExportsRoute,
+  GmailRoute: GmailRoute,
   ImportsRoute: ImportsRouteWithChildren,
   InboxRoute: InboxRoute,
   LinkedinRoute: LinkedinRoute,

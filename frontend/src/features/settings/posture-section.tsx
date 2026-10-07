@@ -216,7 +216,7 @@ function ReplyPollAcknowledge({ rows }: { rows: readonly Protection[] }) {
   )
 }
 
-function StatusBadge({ status }: { status: string }) {
+export function StatusBadge({ status }: { status: string }) {
   return (
     <span
       className={cn(
@@ -238,7 +238,7 @@ function noteCount(count: number): string {
  * notes; expanded, its full `value` and the notes themselves. Warnings show
  * either way (#340): they are what makes the verdict "NOT clear".
  */
-function ProtectionDetail({ row, expanded }: { row: Protection; expanded: boolean }) {
+export function ProtectionDetail({ row, expanded }: { row: Protection; expanded: boolean }) {
   return (
     <>
       <p>
