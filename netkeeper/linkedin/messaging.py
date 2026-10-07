@@ -411,9 +411,23 @@ class PrefillResult:
     #: Auto-send only: why a landed Send click is not proven to have sent the message
     #: (no ``createMessage`` answer, an error, other text). Then nothing is closed.
     send_unconfirmed: str | None = None
+    #: A refusal before the Message click that holds auto-send (#444's checks, ADR 0008).
+    pre_click_hold: PreClickHold | None = None
 
 
 Cancelled = Callable[[], Awaitable[bool]]
+
+
+class PreClickHold(enum.StrEnum):
+    """A refusal before the Message click that a person must clear (#444's pre-click
+    checks), so an auto-send holds on it (ADR 0008): the next try would find the same."""
+
+    BUBBLE = "bubble"
+    """A message bubble or composer is already on the page, or that couldn't be read."""
+
+    COVERED = "covered"
+    """No Message control is on screen with nothing over it."""
+
 
 #: A send gate checked again just before the click: ``None`` when it still holds, or
 #: why not, in fixed words.

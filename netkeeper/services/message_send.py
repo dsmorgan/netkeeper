@@ -59,6 +59,7 @@ from netkeeper.linkedin.messaging import (
     MessageJobSpec,
     MessageOutcome,
     MessageOutcomeKind,
+    PreClickHold,
     PrefillResult,
     PrefillSource,
     SendPermit,
@@ -90,6 +91,7 @@ from netkeeper.services.linkedin_accounts import schedule_paused, scheduled_runs
 from netkeeper.services.linkedin_session import flag_session
 from netkeeper.services.linkedin_steps import (
     AUTO_SEND_HOLD_BUBBLE,
+    AUTO_SEND_HOLD_COVERED,
     AUTO_SEND_HOLD_TAB,
     BUBBLE_LEFT_OPEN_NOTE,
     NOT_SENT_NOTE,
@@ -199,6 +201,7 @@ def record(
     tab_closed: bool = False,
     send_unconfirmed: str | None = None,
     opened: bool | None = None,
+    pre_click_hold: PreClickHold | None = None,
 ) -> PrefillReport:
     """Record ``outcome`` on run ``run_id``'s claimed message, and end the run, in one
     writer transaction. A run with no claimed message only ends ``failed``.
@@ -234,6 +237,21 @@ def record(
                 user,
                 run.linkedin_account_id,
                 reason=AUTO_SEND_HOLD_TAB if bubble_closed else AUTO_SEND_HOLD_BUBBLE,
+                now=now,
+                run_id=run_id,
+            )
+        elif auto and pre_click_hold is not None:
+            # #444's pre-click refusals a person must clear: no click, but the next try
+            # would refuse the same page (ADR 0008, "The auto-send hold").
+            hold_auto_send(
+                session,
+                user,
+                run.linkedin_account_id,
+                reason=(
+                    AUTO_SEND_HOLD_COVERED
+                    if pre_click_hold is PreClickHold.COVERED
+                    else AUTO_SEND_HOLD_BUBBLE
+                ),
                 now=now,
                 run_id=run_id,
             )
@@ -786,6 +804,7 @@ async def run_prefill(
             close_refusal=result.close_refusal,
             tab_closed=tab_closed,
             send_unconfirmed=result.send_unconfirmed,
+            pre_click_hold=result.pre_click_hold,
             budget_spent=None if auto else True,
             click_diagnostics=source.message_click_diagnostics,
         )
