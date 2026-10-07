@@ -511,6 +511,22 @@ class BrowserWorker:
             if (
                 facts.trigger is SyncRunTrigger.SCHEDULED
                 and facts.kind is SyncRunKind.INBOX
+                and route_breaker.inbox_owner_tripped(session, user, facts.account_id)
+            ):
+                # #443: the same second, independent check for the owner breaker.
+                log.error(
+                    "scheduled run %d reached the worker with the inbox owner breaker"
+                    " tripped for account %d",
+                    run_id,
+                    facts.account_id,
+                )
+                return (
+                    "inbox_owner_mismatch",
+                    "the inbox owner breaker is tripped for this account",
+                )
+            if (
+                facts.trigger is SyncRunTrigger.SCHEDULED
+                and facts.kind is SyncRunKind.INBOX
                 and not runs.has_completed_inbox_poll(session, user)
             ):
                 # P4-01: a second, independent check; the scheduled handler already

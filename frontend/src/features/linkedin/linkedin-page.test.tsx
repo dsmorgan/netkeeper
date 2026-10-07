@@ -18,7 +18,7 @@ import {
 
 /** `STOP_REASON_TEXT['owner_mismatch']` (`netkeeper/services/runs.py`). */
 const OWNER_MISMATCH =
-  "the page showed another LinkedIn mailbox than this account's; if you changed accounts, run `netkeeper linkedin inbox-forget-owner`"
+  "the page showed another LinkedIn mailbox than this account's; if you changed accounts, run `netkeeper linkedin inbox-forget-owner`; if your self contact has a LinkedIn profile that names another account, correct that instead"
 
 afterEach(() => {
   resetFakeEventSource()

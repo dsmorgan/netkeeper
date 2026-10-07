@@ -30,7 +30,7 @@ from netkeeper import __version__, migrations
 from netkeeper.campaigns import gmail_oauth
 from netkeeper.campaigns import schedule as schedule_module
 from netkeeper.config import ConfigError, Settings, load_settings, render_toml
-from netkeeper.crm import do_not_send, import_runs, new_contact
+from netkeeper.crm import do_not_send, import_runs, inbox_apply, new_contact
 from netkeeper.crm.archive import ArchiveImport, import_archive
 from netkeeper.crm.archive_check import open_checked_archive
 from netkeeper.crm.contacts import ContactStats, contact_stats
@@ -1691,6 +1691,8 @@ def linkedin_schedule_status(ctx: typer.Context) -> None:
             lost = route_breaker.answer_lost_states(session, user, account_id)
             info = route_breaker.contact_info_state(session, user, account_id)
             inbox = route_breaker.inbox_state(session, user, account_id)
+            owner = route_breaker.inbox_owner_state(session, user, account_id)
+            owner_fix = inbox_apply.owner_mismatch_fix(session, user)
     finally:
         engine.dispose()
     if armed_at is None:
@@ -1717,6 +1719,9 @@ def linkedin_schedule_status(ctx: typer.Context) -> None:
         _streak_line("Contact info breaker", "Contact-info-lost", info, kind=SyncRunKind.ENRICH)
     )
     typer.echo(_streak_line("inbox breaker", "unreadable", inbox, kind=SyncRunKind.INBOX))
+    typer.echo(_streak_line("inbox owner breaker", "owner_mismatch", owner, kind=SyncRunKind.INBOX))
+    if owner.tripped:
+        typer.echo(f"  to fix the mailbox mismatch: {owner_fix}")
 
 
 def _streak_line(
@@ -1906,6 +1911,7 @@ def linkedin_schedule_reset_breaker(
             lost = route_breaker.answer_lost_states(session, user, account_id)
             info = route_breaker.contact_info_state(session, user, account_id)
             inbox = route_breaker.inbox_state(session, user, account_id)
+            owner = route_breaker.inbox_owner_state(session, user, account_id)
         if (
             current.readable
             and current.count == 0
@@ -1914,10 +1920,13 @@ def linkedin_schedule_reset_breaker(
             and info.count == 0
             and inbox.readable
             and inbox.count == 0
+            and owner.readable
+            and owner.count == 0
         ):
             typer.echo(
                 "none of the route-changed breaker, the answer-lost limit, the Contact"
-                " info breaker, and the inbox breaker has a count; nothing to reset"
+                " info breaker, the inbox breaker, and the inbox owner breaker has a count;"
+                " nothing to reset"
             )
             return
         # A corrupt row reads as tripped (fail closed), and posture tells the
@@ -1940,16 +1949,20 @@ def linkedin_schedule_reset_breaker(
                 f"{inbox.count} unreadable inbox"
                 if inbox.readable
                 else "inbox breaker state unreadable",
+                f"{owner.count} owner_mismatch inbox"
+                if owner.readable
+                else "inbox owner breaker state unreadable",
             ]
         )
         question = (
             "reset the route-changed breaker, the answer-lost limit, the Contact info breaker,"
-            f" and the inbox breaker ({counts} run(s) in a row)? scheduled connections,"
-            " enrichment, and inbox runs will be allowed to fire again"
+            f" the inbox breaker, and the inbox owner breaker ({counts} run(s) in a row)?"
+            " scheduled connections, enrichment, and inbox runs will be allowed to fire again"
             if current.readable
             and all(s.readable for s in lost.values())
             and info.readable
             and inbox.readable
+            and owner.readable
             else f"a stored breaker state is unreadable, so it reads as tripped ({counts})."
             " reset them all? scheduled connections, enrichment, and inbox runs will be"
             " allowed to fire again"
@@ -1962,8 +1975,9 @@ def linkedin_schedule_reset_breaker(
     finally:
         engine.dispose()
     typer.echo(
-        "route-changed breaker, answer-lost limit, Contact info breaker, and inbox breaker"
-        " reset; scheduled connections, enrichment, and inbox runs may fire again when due"
+        "route-changed breaker, answer-lost limit, Contact info breaker, inbox breaker, and"
+        " inbox owner breaker reset; scheduled connections, enrichment, and inbox runs may fire"
+        " again when due"
     )
 
 

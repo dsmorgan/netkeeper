@@ -737,7 +737,7 @@ def test_reset_breaker_clears_the_contact_info_breaker(cli_db: sessionmaker[Sess
 
     confirmed = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="y\n")
     assert confirmed.exit_code == 0, confirmed.output
-    assert "Contact info breaker, and inbox breaker reset" in confirmed.output
+    assert "inbox breaker, and inbox owner breaker reset" in confirmed.output
     assert _contact_info_count(cli_db, account_id) == 0
 
 
@@ -809,3 +809,46 @@ def test_reset_breaker_clears_a_corrupt_inbox_row(cli_db: sessionmaker[Session])
     assert "inbox breaker state unreadable" in result.output
     with session_scope(cli_db) as session:
         assert not route_breaker.inbox_tripped(session, _user(session), account_id)
+
+
+def _owner_mismatches(factory: sessionmaker[Session], polls_in_a_row: int) -> int:
+    with session_scope(factory, write=True) as session:
+        user = _user(session)
+        account_id = ensure_account(session, user).id
+        for _ in range(polls_in_a_row):
+            route_breaker.record_inbox_owner(
+                session, user, account_id, owner_mismatch=True, completed=False, now=NOW
+            )
+    return account_id
+
+
+def test_schedule_status_shows_the_inbox_owner_breaker_and_its_fix(
+    cli_db: sessionmaker[Session],
+) -> None:
+    runner = CliRunner()
+    clear = runner.invoke(cli, ["linkedin", "schedule", "status"]).output
+    assert "inbox owner breaker: 0 of 2 owner_mismatch inbox runs in a row" in clear
+    assert "to fix the mailbox mismatch" not in clear
+
+    _owner_mismatches(cli_db, 2)
+    tripped = runner.invoke(cli, ["linkedin", "schedule", "status"]).output
+    assert (
+        "inbox owner breaker: tripped, 2 of 2 owner_mismatch inbox runs in a row;"
+        " scheduled inbox runs are skipped (`netkeeper linkedin schedule reset-breaker`)"
+    ) in tripped
+    assert "to fix the mailbox mismatch: if you changed LinkedIn accounts" in tripped
+    assert "netkeeper linkedin inbox-forget-owner" in tripped
+    # The unreadable-page breaker is a different line and stays clear.
+    assert "inbox breaker: 0 of 2 unreadable inbox runs in a row" in tripped
+
+
+def test_reset_breaker_clears_the_inbox_owner_breaker(cli_db: sessionmaker[Session]) -> None:
+    account_id = _owner_mismatches(cli_db, 2)
+    runner = CliRunner()
+    declined = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="n\n")
+    assert declined.exit_code == 1
+    assert "2 owner_mismatch inbox" in declined.output
+    confirmed = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="y\n")
+    assert confirmed.exit_code == 0, confirmed.output
+    with session_scope(cli_db) as session:
+        assert not route_breaker.inbox_owner_tripped(session, _user(session), account_id)

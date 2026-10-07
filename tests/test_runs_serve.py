@@ -1238,6 +1238,70 @@ async def test_the_worker_refuses_only_a_scheduled_inbox_run_for_the_inbox_break
         assert stored.error == "the inbox breaker is tripped for this account"
 
 
+# --- #443: the inbox owner breaker at the worker ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "trigger", "refused"),
+    [
+        (SyncRunKind.INBOX, SyncRunTrigger.SCHEDULED, True),
+        # A poll by hand is never refused for it: that is how a person releases it.
+        (SyncRunKind.INBOX, SyncRunTrigger.MANUAL, False),
+        (SyncRunKind.ENRICH, SyncRunTrigger.SCHEDULED, False),
+        (SyncRunKind.CONNECTIONS_FULL, SyncRunTrigger.SCHEDULED, False),
+    ],
+)
+async def test_the_worker_refuses_only_a_scheduled_inbox_run_for_the_owner_breaker(
+    session_factory: Any,
+    settings: Settings,
+    kind: SyncRunKind,
+    trigger: SyncRunTrigger,
+    refused: bool,
+) -> None:
+    import factories
+
+    from netkeeper.linkedin.browser import BrowserUnavailable
+    from netkeeper.worker import BrowserWorker
+
+    provider, connector = fake_provider(error=BrowserUnavailable("Chrome is not running"))
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        account = ensure_account(session, user)
+        arm_scheduled_runs(session, user, now=START)
+        for _ in range(route_breaker.INBOX_OWNER_THRESHOLD):
+            route_breaker.record_inbox_owner(
+                session, user, account.id, owner_mismatch=True, completed=False, now=START
+            )
+        run = SyncRun(
+            user_id=user.id,
+            linkedin_account_id=account.id,
+            kind=kind,
+            trigger=trigger,
+            started_at=START,
+        )
+        session.add(run)
+        session.flush()
+        run_id, user_id = run.id, user.id
+    worker = BrowserWorker(provider, session_factory, settings.linkedin)
+
+    await worker.execute(run_id, user_id)
+
+    with session_scope(session_factory) as session:
+        owner = session.get(User, user_id)
+        assert owner is not None
+        stored = runs.get_run(session, owner, run_id)
+        if not refused:
+            assert stored.stop_reason != "inbox_owner_mismatch"
+            assert connector.attaches == 1
+            return
+        assert connector.attaches == 0
+        assert (stored.status, stored.stop_reason) == (
+            SyncRunStatus.FAILED,
+            "inbox_owner_mismatch",
+        )
+        assert stored.error == "the inbox owner breaker is tripped for this account"
+
+
 async def test_a_tripped_connections_breaker_does_not_refuse_a_scheduled_inbox_run(
     session_factory: Any, settings: Settings
 ) -> None:

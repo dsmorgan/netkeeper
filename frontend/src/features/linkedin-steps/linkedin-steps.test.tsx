@@ -1121,7 +1121,7 @@ describe('the inbox check states (#433)', () => {
             status: 'failed',
             stop_reason: 'owner_mismatch',
             stop_reason_text:
-              "the page showed another LinkedIn mailbox than this account's; if you changed accounts, run `netkeeper linkedin inbox-forget-owner`",
+              "the page showed another LinkedIn mailbox than this account's; if you changed accounts, run `netkeeper linkedin inbox-forget-owner`; if your self contact has a LinkedIn profile that names another account, correct that instead",
           }),
         ),
     })

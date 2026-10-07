@@ -269,6 +269,19 @@ async def poll_inbox(
                 now=clock(),
             )
 
+    def record_owner_breaker(*, owner_mismatch: bool, completed: bool) -> None:
+        """#443: the owner-mismatch streak, in its own writer session, after the poll's
+        ending is written. Never touches the other streaks."""
+        with session_scope(factory, write=True) as session:
+            route_breaker.record_inbox_owner(
+                session,
+                _load_user(session, user_id),
+                account_id,
+                owner_mismatch=owner_mismatch,
+                completed=completed,
+                now=clock(),
+            )
+
     def apply_and_finish(
         delta: InboxDelta, reason: str, since: datetime | None
     ) -> inbox_apply.InboxCounts | None:
@@ -366,7 +379,9 @@ async def poll_inbox(
         if counts is not None and reason != INCOMPLETE:
             # The poll completed: a poll that reads again clears the inbox breaker.
             await off_loop(record_breaker, route_changed=False, completed=True)
+            await off_loop(record_owner_breaker, owner_mismatch=False, completed=True)
         if counts is None:
+            await off_loop(record_owner_breaker, owner_mismatch=True, completed=False)
             log.error(
                 "inbox poll %d: the page showed another mailbox; nothing written", started_run_id
             )

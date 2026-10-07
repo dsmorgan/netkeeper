@@ -1158,6 +1158,12 @@ async def poll_and_fire(
                 # Two inbox polls in a row ended route_changed (#437): the messaging page
                 # changed shape, and a poll every interval would only load it again.
                 skipped_reason = "inbox_route_changed_breaker"
+            elif kind is JobKind.INBOX and route_breaker.inbox_owner_tripped(
+                session, user, account_id
+            ):
+                # Two inbox polls in a row ended owner_mismatch (#443): the mailbox is not
+                # this account's, and each poll would load the page and write nothing.
+                skipped_reason = "inbox_owner_mismatch"
             next_due = record_fired(
                 session,
                 user,

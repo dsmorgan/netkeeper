@@ -310,6 +310,26 @@ def owner_matches(session: Session, user: User, owner_urn: str | None) -> bool:
     return known == owner_urn
 
 
+def owner_mismatch_fix(session: Session, user: User) -> str:
+    """What to do about an ``owner_mismatch`` poll (#443), in the one sentence every
+    surface shares. :func:`owner_matches` compares the self contact's ``li_urn`` first, so
+    forgetting the recorded owner fixes the mismatch only when the self contact has none.
+    Read-only."""
+    from netkeeper.crm.self_contact import get_self_contact
+
+    me = get_self_contact(session, user)
+    if me is not None and me.li_urn:
+        return (
+            "your self contact's LinkedIn profile (its `li_urn`) names another account than"
+            " the one signed in: correct it, then run `netkeeper linkedin inbox` by hand"
+            " (`netkeeper linkedin inbox-forget-owner` does not help while it is set)"
+        )
+    return (
+        "if you changed LinkedIn accounts, run `netkeeper linkedin inbox-forget-owner`,"
+        " then `netkeeper linkedin inbox` by hand"
+    )
+
+
 def forget_owner(session: Session, user: User) -> bool:
     """Forget the recorded mailbox owner, so the next poll records the account's new one.
     Needs a writer. ``True`` when one was recorded."""
