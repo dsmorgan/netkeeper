@@ -1392,6 +1392,9 @@ def _merge_campaign_rows(session: Session, user: User, survivor: Contact, loser:
       with it must not restart a sequence, nor let a chained merge through a
       completed middle contact lose a pause (#247 review).
 
+    A recent-contact override (#446) is cleared on every enrollment of both contacts,
+    so the guard re-arms over the combined history.
+
     Whichever wins, the combined enrollment keeps what either one knew:
 
     - ``current_step`` is the higher of the two, because it holds the messages
@@ -1466,6 +1469,14 @@ def _merge_campaign_rows(session: Session, user: User, survivor: Contact, loser:
             survivor.id,
             kept.id,
         )
+    # A recent-contact override (#446) was a decision about one row's contact history.
+    # After a merge the survivor holds both rows' history, which nobody looked at when
+    # overriding, so every enrollment the survivor now holds, and every one the loser
+    # leaves behind, goes back through the recent-contact guard.
+    for enrollment in (*mine.values(), *theirs):
+        enrollment.recent_contact_override_at = None
+        enrollment.recent_contact_override_by = None
+        enrollment.recent_contact_cutoff = None
     session.flush()  # the survivor's enrollments hold before messages point at them
     if outranked:
         # Before the messages move: afterwards both sides' sit on the one enrollment.

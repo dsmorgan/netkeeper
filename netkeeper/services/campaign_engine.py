@@ -476,8 +476,9 @@ def enroll(
     ``override_recent_contact`` (#446) sets aside the recent-contact guard for exactly
     those contacts, and no other guard
     (:func:`~netkeeper.services.campaign_guards.check_enrollment`). An enrollment the
-    override let in records when and by whom, and keeps the override at every step
-    fire for contact made before it (:func:`~netkeeper.services.campaign_guards.check_step`).
+    override let in records when, by whom, and the newest contact it set aside (the
+    cutoff), and keeps the override at every step fire for contact dated at or before
+    that cutoff (:func:`~netkeeper.services.campaign_guards.check_step`).
     """
     _require_writer(session, "enroll")
     campaign = _campaign(session, user, campaign_id)
@@ -509,6 +510,7 @@ def enroll(
                 status=EnrollmentStatus.PENDING,
                 recent_contact_override_at=now if verdict.overridden else None,
                 recent_contact_override_by=user.id if verdict.overridden else None,
+                recent_contact_cutoff=verdict.override_cutoff,
             )
         )
     session.flush()

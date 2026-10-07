@@ -477,9 +477,29 @@ def test_guards_lists_each_skipped_contact_with_every_reason(world: World) -> No
     assert "error: no campaign 999" in missing.output
 
 
-def test_enroll_overrides_the_recent_contact_guard_after_asking(world: World) -> None:
+def test_enroll_refuses_the_override_without_a_terminal(world: World) -> None:
+    """#446: the override asks first, so it never runs unattended (stdin not a TTY)."""
+    campaign_id = _create(world)
+    refused = _run(
+        "campaigns",
+        "enroll",
+        str(campaign_id),
+        "--override-recent-contact",
+        str(world.contacts[0]),
+        input="y\n",
+    )
+    assert refused.exit_code == 1
+    assert "needs a terminal" in refused.output
+    with session_scope(world.factory) as session:
+        assert session.scalars(scoped(_local(session), Enrollment)).all() == []
+
+
+def test_enroll_overrides_the_recent_contact_guard_after_asking(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """#446: an explicit flag, a prompt that names the count and the window, and the
     other guards still apply."""
+    monkeypatch.setattr(cli_module, "_stdin_is_tty", lambda: True)  # a person at a terminal
     with session_scope(world.factory, write=True) as session:
         user = _local(session)
         for contact_id in (world.contacts[0], world.contacts[3]):  # [3] is do-not-contact

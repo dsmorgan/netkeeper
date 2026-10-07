@@ -177,8 +177,8 @@ export function RecentContactOverride({
           {chosen.length === 1 ? 'it' : 'them'} only, and the enrollment records that you did.
         </p>
         <p>
-          Every other guard still applies, now and when each step fires. Contact with them after
-          today counts as recent again.
+          Every other guard still applies, now and when each step fires. Any contact with them after
+          you enroll them counts as recent again.
         </p>
       </ConfirmDialog>
     </div>

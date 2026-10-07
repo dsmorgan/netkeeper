@@ -3178,15 +3178,19 @@ def test_0037_adds_the_override_columns_and_keeps_every_enrollment_unset(
         _seed_a_sent_campaign(connection)
     migrations.upgrade(migration_engine, "0037")
     columns = {c["name"] for c in inspect(migration_engine).get_columns("enrollments")}
-    assert {"recent_contact_override_at", "recent_contact_override_by"} <= columns
+    assert {
+        "recent_contact_override_at",
+        "recent_contact_override_by",
+        "recent_contact_cutoff",
+    } <= columns
     with migration_engine.begin() as connection:
         row = connection.execute(
             text(
-                "SELECT recent_contact_override_at, recent_contact_override_by"
-                " FROM enrollments WHERE id = 1"
+                "SELECT recent_contact_override_at, recent_contact_override_by,"
+                " recent_contact_cutoff FROM enrollments WHERE id = 1"
             )
         ).one()
-        assert tuple(row) == (None, None)
+        assert tuple(row) == (None, None, None)
         connection.execute(
             text(
                 "UPDATE enrollments SET recent_contact_override_at = :t,"
@@ -3206,7 +3210,9 @@ def test_0037_downgrades_to_enrollments_without_an_override(migration_engine: En
         )
     migrations.downgrade(migration_engine, "0036")
     columns = {c["name"] for c in inspect(migration_engine).get_columns("enrollments")}
-    assert columns.isdisjoint({"recent_contact_override_at", "recent_contact_override_by"})
+    assert columns.isdisjoint(
+        {"recent_contact_override_at", "recent_contact_override_by", "recent_contact_cutoff"}
+    )
     with migration_engine.begin() as connection:
         assert _count(connection, "enrollments") == 1
         assert _count(connection, "messages") == 1

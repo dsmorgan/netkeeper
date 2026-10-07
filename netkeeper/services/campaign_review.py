@@ -302,7 +302,8 @@ class SkippedContact:
 
     ``reason_codes`` are the same reasons as :class:`~netkeeper.services.campaign_guards.Reason`
     values. ``overridable``: the recent-contact guard is the only one that skips this
-    contact, and it is not enrolled yet, so a person may enroll it anyway (#446).
+    contact, and it has no enrollment of any status in this campaign (not pending, not
+    removed), so a person may enroll it anyway (#446).
     ``last_contacted_at`` and ``last_contacted_channel`` say when and how someone last
     contacted it, for a contact the recent-contact guard skips; otherwise ``None``."""
 
@@ -396,6 +397,15 @@ def guard_report(
     excluded = [v for v in verdicts if not v.eligible]
     shown = excluded[:limit]
     contacts = _contacts(session, user, [v.contact_id for v in shown])
+    # Any enrollment in this campaign, of any status: the engine leaves an enrolled
+    # contact as it is ("already"), so only a contact with none can be enrolled anyway.
+    in_campaign = set(
+        session.scalars(
+            scoped(user, Enrollment)
+            .with_only_columns(Enrollment.contact_id)
+            .where(Enrollment.campaign_id == campaign.id)
+        )
+    )
     recent = last_contact(
         session,
         user,
@@ -410,10 +420,10 @@ def guard_report(
                 _contact_name(contacts.get(v.contact_id)),
                 tuple(reason_label(r, contacted_within_days=window) for r in v.reasons),
                 reason_codes=tuple(str(r) for r in v.reasons),
-                # The recent-contact guard alone, and only for a contact not enrolled
-                # yet: every other guard is never overridden (#446).
+                # The recent-contact guard alone, and only for a contact with no
+                # enrollment here: every other guard is never overridden (#446).
                 overridable=v.reasons == (Reason.CONTACTED_RECENTLY,)
-                and v.contact_id not in enrolled,
+                and v.contact_id not in in_campaign,
                 last_contacted_at=None if seen is None else seen.at,
                 last_contacted_channel=None if seen is None else seen.channel,
             )
