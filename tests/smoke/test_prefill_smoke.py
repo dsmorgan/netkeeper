@@ -2,7 +2,9 @@
 
 Opt in with ``NETKEEPER_BROWSER_TESTS=1``, same as every other file under
 ``tests/smoke/``, and point ``NETKEEPER_CDP_URL`` at an isolated Chrome on an explicit,
-unused port (never 9222). The only site is the replica this file serves for itself: a
+unused port (never 9222), in a window of about 1440 by 1000 (start it with
+``--window-size=1440,1000``, or resize it): the click-geometry scenarios assume a
+desktop-sized viewport. The only site is the replica this file serves for itself: a
 profile page laid out as the 2026-10-05 capture showed it (``docs/linkedin-messaging-shapes.md``),
 with :mod:`messaging_pages`' invented people.
 

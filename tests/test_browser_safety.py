@@ -1903,6 +1903,10 @@ def test_hand_over_is_reached_only_from_the_prefill() -> None:
 
 #: What would open, reopen, or move a tab, or read it again (#456, ADR 0007, "After the
 #: click: no reattach, no navigation"). None may be reached after the Message click.
+#: ``close`` is not here on purpose: ADR 0008's ``BrowserRun.close_sent_tab`` closes the
+#: run's own tab after a proven, closed send (decision D3), and
+#: ``test_the_sent_bubble_and_tab_are_closed_only_after_a_landed_send`` pins its one
+#: caller, ``PagePrefill._end_after_click``, under ``bubble_closed``.
 AFTER_CLICK_BANNED = frozenset(
     {
         "goto",
