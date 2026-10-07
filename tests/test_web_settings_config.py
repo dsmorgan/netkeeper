@@ -186,8 +186,11 @@ async def test_serve_starts_its_scheduler_and_polls_from_the_settings_page(
         set_setting(session, user, "config.campaigns.reply_poll_minutes", 3)
     started: list[LinkedInSettings] = []
 
-    def scheduler(*args: Any) -> _Stopped:
+    wholes: list[Settings | None] = []
+
+    def scheduler(*args: Any, campaign_settings: Settings | None = None) -> _Stopped:
         started.append(args[-1])
+        wholes.append(campaign_settings)
         return _Stopped()
 
     monkeypatch.setattr("netkeeper.web.app.start_serve_scheduler", scheduler)
@@ -196,6 +199,8 @@ async def test_serve_starts_its_scheduler_and_polls_from_the_settings_page(
     served = create_app(Settings(), engine=engine, extractor=ServeExtractor(executor=_no_executor))
     async with served.router.lifespan_context(served):
         assert [s.active_hours for s in started] == [("07:15", "19:45")]
+        # The auto-send handler's settings (ADR 0008) come from the same startup reading.
+        assert [w.linkedin.active_hours for w in wholes if w is not None] == [("07:15", "19:45")]
         assert _Monitor.intervals == [180]
         assert served.state.campaign_engine.sender.replies_every == timedelta(minutes=3)
 
