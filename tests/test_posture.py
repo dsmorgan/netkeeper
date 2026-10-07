@@ -2359,6 +2359,8 @@ def test_a_tripped_inbox_owner_breaker_names_the_self_contact_when_its_urn_is_se
     assert "sign back in to yours" in warning
     assert "your own contact's LinkedIn ID does not match" in warning
     assert "inbox-forget-owner" not in warning
+    assert "reset-breaker" not in warning
+    assert "a poll that completes after you sign back in releases the breaker" in warning
 
 
 def test_a_corrupt_inbox_owner_row_warns_unknown(writer: Session, user: User) -> None:

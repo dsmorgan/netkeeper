@@ -2047,6 +2047,14 @@ def _inbox_owner_breaker(
                 f" row showed another mailbox{since}"
             ),
         )
+    # With a LinkedIn ID on the self contact, resetting would only trip again on the next
+    # poll: only a poll that completes (after you sign back in) releases it.
+    then = (
+        "Then run `netkeeper linkedin inbox` by hand: a poll that completes after you sign"
+        " back in releases the breaker."
+        if inbox_apply.self_contact_has_urn(session, user)
+        else f"Then {release}"
+    )
     return Protection(
         name=name,
         status=Status.ON,
@@ -2055,7 +2063,7 @@ def _inbox_owner_breaker(
             f"{current.count} LinkedIn inbox polls in a row showed another mailbox than this"
             f" account's{since}. Scheduled inbox polls are skipped; a poll you run by hand"
             f" is not, and connections syncs are unaffected.{waits} To fix it: {fix}."
-            f" Then {release}",
+            f" {then}",
         ),
     )
 

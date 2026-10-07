@@ -99,7 +99,7 @@ waiting once the inbox goes stale, because no scheduled poll refreshes it.
 **The inbox owner breaker** (#443) is a fifth, separate streak for the one ending the
 inbox breaker leaves out: :data:`INBOX_OWNER_THRESHOLD` consecutive inbox polls ending
 ``owner_mismatch`` (the page read fine and showed another mailbox than this account's)
-trip it, and scheduled inbox fires are then skipped as ``"inbox_owner_mismatch"``: each
+trip it, and scheduled inbox fires are then skipped as ``"inbox_owner_breaker"``: each
 one would load the messaging page again and write nothing. The streak clears when an inbox
 poll ends ``completed`` (:func:`record_inbox_owner`), whatever its trigger, so a manual
 poll never waits on it and one that completes releases it; :func:`reset` clears it too.

@@ -233,6 +233,8 @@ def test_every_reason_a_run_is_given_has_plain_words() -> None:
         "route_changed_breaker",
         "answer_lost_breaker",
         "contact_info_breaker",
+        "inbox_route_changed_breaker",
+        "inbox_owner_breaker",
         "no_runner",
         "browser_busy",
         "browser_unavailable",
