@@ -121,6 +121,11 @@ ALLOWED_CONTEXT_MUTATIONS = frozenset(
     {
         (LINKEDIN / "browser.py", "BrowserRun._open_body_tap", "new_cdp_session"),
         (LINKEDIN / "browser.py", "BrowserRun._read_click_geometry", "new_cdp_session"),
+        # #195: the run's tab opens in the background. A browser-level session creates
+        # it (and closes it, by its own target id, when it can't be identified), and a
+        # page-level session reads each new tab's target id to tell it apart.
+        (LINKEDIN / "browser.py", "BrowserRun._open_tab", "new_browser_cdp_session"),
+        (LINKEDIN / "browser.py", "BrowserRun._target_id", "new_cdp_session"),
     }
 )
 #: What the body tap's session may send, each named as a literal at its one call,
@@ -151,10 +156,30 @@ READ_ONLY_CDP_METHODS: dict[str, frozenset[str]] = {
     "DOM.getContentQuads": frozenset({"nodeId"}),
     "DOM.getNodeForLocation": frozenset({"x", "y", "ignorePointerEventsNone"}),
 }
+#: #195, the background tab. These aren't reads of the page, so they're kept apart from
+#: the ones above; none of them reaches a tab netkeeper doesn't own:
+#:
+#: - ``Target.createTarget``: the call ``context.new_page()`` makes, with ``url`` and
+#:   ``background`` only (no ``newWindow``, no ``browserContextId``: the default
+#:   context, ``contexts[0]``). ``background: true`` opens the tab behind the one in
+#:   front, and Chrome doesn't activate its window.
+#: - ``Target.getTargetInfo`` with no params: a page session's own target id.
+#: - ``Target.closeTarget``: only the target id ``Target.createTarget`` just answered,
+#:   when that tab never showed up as a page.
+#:
+#: ``Page.bringToFront`` and ``Target.activateTarget`` are deliberately absent.
+TAB_CDP_METHODS: dict[str, frozenset[str]] = {
+    "Target.createTarget": frozenset({"url", "background"}),
+    "Target.getTargetInfo": frozenset(),
+    "Target.closeTarget": frozenset({"targetId"}),
+}
+ALLOWED_CDP_METHODS = {**READ_ONLY_CDP_METHODS, **TAB_CDP_METHODS}
 #: The functions whose ``send`` calls reach a CDP session, and how many each makes.
 CDP_SENDERS = {
     (LINKEDIN / "browser.py", "BrowserRun._open_body_tap"): 2,
     (LINKEDIN / "browser.py", "BrowserRun._read_click_geometry"): 7,
+    (LINKEDIN / "browser.py", "BrowserRun._open_tab"): 2,
+    (LINKEDIN / "browser.py", "BrowserRun._target_id"): 1,
 }
 #: Which of those methods each function may send: neither borrows the other's.
 CDP_SENDER_METHODS = {
@@ -172,6 +197,10 @@ CDP_SENDER_METHODS = {
             "DOM.getNodeForLocation",
         }
     ),
+    (LINKEDIN / "browser.py", "BrowserRun._open_tab"): frozenset(
+        {"Target.createTarget", "Target.closeTarget"}
+    ),
+    (LINKEDIN / "browser.py", "BrowserRun._target_id"): frozenset({"Target.getTargetInfo"}),
 }
 #: The only observations that open the body tap, each once (ADR 0006's amendment):
 #: the connections sync's (#200) and each enrichment visit's, whose tap streams only
@@ -897,7 +926,8 @@ def test_the_one_cdp_session_is_read_only() -> None:
     durable messages) -- and ``Network.streamResourceContent`` names a request and
     nothing else. The buffer *values* are module constants, pinned by
     ``tests/test_body_tap.py``: a scanner reads names, and the numbers live one
-    import away."""
+    import away. #195 adds the background tab's three ``Target`` methods
+    (``TAB_CDP_METHODS``), each at its own site, and still no ``Page.bringToFront``."""
     found = [
         item
         for root in BROWSER_ROOTS
@@ -907,13 +937,13 @@ def test_the_one_cdp_session_is_read_only() -> None:
     outside = [i.where for i in found if (i.where.path, i.where.function) not in CDP_SENDERS]
     assert not outside, "a CDP send outside the body tap:\n" + "\n".join(str(i) for i in outside)
     for item in found:
-        assert item.method in READ_ONLY_CDP_METHODS, f"{item.where}: sends {item.method!r}"
+        assert item.method in ALLOWED_CDP_METHODS, f"{item.where}: sends {item.method!r}"
         site = (item.where.path, item.where.function)
         assert item.method in CDP_SENDER_METHODS[site], f"{item.where}: sends {item.method!r}"
-        assert item.params == READ_ONLY_CDP_METHODS[item.method], (
+        assert item.params == ALLOWED_CDP_METHODS[item.method], (
             f"{item.where}: {item.method} with params {item.params}"
         )
-    assert sorted(str(i.method) for i in found) == sorted(READ_ONLY_CDP_METHODS)
+    assert sorted(str(i.method) for i in found) == sorted(ALLOWED_CDP_METHODS)
     for site, count in CDP_SENDERS.items():
         hits = [i for i in found if (i.where.path, i.where.function) == site]
         assert len(hits) == count, (
