@@ -50,7 +50,7 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.scoping import get_scoped, scoped
-from netkeeper.services import budgets, message_send, runs, scheduler
+from netkeeper.services import budgets, linkedin_steps, message_send, runs, scheduler
 from netkeeper.services.budgets import ActionClass
 from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.linkedin_session import flag_session, session_flag
@@ -175,6 +175,7 @@ async def test_a_prefill_types_the_message_and_records_it_from_the_typing_start(
         "recipient_name_checked": None,  # an existing conversation has no chip
         "message_click_attempted": True,
         "message_clicked": True,
+        "li_prefills_spent": True,
     }
 
 
@@ -475,6 +476,90 @@ async def test_a_cancelled_run_records_what_it_clicked(lane: Lane) -> None:
     with pytest.raises(asyncio.CancelledError):
         await f.execute()
     assert _click_counts(f) == {"message_click_attempted": True, "message_clicked": True}
+
+
+# --- the budget is recorded, and Try again reads it with the click (#445) -----------------
+
+
+def _try(f: Fixture) -> linkedin_steps.LastTry:
+    enrollment = f.enrollment()
+    assert linkedin_steps.needs_try_again(enrollment)
+    return f.lane.read(lambda s, u: linkedin_steps.last_try(s, u, enrollment, now=NOW))
+
+
+async def test_a_claim_that_lapsed_before_the_lock_spent_nothing_and_needs_no_confirmation(
+    lane: Lane,
+) -> None:
+    f = Fixture(lane, MessagingSite(ZEPHYRINE), clock=Clock(NOW + timedelta(seconds=61)))
+    await f.execute()
+    assert (f.run().counts_json or {}).get("li_prefills_spent") is False
+    last = _try(f)
+    assert (last.run_id, last.click_attempted, last.budget_spent) == (f.run_id, None, False)
+    assert (last.counted_today, last.needs_confirmation) == (False, False)
+
+
+async def test_a_busy_browser_spent_nothing_and_needs_no_confirmation(lane: Lane) -> None:
+    f = Fixture(lane, MessagingSite(ZEPHYRINE))
+    async with f.provider.locks.hold(account_key(f.run().linkedin_account_id)):
+        await f.execute()
+    assert f.enrollment().not_sent_error == "not_typed: the browser was busy"
+    last = _try(f)
+    assert (last.budget_spent, last.needs_confirmation) == (False, False)
+
+
+async def test_a_refusal_before_the_click_spent_the_budget_and_needs_no_confirmation(
+    lane: Lane,
+) -> None:
+    site = MessagingSite(ZEPHYRINE, profile_html="<html><body><h1>Nobody</h1></body></html>")
+    f = Fixture(lane, site)
+    await f.execute()
+    last = _try(f)
+    assert (last.click_attempted, last.budget_spent, last.counted_today) == (False, True, True)
+    assert not last.needs_confirmation
+    assert f.spent(ActionClass.LI_PREFILLS) == 1
+
+
+@pytest.mark.parametrize("landed", [True, False])
+async def test_a_refusal_after_the_click_needs_the_confirmation(lane: Lane, landed: bool) -> None:
+    if landed:
+        site = MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, focus_composer=False))
+        site.focus_ignored = True
+    else:
+        site = MessagingSite(ZEPHYRINE)
+        site.click_error = RuntimeError("the page refused the click")
+    f = Fixture(lane, site)
+    await f.execute()
+    last = _try(f)
+    assert (last.click_attempted, last.budget_spent, last.needs_confirmation) == (True, True, True)
+    assert f.enrollment().next_action_at is None  # parked: only Try again claims it
+
+    later = NOW + timedelta(minutes=30)
+    plain = lane.claim(f.enrollment_id, now=later)
+    assert plain.reasons == (linkedin_steps.Refusal.TRY_AGAIN_NEEDED,)
+    unconfirmed = lane.claim(f.enrollment_id, now=later, retry=True)
+    assert unconfirmed.reasons == (linkedin_steps.Refusal.CONFIRM_NO_BUBBLE,)
+    confirmed = lane.claim(f.enrollment_id, now=later, retry=True, no_bubble_open=True)
+    assert confirmed.claimed, confirmed.reasons
+
+
+async def test_a_retry_runs_through_the_worker_and_prefills(lane: Lane) -> None:
+    """The retry's run is an ordinary prefill: it spends again and types the message."""
+    site = MessagingSite(ZEPHYRINE)
+    site.click_error = RuntimeError("the page refused the click")
+    f = Fixture(lane, site)
+    await f.execute()
+    site.click_error = None
+    later = NOW + timedelta(minutes=5)
+    claim = lane.claim(f.enrollment_id, now=later, retry=True, no_bubble_open=True)
+    assert claim.claimed and claim.run_id is not None and claim.message_id is not None
+    f.clock.at = later
+    await f.worker.execute(claim.run_id, lane.user_id)
+    message = lane.message(claim.message_id)
+    assert message is not None and message.status is MessageStatus.PREFILLED
+    enrollment = f.enrollment()
+    assert not linkedin_steps.needs_try_again(enrollment)
+    assert (enrollment.not_sent_count, enrollment.last_prefill_run_id) == (0, claim.run_id)
+    assert f.spent(ActionClass.LI_PREFILLS) == 2
 
 
 # --- recording ---------------------------------------------------------------------------

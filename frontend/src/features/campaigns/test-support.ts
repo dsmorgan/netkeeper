@@ -263,6 +263,7 @@ export const ENROLLMENTS: EnrollmentPage = {
       next_action_at: '2030-06-20T12:00:00Z',
       exit_reason: null,
       replied_at: null,
+      try_again: false,
     },
     {
       id: 302,
@@ -274,6 +275,7 @@ export const ENROLLMENTS: EnrollmentPage = {
       next_action_at: null,
       exit_reason: 'replied',
       replied_at: '2030-06-18T12:00:00Z',
+      try_again: false,
     },
   ],
 }

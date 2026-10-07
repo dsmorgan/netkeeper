@@ -347,9 +347,17 @@ async def test_one_campaigns_linkedin_queue_is_isolated(running_app: FastAPI) ->
 
     path = f"/campaigns/linkedin/ready?campaign_id={campaign_id}"
     mine = await _get(running_app, a_id, path)
-    assert (mine["total"], mine["by_step"]) == (2, {"1": 2})
+    assert (mine["total"], mine["by_step"], len(mine["try_again"])) == (2, {"1": 2}, 1)
     theirs = await _get(running_app, b_id, path)
-    assert theirs == {"items": [], "total": 0, "by_step": {}}
+    assert (theirs["items"], theirs["total"], theirs["by_step"], theirs["try_again"]) == (
+        [],
+        0,
+        {},
+        [],
+    )
+    # Unfiltered, each user's Try again list is their own (#445).
+    [own] = (await _get(running_app, b_id, "/campaigns/linkedin/ready"))["try_again"]
+    assert own["campaign_id"] != campaign_id
 
 
 async def test_one_campaigns_linkedin_waiting_list_is_isolated(running_app: FastAPI) -> None:

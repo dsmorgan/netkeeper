@@ -149,9 +149,14 @@ def record(
     prefilled_at: datetime | None = None,
     click_attempted: bool | None = None,
     clicked: bool | None = None,
+    budget_spent: bool | None = None,
 ) -> PrefillReport:
     """Record ``outcome`` on run ``run_id``'s claimed message, and end the run, in one
-    writer transaction. A run with no claimed message only ends ``failed``."""
+    writer transaction. A run with no claimed message only ends ``failed``.
+
+    ``budget_spent`` is whether the run spent its ``li_prefills`` and ``profile_visits``
+    units (step 2 of the module docstring): the queue says whether a ``not_typed`` try
+    counted against today's budget (#445). Left out of the counts when unknown."""
     with session_scope(factory, write=True) as session:
         user = _load_user(session, user_id)
         if runs.get_run(session, user, run_id).status is not SyncRunStatus.RUNNING:
@@ -199,6 +204,7 @@ def record(
                     if click_attempted is None or clicked is None
                     else {"message_click_attempted": click_attempted, "message_clicked": clicked}
                 ),
+                **({} if budget_spent is None else {"li_prefills_spent": budget_spent}),
             },
             error=None if prefilled else outcome.reason,
         )
@@ -221,6 +227,7 @@ def record_quietly(
     now: datetime,
     click_attempted: bool | None = None,
     clicked: bool | None = None,
+    budget_spent: bool | None = None,
 ) -> None:
     """:func:`record` on the way out of a refusal or a cancel: a failed write is logged."""
     try:
@@ -233,6 +240,7 @@ def record_quietly(
             now=now,
             click_attempted=click_attempted,
             clicked=clicked,
+            budget_spent=budget_spent,
         )
     except Exception:
         log.exception("could not record how prefill run %d ended", run_id)
@@ -276,7 +284,11 @@ def prepare(
     message_id, scheduled_at, body, urn, public_id = claimed
 
     def refuse(outcome: MessageOutcome) -> PrefillReport:
-        return record(factory, user_id, run_id, outcome, settings=settings, now=clock())
+        # Before the lock, so no budget. No source ran, so the click keys stay out (the
+        # UI then reads the reason's words); no budget spent says no navigation either.
+        return record(
+            factory, user_id, run_id, outcome, settings=settings, now=clock(), budget_spent=False
+        )
 
     if lapsed(scheduled_at, now):
         return refuse(_not_typed("the claim lapsed"))
@@ -331,6 +343,7 @@ async def run_prefill(
             now=clock(),
             click_attempted=False,
             clicked=False,
+            budget_spent=False,
         )
 
     def spend() -> str | None:
@@ -375,6 +388,7 @@ async def run_prefill(
             now=clock(),
             click_attempted=False,
             clicked=False,
+            budget_spent=False,
         )
 
     asked_at = 0.0
@@ -405,6 +419,7 @@ async def run_prefill(
             now=clock(),
             click_attempted=source.message_click_attempted,
             clicked=source.message_clicked,
+            budget_spent=True,
         )
         raise
     except Exception as exc:
@@ -425,6 +440,7 @@ async def run_prefill(
         prefilled_at=result.typing_started_at,
         click_attempted=source.message_click_attempted,
         clicked=source.message_clicked,
+        budget_spent=True,
     )
 
 

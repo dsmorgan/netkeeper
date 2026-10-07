@@ -69,7 +69,7 @@ A prefill run is never retried and never resumed. Before it spends any budget or
 - **The browser lock.** The run asks for it with `wait=False`. If another run holds it, the run records `not_typed` ("the browser was busy").
 - **The claim lapse.** If more than 60 seconds have passed since `Message.scheduled_at`, the run records `not_typed` ("the claim lapsed"). So a prefill never starts long after the person who asked has stopped watching. The 60 seconds is a module constant pinned to its literal. P4-09 has no lapse of its own.
 
-Both count toward P4-09's `NOT_TYPED_PARK_AFTER` like any other `not_typed`.
+Both park the enrollment like any other `not_typed`. Since #445 nothing claims a `not_typed` step again on its own: a person clicks **Try again**, and after a run that clicked Message (or one that can't say it didn't), confirms that no bubble for that contact is open. That retry is a new prefill run, under every rule here; it never resumes the one that refused. See [architecture section 11.6's #445 note](../architecture.md).
 
 ### The typing plan comes first
 

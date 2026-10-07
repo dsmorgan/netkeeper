@@ -4011,6 +4011,11 @@
           },
           "status": {
             "$ref": "#/components/schemas/EnrollmentStatus"
+          },
+          "try_again": {
+            "default": false,
+            "title": "Try Again",
+            "type": "boolean"
           }
         },
         "required": [
@@ -6774,6 +6779,91 @@
         "title": "LastContacted",
         "type": "object"
       },
+      "LastTryOut": {
+        "description": "What the latest prefill of a step did, when it typed nothing (#445). No message\ntext.",
+        "properties": {
+          "at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "budget_spent": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Spent"
+          },
+          "click_attempted": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Click Attempted"
+          },
+          "counted_today": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counted Today"
+          },
+          "needs_confirmation": {
+            "title": "Needs Confirmation",
+            "type": "boolean"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "tries": {
+            "title": "Tries",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reason",
+          "tries",
+          "run_id",
+          "at",
+          "click_attempted",
+          "budget_spent",
+          "counted_today",
+          "needs_confirmation"
+        ],
+        "title": "LastTryOut",
+        "type": "object"
+      },
       "LeftoverDraftOut": {
         "description": "A test-send Gmail draft that deleting the campaign leaves for you to delete.",
         "properties": {
@@ -8897,6 +8987,16 @@
             "default": false,
             "title": "Next",
             "type": "boolean"
+          },
+          "no_bubble_open": {
+            "default": false,
+            "title": "No Bubble Open",
+            "type": "boolean"
+          },
+          "retry": {
+            "default": false,
+            "title": "Retry",
+            "type": "boolean"
           }
         },
         "title": "PrefillIn",
@@ -9074,9 +9174,28 @@
             "title": "Items",
             "type": "array"
           },
+          "prefills_left_today": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prefills Left Today"
+          },
           "total": {
             "title": "Total",
             "type": "integer"
+          },
+          "try_again": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TryAgainOut"
+            },
+            "title": "Try Again",
+            "type": "array"
           }
         },
         "required": [
@@ -12657,6 +12776,62 @@
           "progress"
         ],
         "title": "TriageUndoOut",
+        "type": "object"
+      },
+      "TryAgainOut": {
+        "description": "A LinkedIn step whose latest prefill typed nothing: it waits for you to try it\nagain. No message text.",
+        "properties": {
+          "campaign_id": {
+            "title": "Campaign Id",
+            "type": "integer"
+          },
+          "campaign_name": {
+            "title": "Campaign Name",
+            "type": "string"
+          },
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "contact_name": {
+            "title": "Contact Name",
+            "type": "string"
+          },
+          "enrollment_id": {
+            "title": "Enrollment Id",
+            "type": "integer"
+          },
+          "held_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Held Until"
+          },
+          "last_try": {
+            "$ref": "#/components/schemas/LastTryOut"
+          },
+          "step_position": {
+            "title": "Step Position",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enrollment_id",
+          "campaign_id",
+          "campaign_name",
+          "step_position",
+          "contact_id",
+          "contact_name",
+          "held_until",
+          "last_try"
+        ],
+        "title": "TryAgainOut",
         "type": "object"
       },
       "UserKind": {

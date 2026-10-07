@@ -4702,6 +4702,11 @@ export interface components {
             /** Replied At */
             replied_at: string | null;
             status: components["schemas"]["EnrollmentStatus"];
+            /**
+             * Try Again
+             * @default false
+             */
+            try_again: boolean;
         };
         /** EnrollmentPageOut */
         EnrollmentPageOut: {
@@ -5446,6 +5451,29 @@ export interface components {
             op: "last_contacted";
             /** Within Days */
             within_days?: number | null;
+        };
+        /**
+         * LastTryOut
+         * @description What the latest prefill of a step did, when it typed nothing (#445). No message
+         *     text.
+         */
+        LastTryOut: {
+            /** At */
+            at: string | null;
+            /** Budget Spent */
+            budget_spent: boolean | null;
+            /** Click Attempted */
+            click_attempted: boolean | null;
+            /** Counted Today */
+            counted_today: boolean | null;
+            /** Needs Confirmation */
+            needs_confirmation: boolean;
+            /** Reason */
+            reason: string;
+            /** Run Id */
+            run_id: number | null;
+            /** Tries */
+            tries: number;
         };
         /**
          * LeftoverDraftOut
@@ -6307,6 +6335,16 @@ export interface components {
              * @default false
              */
             next: boolean;
+            /**
+             * No Bubble Open
+             * @default false
+             */
+            no_bubble_open: boolean;
+            /**
+             * Retry
+             * @default false
+             */
+            retry: boolean;
         };
         /**
          * PrefillRefused
@@ -6382,8 +6420,15 @@ export interface components {
             };
             /** Items */
             items: components["schemas"]["ReadyOut"][];
+            /** Prefills Left Today */
+            prefills_left_today?: number | null;
             /** Total */
             total: number;
+            /**
+             * Try Again
+             * @default []
+             */
+            try_again: components["schemas"]["TryAgainOut"][];
         };
         /** RecentMessageOut */
         RecentMessageOut: {
@@ -7776,6 +7821,28 @@ export interface components {
             forced: number[];
             kind: components["schemas"]["TriageDecisionKind"];
             progress: components["schemas"]["TriageProgressOut"];
+        };
+        /**
+         * TryAgainOut
+         * @description A LinkedIn step whose latest prefill typed nothing: it waits for you to try it
+         *     again. No message text.
+         */
+        TryAgainOut: {
+            /** Campaign Id */
+            campaign_id: number;
+            /** Campaign Name */
+            campaign_name: string;
+            /** Contact Id */
+            contact_id: number;
+            /** Contact Name */
+            contact_name: string;
+            /** Enrollment Id */
+            enrollment_id: number;
+            /** Held Until */
+            held_until: string | null;
+            last_try: components["schemas"]["LastTryOut"];
+            /** Step Position */
+            step_position: number;
         };
         /**
          * UserKind

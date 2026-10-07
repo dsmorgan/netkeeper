@@ -11,9 +11,13 @@
  *   offers **I sent it, check now** (an inbox poll) and **Discard**.
  * - **One prefill at a time:** while one is typing or open, every Prefill button is
  *   off, and the queue says why.
+ * - **Try again** (#445): a step whose last prefill typed nothing (`not_typed`) is listed
+ *   apart, with why, how many tries, and whether the last one used today's budget. A
+ *   person clicks Try again for one; when the last try clicked Message, it first asks
+ *   them to confirm no message bubble for that contact is open in Chrome.
  *
- * Never a retry for a failed prefill: a person clears the composer in Chrome. No
- * message text is shown anywhere here; netkeeper never closes the tab.
+ * A part-typed prefill is never retried: a person clears the composer in Chrome and
+ * discards it. No message text is shown anywhere here; netkeeper never closes the tab.
  */
 import { Link } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -39,7 +43,9 @@ import {
   readyQuery,
   stepOptionsQuery,
   waitingQuery,
+  type PrefillTarget,
   type ReadyItem,
+  type TryAgainItem,
   type WaitingItem,
 } from './api'
 import {
@@ -52,13 +58,21 @@ import {
   type WaitingState,
 } from './format'
 import {
+  CONFIRM_BUBBLE_BODY,
+  CONFIRM_BUBBLE_LABEL,
   PARTLY_TYPED,
   PARTLY_TYPED_SENT_ANYWAY,
   PREFILL_NOTE,
+  TRY_AGAIN_NOTE,
   TYPED_WHOLE,
   TYPING,
   TYPING_WARNING,
+  budgetText,
+  confirmBubbleTitle,
   prefillEnding,
+  prefillReason,
+  prefillsLeftText,
+  triesText,
 } from './prefill-copy'
 import { FirstPollNote } from './first-poll-note'
 import { usePrefillRun, useRunGoing, type PrefillRun } from './use-prefill-run'
@@ -122,7 +136,7 @@ export function LinkedInQueueCard({ campaignId, run }: { campaignId?: number; ru
   const queryClient = useQueryClient()
 
   const start = useMutation({
-    mutationFn: (target: { enrollmentId: number } | 'next') => prefill(target),
+    mutationFn: (target: PrefillTarget | 'next') => prefill(target),
     onSuccess: (accepted) => {
       run.watch(accepted.run_id)
       invalidate()
@@ -139,6 +153,7 @@ export function LinkedInQueueCard({ campaignId, run }: { campaignId?: number; ru
   const typing = run.runningId !== null || start.isPending
   const blocked = typing || open !== null || !waiting.isSuccess
   const items = ready.data?.items ?? []
+  const retries = ready.data?.try_again ?? []
   const nextReady = items.find((item) => !held(item, now))
 
   return (
@@ -167,6 +182,37 @@ export function LinkedInQueueCard({ campaignId, run }: { campaignId?: number; ru
         )}
         {start.isError && <Refused error={start.error} onDismiss={() => start.reset()} />}
         {!typing && open !== null && <p className="text-muted-foreground">{ONE_AT_A_TIME}</p>}
+        {ready.isSuccess &&
+          ready.data.prefills_left_today !== null &&
+          ready.data.prefills_left_today !== undefined && (
+            <p className="text-muted-foreground">
+              {prefillsLeftText(ready.data.prefills_left_today)}
+            </p>
+          )}
+
+        {retries.length > 0 && (
+          <section aria-label="Try again" className="flex flex-col gap-1">
+            <h3 className="font-medium">Typed nothing last time</h3>
+            <p className="text-muted-foreground">{TRY_AGAIN_NOTE}</p>
+            <ul aria-label="Try again" className="flex flex-col">
+              {retries.map((item) => (
+                <TryAgainRow
+                  key={item.enrollment_id}
+                  item={item}
+                  showCampaign={campaignId === undefined}
+                  disabled={blocked || held(item, now)}
+                  onRetry={(noBubbleOpen) =>
+                    start.mutateAsync({
+                      enrollmentId: item.enrollment_id,
+                      retry: true,
+                      noBubbleOpen,
+                    })
+                  }
+                />
+              ))}
+            </ul>
+          </section>
+        )}
 
         {ready.isPending ? (
           <LoadingNote label="Loading the queue…" />
@@ -210,7 +256,7 @@ export function LinkedInQueueCard({ campaignId, run }: { campaignId?: number; ru
 }
 
 /** Held by the sending hours: due, but not until `held_until`. */
-function held(item: ReadyItem, now: Date): boolean {
+function held(item: ReadyItem | TryAgainItem, now: Date): boolean {
   return item.held_until !== null && new Date(item.held_until).getTime() > now.getTime()
 }
 
@@ -265,6 +311,98 @@ function ReadyRow({
       >
         Prefill
       </Button>
+    </li>
+  )
+}
+
+/**
+ * A step whose last prefill typed nothing (#445): why, how many tries, whether that try
+ * used today's budget, and **Try again**. When the last try clicked Message (or nothing
+ * says it didn't), Try again first asks you to confirm that no message bubble for the
+ * contact is open in Chrome; the backend refuses a retry without that confirmation.
+ */
+function TryAgainRow({
+  item,
+  showCampaign,
+  disabled,
+  onRetry,
+}: {
+  item: TryAgainItem
+  showCampaign: boolean
+  disabled: boolean
+  onRetry: (noBubbleOpen: boolean) => Promise<unknown>
+}) {
+  const [confirming, setConfirming] = useState(false)
+  const name = item.contact_name || 'Unnamed contact'
+  const last = item.last_try
+  const retry = (noBubbleOpen: boolean) =>
+    onRetry(noBubbleOpen).catch(() => {
+      // The queue's own alert says why; nothing to add here.
+    })
+  return (
+    <li
+      aria-label={`${name}, step ${item.step_position}, typed nothing`}
+      className="flex flex-col gap-1 border-t border-border/60 py-2 first:border-t-0"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <Link
+          to="/contacts/$contactId"
+          params={{ contactId: String(item.contact_id) }}
+          className="font-medium underline underline-offset-4"
+        >
+          {name}
+        </Link>
+        {showCampaign && (
+          <>
+            <span className="text-muted-foreground">in</span>
+            <Link
+              to="/campaigns/$campaignId"
+              params={{ campaignId: String(item.campaign_id) }}
+              className="underline underline-offset-4"
+            >
+              {item.campaign_name}
+            </Link>
+          </>
+        )}
+        <span className="text-muted-foreground">step {item.step_position}</span>
+        <Badge variant="outline">Typed nothing</Badge>
+        <Button
+          size="sm"
+          variant="outline"
+          className="ml-auto"
+          disabled={disabled}
+          aria-label={`Try again for ${name}`}
+          onClick={() => {
+            if (last.needs_confirmation) setConfirming(true)
+            else void retry(false)
+          }}
+        >
+          Try again
+        </Button>
+      </div>
+      <p>{prefillReason(last.reason).text}</p>
+      <p className="text-muted-foreground">
+        {triesText(last.tries)} {budgetText(last)}
+        {last.at !== null && ` Last try ${formatWhen(last.at)}.`}
+      </p>
+      {item.held_until !== null && (
+        <p className="text-muted-foreground">
+          held by your sending hours until {formatWhen(item.held_until)}
+        </p>
+      )}
+      <ConfirmDialog
+        open={confirming}
+        onOpenChange={setConfirming}
+        title={confirmBubbleTitle(name)}
+        confirmLabel={CONFIRM_BUBBLE_LABEL}
+        confirmVariant="default"
+        onConfirm={async () => {
+          setConfirming(false)
+          await retry(true)
+        }}
+      >
+        <p>{CONFIRM_BUBBLE_BODY}</p>
+      </ConfirmDialog>
     </li>
   )
 }

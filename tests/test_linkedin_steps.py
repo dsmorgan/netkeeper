@@ -239,7 +239,7 @@ def test_the_prefill_constants_are_pinned() -> None:
     """Safety constants against numbers written out here (CLAUDE.md)."""
     assert timedelta(days=3) == engine.PREFILL_STALE_AFTER
     assert timedelta(days=3) == linkedin_steps.PREFILL_STALE_AFTER
-    assert linkedin_steps.NOT_TYPED_PARK_AFTER == 2
+    assert linkedin_steps.NOT_TYPED_PREFIX == "not_typed:"
     assert budgets.HARD_MAX_PER_DAY[budgets.ActionClass.LI_PREFILLS] == 50
     assert BudgetSettings().li_prefills_per_day == 15
     assert budgets.ActionClass.LI_PREFILLS.value == "li_prefills"
@@ -785,28 +785,32 @@ def test_too_long_gives_the_claim_back_and_parks_at_once(lane: Lane) -> None:
     assert enrollment.not_sent_error == "too_long: fixed words"
 
 
-@pytest.mark.parametrize("kind", [MessageOutcomeKind.NOT_TYPED])
-def test_nothing_typed_gives_the_claim_back_and_two_in_a_row_park_it(
-    lane: Lane, kind: MessageOutcomeKind
-) -> None:
+def test_nothing_typed_gives_the_claim_back_and_parks_it_for_try_again(lane: Lane) -> None:
+    """#445: a not_typed step never comes back on a timer; only Try again claims it."""
     enrollment_id = lane.enroll()
     claim = lane.claim(enrollment_id)
-    assert claim.message_id is not None
-    assert lane.record(claim.message_id, kind)
+    assert claim.message_id is not None and claim.run_id is not None
+    assert lane.record(claim.message_id, MessageOutcomeKind.NOT_TYPED)
     lane.finish_runs()
 
     assert lane.messages(enrollment_id) == []  # the row goes: the step is free again
     enrollment = lane.enrollment(enrollment_id)
-    assert enrollment.not_sent_count == 1
-    assert enrollment.not_sent_error == f"{kind.value}: fixed words"
-    assert enrollment.next_action_at == NOW + timedelta(minutes=15)
+    assert (enrollment.not_sent_count, enrollment.next_action_at) == (1, None)
+    assert enrollment.not_sent_error == "not_typed: fixed words"
+    assert enrollment.last_prefill_run_id == claim.run_id
+    assert linkedin_steps.needs_try_again(enrollment)
+    assert _ready_ids(lane) == []
+    assert [row.enrollment.id for row in _try_again(lane)] == [enrollment_id]
 
-    later = NOW + timedelta(minutes=15)
-    again = lane.claim(enrollment_id, now=later)
+    later = NOW + timedelta(hours=2)
+    assert lane.claim(enrollment_id, now=later).reasons == (Refusal.TRY_AGAIN_NEEDED,)
+    again = lane.claim(enrollment_id, now=later, retry=True, no_bubble_open=True)
     assert again.claimed and again.message_id is not None
-    lane.record(again.message_id, kind, now=later)
+    lane.record(again.message_id, MessageOutcomeKind.NOT_TYPED, now=later)
+    lane.finish_runs()
     enrollment = lane.enrollment(enrollment_id)
-    assert (enrollment.not_sent_count, enrollment.next_action_at) == (2, None)  # parked
+    assert (enrollment.not_sent_count, enrollment.next_action_at) == (2, None)
+    assert enrollment.last_prefill_run_id == again.run_id
     assert lane.messages(enrollment_id) == []
 
 
@@ -837,7 +841,7 @@ def test_a_success_clears_the_count_of_tries(lane: Lane) -> None:
     lane.record(claim.message_id, MessageOutcomeKind.NOT_TYPED)
     lane.finish_runs()
     later = NOW + timedelta(minutes=15)
-    again = lane.claim(enrollment_id, now=later)
+    again = lane.claim(enrollment_id, now=later, retry=True, no_bubble_open=True)
     assert again.message_id is not None
     lane.record(again.message_id, MessageOutcomeKind.PREFILLED, now=later)
     enrollment = lane.enrollment(enrollment_id)
@@ -1615,3 +1619,323 @@ def test_a_partly_typed_row_of_another_user_is_never_listed_or_blocking(
     assert other.read(lambda s, u: waiting_for_you(s, u, limit=10))[1] == 1
     assert lane.read(lambda s, u: waiting_for_you(s, u, limit=10)) == ([], 0)
     assert lane.claim(lane.enroll()).claimed
+
+
+# --- try again (#445) -----------------------------------------------------------------------
+
+
+def _ready_ids(lane: Lane, now: datetime = NOW) -> list[int]:
+    rows, _ = lane.read(
+        lambda s, u: ready_to_prefill(s, u, now=now, settings=lane.settings, limit=50)
+    )
+    return [row.enrollment.id for row in rows]
+
+
+def _try_again(lane: Lane, now: datetime = NOW, **kwargs: Any) -> list[Any]:
+    return lane.read(
+        lambda s, u: linkedin_steps.try_again(s, u, now=now, settings=lane.settings, **kwargs)
+    )
+
+
+def _ended(lane: Lane, enrollment_id: int, kind: MessageOutcomeKind) -> int:
+    """Claim the step and record ``kind``; the run ends. The claimed message's id."""
+    claim = lane.claim(enrollment_id)
+    assert claim.claimed and claim.message_id is not None, claim.reasons
+    assert lane.record(claim.message_id, kind)
+    lane.finish_runs()
+    return claim.message_id
+
+
+def _end_run(lane: Lane, run_id: int, counts: dict[str, Any], *, at: datetime = NOW) -> None:
+    """What P4-03's runner records on the run: its stop reason and counts."""
+    _set(lane, SyncRun, run_id, stop_reason="not_typed", counts_json=counts, started_at=at)
+
+
+@pytest.mark.parametrize("kind", [MessageOutcomeKind.PARTIALLY_TYPED, MessageOutcomeKind.UNKNOWN])
+def test_a_partly_typed_step_is_never_retried(lane: Lane, kind: MessageOutcomeKind) -> None:
+    enrollment_id = lane.enroll()
+    message_id = _ended(lane, enrollment_id, kind)
+    enrollment = lane.enrollment(enrollment_id)
+    assert not linkedin_steps.needs_try_again(enrollment)
+    assert enrollment.not_sent_error == f"{kind.value}: fixed words"
+    assert _try_again(lane) == []
+    for confirmed in (False, True):
+        refused = lane.claim(enrollment_id, retry=True, no_bubble_open=confirmed)
+        assert refused.reasons == (Refusal.NOTHING_TO_RETRY,)
+        assert refused.detail is not None and "discard" in refused.detail
+    [message] = lane.messages(enrollment_id)
+    assert (message.id, message.status) == (message_id, MessageStatus.FAILED)
+
+
+@pytest.mark.parametrize("kind", [MessageOutcomeKind.PARTIALLY_TYPED, MessageOutcomeKind.UNKNOWN])
+def test_a_retry_that_ends_partly_typed_is_never_retried_again(
+    lane: Lane, kind: MessageOutcomeKind
+) -> None:
+    """The earlier not_typed must not leave Try again open once a retry typed part of it."""
+    enrollment_id = lane.enroll()
+    _ended(lane, enrollment_id, MessageOutcomeKind.NOT_TYPED)
+    again = lane.claim(enrollment_id, retry=True, no_bubble_open=True)
+    assert again.claimed and again.message_id is not None
+    lane.record(again.message_id, kind)
+    lane.finish_runs()
+    enrollment = lane.enrollment(enrollment_id)
+    assert not linkedin_steps.needs_try_again(enrollment)
+    assert (enrollment.not_sent_count, enrollment.not_sent_error) == (
+        0,
+        f"{kind.value}: fixed words",
+    )
+    assert lane.claim(enrollment_id, retry=True, no_bubble_open=True).reasons == (
+        Refusal.NOTHING_TO_RETRY,
+    )
+    # Discarding it lets the bubble go and the note with it.
+    lane.write(lambda s, u: discard(s, u, again.message_id or 0, settings=lane.settings, now=NOW))
+    assert lane.enrollment(enrollment_id).not_sent_error is None
+
+
+def test_too_long_is_never_retried(lane: Lane) -> None:
+    enrollment_id = lane.enroll()
+    _ended(lane, enrollment_id, MessageOutcomeKind.TOO_LONG)
+    assert _try_again(lane) == []
+    refused = lane.claim(enrollment_id, retry=True, no_bubble_open=True)
+    assert refused.reasons == (Refusal.NOTHING_TO_RETRY,)
+    assert refused.detail is not None and "template" in refused.detail
+    assert lane.messages(enrollment_id) == []
+
+
+def test_a_step_never_tried_is_not_a_retry(lane: Lane) -> None:
+    enrollment_id = lane.enroll()
+    assert lane.claim(enrollment_id, retry=True).reasons == (Refusal.NOTHING_TO_RETRY,)
+    assert lane.enrollment(enrollment_id).next_action_at == NOW  # nothing changed
+    assert lane.claim(enrollment_id).claimed
+
+
+@pytest.mark.parametrize(
+    ("counts", "needs"),
+    [
+        (
+            {"message_click_attempted": True, "message_clicked": True, "li_prefills_spent": True},
+            True,
+        ),
+        (
+            {"message_click_attempted": True, "message_clicked": False, "li_prefills_spent": True},
+            True,
+        ),
+        (
+            {"message_click_attempted": False, "message_clicked": False, "li_prefills_spent": True},
+            False,
+        ),
+        ({"li_prefills_spent": False}, False),  # stopped before the navigation
+        ({"li_prefills_spent": True}, True),  # spent, and nothing says it didn't click
+        ({}, True),  # nothing on file
+    ],
+)
+def test_a_retry_after_a_click_needs_the_confirmation(
+    lane: Lane, counts: dict[str, Any], needs: bool
+) -> None:
+    enrollment_id = lane.enroll()
+    _ended(lane, enrollment_id, MessageOutcomeKind.NOT_TYPED)
+    run_id = lane.enrollment(enrollment_id).last_prefill_run_id
+    assert run_id is not None
+    _end_run(lane, run_id, counts)
+    [row] = _try_again(lane)
+    assert row.last.needs_confirmation is needs
+    unconfirmed = lane.claim(enrollment_id, retry=True)
+    if needs:
+        assert unconfirmed.reasons == (Refusal.CONFIRM_NO_BUBBLE,)
+        assert lane.messages(enrollment_id) == []
+        assert lane.enrollment(enrollment_id).not_sent_count == 1  # nothing changed
+        assert lane.claim(enrollment_id, retry=True, no_bubble_open=True).claimed
+    else:
+        assert unconfirmed.claimed, unconfirmed.reasons
+
+
+def test_a_try_with_no_run_on_file_needs_the_confirmation(lane: Lane) -> None:
+    """A not_typed recorded before 0037, or whose run was deleted."""
+    enrollment_id = lane.enroll()
+    _set(
+        lane,
+        Enrollment,
+        enrollment_id,
+        not_sent_count=1,
+        not_sent_error="not_typed: the Message control could not be clicked",
+        next_action_at=NOW - timedelta(hours=1),
+    )
+    assert _ready_ids(lane) == []  # a due time from before #445 doesn't list it as ready
+    [row] = _try_again(lane)
+    assert row.last.reason == "the Message control could not be clicked"
+    assert (row.last.run_id, row.last.click_attempted, row.last.needs_confirmation) == (
+        None,
+        None,
+        True,
+    )
+    assert lane.claim(enrollment_id).reasons == (Refusal.TRY_AGAIN_NEEDED,)
+    # "prefill next" never picks it
+    assert lane.write(lambda s, u: claim_next(s, u, now=NOW, settings=lane.settings)) is None
+    assert lane.claim(enrollment_id, retry=True).reasons == (Refusal.CONFIRM_NO_BUBBLE,)
+    assert lane.claim(enrollment_id, retry=True, no_bubble_open=True).claimed
+
+
+def test_prefill_next_never_claims_a_step_waiting_for_try_again(lane: Lane) -> None:
+    failed, fresh = lane.enroll(next_action_at=NOW - timedelta(hours=1)), lane.enroll()
+    _ended(lane, failed, MessageOutcomeKind.NOT_TYPED)
+    _set(lane, Enrollment, failed, next_action_at=NOW - timedelta(hours=1))  # due anyway
+    claim = lane.write(lambda s, u: claim_next(s, u, now=NOW, settings=lane.settings))
+    assert claim is not None and claim.enrollment_id == fresh and claim.claimed
+
+
+@pytest.mark.parametrize("open_kind", [None, MessageOutcomeKind.PARTIALLY_TYPED])
+def test_a_retry_respects_the_one_open_prefill(
+    lane: Lane, open_kind: MessageOutcomeKind | None
+) -> None:
+    """Claimed, prefilled, or partly typed elsewhere: a retry waits like any claim."""
+    failed, other = lane.enroll(), lane.enroll()
+    _ended(lane, failed, MessageOutcomeKind.NOT_TYPED)
+    claim = lane.claim(other)
+    assert claim.claimed and claim.message_id is not None
+    assert lane.claim(failed, retry=True, no_bubble_open=True).reasons == (Refusal.PREFILL_OPEN,)
+    lane.record(claim.message_id, open_kind or MessageOutcomeKind.PREFILLED)
+    lane.finish_runs()
+    refused = lane.claim(failed, retry=True, no_bubble_open=True)
+    assert refused.reasons == (Refusal.PREFILL_OPEN,)
+    assert lane.messages(failed) == []
+    assert linkedin_steps.needs_try_again(lane.enrollment(failed))
+
+
+def test_a_retry_respects_a_running_run(lane: Lane) -> None:
+    enrollment_id = lane.enroll()
+    _ended(lane, enrollment_id, MessageOutcomeKind.NOT_TYPED)
+    lane.write(
+        lambda s, u: runs.create_run(
+            s, u, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW
+        )
+    )
+    claim = lane.claim(enrollment_id, retry=True, no_bubble_open=True)
+    assert claim.reasons == (Refusal.RUN_IN_PROGRESS,)
+    assert lane.messages(enrollment_id) == []
+
+
+def test_a_retry_still_runs_the_channel_checks(lane: Lane) -> None:
+    """Only the due time is skipped: the inbox hold, the active hours, the budget and the
+    sending hours still hold a retry."""
+    enrollment_id = lane.enroll()
+    _ended(lane, enrollment_id, MessageOutcomeKind.NOT_TYPED)
+    retry: dict[str, Any] = {"retry": True, "no_bubble_open": True}
+    tomorrow = NOW + timedelta(days=1)
+    assert lane.claim(enrollment_id, tomorrow, polled=False, **retry).reasons == (
+        Refusal.INBOX_STALE,
+    )
+    _sent_hours(lane, any_time=True)  # so the active hours are what holds it at night
+    night = NOW.replace(hour=23)
+    assert lane.claim(enrollment_id, night, **retry).reasons == (Refusal.OUTSIDE_ACTIVE_HOURS,)
+
+    def spend(session: Session, user: User) -> None:
+        account = ensure_account(session, user).id
+        budgets.consume(
+            session,
+            user,
+            account,
+            budgets.ActionClass.LI_PREFILLS,
+            now=NOW,
+            settings=lane.settings.linkedin.budget,
+        )
+
+    for _ in range(9):  # the lane's runs spent nothing; ten is the day's default
+        lane.write(spend)
+    left = lane.read(
+        lambda s, u: linkedin_steps.prefills_left_today(s, u, now=NOW, settings=lane.settings)
+    )
+    assert left == 1
+    lane.write(spend)
+    assert lane.claim(enrollment_id, **retry).reasons == ("browser_out_of_budget",)
+    assert lane.messages(enrollment_id) == []
+
+
+def test_a_retry_is_held_by_the_sending_hours(lane: Lane) -> None:
+    enrollment_id = lane.enroll(current_step=None)
+    _ended(lane, enrollment_id, MessageOutcomeKind.NOT_TYPED)
+    _sent_hours(lane, start="09:00", end="12:00")  # NOW is 14:00 UTC
+    refused = lane.claim(enrollment_id, retry=True, no_bubble_open=True)
+    assert refused.reasons == (Skip.OUTSIDE_SENDING_HOURS,)
+    [row] = _try_again(lane)
+    assert row.held_until is not None and row.held_until.isoformat() == "2026-09-30T09:00:00+00:00"
+    assert lane.claim(
+        enrollment_id, now=NOW + timedelta(hours=19), retry=True, no_bubble_open=True
+    ).claimed
+
+
+def test_try_again_lists_only_active_linkedin_steps_of_started_campaigns(lane: Lane) -> None:
+    first, paused, second = lane.enroll(), lane.enroll(), lane.enroll()
+    for enrollment_id in (first, paused, second):
+        _ended(lane, enrollment_id, MessageOutcomeKind.NOT_TYPED)
+    _set(lane, Enrollment, paused, status=EnrollmentStatus.PAUSED)
+    _set(lane, Enrollment, second, not_sent_since=NOW - timedelta(days=1))
+    assert [row.enrollment.id for row in _try_again(lane)] == [second, first]  # oldest try first
+    assert [row.enrollment.id for row in _try_again(lane, campaign_id=lane.campaign_id)] == [
+        second,
+        first,
+    ]
+    assert _try_again(lane, campaign_id=lane.campaign_id + 1000) == []
+    assert lane.claim(paused, retry=True, no_bubble_open=True).reasons == (
+        Skip.GUARD_EXCLUDED,
+        "enrollment_not_active",
+    )
+    _set(lane, Campaign, lane.campaign_id, status=CampaignStatus.PAUSED)
+    assert _try_again(lane) == []
+
+
+def test_try_again_is_scoped_to_the_user(session_factory: sessionmaker[Session]) -> None:
+    mine, theirs = make_lane(session_factory), make_lane(session_factory)
+    enrollment_id = theirs.enroll()
+    _ended(theirs, enrollment_id, MessageOutcomeKind.NOT_TYPED)
+    assert _try_again(mine) == []
+    assert [row.enrollment.id for row in _try_again(theirs)] == [enrollment_id]
+    with pytest.raises(LookupError):
+        mine.claim(enrollment_id, retry=True, no_bubble_open=True)
+
+
+def test_a_try_counted_today_only_when_it_spent_today(lane: Lane) -> None:
+    enrollment_id = lane.enroll()
+    _ended(lane, enrollment_id, MessageOutcomeKind.NOT_TYPED)
+    run_id = lane.enrollment(enrollment_id).last_prefill_run_id
+    assert run_id is not None
+    spent = {"message_click_attempted": False, "li_prefills_spent": True}
+    _end_run(lane, run_id, spent, at=NOW - timedelta(days=1))
+    [row] = _try_again(lane)
+    assert (row.last.budget_spent, row.last.counted_today) == (True, False)
+    _end_run(lane, run_id, spent)
+    [row] = _try_again(lane)
+    assert (row.last.budget_spent, row.last.counted_today) == (True, True)
+    _end_run(lane, run_id, {"li_prefills_spent": False})
+    [row] = _try_again(lane)
+    assert (row.last.budget_spent, row.last.counted_today) == (False, False)
+
+
+@pytest.mark.parametrize(
+    ("count", "error", "needs"),
+    [
+        (1, "not_typed: the browser was busy", True),
+        (3, "not_typed: x", True),
+        (0, "not_typed: x", False),
+        (1, "too_long: x", False),
+        (1, "partially_typed: x", False),
+        (1, "unknown: x", False),
+        (1, None, False),
+        (1, "rate limited", False),
+        (1, "not_typed", False),  # no colon: not a prefill's reason
+    ],
+)
+def test_needs_try_again_and_its_sql_agree(
+    lane: Lane, count: int, error: str | None, needs: bool
+) -> None:
+    enrollment_id = lane.enroll()
+    _set(lane, Enrollment, enrollment_id, not_sent_count=count, not_sent_error=error)
+    assert linkedin_steps.needs_try_again(lane.enrollment(enrollment_id)) is needs
+    listed = lane.read(
+        lambda s, u: s.scalar(
+            scoped(u, Enrollment)
+            .with_only_columns(func.count(Enrollment.id))
+            .where(Enrollment.id == enrollment_id, linkedin_steps._needs_try_again_sql())
+        )
+    )
+    assert bool(listed) is needs
+    assert (enrollment_id in _ready_ids(lane)) is not needs
