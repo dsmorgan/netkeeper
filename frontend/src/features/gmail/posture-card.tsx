@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { postureQuery } from '@/features/settings/api'
 import { ProtectionDetail, StatusBadge } from '@/features/settings/posture-section'
 
-import { GMAIL_POSTURE_ROWS } from './api'
+import { GMAIL_POSTURE_KEYS } from './api'
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -19,7 +19,9 @@ function message(error: unknown): string {
 export function PostureCard() {
   const posture = useQuery(postureQuery)
   const rows =
-    posture.data?.protections.filter((row) => GMAIL_POSTURE_ROWS.includes(row.name)) ?? []
+    posture.data?.protections.filter(
+      (row) => row.key != null && GMAIL_POSTURE_KEYS.includes(row.key),
+    ) ?? []
 
   return (
     <Card size="sm">

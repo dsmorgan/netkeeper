@@ -26,6 +26,23 @@ function when(iso: string): string {
     : at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 }
 
+function kind(row: RecentMessage): string {
+  return row.direction === 'in' ? 'Reply' : 'Sent by you'
+}
+
+function StatusPill({ status }: { status: string }) {
+  return (
+    <span
+      className={cn(
+        'inline-flex h-5 shrink-0 items-center rounded-4xl px-2 text-xs font-medium',
+        STATUS_CLASSES[status] ?? 'bg-muted text-muted-foreground',
+      )}
+    >
+      {status}
+    </span>
+  )
+}
+
 function step(row: RecentMessage): string {
   const name = row.campaign_name ?? '—'
   return row.step_position === null ? name : `${name}, step ${row.step_position}`
@@ -52,56 +69,66 @@ export function RecentCard() {
           <p className="text-muted-foreground">No email yet.</p>
         )}
         {activity.isSuccess && activity.data.recent.length > 0 && (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-max text-left">
-              <thead className="text-muted-foreground">
-                <tr>
-                  <th scope="col" className="py-1 pr-3 font-medium">
-                    When
-                  </th>
-                  <th scope="col" className="py-1 pr-3 font-medium">
-                    Kind
-                  </th>
-                  <th scope="col" className="py-1 pr-3 font-medium">
-                    Status
-                  </th>
-                  <th scope="col" className="py-1 pr-3 font-medium">
-                    Contact
-                  </th>
-                  <th scope="col" className="py-1 font-medium">
-                    Campaign
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {activity.data.recent.map((row) => (
-                  <tr key={row.id} className="border-t border-border/60 align-top">
-                    <td className="py-2 pr-3 text-muted-foreground">{when(row.at)}</td>
-                    <td className="py-2 pr-3">
-                      {row.direction === 'in' ? 'Reply' : 'Sent by you'}
-                    </td>
-                    <td className="py-2 pr-3">
-                      <span
-                        className={cn(
-                          'inline-flex h-5 shrink-0 items-center rounded-4xl px-2 text-xs font-medium',
-                          STATUS_CLASSES[row.status] ?? 'bg-muted text-muted-foreground',
-                        )}
-                      >
-                        {row.status}
-                      </span>
-                      {row.error !== null && (
-                        <p className="mt-1 max-w-xs text-xs break-words text-destructive">
-                          {row.error}
-                        </p>
-                      )}
-                    </td>
-                    <td className="py-2 pr-3">{row.contact_name}</td>
-                    <td className="py-2 text-muted-foreground">{step(row)}</td>
+          <>
+            <ul className="space-y-2 sm:hidden" aria-label="Recent email">
+              {activity.data.recent.map((row) => (
+                <li key={row.id} className="rounded-lg border border-border/60 p-2">
+                  <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                    <span className="font-medium break-words">{row.contact_name}</span>
+                    <StatusPill status={row.status} />
+                  </div>
+                  <p className="text-muted-foreground">
+                    {kind(row)} · {when(row.at)}
+                  </p>
+                  <p className="text-muted-foreground break-words">{step(row)}</p>
+                  {row.error !== null && (
+                    <p className="text-xs break-words text-destructive">{row.error}</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <div className="hidden sm:block sm:overflow-x-auto">
+              <table className="w-full min-w-max text-left">
+                <thead className="text-muted-foreground">
+                  <tr>
+                    <th scope="col" className="py-1 pr-3 font-medium">
+                      When
+                    </th>
+                    <th scope="col" className="py-1 pr-3 font-medium">
+                      Kind
+                    </th>
+                    <th scope="col" className="py-1 pr-3 font-medium">
+                      Status
+                    </th>
+                    <th scope="col" className="py-1 pr-3 font-medium">
+                      Contact
+                    </th>
+                    <th scope="col" className="py-1 font-medium">
+                      Campaign
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {activity.data.recent.map((row) => (
+                    <tr key={row.id} className="border-t border-border/60 align-top">
+                      <td className="py-2 pr-3 text-muted-foreground">{when(row.at)}</td>
+                      <td className="py-2 pr-3">{kind(row)}</td>
+                      <td className="py-2 pr-3">
+                        <StatusPill status={row.status} />
+                        {row.error !== null && (
+                          <p className="mt-1 max-w-xs text-xs break-words text-destructive">
+                            {row.error}
+                          </p>
+                        )}
+                      </td>
+                      <td className="py-2 pr-3">{row.contact_name}</td>
+                      <td className="py-2 text-muted-foreground">{step(row)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </CardContent>
     </Card>

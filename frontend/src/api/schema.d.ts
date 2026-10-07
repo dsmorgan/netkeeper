@@ -3722,6 +3722,17 @@ export interface components {
             /** Ids */
             ids?: number[] | null;
         };
+        /** CampaignCapOut */
+        CampaignCapOut: {
+            /** Campaign Id */
+            campaign_id: number;
+            /** Daily Cap */
+            daily_cap: number;
+            /** Name */
+            name: string;
+            /** Sent Today */
+            sent_today: number;
+        };
         /** CampaignCreate */
         CampaignCreate: {
             /** Daily Cap */
@@ -5703,6 +5714,8 @@ export interface components {
             daily_cap: number;
             /** Email */
             email: string;
+            /** Lower Campaign Caps */
+            lower_campaign_caps: components["schemas"]["CampaignCapOut"][];
             /** Mailbox Id */
             mailbox_id: number;
             /** Sent Today */
@@ -6392,8 +6405,7 @@ export interface components {
             error: string | null;
             /** Id */
             id: number;
-            /** Status */
-            status: string;
+            status: components["schemas"]["MessageStatus"];
             /** Step Position */
             step_position: number | null;
         };

@@ -245,6 +245,12 @@ class Status(enum.StrEnum):
 
 KEY_MANUAL_LINKEDIN_SENDS: Final = "manual_linkedin_sends"
 """The key of ADR 0004's row: off means auto-send is on."""
+KEY_GMAIL_REPLY_POLL: Final = "gmail_reply_poll"
+KEY_SENDING_HOURS: Final = "sending_hours"
+KEY_NEXT_CAMPAIGN_SEND: Final = "next_campaign_send"
+KEY_CAMPAIGN_TEMPLATES: Final = "campaign_templates"
+"""The keys of the rows that concern Gmail and campaign sending; the Gmail page picks
+its posture rows by them (#449)."""
 KEY_LINKEDIN_REPLY_POLL: Final = "linkedin_reply_poll"
 """The key of the LinkedIn inbox poll's row (it is always there). A short first poll adds
 a warning to it, which Settings acknowledges."""
@@ -1461,6 +1467,7 @@ def _sending_hours(session: Session, user: User) -> Protection:
     if hours is None:
         return Protection(
             name="sending hours",
+            key=KEY_SENDING_HOURS,
             status=Status.UNKNOWN,
             value="the stored sending hours cannot be read",
             warnings=(
@@ -1471,11 +1478,13 @@ def _sending_hours(session: Session, user: User) -> Protection:
     if not hours.enabled:
         return Protection(
             name="sending hours",
+            key=KEY_SENDING_HOURS,
             status=Status.ON,
             value="any time: every campaign send goes as soon as it is due",
         )
     return Protection(
         name="sending hours",
+        key=KEY_SENDING_HOURS,
         status=Status.ON,
         value=f"{hours.describe()} ({user.timezone}); only a campaign's start ignores them",
     )
@@ -1488,11 +1497,13 @@ def _campaign_templates(session: Session, user: User) -> Protection:
     if not blocked:
         return Protection(
             name="campaign templates",
+            key=KEY_CAMPAIGN_TEMPLATES,
             status=Status.ON,
             value="no active or paused campaign uses a removed merge field",
         )
     return Protection(
         name="campaign templates",
+        key=KEY_CAMPAIGN_TEMPLATES,
         status=Status.ON,
         value=f"{len(blocked)} active or paused campaign(s) blocked by a removed merge field",
         warnings=(describe_removed_field_campaigns(blocked),),
@@ -1513,7 +1524,10 @@ def _next_campaign_send(
     fires, _ = upcoming(session, user, limit=NEXT_SEND_LOOKAHEAD)
     if not fires:
         return Protection(
-            name="next campaign send", status=Status.ON, value="no campaign send is scheduled"
+            name="next campaign send",
+            key=KEY_NEXT_CAMPAIGN_SEND,
+            status=Status.ON,
+            value="no campaign send is scheduled",
         )
     # Where each row will really go (#338 review, N4): a row already due waits for the
     # spill, or goes at the next tick. Rows are read soonest first,
@@ -1528,6 +1542,7 @@ def _next_campaign_send(
     local = when.astimezone(zone)
     return Protection(
         name="next campaign send",
+        key=KEY_NEXT_CAMPAIGN_SEND,
         status=Status.ON,
         value=(
             f"{fire.campaign.name!r}{step} at {local:%a %b} {local.day}, {local:%H:%M}"
@@ -1559,6 +1574,7 @@ def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settin
     if not armed:
         return Protection(
             name="reply poll",
+            key=KEY_GMAIL_REPLY_POLL,
             status=Status.ON,
             value="no armed mailbox: no campaign email goes out, so there is no reply to poll for",
             brief="no armed mailbox",
@@ -1608,6 +1624,7 @@ def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settin
     polled_brief = "; ".join(poll_parts)
     return Protection(
         name="reply poll",
+        key=KEY_GMAIL_REPLY_POLL,
         status=Status.ON,
         value=value,
         notes=tuple(notes),

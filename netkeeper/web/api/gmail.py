@@ -14,12 +14,20 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from netkeeper.config import Settings
-from netkeeper.models import MessageDirection
+from netkeeper.models import MessageDirection, MessageStatus
 from netkeeper.models.base import utcnow
 from netkeeper.services import gmail_activity as service
 from netkeeper.web.deps import CurrentUser, SessionDep
 
 router = APIRouter(prefix="/gmail", tags=["gmail"])
+
+
+class CampaignCapOut(BaseModel):
+    campaign_id: int
+    name: str
+    sent_today: int
+    daily_cap: int
+    """The campaign's own cap, lower than the mailbox's."""
 
 
 class MailboxSendsOut(BaseModel):
@@ -29,12 +37,14 @@ class MailboxSendsOut(BaseModel):
     """Recipients fired today across every campaign on the mailbox, any status."""
     daily_cap: int
     """The most the engine sends from it in a day: its cap, never over the hard maximum."""
+    lower_campaign_caps: list[CampaignCapOut]
+    """Active campaigns on it whose own cap is lower: each stops sending at its own cap."""
 
 
 class RecentMessageOut(BaseModel):
     id: int
     direction: MessageDirection
-    status: str
+    status: MessageStatus
     at: datetime
     """When it was sent, else scheduled, else made."""
     campaign_id: int | None
@@ -73,6 +83,15 @@ def get_gmail_activity(
                 email=box.email,
                 sent_today=box.sent_today,
                 daily_cap=box.daily_cap,
+                lower_campaign_caps=[
+                    CampaignCapOut(
+                        campaign_id=c.campaign_id,
+                        name=c.name,
+                        sent_today=c.sent_today,
+                        daily_cap=c.daily_cap,
+                    )
+                    for c in box.lower_campaign_caps
+                ],
             )
             for box in activity.mailboxes
         ],
