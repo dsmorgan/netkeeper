@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import secrets
+import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
@@ -3013,11 +3014,19 @@ def campaigns_enroll(
 
     `--override-recent-contact` enrolls the contacts you name although someone
     contacted them within the campaign's recent-contact window. Every other guard
-    still applies to them. It asks first, and cannot be combined with `--list` or
-    `--filter`. `netkeeper campaigns guards` lists the contacts you can name.
+    still applies to them. It asks first, so it needs a terminal and never runs
+    unattended, and cannot be combined with `--list` or `--filter`.
+    `netkeeper campaigns guards` lists the contacts you can name.
     """
     audience = _audience_filter_or_exit(filter_json)
     chosen = _id_list_or_exit(override_recent_contact, "--override-recent-contact")
+    if chosen and not _stdin_is_tty():
+        typer.echo(
+            "error: --override-recent-contact asks you to confirm, so it needs a terminal;"
+            " it never runs unattended",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     with _campaign_db() as factory:
         if chosen:
             if list_name is not None or audience is not None:
@@ -3065,6 +3074,11 @@ def campaigns_enroll(
             f"recent-contact guard overridden for {outcome.overridden} of {len(chosen)} contacts"
         )
     typer.echo(outcome.summary)
+
+
+def _stdin_is_tty() -> bool:
+    """Whether a person can answer a prompt. Tests stand in for one by patching this."""
+    return sys.stdin.isatty()
 
 
 def _id_list_or_exit(value: str | None, flag: str) -> list[int]:

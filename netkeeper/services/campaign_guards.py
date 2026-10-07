@@ -159,11 +159,12 @@ class ContactFacts:
     Part B), or ``None``: an opt-out on any of the contact's addresses, otherwise
     the entry for its sendable address.
 
-    ``recent_contact_override_at`` is when a person overrode the recent-contact guard
-    for this contact's enrollment (#446), or ``None``. :func:`load_facts` never sets
-    it: the enrollment's own record does (:func:`check_step`,
-    :func:`load_pending_facts`), or :func:`check_enrollment` for the contacts a person
-    chose. It is about :func:`not_contacted_recently` alone.
+    ``recent_contact_cutoff`` is set when a person overrode the recent-contact guard
+    for this contact's enrollment (#446): the newest outbound contact the guard saw
+    when they did, the contact they chose to set aside. ``None`` otherwise.
+    :func:`load_facts` never sets it: the enrollment's own record does
+    (:func:`check_step`, :func:`load_pending_facts`), or :func:`check_enrollment` for
+    the contacts a person chose. It is about :func:`not_contacted_recently` alone.
     """
 
     contact_id: int
@@ -182,7 +183,7 @@ class ContactFacts:
     address_bounced_elsewhere: bool
     duplicate_address: bool
     do_not_send: DoNotSendReason | None
-    recent_contact_override_at: datetime | None = None
+    recent_contact_cutoff: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,14 +205,19 @@ class GuardPolicy:
 class Verdict:
     """One contact's result: eligible when ``reasons`` is empty.
 
-    ``overridden``: a person's override of the recent-contact guard (#446) is what
-    kept :attr:`Reason.CONTACTED_RECENTLY` out of ``reasons``. Only
-    :func:`check_enrollment` sets it, for the contacts it was asked to override.
+    ``override_cutoff``: a person's override of the recent-contact guard (#446) is
+    what kept :attr:`Reason.CONTACTED_RECENTLY` out of ``reasons``, and this is the
+    newest outbound contact it set aside (:attr:`ContactFacts.recent_contact_cutoff`).
+    Only :func:`check_enrollment` sets it, for the contacts it was asked to override.
     """
 
     contact_id: int
     reasons: tuple[Reason, ...]
-    overridden: bool = False
+    override_cutoff: datetime | None = None
+
+    @property
+    def overridden(self) -> bool:
+        return self.override_cutoff is not None
 
     @property
     def eligible(self) -> bool:
@@ -342,15 +348,16 @@ def not_contacted_recently(
     interaction (an email, a LinkedIn message, a call, a meeting) or a sent
     campaign message. A time in the future counts as recent.
 
-    A person's override (#446, ``facts.recent_contact_override_at``) sets aside the
-    contact made at or before the override, and nothing newer: contact after it
-    counts as recent again.
+    A person's override (#446, ``facts.recent_contact_cutoff``) sets aside the
+    contact they saw when they overrode it, the newest then, and anything dated at
+    or before it. Contact dated after it counts as recent again, even one recorded
+    late with a date before the override itself.
     """
     days = policy.contacted_within_days
     if days <= 0 or facts.last_outbound_at is None:
         return None
-    overridden_at = facts.recent_contact_override_at
-    if overridden_at is not None and facts.last_outbound_at <= overridden_at:
+    cutoff = facts.recent_contact_cutoff
+    if cutoff is not None and facts.last_outbound_at <= cutoff:
         return None
     if facts.last_outbound_at > now - timedelta(days=days):
         return Reason.CONTACTED_RECENTLY
@@ -649,7 +656,7 @@ def load_pending_facts(
     sendable = {c: f.sendable_email for c, f in facts.items() if f.sendable_email is not None}
     holders = _address_holders(session, user, sendable, campaign_id) if sendable else []
     others = _other_enrollments(session, user, sorted(facts), campaign_id) if facts else []
-    overrides = _recent_contact_overrides(session, user, [e for e, _ in pending])
+    cutoffs = _recent_contact_cutoffs(session, user, [e for e, _ in pending])
     out: dict[int, ContactFacts] = {}
     for enrollment_id, contact_id in pending:
         found = facts.get(contact_id)
@@ -668,23 +675,23 @@ def load_pending_facts(
                 for held_by, holder, other in others
                 if holder == contact_id and held_by < enrollment_id
             ),
-            recent_contact_override_at=overrides.get(enrollment_id),
+            recent_contact_cutoff=cutoffs.get(enrollment_id),
         )
     return out
 
 
-def _recent_contact_overrides(
+def _recent_contact_cutoffs(
     session: Session, user: User, enrollment_ids: Sequence[int]
 ) -> dict[int, datetime]:
-    """When a person overrode the recent-contact guard, per enrollment that has one (#446)."""
+    """The recent-contact override's cutoff, per enrollment that has one (#446)."""
     if not enrollment_ids:
         return {}
     rows = session.execute(
         scoped(user, Enrollment)
-        .with_only_columns(Enrollment.id, Enrollment.recent_contact_override_at)
+        .with_only_columns(Enrollment.id, Enrollment.recent_contact_cutoff)
         .where(
             Enrollment.id.in_(sorted(set(enrollment_ids))),
-            Enrollment.recent_contact_override_at.is_not(None),
+            Enrollment.recent_contact_cutoff.is_not(None),
         )
     )
     return {enrollment_id: at for enrollment_id, at in rows if at is not None}
@@ -912,10 +919,11 @@ def check_enrollment(
     """The verdict for enrolling each of ``contact_ids`` in ``campaign``, in id order.
 
     ``override_recent_contact`` names the contacts a person chose to enroll although
-    someone contacted them recently (#446). For exactly those, outbound contact up to
-    ``now`` does not count (:func:`not_contacted_recently`); every other guard runs
-    as always, and so does the recent-contact guard for every other contact. A
-    verdict the override changed has :attr:`Verdict.overridden`.
+    someone contacted them recently (#446). For exactly those, the newest outbound
+    contact the guard sees now, and anything dated at or before it, does not count
+    (:func:`not_contacted_recently`); contact dated in the future is never set aside.
+    Every other guard runs as always, and so does the recent-contact guard for every
+    other contact. A verdict the override changed has :attr:`Verdict.override_cutoff`.
 
     Checked against the first step's channel, the one the enrollment will send
     first; each later step is checked again when it fires (:func:`check_step`).
@@ -942,11 +950,18 @@ def check_enrollment(
     for i in ids:
         verdict = check_contact(facts.get(i), i, first, policy, now=now)
         found = facts.get(i)
-        if i in chosen and found is not None and Reason.CONTACTED_RECENTLY in verdict.reasons:
+        cutoff = None if found is None else found.last_outbound_at
+        if (
+            i in chosen
+            and found is not None
+            and cutoff is not None
+            and cutoff <= now
+            and Reason.CONTACTED_RECENTLY in verdict.reasons
+        ):
             again = check_contact(
-                replace(found, recent_contact_override_at=now), i, first, policy, now=now
+                replace(found, recent_contact_cutoff=cutoff), i, first, policy, now=now
             )
-            verdict = replace(again, overridden=True)
+            verdict = replace(again, override_cutoff=cutoff)
         verdicts.append(verdict)
     return verdicts
 
@@ -1054,18 +1069,18 @@ def check_step(
             Enrollment.status,
             Campaign.status,
             Campaign.contacted_within_days_guard,
-            Enrollment.recent_contact_override_at,
+            Enrollment.recent_contact_cutoff,
         )
         .join(Campaign, Campaign.id == Enrollment.campaign_id)
         .where(Enrollment.id == enrollment.id, Campaign.user_id == user.id)
     ).one_or_none()
     if state is None:  # deleted since: nothing to send to
         return Verdict(enrollment.contact_id, (Reason.ENROLLMENT_NOT_ACTIVE,))
-    enrollment_status, campaign_status, window, overridden_at = state
+    enrollment_status, campaign_status, window, cutoff = state
     contact_facts = facts.get(enrollment.contact_id)
-    if contact_facts is not None and overridden_at is not None:
-        # The person's override (#446): contact before it is set aside, newer is not.
-        contact_facts = replace(contact_facts, recent_contact_override_at=overridden_at)
+    if contact_facts is not None and cutoff is not None:
+        # The person's override (#446): the contact they saw is set aside, newer is not.
+        contact_facts = replace(contact_facts, recent_contact_cutoff=cutoff)
     verdict = check_contact(
         contact_facts,
         enrollment.contact_id,
