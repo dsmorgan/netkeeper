@@ -3722,7 +3722,9 @@ def _adoption_lines(p: template_adoption.AdoptionPreview) -> list[str]:
     )
     if p.blocked_total:
         counted = (
-            f"{p.blocked_total} of the first rendered" if p.blocked_capped else p.blocked_total
+            f"{p.blocked_total} among the first enrollments checked"
+            if p.blocked_capped
+            else p.blocked_total
         )
         lines.append(f"blocked in v{p.newest.version}, never sent ({counted}):")
         lines.extend(

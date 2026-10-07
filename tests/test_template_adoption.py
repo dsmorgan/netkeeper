@@ -32,6 +32,7 @@ from netkeeper.models import (
     Campaign,
     CampaignStatus,
     CampaignStep,
+    Contact,
     Enrollment,
     EnrollmentStatus,
     Message,
@@ -52,6 +53,7 @@ from netkeeper.services.campaign_engine import run_tick
 from netkeeper.services.campaigns import CampaignConflict, CampaignNotFound
 from netkeeper.services.template_adoption import AdoptionStale
 from netkeeper.services.users import ensure_local_user
+from netkeeper.web.api import template_adoption as template_api
 
 EMAIL = TemplateChannel.EMAIL
 LINKEDIN = TemplateChannel.LINKEDIN
@@ -740,8 +742,18 @@ def test_a_due_enrollment_keeps_its_due_time(writer: Session) -> None:
     assert _changed(before, _row(_fresh(writer, user, Enrollment, waiting.id))) == {}
 
 
+@pytest.mark.parametrize(
+    "stays_parked",
+    [
+        "not_typed: x",  # waits for Try again (#445)
+        "partially_typed: stopped part way",  # part of the body may be in a bubble
+        "unknown: lost the composer",
+    ],
+)
 @pytest.mark.parametrize("mode", [StepMode.PREFILL, StepMode.AUTO_SEND])
-def test_a_prefill_refused_as_too_long_is_released(writer: Session, mode: StepMode) -> None:
+def test_a_prefill_refused_as_too_long_is_released(
+    writer: Session, mode: StepMode, stays_parked: str
+) -> None:
     """A ``too_long`` refusal is decided before the lock, the budget and any navigation, so
     no bubble is open: the shorter version makes it due again, and the claim lints it."""
     user = factories.make_user(writer)
@@ -755,7 +767,7 @@ def test_a_prefill_refused_as_too_long_is_released(writer: Session, mode: StepMo
         not_sent_since=NOW - timedelta(hours=1),
     )
     not_typed = _enroll(
-        writer, campaign, next_action_at=None, not_sent_error="not_typed: x", not_sent_count=1
+        writer, campaign, next_action_at=None, not_sent_error=stays_parked, not_sent_count=1
     )
     _new_version(writer, user, campaign.steps[0], "Hi {{ first_name }}, shorter now")
     before = _row(_fresh(writer, user, Enrollment, not_typed.id))
@@ -771,7 +783,7 @@ def test_a_prefill_refused_as_too_long_is_released(writer: Session, mode: StepMo
         0,
         None,
     )
-    # A prefill that typed nothing waits for Try again (#445), never for a new version.
+    # Only too_long: any other prefill outcome waits for a person, never for a new version.
     assert _changed(before, _row(_fresh(writer, user, Enrollment, not_typed.id))) == {}
 
 
@@ -838,3 +850,28 @@ def test_adopt_needs_a_writer_session(session_factory: sessionmaker[Session]) ->
         shown = service.preview(s, user, ids[1], ids[2], now=NOW)
         with pytest.raises(RuntimeError, match="writer session"):
             service.adopt(s, user, ids[1], ids[2], fingerprint_seen=shown.fingerprint, now=NOW)
+
+
+def test_the_blocked_count_says_when_it_is_capped(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """More enrollments than the preview renders: the service, the API and the CLI all say
+    the blocked count covers only the first ones checked."""
+    monkeypatch.setattr(service, "RENDER_MAX", 1)
+    with session_scope(cli_db, write=True) as session:
+        user = _local(session)
+        campaign = _campaign(session, user)
+        for _ in range(2):
+            _enroll(session, campaign, next_action_at=NOW)
+        _new_version(session, user, campaign.steps[0], "Hello {{ first_name }}")
+        for contact in session.scalars(scoped(user, Contact)):
+            contact.do_not_contact = True  # a guard excludes it: blocked
+        campaign_id, step_id = campaign.id, campaign.steps[0].id
+        shown = service.preview(session, user, campaign_id, step_id, now=NOW)
+    assert (shown.affected_total, shown.blocked_total, shown.blocked_capped) == (2, 1, True)
+    out = template_api._preview_out(shown)
+    assert (out.blocked_total, out.blocked_capped) == (1, True)
+    declined = CliRunner().invoke(
+        cli, ["campaigns", "adopt-template", str(campaign_id), "1"], input="n\n"
+    )
+    assert "blocked in v2, never sent (1 among the first enrollments checked):" in declined.output
