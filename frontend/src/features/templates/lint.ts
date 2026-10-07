@@ -47,7 +47,7 @@ export const WHY_IT_MATTERS: Readonly<Record<LintRule, string>> = {
   removed_field:
     'The me.* fields were removed, so this renders as a blank. Write your own details into the template; a test send shows the contact fields with yours, from Settings.',
   linkedin_subject:
-    'LinkedIn messages have no subject line, so this text would never reach the person.',
+    'LinkedIn messages have no subject line, so this subject is ignored and never sent.',
   linkedin_too_long: 'LinkedIn refuses a message this long, so the prefill could never send it.',
   linkedin_typing_time:
     'The prefill types each character like a person would and gives up after five minutes, so a message this slow to type may never be sent.',

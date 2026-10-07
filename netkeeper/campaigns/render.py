@@ -87,7 +87,8 @@ applies is an error but the two LinkedIn length warnings below, and
 
 A LinkedIn template (P4-11) is also held to what LinkedIn and the prefill accept:
 
-- :attr:`LintRule.LINKEDIN_SUBJECT`: a subject. LinkedIn messages have none.
+- :attr:`LintRule.LINKEDIN_SUBJECT`: a subject, a warning (#448). LinkedIn messages have
+  none, so it is ignored, never rendered, and does not block.
 - :attr:`LintRule.LINKEDIN_TOO_LONG`: a body over :data:`LINKEDIN_MESSAGE_MAX_CHARS`,
   LinkedIn's own limit.
 - :attr:`LintRule.LINKEDIN_TYPING_TIME`: a body whose expected typing time
@@ -1107,12 +1108,13 @@ def _lint(
         issues.append(
             LintIssue(
                 LintRule.LINKEDIN_SUBJECT,
-                Severity.ERROR,
+                Severity.WARNING,
                 Part.SUBJECT,
-                "LinkedIn messages have no subject, so clear it",
+                "LinkedIn messages have no subject, so this one is ignored; clear it",
                 line=1,
             )
         )
+        subject = None  # never analysed or rendered: a stray merge field in it cannot block
     analyses: dict[Part, _Analysis] = {}
     if subject is not None:
         analyses[Part.SUBJECT] = _analyse(subject, Part.SUBJECT)
@@ -1435,6 +1437,8 @@ def render(
     the rendered message breaks of LinkedIn's rules that the template text did not.
     """
     issues, analyses = _lint(channel, subject, body)
+    if channel is TemplateChannel.LINKEDIN:
+        subject = None  # a LinkedIn message has no subject, whatever is stored (#448)
     for issue in issues:
         if issue.rule in _RENDER_REFUSES:
             raise TemplateRenderError(f"{issue.part.value}: {issue.message}")

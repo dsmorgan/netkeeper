@@ -466,6 +466,24 @@ def test_a_template_using_a_removed_me_field_parks_and_says_why(lane: Lane) -> N
     assert (lane.messages(enrollment_id), lane.runs()) == ([], [])
 
 
+def test_a_legacy_linkedin_subject_does_not_block_or_get_sent(lane: Lane) -> None:
+    """#448: a LinkedIn template saved with a subject before the rule still sends, with none,
+    and a merge field in that subject (even a removed ``me.*`` one) does not park it."""
+    enrollment_id = lane.enroll()
+
+    def legacy(session: Session, user: User) -> None:
+        campaign = get_scoped(session, user, Campaign, lane.campaign_id)
+        assert campaign is not None
+        campaign.steps[0].template.subject = "Re {{ me.first_name }}"
+
+    lane.write(legacy)
+    claim = lane.claim(enrollment_id)
+    assert claim.claimed and claim.reasons == ()
+    [message] = lane.messages(enrollment_id)
+    assert message.subject is None
+    assert message.body_rendered is not None and message.body_rendered.startswith(BODY_MARK)
+
+
 def test_a_paused_enrollment_is_refused(lane: Lane) -> None:
     enrollment_id = lane.enroll(status=EnrollmentStatus.PAUSED)
     assert lane.claim(enrollment_id).reasons == (Skip.GUARD_EXCLUDED, "enrollment_not_active")

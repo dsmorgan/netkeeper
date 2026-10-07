@@ -491,7 +491,8 @@ def _render_step(template: Template | None, values: MergeValues, today: date) ->
     """The step as the engine renders it at a fire, less the previous send's date."""
     if template is None:
         raise TemplateRenderError("the step's template is gone")
-    return render(template.channel, template.subject, template.body, values, today=today)
+    subject = None if template.channel is TemplateChannel.LINKEDIN else template.subject
+    return render(template.channel, subject, template.body, values, today=today)
 
 
 @dataclass(frozen=True, slots=True)

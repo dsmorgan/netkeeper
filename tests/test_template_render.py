@@ -964,11 +964,20 @@ def test_lint_reads_the_newline_flag_from_the_pacing_module() -> None:
 
 
 @pytest.mark.parametrize("subject", ["Hello", "", "   "])
-def test_a_linkedin_template_with_a_subject_is_an_error(subject: str) -> None:
+def test_a_linkedin_template_with_a_subject_is_a_warning(subject: str) -> None:
+    """#448: flagged, but ignored rather than blocking, so a saved one keeps working."""
     issues = lint(LINKEDIN, subject, GOOD_BODY)
     assert _lines(issues) == [(LintRule.LINKEDIN_SUBJECT, None, 1)]
     assert issues[0].part is Part.SUBJECT
-    assert has_errors(issues)
+    assert issues[0].severity is Severity.WARNING
+    assert not has_errors(issues)
+
+
+def test_a_linkedin_subject_is_never_analysed_or_rendered() -> None:
+    issues = lint(LINKEDIN, "Hi {{ me.first_name }}", GOOD_BODY)
+    assert [i.rule for i in issues] == [LintRule.LINKEDIN_SUBJECT]
+    rendered = render(LINKEDIN, "Hi {{ first_name }}", GOOD_BODY, _values(), today=date(2026, 1, 1))
+    assert rendered.subject is None
 
 
 def test_a_linkedin_body_at_the_warning_limit_is_clean() -> None:

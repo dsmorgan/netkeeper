@@ -519,7 +519,7 @@ describe('save and delete', () => {
     })
   })
 
-  it('drops a typed subject when the channel switches to LinkedIn, and shows the field again for email', async () => {
+  it('hides a typed subject while the channel is LinkedIn, and restores it for email', async () => {
     mockApi(routes([template()]))
     await renderPage()
     fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
@@ -533,6 +533,18 @@ describe('save and delete', () => {
 
     fireEvent.change(screen.getByLabelText('Channel'), { target: { value: 'email' } })
     expect(subject).toBeEnabled()
+    // The subject typed for email comes back.
+    expect(subject).toHaveValue('Hi {{ first_name }}')
+  })
+
+  it('inserts into the body after the subject was focused and the channel went to LinkedIn', async () => {
+    mockApi(routes([template({ body: 'Hi' })]))
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    const subject = await screen.findByLabelText('Subject')
+    act(() => subject.focus())
+    fireEvent.change(screen.getByLabelText('Channel'), { target: { value: 'linkedin' } })
+    expect(screen.getByText(/Inserts at the cursor in the body/)).toBeInTheDocument()
   })
 
   it('stops guarding once a dirty template is deleted', async () => {
