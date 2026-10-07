@@ -610,6 +610,58 @@ async def test_a_minimized_dialog_alone_refuses_before_the_click() -> None:
     assert ran.tab.clicks == [] and not ran.run.message_click_attempted
 
 
+@pytest.mark.parametrize("hidden", [False, True])
+async def test_a_composer_alone_refuses_before_the_click(hidden: bool) -> None:
+    """The composer half of the check before the click: a ``Write a message…`` textbox,
+    hidden or not, with no ``Messaging`` dialog around it."""
+    style = ' style="display:none"' if hidden else ""
+    composer = (
+        f'<div{style}><div contenteditable="true" role="textbox" aria-multiline="true"'
+        ' aria-label="Write a message…"><p><br></p></div></div>'
+    )
+    ran = await prefill(MessagingSite(ZEPHYRINE, before=composer))
+    assert_no_keys(ran)
+    assert ran.result.outcome.reason == browser_module.BUBBLE_ALREADY_OPEN
+    assert ran.tab.clicks == [] and not ran.run.message_click_attempted
+
+
+async def test_a_bubble_check_that_cannot_read_refuses_with_no_click(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    site = MessagingSite(ZEPHYRINE)
+
+    async def unreadable(self: BrowserRun, tab: object) -> bool:
+        raise RuntimeError("Target crashed <secret markup>")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(BrowserRun, "_bubble_already_open", unreadable)
+        with caplog.at_level("WARNING"):
+            ran = await prefill(site)
+    assert_no_keys(ran)
+    assert ran.result.outcome.reason == browser_module.BUBBLE_UNREADABLE
+    assert ran.tab.clicks == [] and not ran.run.message_click_attempted
+    assert "could not be read (RuntimeError)" in caplog.text
+    assert "secret markup" not in caplog.text
+
+
+async def test_an_unrelated_textbox_and_dialog_do_not_stop_the_click() -> None:
+    """The check is narrow: a comment box and the Contact info dialog are not a message
+    bubble, so the prefill clicks and types."""
+    unrelated = (
+        '<div contenteditable="true" role="textbox" aria-label="Add a comment…"><p><br></p>'
+        '</div><div role="dialog" aria-label="Contact info" hidden><p>overlay</p></div>'
+    )
+    ran = await prefill(MessagingSite(ZEPHYRINE, before=unrelated))
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert len(ran.tab.clicks) == 1
+
+
+def test_the_bubble_check_words_are_pinned() -> None:
+    assert browser_module.BUBBLE_UNREADABLE == (
+        "whether a message bubble is open could not be read"
+    )
+
+
 def test_the_bubble_already_open_words_are_pinned() -> None:
     assert browser_module.BUBBLE_ALREADY_OPEN == (
         "a message bubble is already open in Chrome, minimized ones included;"

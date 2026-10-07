@@ -928,6 +928,8 @@ describe('every recorded phrase has words (S1 drift guard)', () => {
       'the Message control could not be read',
       'no Message control is visible',
       'no Message control is on screen with nothing over it; close or move what covers it',
+      'whether a message bubble is open could not be read',
+      'whether a message bubble is open could not be read',
       'a message bubble is already open in Chrome, minimized ones included; close it, then try again',
     ]) {
       expect(prefillReason(phrase).bubble).toBe('closed')

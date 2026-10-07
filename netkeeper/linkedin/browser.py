@@ -669,6 +669,8 @@ def _clear(box: Mapping[str, float], hit: Mapping[str, float] | None) -> bool:
 BUBBLE_ALREADY_OPEN: Final = (
     "a message bubble is already open in Chrome, minimized ones included; close it, then try again"
 )
+#: The refusal, before the click, when that check couldn't read the page (#444).
+BUBBLE_UNREADABLE: Final = "whether a message bubble is open could not be read"
 #: The refusal when no control is on screen and clear, and none can be scrolled to.
 MESSAGE_NOT_ON_SCREEN: Final = (
     "no Message control is on screen with nothing over it; close or move what covers it"
@@ -1795,7 +1797,12 @@ class BrowserRun:
         except Exception as exc:
             if self._lost(page):
                 raise BrowserUnavailable("lost the tab while looking for open bubbles") from exc
-            return MessageClick(False, False, "the Message control could not be read")
+            log.warning(
+                "prefill: whether a message bubble is open could not be read (%s); nothing"
+                " was clicked",
+                type(exc).__name__,
+            )
+            return MessageClick(False, False, BUBBLE_UNREADABLE)
         if leftover:
             log.info("prefill: a message bubble was already on the page; nothing was clicked")
             return MessageClick(False, False, BUBBLE_ALREADY_OPEN)

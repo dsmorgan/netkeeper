@@ -1964,14 +1964,21 @@ def _reached_banned(
 
 
 def _held_not_called(function: ast.AST, banned: frozenset[str] = AFTER_CLICK_BANNED) -> list[str]:
-    """Every banned attribute in ``function`` that isn't the callee of a call: one held in
-    a local (``nav = self._run.goto``) could be called after the click under another name."""
+    """Every banned attribute in ``function`` that isn't the callee of a call, and every
+    banned name as a string: one held in a local (``nav = self._run.goto``, or
+    ``getattr(self._run, "goto")``) could be called after the click under another name."""
     callees = {id(n.func) for n in walk(function) if isinstance(n, ast.Call)}
-    return [
+    held = [
         f"{n.attr} (line {n.lineno})"
         for n in walk(function)
         if isinstance(n, ast.Attribute) and n.attr in banned and id(n) not in callees
     ]
+    named = [
+        f"{n.value!r} (line {n.lineno})"
+        for n in walk(function)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value in banned
+    ]
+    return held + named
 
 
 def _after_click_in_prefill(source: str) -> list[ast.AST]:
@@ -2024,6 +2031,7 @@ def test_nothing_navigates_after_the_message_click_or_in_hand_over() -> None:
         ("hand_over_helper", "await page.reload()"),
         ("type_into_composer", "await self.goto('https://www.linkedin.com/feed/')"),
         ("alias", "nav = self._run.goto"),
+        ("alias", "nav = getattr(self._run, 'goto')"),
     ],
 )
 def test_the_navigation_pin_catches_each_mutation(where: str, line: str) -> None:

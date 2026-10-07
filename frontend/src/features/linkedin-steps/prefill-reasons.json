@@ -71,5 +71,6 @@
   "the tab or the browser went away",
   "the tab's url changed",
   "the typing plan refused the body ({})",
-  "today's LinkedIn budget is spent"
+  "today's LinkedIn budget is spent",
+  "whether a message bubble is open could not be read"
 ]
