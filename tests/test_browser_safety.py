@@ -1811,12 +1811,12 @@ def test_the_message_click_is_bound_to_the_contacts_href() -> None:
     # Every control the click can be sent to is drawn from the href-bound locator.
     method = next(
         node
-        for node in ast.walk(ast.parse(source))
+        for node in walk(parse(source))
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "click_message"
     )
     appended = [
         ast.unparse(node.args[0])
-        for node in ast.walk(method)
+        for node in walk(method)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "append"
@@ -1825,7 +1825,7 @@ def test_the_message_click_is_bound_to_the_contacts_href() -> None:
     assert sorted(appended) == ["top.first", "visible.nth(index)"]
     assigned = {
         ast.unparse(node.targets[0]): ast.unparse(node.value)
-        for node in ast.walk(method)
+        for node in walk(method)
         if isinstance(node, ast.Assign) and len(node.targets) == 1
     }
     assert assigned["visible"] == "bound.filter(visible=True)"
@@ -1868,6 +1868,141 @@ def test_hand_over_is_reached_only_from_the_prefill() -> None:
         for item, _ in name_reaches(read_source(path), "hand_over", path)
     ]
     assert reaches == [(LINKEDIN / "page_messaging.py", "PagePrefill._end_after_click")]
+
+
+#: What would open, reopen, or move a tab, or read it again (#456, ADR 0007, "After the
+#: click: no reattach, no navigation"). None may be reached after the Message click.
+AFTER_CLICK_BANNED = frozenset(
+    {
+        "goto",
+        "reload",
+        "go_back",
+        "go_forward",
+        "new_page",
+        "ensure_page",
+        "_ensure_page",
+        "_reopen_for",
+        "_reopen_after_reattach",
+        "scroll",
+        "observe",
+    }
+)
+
+
+def _methods(tree: ast.Module, cls: str) -> dict[str, ast.AsyncFunctionDef | ast.FunctionDef]:
+    [found] = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls]
+    return {n.name: n for n in found.body if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef)}
+
+
+def _reached_banned(
+    tree: ast.Module,
+    cls: str,
+    roots: list[ast.AST],
+    banned: frozenset[str] = AFTER_CLICK_BANNED,
+) -> list[str]:
+    """Every banned name reached from ``roots``, following ``self.<method>`` into the
+    class's own methods and a bare call into the module's own functions, transitively."""
+    methods = _methods(tree, cls)
+    functions = {
+        n.name: n for n in tree.body if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef)
+    }
+    found: list[str] = []
+    seen: set[str] = set()
+    queue = list(roots)
+    while queue:
+        root = queue.pop()
+        for node in walk(root):
+            name = None
+            if isinstance(node, ast.Attribute):
+                name = node.attr
+                if name in banned:
+                    found.append(f"{name} (line {node.lineno})")
+                is_self = isinstance(node.value, ast.Name) and node.value.id == "self"
+                if is_self and name in methods and name not in seen:
+                    seen.add(name)
+                    queue.append(methods[name])
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                name = node.func.id
+                if name in functions and name not in seen:
+                    seen.add(name)
+                    queue.append(functions[name])
+            elif isinstance(node, ast.Constant) and node.value in banned:
+                found.append(f"{node.value!r} (line {node.lineno})")
+    return found
+
+
+def _after_click_in_prefill(source: str) -> list[ast.AST]:
+    """The statements of ``PagePrefill.prefill`` from the ``click_message`` call on: the
+    rest of the ``try`` that holds it, and its ``finally``."""
+    prefill = _methods(parse(source), "PagePrefill")["prefill"]
+    [click] = [
+        n for n in walk(prefill) if isinstance(n, ast.Attribute) and n.attr == "click_message"
+    ]
+    after: list[ast.AST] = []
+    for node in walk(prefill):
+        if isinstance(node, ast.Try) and any(click in walk(stmt) for stmt in node.body):
+            after += [stmt for stmt in node.body if (stmt.end_lineno or 0) >= click.lineno]
+            after += [*node.handlers, *node.finalbody]
+    after += [stmt for stmt in prefill.body if stmt.lineno > click.lineno]
+    assert after, "PagePrefill.prefill no longer calls click_message inside a try"
+    return after
+
+
+def test_nothing_navigates_after_the_message_click_or_in_hand_over() -> None:
+    """#456, ADR 0007: from the Message click on, ``PagePrefill.prefill`` (and the methods
+    of its own it calls from there) never reaches a navigation, a reopened tab, a scroll,
+    or an observation; and ``BrowserRun.hand_over``, with every method and function it
+    reaches, navigates nothing. ``_ensure_page`` refuses at run time too; this pins it
+    in the source."""
+    messaging = read_source(LINKEDIN / "page_messaging.py")
+    reached = _reached_banned(parse(messaging), "PagePrefill", _after_click_in_prefill(messaging))
+    assert not reached, f"PagePrefill.prefill navigates after the click: {reached}"
+    browser = read_source(LINKEDIN / "browser.py")
+    tree = parse(browser)
+    hand_over = _methods(tree, "BrowserRun")["hand_over"]
+    reached = _reached_banned(tree, "BrowserRun", [hand_over])
+    assert not reached, f"hand_over navigates: {reached}"
+
+
+@pytest.mark.parametrize(
+    ("where", "line"),
+    [
+        ("prefill", "await self._run.goto(self._origin)"),
+        ("prefill_helper", "await self._run.ensure_page()"),
+        ("hand_over", "await self.goto('https://www.linkedin.com/feed/')"),
+        ("hand_over_helper", "await page.reload()"),
+    ],
+)
+def test_the_navigation_pin_catches_each_mutation(where: str, line: str) -> None:
+    """The mutations #456 names, and one level of indirection for each, fail the pin."""
+    if where.startswith("prefill"):
+        source = read_source(LINKEDIN / "page_messaging.py")
+        if where == "prefill":
+            anchor = "            if not click.clicked:\n"
+            assert anchor in source
+            mutated = source.replace(anchor, f"            {line}\n{anchor}", 1)
+        else:
+            anchor = "        await self._run.hand_over()\n"
+            assert anchor in source
+            mutated = source.replace(anchor, f"        {line}\n{anchor}", 1)
+        tree = ast.parse(mutated)
+        reached = _reached_banned(tree, "PagePrefill", _after_click_in_prefill(mutated))
+    else:
+        source = read_source(LINKEDIN / "browser.py")
+        anchor = "        self._handed_over = True\n"
+        assert anchor in source
+        if where == "hand_over":
+            mutated = source.replace(anchor, f"{anchor}        {line}\n", 1)
+        else:
+            helper = "async def _detach_quietly("
+            assert helper in source
+            head, _, tail = source.partition(helper)
+            signature, _, rest = tail.partition(":\n")
+            mutated = f"{head}{helper}{signature}:\n    page: Any = None\n    {line}\n{rest}"
+        tree = ast.parse(mutated)
+        hand_over = _methods(tree, "BrowserRun")["hand_over"]
+        reached = _reached_banned(tree, "BrowserRun", [hand_over])
+    assert reached, f"the pin missed {line!r} in {where}"
 
 
 def test_the_prefill_methods_are_called_only_from_the_prefill() -> None:
