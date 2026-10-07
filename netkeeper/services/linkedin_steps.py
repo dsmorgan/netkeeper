@@ -1026,6 +1026,10 @@ def record_prefill_outcome(
         prefilled_at.tzinfo is None or prefilled_at.utcoffset() is None or prefilled_at > now
     ):
         raise ValueError("prefilled_at must be timezone-aware and no later than now")
+    if outcome.kind is MessageOutcomeKind.NOT_TYPED and outcome.typed_chars != 0:
+        # not_typed promises nothing reached the composer, which is what lets Try again
+        # retype it (#445). A run that typed something is partially_typed or unknown.
+        raise ValueError("a not_typed outcome typed nothing; typed_chars must be 0")
     message = _claimed_message(session, user, message_id)
     if message is None:
         return False

@@ -3093,6 +3093,16 @@ def _seed_enrollments_that_tried(connection: Connection) -> None:
             {"s": status, "e": error, "n": count, "t": STAMP, "id": id},
         )
     _insert_message(connection, id=1, enrollment_id=8, contact_id=8, step_id=1, status="scheduled")
+    # An inbound message on enrollment 1's step claims nothing: only an outbound one does.
+    _insert_message(
+        connection,
+        id=2,
+        enrollment_id=1,
+        contact_id=1,
+        step_id=1,
+        direction="in",
+        status="received",
+    )
 
 
 _PARKED: Final = {1, 6}
