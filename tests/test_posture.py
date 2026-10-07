@@ -2297,7 +2297,7 @@ def test_a_linkedin_message_budget_above_20_a_day_is_a_note_and_the_report_stays
     calm = _report(writer, user, settings=_budget(**{f"{action}_per_day": 20}))
 
     (note,) = _notes_for(risky, f"budget {action}")
-    assert note.startswith(f"{action} is set to 21 a day, above 20 a day")
+    assert "are set to 21 a day, above 20 a day" in note
     assert _notes_for(calm, f"budget {action}") == ()
     assert risky.ok is True
     assert risky.warnings == ()

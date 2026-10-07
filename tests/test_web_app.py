@@ -296,6 +296,37 @@ def test_serve_app_logs_the_profile_visit_risk_once_above_100_a_day(
         assert risk == []
 
 
+@pytest.mark.parametrize("field", ["li_prefills_per_day", "li_messages_auto_per_day"])
+@pytest.mark.parametrize(("per_day", "warns"), [(21, True), (20, False)])
+def test_serve_app_logs_the_linkedin_message_risk_once_above_20_a_day(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    field: str,
+    per_day: int,
+    warns: bool,
+) -> None:
+    """#447: serve's startup logs a message budget above 20 a day once, per budget."""
+    monkeypatch.setenv("NETKEEPER_FRONTEND_DIST", str(tmp_path / "no-dist"))
+    base = Settings()
+    settings = replace(
+        base,
+        linkedin=replace(base.linkedin, budget=replace(base.linkedin.budget, **{field: per_day})),
+    )
+    with caplog.at_level(logging.WARNING, logger="netkeeper.worker"):
+        serve_app(settings)
+    risk = [
+        r
+        for r in caplog.records
+        if r.name == "netkeeper.worker" and "a day, above 20 a day" in r.getMessage()
+    ]
+    if warns:
+        assert len(risk) == 1 and risk[0].levelno == logging.WARNING
+        assert risk[0].getMessage().startswith(("LinkedIn prefills are", "Auto-sent LinkedIn"))
+    else:
+        assert risk == []
+
+
 # --- router discovery -------------------------------------------------------
 
 

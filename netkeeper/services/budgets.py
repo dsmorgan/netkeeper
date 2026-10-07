@@ -206,6 +206,12 @@ def profile_visit_risk_warning(settings: BudgetSettings) -> str | None:
     )
 
 
+_LI_MESSAGE_LABEL: Final = {
+    ActionClass.LI_PREFILLS: "LinkedIn prefills",
+    ActionClass.LI_MESSAGES_AUTO: "Auto-sent LinkedIn messages",
+}
+
+
 def li_message_risk_warning(action: ActionClass, settings: BudgetSettings) -> str | None:
     """The warning for a daily LinkedIn message budget above 20, or None (#447).
 
@@ -220,9 +226,9 @@ def li_message_risk_warning(action: ActionClass, settings: BudgetSettings) -> st
     if day <= LI_MESSAGE_WARN_ABOVE:
         return None
     return (
-        f"{action.value} is set to {day} a day, above {LI_MESSAGE_WARN_ABOVE} a day."
+        f"{_LI_MESSAGE_LABEL[action]} are set to {day} a day, above {LI_MESSAGE_WARN_ABOVE} a day."
         " More LinkedIn messages a day make it more likely that LinkedIn"
-        " restricts your account or asks you to verify it. Heat still shrinks the budget"
+        " restricts your account or asks you to verify it. Heat still pauses prefills"
         " after LinkedIn throttles you."
     )
 

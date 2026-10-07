@@ -622,7 +622,9 @@ def test_a_linkedin_message_budget_warns_above_20_a_day_and_not_at_20(
     assert budgets.li_message_risk_warning(action, _settings(**{field: 20})) is None
     assert budgets.li_message_risk_warning(action, _settings(**{field: 15})) is None
     warned = budgets.li_message_risk_warning(action, _settings(**{field: 21}))
-    assert warned is not None and warned.startswith(f"{action.value} is set to 21 a day")
+    assert warned is not None and warned.startswith(
+        budgets._LI_MESSAGE_LABEL[action] + " are set to 21 a day"
+    )
     clamped = budgets.li_message_risk_warning(action, _settings(**{field: 500}))
     assert clamped is not None and "set to 50 a day" in clamped
 

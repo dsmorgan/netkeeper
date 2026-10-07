@@ -14,6 +14,10 @@ LinkedIn restricts accounts for automated messaging faster than for automated pr
 
 The default LinkedIn step mode is `prefill`: the sidecar opens the conversation in the user's Chrome, types the rendered message, and stops. The user clicks Send. The next inbox poll confirms the send and records it. An `auto_send` mode exists behind a config flag and a per-step setting, with its own daily budget, active hours, and heat backoff, and the posture page highlights it as a non-default risk.
 
+## Amendment (2026-10-07, #447)
+
+The maintainer raised the LinkedIn message budgets after CP8 (#35) showed them too low for real use. `li_messages_auto` keeps its default of 15 a day, and its hard maximum goes from 30 to 50. `li_prefills` goes from 10 a day (hard maximum 20) to 15 a day (hard maximum 50). Setting either above 20 a day shows a warning. Auto-send stays off by default, and each budget stays separate.
+
 ## Consequences
 
 - A weekly batch still needs a few minutes of clicking Send. That is the price of the account staying open.
