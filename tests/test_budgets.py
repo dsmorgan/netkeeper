@@ -23,6 +23,7 @@ import factories
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
+import netkeeper.services.budgets as budgets
 from netkeeper.config import BudgetSettings
 from netkeeper.db import session_scope
 from netkeeper.models import User
@@ -311,8 +312,8 @@ def test_hard_max_per_day_matches_spec_9_6() -> None:
         ActionClass.CONNECTION_PAGES: 400,
         ActionClass.PROFILE_VISITS: 250,
         ActionClass.INBOX_POLLS: 24,
-        ActionClass.LI_MESSAGES_AUTO: 30,
-        ActionClass.LI_PREFILLS: 20,
+        ActionClass.LI_MESSAGES_AUTO: 50,
+        ActionClass.LI_PREFILLS: 50,
     }
 
 
@@ -584,3 +585,50 @@ def test_an_explicit_week_below_five_times_the_daily_limit_gets_a_note(
     """#319 review S3: compared against the limits in force, after both clamps."""
     settings = _settings(profile_visits_per_day=day, profile_visits_per_week=week)
     assert profile_visit_week_note(settings) == expected
+
+
+# --- the LinkedIn message budgets (#447) ----------------------------------------------
+
+_LI_MESSAGE_ACTIONS = [ActionClass.LI_PREFILLS, ActionClass.LI_MESSAGES_AUTO]
+_LI_FIELD = {
+    ActionClass.LI_PREFILLS: "li_prefills_per_day",
+    ActionClass.LI_MESSAGES_AUTO: "li_messages_auto_per_day",
+}
+
+
+@pytest.mark.parametrize("action", _LI_MESSAGE_ACTIONS)
+def test_a_linkedin_message_budget_defaults_to_15_with_a_hard_max_of_50(
+    action: ActionClass,
+) -> None:
+    assert getattr(BudgetSettings(), _LI_FIELD[action]) == 15
+    assert HARD_MAX_PER_DAY[action] == 50
+    assert budgets._limits_for(action, BudgetSettings()).day == 15
+
+
+@pytest.mark.parametrize("action", _LI_MESSAGE_ACTIONS)
+@pytest.mark.parametrize(("asked", "enforced"), [(50, 50), (51, 50)])
+def test_a_linkedin_message_budget_accepts_50_and_clamps_51(
+    action: ActionClass, asked: int, enforced: int
+) -> None:
+    settings = _settings(**{_LI_FIELD[action]: asked})
+    assert budgets._limits_for(action, settings).day == enforced
+
+
+@pytest.mark.parametrize("action", _LI_MESSAGE_ACTIONS)
+def test_a_linkedin_message_budget_warns_above_20_a_day_and_not_at_20(
+    action: ActionClass,
+) -> None:
+    field = _LI_FIELD[action]
+    assert budgets.li_message_risk_warning(action, _settings(**{field: 20})) is None
+    assert budgets.li_message_risk_warning(action, _settings(**{field: 15})) is None
+    warned = budgets.li_message_risk_warning(action, _settings(**{field: 21}))
+    assert warned is not None and warned.startswith(f"{action.value} is set to 21 a day")
+    clamped = budgets.li_message_risk_warning(action, _settings(**{field: 500}))
+    assert clamped is not None and "set to 50 a day" in clamped
+
+
+def test_the_two_message_budgets_warn_separately() -> None:
+    settings = _settings(li_prefills_per_day=30)
+    assert budgets.li_message_risk_warning(ActionClass.LI_PREFILLS, settings) is not None
+    assert budgets.li_message_risk_warning(ActionClass.LI_MESSAGES_AUTO, settings) is None
+    assert budgets.li_message_risk_warning(ActionClass.PROFILE_VISITS, settings) is None

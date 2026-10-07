@@ -240,8 +240,8 @@ def test_the_prefill_constants_are_pinned() -> None:
     assert timedelta(days=3) == engine.PREFILL_STALE_AFTER
     assert timedelta(days=3) == linkedin_steps.PREFILL_STALE_AFTER
     assert linkedin_steps.NOT_TYPED_PARK_AFTER == 2
-    assert budgets.HARD_MAX_PER_DAY[budgets.ActionClass.LI_PREFILLS] == 20
-    assert BudgetSettings().li_prefills_per_day == 10
+    assert budgets.HARD_MAX_PER_DAY[budgets.ActionClass.LI_PREFILLS] == 50
+    assert BudgetSettings().li_prefills_per_day == 15
     assert budgets.ActionClass.LI_PREFILLS.value == "li_prefills"
     assert engine.LINKEDIN_ENRICH_PRIORITY == 1
     assert {s.value for s in linkedin_steps.OPEN_STATUSES} == {"scheduled", "prefilled"}
@@ -251,7 +251,7 @@ def test_the_prefill_constants_are_pinned() -> None:
 def test_the_li_prefills_budget_is_clamped_to_its_hard_max() -> None:
     asked = BudgetSettings(li_prefills_per_day=500)
     assert budgets.configured_default(budgets.ActionClass.LI_PREFILLS, asked) == 500
-    assert budgets._limits_for(budgets.ActionClass.LI_PREFILLS, asked).day == 20
+    assert budgets._limits_for(budgets.ActionClass.LI_PREFILLS, asked).day == 50
 
 
 # --- the claim ------------------------------------------------------------------------

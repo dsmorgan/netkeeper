@@ -533,9 +533,11 @@ Counters live in `settings_kv`, keyed by local day and week, per action class:
 | `profile_visits` | 60 | 250 | The number that matters. The reference workflow's guidance for scraping tools is 100; above that, netkeeper warns (below) |
 | `contact_info_fetches` | tied to `profile_visits` | | One per visit. *As built (#190):* the one Contact info click, covered by the visit's `profile_visits` unit; no separate counter |
 | `inbox_polls` | 8 | 24 | |
-| `li_messages_auto` | 15 | 30 | Only when auto-send is enabled |
-| `li_prefills` | 10 | 20 | A campaign's LinkedIn step typed into the composer for you to send (P4-09). Each prefill also spends one `profile_visits` unit |
+| `li_messages_auto` | 15 | 50 | Only when auto-send is enabled |
+| `li_prefills` | 15 | 50 | A campaign's LinkedIn step typed into the composer for you to send (P4-09). Each prefill also spends one `profile_visits` unit |
 | `profile_visits` per week | 5 × the daily limit (300) | 1,250 | Follows the daily limit unless `profile_visits_per_week` is set |
+
+*As amended (2026-10-07, #447).* Both LinkedIn message budgets, `li_prefills` (was 10 a day, hard max 20) and `li_messages_auto` (was 15, hard max 30), default to 15 a day with a hard maximum of 50. Setting either above 20 a day is your call, and netkeeper warns about it: `netkeeper serve` logs it at startup, and `netkeeper posture` and the Settings page list it as a note on that budget row. Each budget stays separate, and heat still shrinks both.
 
 *As built (#318).* The profile-visit hard max is 250 a day. The default stays at 60, and netkeeper was designed around 100 at most, the reference workflow's guidance. A daily limit above 100 is your call: nothing refuses it and nothing asks you to confirm it, but netkeeper warns about it wherever the budget appears. `netkeeper serve` logs the warning once at startup, `netkeeper posture` and the Settings page list it as a note on the `profile_visits` budget row (since #340, the note itself appears with `netkeeper posture --details` or under **Show details**; the summary shows a note count), `GET /linkedin/budget` returns it as `risk_warning`, and arming scheduled runs (`netkeeper linkedin schedule arm` and the LinkedIn page's dialog) shows it before you confirm. The warning reads: "Profile visits are set to N a day, above the 100 a day netkeeper was designed around. More visits a day make it more likely that LinkedIn restricts your account or asks you to verify it. Heat still slows runs down after LinkedIn throttles a visit." A posture note is information, not a warning: it does not change the verdict or the exit code, so the report stays clear above 100 a day.
 
@@ -1169,7 +1171,7 @@ profile_visits_per_day = 60
 # profile_visits_per_week = 300
 inbox_polls_per_day = 8
 li_messages_auto_per_day = 15
-li_prefills_per_day = 10
+li_prefills_per_day = 15
 warmup_start = 20
 warmup_step = 10
 

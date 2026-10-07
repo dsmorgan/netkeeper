@@ -79,7 +79,11 @@ from netkeeper.linkedin.page_profiles import PageProfiles
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.services import message_send, route_breaker, runs
-from netkeeper.services.budgets import profile_visit_risk_warning
+from netkeeper.services.budgets import (
+    ActionClass,
+    li_message_risk_warning,
+    profile_visit_risk_warning,
+)
 from netkeeper.services.connections_sync import sync_connections
 from netkeeper.services.enrichment import enrich_contacts
 from netkeeper.services.events import Event, EventBus
@@ -617,11 +621,16 @@ def serve_app(settings: Settings) -> FastAPI:
     """The app ``netkeeper serve`` runs: ``create_app`` with the extractor.
 
     Logs the profile-visit risk warning (#318) once here, at startup, when the
-    daily limit is above the level netkeeper was designed around.
+    daily limit is above the level netkeeper was designed around, and the same for
+    a LinkedIn message budget above 20 a day (#447).
     """
     risk = profile_visit_risk_warning(settings.linkedin.budget)
     if risk is not None:
         log.warning("%s", risk)
+    for action in (ActionClass.LI_PREFILLS, ActionClass.LI_MESSAGES_AUTO):
+        message_risk = li_message_risk_warning(action, settings.linkedin.budget)
+        if message_risk is not None:
+            log.warning("%s", message_risk)
     return create_app(settings, extractor=serve_extractor(settings))
 
 

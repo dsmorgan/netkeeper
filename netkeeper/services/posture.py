@@ -98,6 +98,7 @@ from netkeeper.services.budgets import (
     ActionClass,
     BudgetSnapshot,
     configured_default,
+    li_message_risk_warning,
     profile_visit_risk_warning,
     profile_visit_week_note,
 )
@@ -1309,6 +1310,9 @@ def _budget(action: ActionClass, snapshot: BudgetSnapshot, settings: Settings) -
         short_week = profile_visit_week_note(budget)
         if short_week is not None:
             notes.append(short_week)
+    message_risk = li_message_risk_warning(action, budget)
+    if message_risk is not None:
+        notes.append(message_risk)  # the user's call (#447), so a note, never gating
     hard_week = HARD_MAX_PER_WEEK.get(action)
     asked_week = configured_default(action, budget, "week")
     if hard_week is not None and asked_week is not None and asked_week > hard_week:
