@@ -378,7 +378,7 @@ class Enrollment(UserOwned, TimestampMixin, Base):
         ForeignKey("sync_runs.id", ondelete="SET NULL")
     )
     # A person overrode the recent-contact guard for this contact at enrollment (#446;
-    # 0037): when, who, and the cutoff, the newest outbound contact the guard saw then.
+    # 0038): when, who, and the cutoff, the newest outbound contact the guard saw then.
     # Outbound contact dated at or before the cutoff no longer counts as recent at any
     # step fire; anything dated after it still does. Every other guard applies as
     # always. NULL for an enrollment the guard passed, and cleared by a contact merge.
