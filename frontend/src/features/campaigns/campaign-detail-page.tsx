@@ -66,6 +66,7 @@ import {
   toLocalInput,
 } from './format'
 import { ENROLLMENTS_ANCHOR, ResultsCard } from './results-card'
+import { RecentContactOverride } from './recent-contact-override'
 import { ReviewPanel } from './review-panel'
 import { UNCHOSEN, startIso, type StartChoice } from './start'
 import { StartPicker } from './start-picker'
@@ -706,7 +707,8 @@ function AudienceCard({ campaign }: { campaign: Campaign }) {
   const draft = campaign.status === 'draft'
 
   const run = useMutation({
-    mutationFn: (replace: boolean) => enroll(campaign.id, replace ? sourceBody(source) : {}),
+    mutationFn: (replace: boolean) =>
+      enroll(campaign.id, { ...(replace ? sourceBody(source) : {}), confirm: false }),
     onSuccess: async (answer) => {
       setOutcome(answer)
       setChanging(false)
@@ -736,6 +738,12 @@ function AudienceCard({ campaign }: { campaign: Campaign }) {
             <p className="font-medium">{outcome.summary}</p>
             {outcome.excluded > 0 && (
               <p className="text-muted-foreground">This time: {outcome.excluded_summary}</p>
+            )}
+            {(outcome.overridden ?? 0) > 0 && (
+              <p>
+                The recent-contact guard was overridden for {outcome.overridden}{' '}
+                {outcome.overridden === 1 ? 'contact' : 'contacts'}.
+              </p>
             )}
           </div>
         )}
@@ -782,6 +790,9 @@ function AudienceCard({ campaign }: { campaign: Campaign }) {
           </p>
         )}
         {run.isError && <ErrorNote label="Nobody was enrolled." error={run.error} />}
+        {hasSource && !changing && (
+          <RecentContactOverride campaign={campaign} onEnrolled={setOutcome} />
+        )}
       </CardContent>
     </Card>
   )
@@ -953,6 +964,12 @@ function EnrollmentsCard({
                     </td>
                     <td className="py-2 text-muted-foreground">
                       {row.exit_reason ?? ''}
+                      {row.recent_contact_override_at != null && (
+                        <span role="note" className="block">
+                          Enrolled although contacted recently: recent-contact guard overridden{' '}
+                          {formatWhen(row.recent_contact_override_at)}
+                        </span>
+                      )}
                       {row.not_sent_error != null && (
                         <span role="note" className="block text-destructive">
                           {row.not_sent_error}

@@ -305,6 +305,13 @@ class EnrollOutcome:
     excluded_summary: str = ""
     """The same line over the contacts this call considered, so an exclusion that never
     becomes an enrollment is named too, such as the self contact ("1 yourself", #342)."""
+    overridden: int = 0
+    """Contacts enrolled only because the person overrode the recent-contact guard (#446)."""
+
+
+OVERRIDE_MAX: Final = 500
+"""The most contacts one enroll call overrides the recent-contact guard for (#446): as
+many as the review's guard details list."""
 
 
 def _drop_outside(session: Session, user: User, campaign_id: int, keep: set[int]) -> int:
@@ -339,8 +346,17 @@ def enroll(
     list_id: int | None = None,
     filter: FilterTree | None = None,
     contact_ids: Sequence[int] = (),
+    override_recent_contact: Sequence[int] = (),
+    confirm: bool = False,
 ) -> EnrollOutcome:
     """Enroll the campaign's audience as ``pending``, through the guards.
+
+    ``override_recent_contact`` (#446) names contacts to enroll although someone
+    contacted them within the campaign's recent-contact window. It needs
+    ``confirm``, cannot change the source in the same call, and each contact must be
+    in the audience (the source's, or one of ``contact_ids``). Only the recent-contact
+    guard is set aside, and only for those contacts: every other guard still decides
+    (:func:`campaign_engine.enroll`).
 
     ``list_id`` or ``filter`` replaces the campaign's audience source, and only on a
     ``draft``: the pending enrollments whose contacts the new source does not hold
@@ -353,6 +369,19 @@ def enroll(
     campaign = get_campaign(session, user, campaign_id)
     if list_id is not None and filter is not None:
         raise InvalidCampaign("the audience is a list or a filter, not both")
+    chosen = set(override_recent_contact)
+    if chosen:
+        if not confirm:
+            raise InvalidCampaign(
+                "overriding the recent-contact guard needs confirm: those contacts were"
+                " contacted recently"
+            )
+        if list_id is not None or filter is not None:
+            raise InvalidCampaign("override the recent-contact guard without changing the source")
+        if len(chosen) > OVERRIDE_MAX:
+            raise InvalidCampaign(
+                f"override the recent-contact guard for at most {OVERRIDE_MAX} contacts at once"
+            )
     removed = 0
     if list_id is not None or filter is not None:
         if campaign.status is not CampaignStatus.DRAFT:
@@ -369,8 +398,15 @@ def enroll(
         raise InvalidCampaign(
             f"campaign {campaign_id} has no audience: give a list, a filter or contacts"
         )
+    outside = sorted(chosen - ids)
+    if outside:
+        raise InvalidCampaign(
+            f"not in campaign {campaign_id}'s audience: {', '.join(map(str, outside))}"
+        )
     try:
-        result = campaign_engine.enroll(session, user, campaign_id, ids, now=now)
+        result = campaign_engine.enroll(
+            session, user, campaign_id, ids, now=now, override_recent_contact=chosen
+        )
     except campaign_engine.CampaignEngineError as exc:
         raise CampaignConflict(str(exc)) from exc
     pending = session.scalar(
@@ -392,6 +428,7 @@ def enroll(
         excluded_summary=skip_summary(
             result.verdicts, contacted_within_days=campaign.contacted_within_days_guard
         ),
+        overridden=len(result.overridden),
     )
 
 

@@ -188,7 +188,13 @@ export function guardDetails(overrides: Partial<GuardDetails> = {}): GuardDetail
     will_start: 2,
     not_enrolled: 0,
     skipped: [
-      { contact_id: 403, name: 'Tobias Wrenfield', reasons: ['do-not-contact', 'no email'] },
+      {
+        contact_id: 403,
+        name: 'Tobias Wrenfield',
+        reasons: ['do-not-contact', 'no email'],
+        reason_codes: ['do_not_contact', 'no_email'],
+        overridable: false,
+      },
     ],
     skipped_total: 1,
     prior_contact_note: null,

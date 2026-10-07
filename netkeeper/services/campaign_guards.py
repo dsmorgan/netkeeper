@@ -158,6 +158,12 @@ class ContactFacts:
     ``do_not_send`` is why the do-not-send list holds the contact's address (#238,
     Part B), or ``None``: an opt-out on any of the contact's addresses, otherwise
     the entry for its sendable address.
+
+    ``recent_contact_override_at`` is when a person overrode the recent-contact guard
+    for this contact's enrollment (#446), or ``None``. :func:`load_facts` never sets
+    it: the enrollment's own record does (:func:`check_step`,
+    :func:`load_pending_facts`), or :func:`check_enrollment` for the contacts a person
+    chose. It is about :func:`not_contacted_recently` alone.
     """
 
     contact_id: int
@@ -176,6 +182,7 @@ class ContactFacts:
     address_bounced_elsewhere: bool
     duplicate_address: bool
     do_not_send: DoNotSendReason | None
+    recent_contact_override_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,10 +202,16 @@ class GuardPolicy:
 
 @dataclass(frozen=True, slots=True)
 class Verdict:
-    """One contact's result: eligible when ``reasons`` is empty."""
+    """One contact's result: eligible when ``reasons`` is empty.
+
+    ``overridden``: a person's override of the recent-contact guard (#446) is what
+    kept :attr:`Reason.CONTACTED_RECENTLY` out of ``reasons``. Only
+    :func:`check_enrollment` sets it, for the contacts it was asked to override.
+    """
 
     contact_id: int
     reasons: tuple[Reason, ...]
+    overridden: bool = False
 
     @property
     def eligible(self) -> bool:
@@ -328,9 +341,16 @@ def not_contacted_recently(
     Outbound means any :data:`~netkeeper.crm.interactions.OUTBOUND_KINDS`
     interaction (an email, a LinkedIn message, a call, a meeting) or a sent
     campaign message. A time in the future counts as recent.
+
+    A person's override (#446, ``facts.recent_contact_override_at``) sets aside the
+    contact made at or before the override, and nothing newer: contact after it
+    counts as recent again.
     """
     days = policy.contacted_within_days
     if days <= 0 or facts.last_outbound_at is None:
+        return None
+    overridden_at = facts.recent_contact_override_at
+    if overridden_at is not None and facts.last_outbound_at <= overridden_at:
         return None
     if facts.last_outbound_at > now - timedelta(days=days):
         return Reason.CONTACTED_RECENTLY
@@ -629,6 +649,7 @@ def load_pending_facts(
     sendable = {c: f.sendable_email for c, f in facts.items() if f.sendable_email is not None}
     holders = _address_holders(session, user, sendable, campaign_id) if sendable else []
     others = _other_enrollments(session, user, sorted(facts), campaign_id) if facts else []
+    overrides = _recent_contact_overrides(session, user, [e for e, _ in pending])
     out: dict[int, ContactFacts] = {}
     for enrollment_id, contact_id in pending:
         found = facts.get(contact_id)
@@ -647,8 +668,26 @@ def load_pending_facts(
                 for held_by, holder, other in others
                 if holder == contact_id and held_by < enrollment_id
             ),
+            recent_contact_override_at=overrides.get(enrollment_id),
         )
     return out
+
+
+def _recent_contact_overrides(
+    session: Session, user: User, enrollment_ids: Sequence[int]
+) -> dict[int, datetime]:
+    """When a person overrode the recent-contact guard, per enrollment that has one (#446)."""
+    if not enrollment_ids:
+        return {}
+    rows = session.execute(
+        scoped(user, Enrollment)
+        .with_only_columns(Enrollment.id, Enrollment.recent_contact_override_at)
+        .where(
+            Enrollment.id.in_(sorted(set(enrollment_ids))),
+            Enrollment.recent_contact_override_at.is_not(None),
+        )
+    )
+    return {enrollment_id: at for enrollment_id, at in rows if at is not None}
 
 
 def _listed(
@@ -804,6 +843,60 @@ def _last_outbound(
     return newest
 
 
+@dataclass(frozen=True, slots=True)
+class LastContact:
+    """The newest outbound contact with someone, and how (#446).
+
+    ``channel`` is ``email``, ``linkedin``, ``call`` or ``meeting``: an outbound
+    interaction's kind, or a sent campaign message's channel."""
+
+    at: datetime
+    channel: str
+
+
+_INTERACTION_CHANNELS: Final[Mapping[str, str]] = {
+    "email_out": "email",
+    "li_out": "linkedin",
+    "call": "call",
+    "meeting": "meeting",
+}
+
+
+def last_contact(session: Session, user: User, ids: Collection[int]) -> dict[int, LastContact]:
+    """Per contact, the newest outbound interaction or sent message, as the recent-contact
+    guard counts it at enrollment (:func:`_last_outbound`), with its channel. For the
+    review's list of contacts that guard skips (#446). Reads only."""
+    wanted = sorted(set(ids))
+    if not wanted:
+        return {}
+    newest: dict[int, LastContact] = {}
+
+    def keep(contact_id: int, at: datetime | None, channel: str) -> None:
+        if at is None:
+            return
+        held = newest.get(contact_id)
+        if held is None or at > held.at:
+            newest[contact_id] = LastContact(at, channel)
+
+    for contact_id, kind, at in session.execute(
+        scoped(user, Interaction)
+        .with_only_columns(Interaction.contact_id, Interaction.kind, Interaction.at)
+        .where(Interaction.contact_id.in_(wanted), Interaction.kind.in_(OUTBOUND_KINDS))
+    ):
+        keep(contact_id, at, _INTERACTION_CHANNELS.get(str(kind), str(kind)))
+    for contact_id, channel, sent_at in session.execute(
+        scoped(user, Message)
+        .with_only_columns(Message.contact_id, Message.channel, Message.sent_at)
+        .where(
+            Message.contact_id.in_(wanted),
+            Message.direction == MessageDirection.OUT,
+            Message.sent_at.is_not(None),
+        )
+    ):
+        keep(contact_id, sent_at, str(channel))
+    return newest
+
+
 # --- the two moments ----------------------------------------------------------------
 
 
@@ -814,8 +907,15 @@ def check_enrollment(
     contact_ids: Collection[int],
     *,
     now: datetime,
+    override_recent_contact: Collection[int] = (),
 ) -> list[Verdict]:
     """The verdict for enrolling each of ``contact_ids`` in ``campaign``, in id order.
+
+    ``override_recent_contact`` names the contacts a person chose to enroll although
+    someone contacted them recently (#446). For exactly those, outbound contact up to
+    ``now`` does not count (:func:`not_contacted_recently`); every other guard runs
+    as always, and so does the recent-contact guard for every other contact. A
+    verdict the override changed has :attr:`Verdict.overridden`.
 
     Checked against the first step's channel, the one the enrollment will send
     first; each later step is checked again when it fires (:func:`check_step`).
@@ -837,7 +937,18 @@ def check_enrollment(
         return [Verdict(i, (Reason.UNKNOWN_CHANNEL,)) for i in ids]
     facts = load_facts(session, user, ids, campaign_id=campaign.id)
     policy = GuardPolicy(contacted_within_days=window)
-    return [check_contact(facts.get(i), i, first, policy, now=now) for i in ids]
+    chosen = frozenset(override_recent_contact)
+    verdicts: list[Verdict] = []
+    for i in ids:
+        verdict = check_contact(facts.get(i), i, first, policy, now=now)
+        found = facts.get(i)
+        if i in chosen and found is not None and Reason.CONTACTED_RECENTLY in verdict.reasons:
+            again = check_contact(
+                replace(found, recent_contact_override_at=now), i, first, policy, now=now
+            )
+            verdict = replace(again, overridden=True)
+        verdicts.append(verdict)
+    return verdicts
 
 
 def check_audience(
@@ -939,15 +1050,24 @@ def check_step(
     # another session made (expire_on_commit=False).
     state = session.execute(
         scoped(user, Enrollment)
-        .with_only_columns(Enrollment.status, Campaign.status, Campaign.contacted_within_days_guard)
+        .with_only_columns(
+            Enrollment.status,
+            Campaign.status,
+            Campaign.contacted_within_days_guard,
+            Enrollment.recent_contact_override_at,
+        )
         .join(Campaign, Campaign.id == Enrollment.campaign_id)
         .where(Enrollment.id == enrollment.id, Campaign.user_id == user.id)
     ).one_or_none()
     if state is None:  # deleted since: nothing to send to
         return Verdict(enrollment.contact_id, (Reason.ENROLLMENT_NOT_ACTIVE,))
-    enrollment_status, campaign_status, window = state
+    enrollment_status, campaign_status, window, overridden_at = state
+    contact_facts = facts.get(enrollment.contact_id)
+    if contact_facts is not None and overridden_at is not None:
+        # The person's override (#446): contact before it is set aside, newer is not.
+        contact_facts = replace(contact_facts, recent_contact_override_at=overridden_at)
     verdict = check_contact(
-        facts.get(enrollment.contact_id),
+        contact_facts,
         enrollment.contact_id,
         step.channel,
         GuardPolicy(contacted_within_days=window),

@@ -448,6 +448,8 @@ class EnrollResult:
     enrolled: tuple[int, ...]
     already: tuple[int, ...]
     verdicts: tuple[Verdict, ...]
+    overridden: tuple[int, ...] = ()
+    """The contacts enrolled only because a person overrode the recent-contact guard (#446)."""
 
 
 ENROLLING_STATUSES: Final[frozenset[CampaignStatus]] = frozenset(
@@ -458,12 +460,24 @@ contact it sends to went through the review (spec 11.8)."""
 
 
 def enroll(
-    session: Session, user: User, campaign_id: int, contact_ids: Collection[int], *, now: datetime
+    session: Session,
+    user: User,
+    campaign_id: int,
+    contact_ids: Collection[int],
+    *,
+    now: datetime,
+    override_recent_contact: Collection[int] = (),
 ) -> EnrollResult:
     """Enroll each of ``contact_ids`` the guards pass (spec 11.9) as ``pending``.
 
     A contact already enrolled in the campaign is left as it is and reported in
     ``already``. Refused for a campaign past review (:data:`ENROLLING_STATUSES`).
+
+    ``override_recent_contact`` (#446) sets aside the recent-contact guard for exactly
+    those contacts, and no other guard
+    (:func:`~netkeeper.services.campaign_guards.check_enrollment`). An enrollment the
+    override let in records when and by whom, and keeps the override at every step
+    fire for contact made before it (:func:`~netkeeper.services.campaign_guards.check_step`).
     """
     _require_writer(session, "enroll")
     campaign = _campaign(session, user, campaign_id)
@@ -478,19 +492,33 @@ def enroll(
         )
     )
     fresh = [i for i in ids if i not in present]
-    verdicts = check_enrollment(session, user, campaign, fresh, now=now)
+    verdicts = check_enrollment(
+        session, user, campaign, fresh, now=now, override_recent_contact=override_recent_contact
+    )
     enrolled = [v.contact_id for v in verdicts if v.eligible]
+    overridden = [v.contact_id for v in verdicts if v.eligible and v.overridden]
     _ask_for_linkedin_ids(session, user, campaign_id, verdicts)
-    for contact_id in enrolled:
+    for verdict in verdicts:
+        if not verdict.eligible:
+            continue
         session.add(
             Enrollment(
                 user_id=user.id,
                 campaign_id=campaign_id,
-                contact_id=contact_id,
+                contact_id=verdict.contact_id,
                 status=EnrollmentStatus.PENDING,
+                recent_contact_override_at=now if verdict.overridden else None,
+                recent_contact_override_by=user.id if verdict.overridden else None,
             )
         )
     session.flush()
+    if overridden:
+        log.info(
+            "campaign %d: recent-contact guard overridden for %d contacts by user %d",
+            campaign_id,
+            len(overridden),
+            user.id,
+        )
     log.info(
         "campaign %d: %d enrolled, %d excluded, %d already in",
         campaign_id,
@@ -498,7 +526,7 @@ def enroll(
         len(verdicts) - len(enrolled),
         len(present),
     )
-    return EnrollResult(tuple(enrolled), tuple(sorted(present)), tuple(verdicts))
+    return EnrollResult(tuple(enrolled), tuple(sorted(present)), tuple(verdicts), tuple(overridden))
 
 
 LINKEDIN_ENRICH_PRIORITY: Final = 1

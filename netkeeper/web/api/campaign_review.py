@@ -134,6 +134,16 @@ class SkippedContactOut(BaseModel):
     name: str
     reasons: list[str]
     """Every reason that applies; the summary counts only the first."""
+    reason_codes: list[str] = Field(default_factory=list)
+    """The same reasons as codes, such as ``contacted_recently``."""
+    overridable: bool = False
+    """Only the recent-contact guard skips this contact, and it is not enrolled yet, so
+    ``POST /campaigns/{id}/enroll`` with ``override_recent_contact`` may enroll it
+    (#446). No other guard is ever overridable."""
+    last_contacted_at: datetime | None = None
+    """When someone last contacted it, for a contact the recent-contact guard skips."""
+    last_contacted_channel: str | None = None
+    """How: ``email``, ``linkedin``, ``call`` or ``meeting``."""
 
 
 class GuardsOut(BaseModel):
@@ -438,7 +448,15 @@ def get_guards(
         will_start=report.will_start,
         not_enrolled=report.not_enrolled,
         skipped=[
-            SkippedContactOut(contact_id=c.contact_id, name=c.name, reasons=list(c.reasons))
+            SkippedContactOut(
+                contact_id=c.contact_id,
+                name=c.name,
+                reasons=list(c.reasons),
+                reason_codes=list(c.reason_codes),
+                overridable=c.overridable,
+                last_contacted_at=c.last_contacted_at,
+                last_contacted_channel=c.last_contacted_channel,
+            )
             for c in report.skipped
         ],
         skipped_total=report.skipped_total,

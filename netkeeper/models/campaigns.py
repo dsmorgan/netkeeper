@@ -377,6 +377,14 @@ class Enrollment(UserOwned, TimestampMixin, Base):
     last_prefill_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("sync_runs.id", ondelete="SET NULL")
     )
+    # A person overrode the recent-contact guard for this contact at enrollment (#446;
+    # 0037): when, and who. Outbound contact at or before ``recent_contact_override_at``
+    # no longer counts as recent at any step fire; anything newer still does. Every
+    # other guard applies as always. NULL for an enrollment the guard passed.
+    recent_contact_override_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # The user id, without a foreign key: ``UserOwned``'s ``user`` relationship needs
+    # ``user_id`` to be the only key to ``users``. Today it is always ``user_id``.
+    recent_contact_override_by: Mapped[int | None] = mapped_column(Integer)
 
     campaign: Mapped[Campaign] = relationship()
 

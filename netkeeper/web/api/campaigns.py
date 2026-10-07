@@ -119,6 +119,16 @@ class EnrollIn(BaseModel):
     list_id: int | None = None
     filter: FilterTree | None = None
     contact_ids: Annotated[list[int], Field(max_length=10_000)] = Field(default_factory=list)
+    override_recent_contact: Annotated[list[int], Field(max_length=service.OVERRIDE_MAX)] = Field(
+        default_factory=list
+    )
+    """Contacts to enroll although someone contacted them within the campaign's
+    recent-contact window (#446). Each must be in the audience. Only the recent-contact
+    guard is set aside, and only for these contacts: every other guard still applies.
+    Needs ``confirm`` and no new ``list_id`` or ``filter``."""
+    confirm: bool = False
+    """Required with ``override_recent_contact``: the person confirmed enrolling
+    contacts that were contacted recently."""
 
 
 class EnrollOut(BaseModel):
@@ -133,6 +143,8 @@ class EnrollOut(BaseModel):
     excluded_summary: str
     """The guards' line over the contacts this call considered (#342): an excluded contact
     that never becomes an enrollment, such as yourself, is named here."""
+    overridden: int = 0
+    """Contacts enrolled only because of ``override_recent_contact`` (#446)."""
 
 
 class CampaignSummaryOut(BaseModel):
@@ -337,6 +349,11 @@ class EnrollmentOut(BaseModel):
     try_again: bool = False
     """The latest LinkedIn prefill typed nothing, and the step waits for you to click
     Try again in the LinkedIn queue (#445). It has no next action until then."""
+    recent_contact_override_at: datetime | None = None
+    """When a person enrolled this contact although it was contacted recently,
+    overriding the recent-contact guard (#446); None when the guard passed it."""
+    recent_contact_override_by: int | None = None
+    """The user who overrode the recent-contact guard."""
 
 
 class EnrollmentPageOut(BaseModel):
@@ -539,6 +556,8 @@ def list_enrollments(
                 try_again=row.enrollment.status is EnrollmentStatus.ACTIVE
                 and (row.enrollment.current_step or 0) + 1 in on_linkedin
                 and linkedin_steps.needs_try_again(row.enrollment),
+                recent_contact_override_at=row.enrollment.recent_contact_override_at,
+                recent_contact_override_by=row.enrollment.recent_contact_override_by,
             )
             for row in page.items
         ],
@@ -552,7 +571,10 @@ def list_enrollments(
     responses={**NOT_FOUND, **CONFLICT, **INVALID},
 )
 def enroll(campaign_id: int, body: EnrollIn, session: SessionDep, user: CurrentUser) -> EnrollOut:
-    """Enroll the audience as ``pending``, through the guards (spec 11.9)."""
+    """Enroll the audience as ``pending``, through the guards (spec 11.9).
+
+    ``override_recent_contact`` with ``confirm`` enrolls those contacts although they
+    were contacted recently (#446); every other guard still applies to them."""
     with translate_errors():
         outcome = service.enroll(
             session,
@@ -562,6 +584,8 @@ def enroll(campaign_id: int, body: EnrollIn, session: SessionDep, user: CurrentU
             list_id=body.list_id,
             filter=body.filter,
             contact_ids=body.contact_ids,
+            override_recent_contact=body.override_recent_contact,
+            confirm=body.confirm,
         )
     return EnrollOut(
         campaign_id=outcome.campaign_id,
@@ -572,6 +596,7 @@ def enroll(campaign_id: int, body: EnrollIn, session: SessionDep, user: CurrentU
         pending=outcome.pending,
         summary=outcome.summary,
         excluded_summary=outcome.excluded_summary,
+        overridden=outcome.overridden,
     )
 
 

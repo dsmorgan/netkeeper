@@ -20,12 +20,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns import templates as template_service
 from netkeeper.crm import lists as list_service
+from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import session_scope
 from netkeeper.models import (
     Campaign,
     CampaignStatus,
     Enrollment,
     EnrollmentStatus,
+    InteractionKind,
     ListKind,
     Mailbox,
     MailboxStatus,
@@ -162,6 +164,7 @@ async def test_enroll_list_and_status(running_app: FastAPI, client: httpx.AsyncC
         "pending": 2,
         "summary": "2 will start, 1 skipped (1 do-not-contact)",
         "excluded_summary": "2 will start, 1 skipped (1 do-not-contact)",
+        "overridden": 0,
     }
     listed = (await client.get("/api/v1/campaigns")).json()
     assert [(c["id"], c["status"], c["steps"], c["enrollments"]) for c in listed] == [
@@ -174,6 +177,75 @@ async def test_enroll_list_and_status(running_app: FastAPI, client: httpx.AsyncC
     assert (
         await client.post("/api/v1/campaigns/999/enroll", json={}, headers=CSRF)
     ).status_code == 404
+
+
+async def test_enroll_overrides_the_recent_contact_guard_for_named_contacts_only(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """#446: only the recent-contact guard, only for the ids named, and only confirmed."""
+    seed = _seed(running_app)
+    contacted = datetime.now(UTC) - timedelta(days=3)
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = _local(session)
+        recent, extra = (
+            factories.make_contact(session, user, emails=[f"r{n}@contacts.example"]).id
+            for n in range(2)
+        )
+        list_service.add_members(session, user, seed["list_id"], [recent, extra])
+        # The do-not-contact one was contacted recently too: still never overridable.
+        for contact_id in (recent, extra, seed["contacts"][2]):
+            add_interaction(session, user, contact_id, InteractionKind.EMAIL_OUT, contacted)
+    created = await _create(client, seed)
+    base = f"/api/v1/campaigns/{created['id']}"
+    first = (await client.post(f"{base}/enroll", json={}, headers=CSRF)).json()
+    assert first["summary"] == (
+        "2 will start, 3 skipped (2 contacted in the last 30 days, 1 do-not-contact)"
+    )
+
+    guards = (await client.get(f"{base}/review/guards")).json()
+    rows = {row["contact_id"]: row for row in guards["skipped"]}
+    assert rows[recent]["overridable"] and rows[recent]["reason_codes"] == ["contacted_recently"]
+    assert rows[recent]["last_contacted_channel"] == "email"
+    assert rows[recent]["last_contacted_at"] is not None
+    assert not rows[seed["contacts"][2]]["overridable"]
+
+    unconfirmed = await client.post(
+        f"{base}/enroll", json={"override_recent_contact": [recent]}, headers=CSRF
+    )
+    assert unconfirmed.status_code == 422
+    assert "confirm" in unconfirmed.text
+    blocked = await client.post(
+        f"{base}/enroll",
+        json={"override_recent_contact": [seed["contacts"][2]], "confirm": True},
+        headers=CSRF,
+    )
+    assert blocked.status_code == 200, blocked.text
+    assert (blocked.json()["enrolled"], blocked.json()["overridden"]) == (0, 0)
+
+    overridden = await client.post(
+        f"{base}/enroll",
+        json={"override_recent_contact": [recent], "confirm": True},
+        headers=CSRF,
+    )
+    assert overridden.status_code == 200, overridden.text
+    assert (overridden.json()["enrolled"], overridden.json()["overridden"]) == (1, 1)
+    assert overridden.json()["summary"] == (
+        "3 will start, 2 skipped (1 do-not-contact, 1 contacted in the last 30 days)"
+    )
+
+    page = (await client.get(f"{base}/enrollments")).json()
+    by_contact = {row["contact_id"]: row for row in page["items"]}
+    assert set(by_contact) == {seed["contacts"][0], seed["contacts"][1], recent}
+    assert by_contact[recent]["recent_contact_override_at"] is not None
+    assert by_contact[recent]["recent_contact_override_by"] == _user_id(running_app)
+    assert by_contact[seed["contacts"][0]]["recent_contact_override_at"] is None
+
+
+def _user_id(app: FastAPI) -> int:
+    factory: sessionmaker[Session] = app.state.session_factory
+    with session_scope(factory) as session:
+        return _local(session).id
 
 
 async def test_enroll_from_a_filter_sets_the_source_on_a_draft_only(

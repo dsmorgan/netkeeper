@@ -116,9 +116,11 @@ from netkeeper.services import campaign_engine, mailboxes
 from netkeeper.services.campaign_guards import (
     UNSENDABLE_EMAIL_STATUSES,
     GuardPolicy,
+    Reason,
     Verdict,
     check_audience,
     check_contact,
+    last_contact,
     load_pending_facts,
     reason_label,
     skip_summary,
@@ -296,11 +298,21 @@ GUARD_DETAILS_MAX: Final = 500
 
 @dataclass(frozen=True, slots=True)
 class SkippedContact:
-    """One contact the guards skip, with every reason, not only the one counted."""
+    """One contact the guards skip, with every reason, not only the one counted.
+
+    ``reason_codes`` are the same reasons as :class:`~netkeeper.services.campaign_guards.Reason`
+    values. ``overridable``: the recent-contact guard is the only one that skips this
+    contact, and it is not enrolled yet, so a person may enroll it anyway (#446).
+    ``last_contacted_at`` and ``last_contacted_channel`` say when and how someone last
+    contacted it, for a contact the recent-contact guard skips; otherwise ``None``."""
 
     contact_id: int
     name: str
     reasons: tuple[str, ...]
+    reason_codes: tuple[str, ...] = ()
+    overridable: bool = False
+    last_contacted_at: datetime | None = None
+    last_contacted_channel: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,19 +396,33 @@ def guard_report(
     excluded = [v for v in verdicts if not v.eligible]
     shown = excluded[:limit]
     contacts = _contacts(session, user, [v.contact_id for v in shown])
-    skipped = tuple(
-        SkippedContact(
-            v.contact_id,
-            _contact_name(contacts.get(v.contact_id)),
-            tuple(reason_label(r, contacted_within_days=window) for r in v.reasons),
-        )
-        for v in shown
+    recent = last_contact(
+        session,
+        user,
+        [v.contact_id for v in shown if Reason.CONTACTED_RECENTLY in v.reasons],
     )
+    skipped: list[SkippedContact] = []
+    for v in shown:
+        seen = recent.get(v.contact_id)
+        skipped.append(
+            SkippedContact(
+                v.contact_id,
+                _contact_name(contacts.get(v.contact_id)),
+                tuple(reason_label(r, contacted_within_days=window) for r in v.reasons),
+                reason_codes=tuple(str(r) for r in v.reasons),
+                # The recent-contact guard alone, and only for a contact not enrolled
+                # yet: every other guard is never overridden (#446).
+                overridable=v.reasons == (Reason.CONTACTED_RECENTLY,)
+                and v.contact_id not in enrolled,
+                last_contacted_at=None if seen is None else seen.at,
+                last_contacted_channel=None if seen is None else seen.channel,
+            )
+        )
     return GuardReport(
         summary=skip_summary(verdicts, contacted_within_days=window, enrolled=enrolled),
         will_start=len(sending),
         not_enrolled=sum(1 for v in verdicts if v.eligible and v.contact_id not in enrolled),
-        skipped=skipped,
+        skipped=tuple(skipped),
         skipped_total=len(excluded),
         prior_contact=prior_contact(session, user, sending).note(),
     )

@@ -410,6 +410,9 @@ export interface paths {
         /**
          * Enroll
          * @description Enroll the audience as ``pending``, through the guards (spec 11.9).
+         *
+         *     ``override_recent_contact`` with ``confirm`` enrolls those contacts although they
+         *     were contacted recently (#446); every other guard still applies to them.
          */
         post: operations["enroll_campaign"];
         delete?: never;
@@ -4646,11 +4649,18 @@ export interface components {
          *     any ``contact_ids``, are then enrolled through the guards.
          */
         EnrollIn: {
+            /**
+             * Confirm
+             * @default false
+             */
+            confirm: boolean;
             /** Contact Ids */
             contact_ids?: number[];
             filter?: components["schemas"]["FilterTree-Input"] | null;
             /** List Id */
             list_id?: number | null;
+            /** Override Recent Contact */
+            override_recent_contact?: number[];
         };
         /** EnrollOut */
         EnrollOut: {
@@ -4664,6 +4674,11 @@ export interface components {
             excluded: number;
             /** Excluded Summary */
             excluded_summary: string;
+            /**
+             * Overridden
+             * @default 0
+             */
+            overridden: number;
             /** Pending */
             pending: number;
             /** Removed */
@@ -4699,6 +4714,10 @@ export interface components {
             next_action_at: string | null;
             /** Not Sent Error */
             not_sent_error?: string | null;
+            /** Recent Contact Override At */
+            recent_contact_override_at?: string | null;
+            /** Recent Contact Override By */
+            recent_contact_override_by?: number | null;
             /** Replied At */
             replied_at: string | null;
             status: components["schemas"]["EnrollmentStatus"];
@@ -6971,8 +6990,19 @@ export interface components {
         SkippedContactOut: {
             /** Contact Id */
             contact_id: number;
+            /** Last Contacted At */
+            last_contacted_at?: string | null;
+            /** Last Contacted Channel */
+            last_contacted_channel?: string | null;
             /** Name */
             name: string;
+            /**
+             * Overridable
+             * @default false
+             */
+            overridable: boolean;
+            /** Reason Codes */
+            reason_codes?: string[];
             /** Reasons */
             reasons: string[];
         };
