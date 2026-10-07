@@ -25,7 +25,7 @@ import {
 import { FakeEventSource, resetFakeEventSource } from '@/test/fake-event-source'
 import { jsonResponse, mockFetch } from '@/test/fetch'
 
-import type { ReadyItem, ReadyPage, WaitingItem, WaitingPage } from './api'
+import type { ReadyItem, ReadyPage, TryAgainItem, WaitingItem, WaitingPage } from './api'
 import { ONE_AT_A_TIME, REVIEW_AND_SEND, ageText, reasonText, threadUrl } from './format'
 import { LinkedInStepsSection } from './linkedin-steps-section'
 import reasons from './prefill-reasons.json'
@@ -37,10 +37,17 @@ import {
   PARTLY_TYPED,
   PREFILL_NOTE,
   TYPED_WHOLE,
+  CONFIRM_BUBBLE_BODY,
+  CONFIRM_BUBBLE_LABEL,
+  TRY_AGAIN_NOTE,
+  TRY_AGAIN_STEP,
   TYPING,
   TYPING_WARNING,
+  budgetText,
+  confirmBubbleTitle,
   prefillEnding,
   prefillReason,
+  prefillsLeftText,
 } from './prefill-copy'
 
 const HOUR = 3_600_000
@@ -63,8 +70,35 @@ function readyItem(overrides: Partial<ReadyItem> = {}): ReadyItem {
   }
 }
 
-function readyPage(items: ReadyItem[]): ReadyPage {
-  return { items, total: items.length, by_step: {} }
+function readyPage(items: ReadyItem[], tryAgain: TryAgainItem[] = []): ReadyPage {
+  return { items, total: items.length, by_step: {}, try_again: tryAgain, prefills_left_today: 7 }
+}
+
+function tryAgainItem(
+  overrides: Partial<TryAgainItem> = {},
+  last: Partial<TryAgainItem['last_try']> = {},
+): TryAgainItem {
+  return {
+    enrollment_id: 34,
+    campaign_id: 5,
+    campaign_name: 'Autumn reconnect',
+    step_position: 1,
+    contact_id: 44,
+    contact_name: 'Wilhelmina Thorne',
+    held_until: null,
+    ...overrides,
+    last_try: {
+      reason: 'the Message control could not be clicked',
+      tries: 1,
+      run_id: 80,
+      at: hoursAgo(1),
+      click_attempted: true,
+      budget_spent: true,
+      counted_today: true,
+      needs_confirmation: true,
+      ...last,
+    },
+  }
 }
 
 function waitingItem(overrides: Partial<WaitingItem> = {}): WaitingItem {
@@ -172,7 +206,7 @@ describe('the LinkedIn queue', () => {
 
     expect(await screen.findByText(TYPING)).toBeVisible()
     expect(posts(calls, PREFILL).map((call) => call.body)).toEqual([
-      { enrollment_id: 31, next: false },
+      { enrollment_id: 31, next: false, retry: false, no_bubble_open: false },
     ])
     // One at a time: every Prefill button is off while it types.
     for (const button of screen.getAllByRole('button', { name: /^Prefill/ })) {
@@ -192,7 +226,11 @@ describe('the LinkedIn queue', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Prefill next' }))
 
-    await waitFor(() => expect(posts(calls, PREFILL).map((c) => c.body)).toEqual([{ next: true }]))
+    await waitFor(() =>
+      expect(posts(calls, PREFILL).map((c) => c.body)).toEqual([
+        { next: true, retry: false, no_bubble_open: false },
+      ]),
+    )
   })
 
   it('shows a refusal plainly, says nothing was typed, and offers no retry', async () => {
@@ -1082,5 +1120,160 @@ describe('the inbox check states (#433)', () => {
     })
     fireEvent.click(await screen.findByRole('button', { name: 'I sent it, check now' }))
     expect(await screen.findByText(/netkeeper linkedin inbox-forget-owner/)).toBeVisible()
+  })
+})
+
+describe('Try again (#445)', () => {
+  const RETRY_ACCEPTED = () =>
+    jsonResponse({ enrollment_id: 34, message_id: 72, run_id: 82, task_id: 't' }, 202)
+
+  it('lists a step that typed nothing apart, with why, its tries and the budget', async () => {
+    const { calls } = renderSection({
+      'GET /api/v1/campaigns/linkedin/ready': () =>
+        jsonResponse(readyPage([readyItem()], [tryAgainItem({}, { tries: 2 })])),
+    })
+    const list = await screen.findByRole('list', { name: 'Try again' })
+    const row = within(list).getByRole('listitem')
+    expect(row).toHaveTextContent('Wilhelmina Thorne')
+    expect(row).toHaveTextContent("Chrome didn't take netkeeper's click on Message.")
+    expect(row).toHaveTextContent('Tried 2 times in a row.')
+    expect(row).toHaveTextContent("That try used one of today's LinkedIn prefills.")
+    expect(screen.getByText(TRY_AGAIN_NOTE)).toBeVisible()
+    expect(screen.getByText(prefillsLeftText(7))).toBeVisible()
+    // Only Try again claims it: no Prefill button for it, and nothing posted on its own.
+    expect(screen.queryByRole('button', { name: 'Prefill Wilhelmina Thorne' })).toBeNull()
+    expect(
+      within(row).getByRole('button', { name: 'Try again for Wilhelmina Thorne' }),
+    ).toBeEnabled()
+    expect(posts(calls, PREFILL)).toEqual([])
+  })
+
+  it('retries at once when the last try never clicked Message', async () => {
+    const { calls } = renderSection({
+      'GET /api/v1/campaigns/linkedin/ready': () =>
+        jsonResponse(
+          readyPage(
+            [],
+            [
+              tryAgainItem(
+                {},
+                {
+                  reason: 'the browser was busy',
+                  click_attempted: null,
+                  budget_spent: false,
+                  counted_today: false,
+                  needs_confirmation: false,
+                },
+              ),
+            ],
+          ),
+        ),
+      [`POST ${PREFILL}`]: RETRY_ACCEPTED,
+      'GET /api/v1/linkedin/runs/82': () =>
+        jsonResponse(run({ id: 82, kind: 'message_send', status: 'running' })),
+    })
+    const row = within(await screen.findByRole('list', { name: 'Try again' })).getByRole('listitem')
+    expect(row).toHaveTextContent("didn't use one of today's LinkedIn prefills")
+    fireEvent.click(within(row).getByRole('button', { name: 'Try again for Wilhelmina Thorne' }))
+    await waitFor(() =>
+      expect(posts(calls, PREFILL).map((c) => c.body)).toEqual([
+        { enrollment_id: 34, next: false, retry: true, no_bubble_open: false },
+      ]),
+    )
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(await screen.findByText(TYPING)).toBeVisible()
+  })
+
+  it('asks before a retry whose last try clicked Message, and posts nothing until you confirm', async () => {
+    const { calls } = renderSection({
+      'GET /api/v1/campaigns/linkedin/ready': () => jsonResponse(readyPage([], [tryAgainItem()])),
+      [`POST ${PREFILL}`]: RETRY_ACCEPTED,
+      'GET /api/v1/linkedin/runs/82': () =>
+        jsonResponse(run({ id: 82, kind: 'message_send', status: 'running' })),
+    })
+    const button = await screen.findByRole('button', { name: 'Try again for Wilhelmina Thorne' })
+
+    fireEvent.click(button)
+    let dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent(confirmBubbleTitle('Wilhelmina Thorne'))
+    expect(dialog).toHaveTextContent(CONFIRM_BUBBLE_BODY)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(posts(calls, PREFILL)).toEqual([])
+
+    fireEvent.click(button)
+    dialog = await screen.findByRole('alertdialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: CONFIRM_BUBBLE_LABEL }))
+    await waitFor(() =>
+      expect(posts(calls, PREFILL).map((c) => c.body)).toEqual([
+        { enrollment_id: 34, next: false, retry: true, no_bubble_open: true },
+      ]),
+    )
+  })
+
+  it('keeps Try again off while another prefill is open, or the sending hours hold it', async () => {
+    renderSection({
+      'GET /api/v1/campaigns/linkedin/ready': () =>
+        jsonResponse(
+          readyPage(
+            [],
+            [
+              tryAgainItem(),
+              tryAgainItem({
+                enrollment_id: 35,
+                contact_id: 45,
+                contact_name: 'Ada Pemberton',
+                held_until: new Date(Date.now() + HOUR).toISOString(),
+              }),
+            ],
+          ),
+        ),
+      'GET /api/v1/campaigns/linkedin/waiting': () => jsonResponse(waitingPage([waitingItem()])),
+    })
+    expect(
+      await screen.findByRole('button', { name: 'Try again for Wilhelmina Thorne' }),
+    ).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Try again for Ada Pemberton' })).toBeDisabled()
+    expect(screen.getByText(ONE_AT_A_TIME)).toBeVisible()
+  })
+
+  it('shows a refused retry like any refusal', async () => {
+    renderSection({
+      'GET /api/v1/campaigns/linkedin/ready': () =>
+        jsonResponse(readyPage([], [tryAgainItem({}, { needs_confirmation: false })])),
+      [`POST ${PREFILL}`]: () =>
+        jsonResponse(
+          { detail: { enrollment_id: 34, reasons: ['browser_out_of_budget'], detail: null } },
+          409,
+        ),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Try again for Wilhelmina Thorne' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Not prefilled. Nothing was typed in Chrome.')
+    expect(alert).toHaveTextContent("today's LinkedIn prefill budget is spent")
+  })
+
+  it('says in words whether the last try counted against today', () => {
+    expect(budgetText({ budget_spent: true, counted_today: true })).toBe(
+      "That try used one of today's LinkedIn prefills.",
+    )
+    expect(budgetText({ budget_spent: true, counted_today: false })).toMatch(/earlier day/)
+    expect(budgetText({ budget_spent: false, counted_today: false })).toMatch(/didn't use/)
+    expect(budgetText({ budget_spent: null, counted_today: null })).toMatch(/can't tell/)
+    expect(prefillsLeftText(0)).toBe("Today's LinkedIn prefill budget is spent.")
+    expect(prefillsLeftText(1)).toBe("1 of today's LinkedIn prefills is left.")
+  })
+
+  it('points a not_typed ending at Try again, and never a part-typed or too long one', () => {
+    expect(prefillEnding('not_typed', 'the browser was busy')?.steps).toContain(TRY_AGAIN_STEP)
+    for (const reason of ['partially_typed', 'unknown', 'too_long']) {
+      expect(prefillEnding(reason, 'x')?.steps).not.toContain(TRY_AGAIN_STEP)
+    }
+  })
+
+  it('says each new refusal in plain words', () => {
+    for (const reason of ['try_again_needed', 'nothing_to_retry', 'confirm_no_bubble']) {
+      expect(reasonText(reason)).not.toBe(reason.replace(/_/g, ' '))
+    }
   })
 })

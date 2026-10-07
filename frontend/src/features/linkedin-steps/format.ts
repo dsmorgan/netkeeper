@@ -59,6 +59,11 @@ export const REASON_TEXT: Readonly<Record<string, string>> = {
   campaign_at_cap: "the campaign has reached today's cap",
   campaign_blocked: 'the campaign is blocked, for example because it has no steps',
   in_another_campaign: "they're in another active campaign",
+  try_again_needed: 'the last prefill typed nothing; use Try again',
+  nothing_to_retry:
+    'only a step whose last prefill typed nothing can be tried again; a part-typed one must be cleared and discarded first, and one too long waits for the template to change',
+  confirm_no_bubble:
+    'the last try clicked Message; confirm that no message bubble for this contact is open in Chrome',
 }
 
 /** One reason as words: the table above, a lint rule's own reason, or the code itself. */

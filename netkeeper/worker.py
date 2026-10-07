@@ -347,7 +347,9 @@ class BrowserWorker:
         return dataclasses.replace(base, linkedin=self._settings)
 
     async def _prefill_not_typed(self, run_id: int, user_id: int, reason: str) -> None:
-        """Give a prefill's claim back, ``not_typed``, when its run ended before any key."""
+        """Give a prefill's claim back, ``not_typed``, when its run ended before the runner
+        started, so no budget was spent (#445). The click keys stay out, as for any path
+        that ran no source. A run the runner recorded is not recorded again."""
         await off_loop(
             message_send.record_quietly,
             self._factory,
@@ -356,6 +358,7 @@ class BrowserWorker:
             MessageOutcome(MessageOutcomeKind.NOT_TYPED, reason, None, 0),
             settings=self._prefill_settings(),
             now=self._clock(),
+            budget_spent=False,
         )
 
     async def _run_job(

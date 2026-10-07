@@ -15,6 +15,8 @@ import type { components } from '@/api/schema'
 type Schemas = components['schemas']
 
 export type ReadyItem = Schemas['ReadyOut']
+export type TryAgainItem = Schemas['TryAgainOut']
+export type LastTry = Schemas['LastTryOut']
 export type ReadyPage = Schemas['ReadyPage']
 export type WaitingItem = Schemas['WaitingOut']
 export type WaitingPage = Schemas['WaitingPage']
@@ -124,13 +126,34 @@ export const stepOptionsQuery = queryOptions({
   staleTime: 60_000,
 })
 
+/** One enrollment's step, or Try again on one whose latest prefill typed nothing (#445). */
+export type PrefillTarget =
+  | { enrollmentId: number; retry?: false }
+  | { enrollmentId: number; retry: true; noBubbleOpen: boolean }
+
 /**
  * Claim one LinkedIn step and start its prefill: `202` with the run, before any
- * browser work. A refusal throws a {@link LinkedInStepError} with its reasons.
+ * browser work. A refusal throws a {@link LinkedInStepError} with its reasons. Try again
+ * (`retry`) is always one enrollment; `noBubbleOpen` says the person checked Chrome.
  */
-export async function prefill(target: { enrollmentId: number } | 'next'): Promise<PrefillAccepted> {
+export async function prefill(target: PrefillTarget | 'next'): Promise<PrefillAccepted> {
   const { data, error, response } = await api.POST('/api/v1/campaigns/linkedin/prefill', {
-    body: target === 'next' ? { next: true } : { enrollment_id: target.enrollmentId, next: false },
+    body:
+      target === 'next'
+        ? { next: true, retry: false, no_bubble_open: false }
+        : target.retry === true
+          ? {
+              enrollment_id: target.enrollmentId,
+              next: false,
+              retry: true,
+              no_bubble_open: target.noBubbleOpen,
+            }
+          : {
+              enrollment_id: target.enrollmentId,
+              next: false,
+              retry: false,
+              no_bubble_open: false,
+            },
   })
   if (data === undefined) fail(response.status, error, 'could not start the prefill')
   return data

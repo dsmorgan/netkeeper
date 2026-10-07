@@ -3743,9 +3743,25 @@ def campaigns_linkedin_ready(ctx: typer.Context) -> None:
             )
             for row in rows
         ]
+        retries = [
+            f"enrollment {row.enrollment.id}: {_contact_label(row.contact)},"
+            f" {row.campaign.name!r} step {row.step.position}: {row.last.reason}"
+            f" ({row.last.tries} in a row)"
+            + ("; confirm no message bubble is open" if row.last.needs_confirmation else "")
+            for row in linkedin_steps.try_again(
+                session, user, now=datetime.now(UTC), settings=settings
+            )
+        ]
     typer.echo(f"{total} ready to prefill")
     for line in lines:
         typer.echo(f"  {line}")
+    if retries:
+        typer.echo(
+            f"{len(retries)} typed nothing last time; try again with"
+            " `netkeeper campaigns linkedin prefill <enrollment id> --retry`"
+        )
+        for line in retries:
+            typer.echo(f"  {line}")
 
 
 @campaigns_linkedin_app.command("waiting")
@@ -3776,16 +3792,37 @@ def campaigns_linkedin_prefill(
     next_ready: Annotated[
         bool, typer.Option("--next", help="Prefill the oldest ready LinkedIn step.")
     ] = False,
+    retry: Annotated[
+        bool,
+        typer.Option(
+            "--retry", help="Try again: the step's latest prefill typed nothing (not_typed)."
+        ),
+    ] = False,
+    no_bubble_open: Annotated[
+        bool,
+        typer.Option(
+            "--no-bubble-open",
+            help="With --retry: you checked that no message bubble for the contact is open"
+            " in Chrome. Needed when the last try clicked Message.",
+        ),
+    ] = False,
 ) -> None:
     """Prefill one LinkedIn step, in this terminal, while you watch Chrome
     (POST /campaigns/linkedin/prefill).
 
     It types the message into LinkedIn's composer and stops: it never sends. Send it
     yourself, then `netkeeper campaigns linkedin check <message id>`, or let the next
-    inbox poll find it. One prefill is open at a time.
+    inbox poll find it. One prefill is open at a time. A step whose latest prefill typed
+    nothing waits for `--retry`.
     """
     if (enrollment_id is None) == (not next_ready):
         typer.echo("error: give an enrollment id or --next, not both", err=True)
+        raise typer.Exit(code=1)
+    if retry and enrollment_id is None:
+        typer.echo("error: --retry needs an enrollment id: a retry is one at a time", err=True)
+        raise typer.Exit(code=1)
+    if no_bubble_open and not retry:
+        typer.echo("error: --no-bubble-open goes with --retry only", err=True)
         raise typer.Exit(code=1)
     settings = _load_settings_or_exit(ctx.ensure_object(CliState))
     with _campaign_db() as factory:
@@ -3798,7 +3835,13 @@ def campaigns_linkedin_prefill(
                     linkedin_steps.claim_next(session, user, now=now, settings=settings)
                     if enrollment_id is None
                     else linkedin_steps.claim_prefill(
-                        session, user, enrollment_id, now=now, settings=settings
+                        session,
+                        user,
+                        enrollment_id,
+                        now=now,
+                        settings=settings,
+                        retry=retry,
+                        no_bubble_open=no_bubble_open,
                     )
                 )
             except LookupError as exc:

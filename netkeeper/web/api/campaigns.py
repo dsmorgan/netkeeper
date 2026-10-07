@@ -55,7 +55,7 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.models.base import utcnow
-from netkeeper.services import campaign_results
+from netkeeper.services import campaign_results, linkedin_steps
 from netkeeper.services import campaigns as service
 from netkeeper.services.campaign_engine import hours_for
 from netkeeper.web.api.campaign_review import MissingOut
@@ -334,6 +334,9 @@ class EnrollmentOut(BaseModel):
     not_sent_error: str | None = None
     """Why the latest try sent nothing, or why the enrollment is blocked: a step template
     that names a removed ``me.*`` field says so (#342). None once something sends."""
+    try_again: bool = False
+    """The latest LinkedIn prefill typed nothing, and the step waits for you to click
+    Try again in the LinkedIn queue (#445). It has no next action until then."""
 
 
 class EnrollmentPageOut(BaseModel):
@@ -532,6 +535,8 @@ def list_enrollments(
                 exit_reason=row.enrollment.exit_reason,
                 replied_at=row.enrollment.replied_at,
                 not_sent_error=row.enrollment.not_sent_error,
+                try_again=row.enrollment.status is EnrollmentStatus.ACTIVE
+                and linkedin_steps.needs_try_again(row.enrollment),
             )
             for row in page.items
         ],

@@ -62,13 +62,23 @@ again. The run left ``running`` is failed at the next start.
 - ``prefilled``: ``prefilled_at`` (when typing started, before the first key), the
   conversation if the page loaded it, and the step counts as fired. The enrollment
   waits until the message is seen sent (P4-02).
-- ``not_typed`` or ``too_long`` (refused before any key): the claim is given back, as
-  an email send that sent nothing is: the message row is deleted, the reason goes on
-  the enrollment, and it is ready again :func:`~netkeeper.services.campaign_engine.retry_after`
-  later. :data:`NOT_TYPED_PARK_AFTER` in a row park it for a person; ``too_long``
-  parks it at once, since the same body would be too long again.
+- ``not_typed`` or ``too_long`` (refused before any key): the claim is given back: the
+  message row is deleted, the reason and the run go on the enrollment
+  (``not_sent_error``, ``last_prefill_run_id``), and it is parked for a person. Nothing
+  claims it again on its own (#445).
 - ``partially_typed`` or ``unknown``: ``failed`` with the reason, and the enrollment
   parked. Never retyped: a person clears the composer.
+
+**Try again** (#445). A step whose latest prefill ended ``not_typed``
+(:func:`needs_try_again`) leaves the ready list and is listed by :func:`try_again`
+instead. Only a claim with ``retry=True``, which a person asks for one enrollment at a
+time, claims it again (``try_again_needed`` otherwise), and every check above still
+runs, except the due time. When the failed run clicked **Message**, or nothing says it
+didn't, the retry also needs ``no_bubble_open=True``: the person says no message bubble
+for that contact is open in Chrome (``confirm_no_bubble`` otherwise), since a page with
+two bubbles refuses and a bubble may hold a draft. ``too_long``, ``partially_typed``
+and ``unknown`` are never retried (``nothing_to_retry``): a body too long waits for the
+template to change, and a half-typed message waits for a discard.
 
 **Stale.** The engine's tick turns a ``prefilled`` message ``stale``
 :data:`~netkeeper.services.campaign_engine.PREFILL_STALE_AFTER` after its prefill
@@ -142,19 +152,21 @@ from netkeeper.services.linkedin_session import last_session_evidence, session_f
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "NOT_TYPED_PARK_AFTER",
     "PREFILL_STALE_AFTER",
     "PrefillClaim",
     "Refusal",
     "claim_prefill",
     "discard",
+    "needs_try_again",
     "ready_to_prefill",
     "record_prefill_outcome",
+    "try_again",
 ]
 
-NOT_TYPED_PARK_AFTER: Final = 2
-"""This many prefills in a row of the same enrollment refused before any key
-(``not_typed`` or ``too_long``) park it for a person."""
+NOT_TYPED_PREFIX: Final = "not_typed:"
+"""How an enrollment's ``not_sent_error`` starts after a prefill that typed nothing
+(:func:`record_prefill_outcome`). With ``not_sent_count`` above zero, the step waits for
+a person to try it again (:func:`needs_try_again`, #445)."""
 
 READY_PAGE_MAX: Final = 50
 """The most rows one :func:`ready_to_prefill` or :func:`waiting_for_you` call answers."""
@@ -203,6 +215,13 @@ class Refusal(enum.StrEnum):
     RUN_REFUSED = "run_refused"
     RENDERED_ERRORS = "rendered_errors"
     INBOX_STALE = "linkedin_inbox_stale"
+    TRY_AGAIN_NEEDED = "try_again_needed"
+    """The latest prefill typed nothing: only Try again (``retry``) claims it (#445)."""
+    NOTHING_TO_RETRY = "nothing_to_retry"
+    """A retry of a step whose latest prefill did not end ``not_typed`` (#445)."""
+    CONFIRM_NO_BUBBLE = "confirm_no_bubble"
+    """A retry after a run that clicked Message, without the person saying no message
+    bubble for the contact is open (#445)."""
 
 
 #: Refusals about the user, not the enrollment: every other enrollment would get the
@@ -272,8 +291,27 @@ class ReadyPrefill:
     held_until: datetime | None
 
 
+def needs_try_again(enrollment: Enrollment) -> bool:
+    """Whether the enrollment's step waits for a person to try its prefill again: the
+    latest prefill typed nothing (``not_typed``, #445). :func:`_needs_try_again_sql` is
+    the same rule in SQL; a test holds the two together."""
+    return enrollment.not_sent_count > 0 and (enrollment.not_sent_error or "").startswith(
+        NOT_TYPED_PREFIX
+    )
+
+
+def _needs_try_again_sql() -> ColumnElement[bool]:
+    """:func:`needs_try_again` in SQL. Never NULL, so its negation keeps an enrollment
+    with no ``not_sent_error`` (``NOT NULL`` would drop it from the ready list)."""
+    return and_(
+        Enrollment.not_sent_count > 0,
+        func.coalesce(Enrollment.not_sent_error, "").startswith(NOT_TYPED_PREFIX, autoescape=True),
+    )
+
+
 def _ready_statement(user: User, now: datetime, campaign_id: int | None) -> Select[Enrollment]:
-    """The tick's selection, narrowed to LinkedIn steps (and one campaign's, if given)."""
+    """The tick's selection, narrowed to LinkedIn steps (and one campaign's, if given).
+    A step waiting for Try again is :func:`try_again`'s, never here (#445)."""
     statement = (
         engine._selected(user, now)
         .join(Contact, Contact.id == Enrollment.contact_id)
@@ -281,6 +319,7 @@ def _ready_statement(user: User, now: datetime, campaign_id: int | None) -> Sele
             Contact.user_id == user.id,
             not_self(),  # never the self contact (#342)
             CampaignStep.channel == TemplateChannel.LINKEDIN,
+            ~_needs_try_again_sql(),
         )
     )
     if campaign_id is not None:
@@ -351,6 +390,176 @@ def ready_to_prefill(
     return ready, total or 0
 
 
+# --- try again (#445) -------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class LastTry:
+    """What the latest prefill of a step waiting for Try again did. The run's facts are
+    None when it isn't on file (a run deleted, or a try recorded before 0037)."""
+
+    reason: str
+    """The run's reason, the fixed words after ``not_typed: ``. Never message text."""
+    tries: int
+    """Prefills in a row that typed nothing."""
+    run_id: int | None
+    at: datetime | None
+    """When the run ended."""
+    click_attempted: bool | None
+    """Whether the run clicked Message, so a message bubble may be open."""
+    budget_spent: bool | None
+    """Whether the run spent a ``li_prefills`` unit (and a ``profile_visits`` one)."""
+    counted_today: bool | None
+    """``budget_spent``, and spent on today's budget (the user's local day)."""
+
+    @property
+    def needs_confirmation(self) -> bool:
+        """A retry asks the person to say no bubble is open unless the run surely never
+        clicked Message: it said so, or it stopped before spending its budget, which comes
+        before the navigation and so before any click (ADR 0007)."""
+        return self.click_attempted is not False and self.budget_spent is not False
+
+
+def last_try(session: Session, user: User, enrollment: Enrollment, *, now: datetime) -> LastTry:
+    """The latest try of ``enrollment``'s step, which :func:`needs_try_again`. Read-only."""
+    reason = (enrollment.not_sent_error or "").removeprefix(NOT_TYPED_PREFIX).strip()
+    run = (
+        None
+        if enrollment.last_prefill_run_id is None
+        else get_scoped(session, user, SyncRun, enrollment.last_prefill_run_id)
+    )
+    if run is None or run.stop_reason != MessageOutcomeKind.NOT_TYPED.value:
+        return LastTry(reason, enrollment.not_sent_count, None, None, None, None, None)
+    counts = run.counts_json or {}
+    attempted = counts.get("message_click_attempted")
+    spent = counts.get("li_prefills_spent")
+    click_attempted = attempted if isinstance(attempted, bool) else None
+    budget_spent = spent if isinstance(spent, bool) else None
+    counted_today = (
+        None
+        if budget_spent is None
+        else budget_spent
+        and budgets.LocalPeriod.at(user, run.started_at).day
+        == budgets.LocalPeriod.at(user, now).day
+    )
+    return LastTry(
+        reason,
+        enrollment.not_sent_count,
+        run.id,
+        run.completed_at,
+        click_attempted,
+        budget_spent,
+        counted_today,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TryAgainPrefill:
+    """One LinkedIn step whose latest prefill typed nothing. ``held_until`` is when the
+    sending hours let a retry go, or None for now."""
+
+    enrollment: Enrollment
+    campaign: Campaign
+    step: CampaignStep
+    contact: Contact
+    last: LastTry
+    held_until: datetime | None
+
+
+def try_again(
+    session: Session,
+    user: User,
+    *,
+    now: datetime,
+    settings: Settings,
+    campaign_id: int | None = None,
+) -> list[TryAgainPrefill]:
+    """Steps whose latest prefill ended ``not_typed``, oldest try first, at most
+    :data:`READY_PAGE_MAX`: an ``active`` enrollment of an ``active`` campaign that has
+    started, its next step on LinkedIn and not claimed, whatever its due time. Each waits
+    for a person to click Try again. Read-only."""
+    statement = (
+        scoped(user, Enrollment)
+        .join(Campaign, Campaign.id == Enrollment.campaign_id)
+        .join(CampaignStep, engine._next_step_join(user))
+        .join(Contact, Contact.id == Enrollment.contact_id)
+        .where(
+            Campaign.user_id == user.id,
+            Contact.user_id == user.id,
+            not_self(),
+            Campaign.status == CampaignStatus.ACTIVE,
+            Campaign.starts_at.is_not(None),
+            Campaign.starts_at <= now,
+            Enrollment.status == EnrollmentStatus.ACTIVE,
+            CampaignStep.channel == TemplateChannel.LINKEDIN,
+            _needs_try_again_sql(),
+            # A retry claimed and not recorded yet is the open prefill, not a row here.
+            ~scoped(user, Message)
+            .with_only_columns(Message.id)
+            .where(
+                Message.enrollment_id == Enrollment.id,
+                Message.step_id == CampaignStep.id,
+                Message.direction == MessageDirection.OUT,
+            )
+            .exists(),
+        )
+    )
+    if campaign_id is not None:
+        statement = statement.where(Enrollment.campaign_id == campaign_id)
+    rows = session.execute(
+        statement.add_columns(Campaign, CampaignStep, Contact)
+        .order_by(Enrollment.not_sent_since, Enrollment.id)
+        .limit(READY_PAGE_MAX)
+    )
+    hours = engine.hours_for(session, user)
+    slots: schedule.Suggested | None = None
+    with contextlib.suppress(schedule.ScheduleError):
+        slots = engine.slots_for(settings, user)
+    found: list[TryAgainPrefill] = []
+    for enrollment, campaign, step, contact in rows:
+        held = (
+            None
+            if hours is None or slots is None
+            else schedule.hold(
+                now,
+                now,
+                slots=slots,
+                hours=hours,
+                starts_at=campaign.starts_at if campaign.start_chosen else None,
+                first_step=enrollment.current_step is None,
+            )
+        )
+        last = last_try(session, user, enrollment, now=now)
+        found.append(TryAgainPrefill(enrollment, campaign, step, contact, last, held))
+    return found
+
+
+def prefills_left_today(session: Session, user: User, *, now: datetime, settings: Settings) -> int:
+    """How many ``li_prefills`` units today's budget still has. Read-only."""
+    snapshot = budgets.status(
+        session,
+        user,
+        account_id_for(session, user),
+        budgets.ActionClass.LI_PREFILLS,
+        now=now,
+        settings=settings.linkedin.budget,
+    )
+    return snapshot.day.remaining
+
+
+def _no_retry_detail(enrollment: Enrollment) -> str:
+    """Why a retry was refused, in one line: what the latest prefill ended as."""
+    error = enrollment.not_sent_error or ""
+    if error.startswith("too_long:"):
+        return "the message is too long to type; it waits until the template changes"
+    if error.startswith(PARTLY_TYPED_PREFIXES):
+        return (
+            "part of the message may be in the composer: clear it in Chrome, then discard"
+            " it in Waiting for you"
+        )
+    return "only a step whose latest prefill typed nothing (not_typed) can be tried again"
+
+
 # --- the claim ------------------------------------------------------------------------
 
 
@@ -418,13 +627,23 @@ class _Claimer:
     """One claim: see :func:`claim_prefill`."""
 
     def __init__(
-        self, session: Session, user: User, now: datetime, settings: Settings, start_run: StartRun
+        self,
+        session: Session,
+        user: User,
+        now: datetime,
+        settings: Settings,
+        start_run: StartRun,
+        *,
+        retry: bool = False,
+        no_bubble_open: bool = False,
     ) -> None:
         self.session = session
         self.user = user
         self.now = now
         self.settings = settings
         self.start_run = start_run
+        self.retry = retry
+        self.no_bubble_open = no_bubble_open
 
     def refuse(
         self, enrollment: Enrollment, *reasons: str, detail: str | None = None
@@ -466,9 +685,37 @@ class _Claimer:
             return self.refuse(enrollment, Refusal.NO_STEP)
         if step.channel is not TemplateChannel.LINKEDIN:
             return self.refuse(enrollment, Refusal.NOT_A_LINKEDIN_STEP)
-        due = enrollment.next_action_at
-        if due is None or due > now:
-            return self.refuse(enrollment, Skip.NOT_DUE)
+        # Try again (#445): a step whose latest prefill typed nothing is claimed only by a
+        # retry, and a retry claims only such a step. Neither refusal changes anything.
+        waiting = needs_try_again(enrollment)
+        if self.retry and not waiting:
+            return self.refuse(
+                enrollment, Refusal.NOTHING_TO_RETRY, detail=_no_retry_detail(enrollment)
+            )
+        if waiting and not self.retry:
+            return self.refuse(
+                enrollment,
+                Refusal.TRY_AGAIN_NEEDED,
+                detail="the latest prefill typed nothing; use Try again",
+            )
+        due: datetime | None
+        if self.retry:
+            if (
+                last_try(session, user, enrollment, now=now).needs_confirmation
+                and not self.no_bubble_open
+            ):
+                return self.refuse(
+                    enrollment,
+                    Refusal.CONFIRM_NO_BUBBLE,
+                    detail="the last try clicked Message; close any message bubble for this"
+                    " contact in Chrome, then confirm",
+                )
+            # A person asked now: the step's own due time (it is parked) doesn't hold it.
+            due = now
+        else:
+            due = enrollment.next_action_at
+            if due is None or due > now:
+                return self.refuse(enrollment, Skip.NOT_DUE)
 
         # The sending hours, by the tick's own rule (#338).
         try:
@@ -656,6 +903,8 @@ def claim_prefill(
     now: datetime,
     settings: Settings,
     start_run: StartRun = start_message_send_run,
+    retry: bool = False,
+    no_bubble_open: bool = False,
 ) -> PrefillClaim:
     """Claim the enrollment's due LinkedIn step for one prefill, or say why not.
 
@@ -665,13 +914,19 @@ def claim_prefill(
     later), so the caller commits either way. ``start_run`` records the run; tests
     stand in for it while ``message_send`` has no runner (P4-03).
 
+    ``retry`` is Try again (#445): it claims only a step whose latest prefill ended
+    ``not_typed``, whatever its due time, and needs ``no_bubble_open`` when that run
+    clicked Message (or nothing says it didn't). Only a person's request passes either.
+
     Raises :class:`LookupError` for an enrollment that is not ``user``'s. Needs a
     writer session.
     """
     engine._require_writer(session, "claim_prefill")
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
-    return _Claimer(session, user, now, settings, start_run).claim(enrollment_id)
+    return _Claimer(
+        session, user, now, settings, start_run, retry=retry, no_bubble_open=no_bubble_open
+    ).claim(enrollment_id)
 
 
 def claim_next(
@@ -748,6 +1003,11 @@ def record_prefill_outcome(
         return False
     reason = f"{outcome.kind.value}: {outcome.reason}"[: engine.ERROR_MAX_LENGTH]
     kind = outcome.kind
+    # The run goes on the enrollment, whatever the outcome: after a ``not_typed`` it is
+    # the only way back to whether the run clicked Message or spent budget (#445).
+    engine._enrollment(
+        session, user, message.enrollment_id
+    ).last_prefill_run_id = message.sync_run_id
     if kind is MessageOutcomeKind.PREFILLED:
         message.status = MessageStatus.PREFILLED
         message.prefilled_at = now if prefilled_at is None else prefilled_at
@@ -759,21 +1019,17 @@ def record_prefill_outcome(
         log.info("message %d is prefilled; it waits for the person to send it", message.id)
         return True
     if kind in (MessageOutcomeKind.NOT_TYPED, MessageOutcomeKind.TOO_LONG):
-        # Too long now is too long next time: parked at once, never retried.
-        _give_back(
-            session,
-            user,
-            settings,
-            message,
-            reason,
-            now=now,
-            park=kind is MessageOutcomeKind.TOO_LONG,
-        )
+        # Parked either way. A not_typed step waits for Try again (#445); too long now is
+        # too long next time, so a too_long one is never retried.
+        _give_back(session, user, message, reason, now=now)
         return True
-    # partially_typed, unknown: what the composer holds is not known. Never retyped.
+    # partially_typed, unknown: what the composer holds is not known. Never retyped. The
+    # enrollment says so, not an earlier try's not_typed, which Try again would act on.
     message.status = MessageStatus.FAILED
     message.error = reason
+    engine._clear_not_sent(session, user, message.enrollment_id)
     enrollment = engine._enrollment(session, user, message.enrollment_id)
+    enrollment.not_sent_error = reason
     enrollment.next_action_at = None
     session.flush()
     log.warning(
@@ -786,44 +1042,24 @@ def record_prefill_outcome(
 
 
 def _give_back(
-    session: Session,
-    user: User,
-    settings: Settings,
-    message: Message,
-    reason: str,
-    *,
-    now: datetime,
-    park: bool = False,
+    session: Session, user: User, message: Message, reason: str, *, now: datetime
 ) -> None:
     """Nothing was typed: the row goes, so the step is free to be claimed again, and the
-    enrollment is ready again later, or parked after :data:`NOT_TYPED_PARK_AFTER` in a row
-    (at once with ``park``: a body too long)."""
+    enrollment is parked for a person (#445). It never comes back on a timer: a
+    ``not_typed`` step waits for Try again (:func:`try_again`), and a ``too_long`` one
+    for the template to change."""
     enrollment = engine._enrollment(session, user, message.enrollment_id)
     enrollment.not_sent_count += 1
     enrollment.not_sent_since = enrollment.not_sent_since or now
     enrollment.not_sent_error = reason
-    tries = enrollment.not_sent_count
+    enrollment.next_action_at = None
     session.delete(message)
     session.flush()
-    if park or tries >= NOT_TYPED_PARK_AFTER:
-        enrollment.next_action_at = None
-        log.warning(
-            "enrollment %d: %d prefills in a row typed nothing; it waits for a person",
-            enrollment.id,
-            tries,
-        )
-        return
-    # A paused enrollment keeps a due time for the resume; an ended one has none.
-    if enrollment.status not in (EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED):
-        return
-    due = now + engine.retry_after(tries)
-    window = engine.hours_for(session, user)
-    if window is not None:
-        with contextlib.suppress(schedule.ScheduleError):
-            due = schedule.next_opening(due, window, engine.slots_for(settings, user))
-    enrollment.next_action_at = due
-    session.flush()
-    log.info("enrollment %d: the prefill typed nothing; ready again at %s", enrollment.id, due)
+    log.info(
+        "enrollment %d: %d prefills in a row typed nothing; it waits for a person",
+        enrollment.id,
+        enrollment.not_sent_count,
+    )
 
 
 # --- what waits for the person ---------------------------------------------------------
@@ -966,8 +1202,12 @@ def discard(
     message.status = MessageStatus.DISCARDED
     message.discarded_at = now
     message.error = None
+    enrollment = engine._enrollment(session, user, message.enrollment_id)
+    if partly_typed and (enrollment.not_sent_error or "").startswith(PARTLY_TYPED_PREFIXES):
+        # The enrollment's note named the partly typed message; it's let go now.
+        engine._clear_not_sent(session, user, enrollment.id)
     session.flush()
-    if partly_typed and engine._enrollment(session, user, message.enrollment_id).next_action_at:
+    if partly_typed and enrollment.next_action_at:
         # The enrollment has moved on since (a send seen, a new due time, a merge): the
         # discard only lets the bubble go. It never advances the enrollment again.
         log.info("message %d discarded; its enrollment had already moved on", message.id)

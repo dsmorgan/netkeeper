@@ -3046,3 +3046,101 @@ def test_0036_holds_one_open_linkedin_prefill_per_user(migration_engine: Engine)
             text("UPDATE messages SET channel = 'linkedin', status = 'scheduled' WHERE id = 3")
         )
         assert _count(connection, "messages") == 3
+
+
+# --- the run behind an enrollment's latest prefill (0037, #445) ----------------------------
+
+
+def _migration_0037() -> Any:
+    path = VERSIONS_DIR / "0037_enrollment_last_prefill_run.py"
+    spec = importlib.util.spec_from_file_location("migration_0037", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _seed_enrollments_that_tried(connection: Connection) -> None:
+    """Enrollment 1 typed nothing last time; 2 was too long; 3 waits on an email retry; 4
+    is a not_typed whose count was cleared. Each has a due time."""
+    _seed_a_sent_campaign(connection)
+    for id, error, count in (
+        (2, "too_long: the message is too long to type", 1),
+        (3, "rate limited", 2),
+        (4, "not_typed: the browser was busy", 0),
+    ):
+        _insert_contact(connection, id=id, user_id=1)
+        _insert_enrollment(connection, id=id, campaign_id=1, contact_id=id)
+        connection.execute(
+            text(
+                "UPDATE enrollments SET not_sent_error = :e, not_sent_count = :n,"
+                " next_action_at = :t WHERE id = :id"
+            ),
+            {"e": error, "n": count, "t": STAMP, "id": id},
+        )
+    connection.execute(
+        text(
+            "UPDATE enrollments SET not_sent_error = :e, not_sent_count = 1,"
+            " next_action_at = :t WHERE id = 1"
+        ),
+        {"e": "not_typed: the Message control could not be clicked", "t": STAMP},
+    )
+
+
+def test_0037_adds_the_run_and_parks_what_typed_nothing(migration_engine: Engine) -> None:
+    previous = _migration_0037().down_revision
+    migrations.upgrade(migration_engine, previous)
+    with migration_engine.begin() as connection:
+        _seed_enrollments_that_tried(connection)
+    migrations.upgrade(migration_engine, "0037")
+    columns = {c["name"] for c in inspect(migration_engine).get_columns("enrollments")}
+    assert "last_prefill_run_id" in columns
+    with migration_engine.begin() as connection:
+        due: dict[int, Any] = dict(
+            connection.execute(text("SELECT id, next_action_at FROM enrollments ORDER BY id")).all()
+        )
+        # Only the not_typed one still counted loses its due time: Try again claims it.
+        assert due[1] is None
+        assert all(due[id] is not None for id in (2, 3, 4))
+        assert (
+            connection.execute(
+                text("SELECT last_prefill_run_id FROM enrollments WHERE id = 1")
+            ).scalar_one()
+            is None
+        )
+        connection.execute(
+            text(
+                "INSERT INTO linkedin_accounts (user_id, label, created_at, updated_at)"
+                " VALUES (1, 'default', :t, :t)"
+            ),
+            {"t": STAMP},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO sync_runs (id, user_id, linkedin_account_id, kind, status, trigger,"
+                " started_at, browser_mode, created_at, updated_at)"
+                " VALUES (1, 1, 1, 'message_send', 'aborted', 'manual', :t, 'attach', :t, :t)"
+            ),
+            {"t": STAMP},
+        )
+        connection.execute(text("UPDATE enrollments SET last_prefill_run_id = 1 WHERE id = 1"))
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        connection.execute(text("UPDATE enrollments SET last_prefill_run_id = 99 WHERE id = 2"))
+    with migration_engine.begin() as connection:
+        connection.execute(text("DELETE FROM sync_runs WHERE id = 1"))
+        kept = connection.execute(text("SELECT last_prefill_run_id FROM enrollments WHERE id = 1"))
+        assert kept.scalar_one() is None  # SET NULL: the enrollment outlives the run
+        assert _count(connection, "enrollments") == 4
+
+
+def test_0037_downgrades_to_enrollments_without_the_run(migration_engine: Engine) -> None:
+    previous = _migration_0037().down_revision
+    migrations.upgrade(migration_engine, "0037")
+    with migration_engine.begin() as connection:
+        _seed_enrollments_that_tried(connection)
+    migrations.downgrade(migration_engine, previous)
+    columns = {c["name"] for c in inspect(migration_engine).get_columns("enrollments")}
+    assert "last_prefill_run_id" not in columns
+    with migration_engine.begin() as connection:
+        assert _count(connection, "enrollments") == 4
+    migrations.upgrade(migration_engine, "0037")

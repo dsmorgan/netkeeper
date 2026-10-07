@@ -1034,6 +1034,32 @@ def test_linkedin_prefill_refused_writes_nothing(cli_db: sessionmaker[Session]) 
     assert both.exit_code == 1
 
 
+def test_linkedin_ready_lists_a_step_that_typed_nothing_for_retry(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """#445: a not_typed step is listed apart, with the retry command; the flags check."""
+    enrollment_id, _ = _linkedin_enrollment(cli_db)
+    with session_scope(cli_db, write=True) as session:
+        enrollment = get_scoped(session, _local(session), Enrollment, enrollment_id)
+        assert enrollment is not None
+        enrollment.not_sent_count = 1
+        enrollment.not_sent_error = "not_typed: the browser was busy"
+        enrollment.next_action_at = None
+    output = _ok("campaigns", "linkedin", "ready")
+    assert "0 ready to prefill" in output
+    assert "1 typed nothing last time" in output and "--retry" in output
+    assert f"enrollment {enrollment_id}: Fictional Lane" in output
+    assert "the browser was busy (1 in a row); confirm no message bubble is open" in output
+
+    for args in (("--next", "--retry"), (str(enrollment_id), "--no-bubble-open")):
+        refused = _run("campaigns", "linkedin", "prefill", *args)
+        assert refused.exit_code == 1
+    unconfirmed = _run("campaigns", "linkedin", "prefill", str(enrollment_id), "--retry")
+    assert unconfirmed.exit_code == 1 and "confirm_no_bubble" in unconfirmed.output
+    with session_scope(cli_db) as session:
+        assert session.scalars(scoped(_local(session), Message)).all() == []
+
+
 def test_linkedin_waiting_and_discard(cli_db: sessionmaker[Session]) -> None:
     _, message_id = _linkedin_enrollment(
         cli_db, status=MessageStatus.PREFILLED, sent_at=None, prefilled_at=datetime.now(UTC)

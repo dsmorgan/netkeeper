@@ -2,16 +2,20 @@
 
 - ``GET /campaigns/linkedin/ready``: due LinkedIn steps, oldest first, each ready to
   prefill once its ``held_until`` (the sending hours) has passed. ``campaign_id`` keeps
-  one campaign's, with its count at each step (``by_step``, #383).
+  one campaign's, with its count at each step (``by_step``, #383). ``try_again`` lists
+  the steps whose latest prefill typed nothing, with what that try did, and
+  ``prefills_left_today`` today's ``li_prefills`` budget (#445).
 - ``GET /campaigns/linkedin/options``: whether the builder may offer ``auto_send``.
 - ``GET /campaigns/linkedin/waiting``: ``prefilled`` and ``stale`` messages, waiting
   for you to send or discard them, and ``interrupted`` ones (claimed, their run over
   with no outcome), waiting for you to discard them. ``campaign_id`` keeps one
   campaign's (#383).
 - ``POST /campaigns/linkedin/prefill`` with ``{"enrollment_id": n}`` or
-  ``{"next": true}``: claims the step (every check in
-  :mod:`netkeeper.services.linkedin_steps`) and submits its ``message_send`` run to
-  the task runner. ``202`` with the run id. It never waits for the browser (spec 9.9).
+  ``{"next": true}``, or Try again with ``{"enrollment_id": n, "retry": true}`` and,
+  after a try that clicked Message, ``"no_bubble_open": true`` (#445): claims the step
+  (every check in :mod:`netkeeper.services.linkedin_steps`) and submits its
+  ``message_send`` run to the task runner. ``202`` with the run id. It never waits for
+  the browser (spec 9.9).
 - ``POST /campaigns/linkedin/messages/{id}/check``: "I sent it, check now": a manual
   inbox poll.
 - ``POST /campaigns/linkedin/messages/{id}/discard``: you will not send it. The step
@@ -81,12 +85,54 @@ class ReadyOut(BaseModel):
     """When the sending hours let it go; null for now."""
 
 
+class LastTryOut(BaseModel):
+    """What the latest prefill of a step did, when it typed nothing (#445). No message
+    text."""
+
+    reason: str
+    """The run's reason, in fixed words (``prefill-copy.ts`` turns them into a sentence)."""
+    tries: int
+    """Prefills in a row that typed nothing."""
+    run_id: int | None
+    at: datetime | None
+    """When that run ended; null when the run isn't on file."""
+    click_attempted: bool | None
+    """Whether that run clicked Message, so a message bubble may be open; null when not
+    known."""
+    budget_spent: bool | None
+    """Whether that run spent a ``li_prefills`` unit; null when not known."""
+    counted_today: bool | None
+    """Whether it counted against today's ``li_prefills`` budget; null when not known."""
+    needs_confirmation: bool
+    """Try again asks you to confirm that no message bubble for the contact is open."""
+
+
+class TryAgainOut(BaseModel):
+    """A LinkedIn step whose latest prefill typed nothing: it waits for you to try it
+    again. No message text."""
+
+    enrollment_id: int
+    campaign_id: int
+    campaign_name: str
+    step_position: int
+    contact_id: int
+    contact_name: str
+    held_until: datetime | None
+    """When the sending hours let a retry go; null for now."""
+    last_try: LastTryOut
+
+
 class ReadyPage(BaseModel):
     items: list[ReadyOut]
     total: int
     by_step: dict[int, int] = {}
     """With ``campaign_id``: how many are ready at each step position of that campaign,
     every page's worth (#383). Empty without it."""
+    try_again: list[TryAgainOut] = []
+    """Steps whose latest prefill typed nothing, oldest try first (#445). Never in
+    ``items``: only Try again claims them."""
+    prefills_left_today: int | None = None
+    """How many prefills today's ``li_prefills`` budget still allows."""
 
 
 class OptionsOut(BaseModel):
@@ -130,11 +176,20 @@ class PrefillIn(BaseModel):
 
     enrollment_id: int | None = None
     next: bool = False
+    retry: bool = False
+    """Try again (#445): the enrollment's step, whose latest prefill typed nothing."""
+    no_bubble_open: bool = False
+    """With ``retry``: you checked that no message bubble for the contact is open in
+    Chrome. Needed when the last try clicked Message."""
 
     @model_validator(mode="after")
     def _one_of(self) -> PrefillIn:
         if (self.enrollment_id is None) == (not self.next):
             raise ValueError('give either "enrollment_id" or "next": true, not both')
+        if self.retry and self.enrollment_id is None:
+            raise ValueError('"retry" needs an "enrollment_id": a retry is one at a time')
+        if self.no_bubble_open and not self.retry:
+            raise ValueError('"no_bubble_open" goes with "retry" only')
         return self
 
 
@@ -187,6 +242,8 @@ def list_ready(
         if campaign_id is None
         else service.ready_by_step(session, user, now=now, campaign_id=campaign_id)
     )
+    settings = _settings(request)
+    retries = service.try_again(session, user, now=now, settings=settings, campaign_id=campaign_id)
     return ReadyPage(
         items=[
             ReadyOut(
@@ -203,6 +260,29 @@ def list_ready(
         ],
         total=total,
         by_step=by_step,
+        try_again=[
+            TryAgainOut(
+                enrollment_id=row.enrollment.id,
+                campaign_id=row.campaign.id,
+                campaign_name=row.campaign.name,
+                step_position=row.step.position,
+                contact_id=row.contact.id,
+                contact_name=_name(row.contact),
+                held_until=row.held_until,
+                last_try=LastTryOut(
+                    reason=row.last.reason,
+                    tries=row.last.tries,
+                    run_id=row.last.run_id,
+                    at=row.last.at,
+                    click_attempted=row.last.click_attempted,
+                    budget_spent=row.last.budget_spent,
+                    counted_today=row.last.counted_today,
+                    needs_confirmation=row.last.needs_confirmation,
+                ),
+            )
+            for row in retries
+        ],
+        prefills_left_today=service.prefills_left_today(session, user, now=now, settings=settings),
     )
 
 
@@ -271,7 +351,13 @@ async def prefill(
         else:
             assert body.enrollment_id is not None  # the model's own check
             claim = service.claim_prefill(
-                session, user, body.enrollment_id, now=now, settings=settings
+                session,
+                user,
+                body.enrollment_id,
+                now=now,
+                settings=settings,
+                retry=body.retry,
+                no_bubble_open=body.no_bubble_open,
             )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

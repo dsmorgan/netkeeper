@@ -496,12 +496,21 @@ def _seed_next_fires(session: Session, user: User) -> int:
 
 
 def _seed_linkedin_ready(session: Session, user: User) -> int:
-    """Two due enrollments of ``user`` in one active LinkedIn campaign (P4-09)."""
+    """Two due enrollments of ``user`` in one active LinkedIn campaign (P4-09), and one
+    whose prefill typed nothing, waiting for Try again (``try_again``, #445)."""
     campaign = factories.make_campaign(session, user, channels=(TemplateChannel.LINKEDIN,))
     for _ in range(2):
         factories.make_enrollment(
             session, campaign, factories.make_contact(session, user), next_action_at=SEED_AT
         )
+    factories.make_enrollment(
+        session,
+        campaign,
+        factories.make_contact(session, user),
+        next_action_at=None,
+        not_sent_count=1,
+        not_sent_error="not_typed: the browser was busy",
+    )
     return 2
 
 

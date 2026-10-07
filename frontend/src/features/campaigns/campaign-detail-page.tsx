@@ -947,7 +947,9 @@ function EnrollmentsCard({
                     </td>
                     <td className="py-2 pr-3 tabular-nums">{row.current_step ?? '—'}</td>
                     <td className="py-2 pr-3 text-muted-foreground">
-                      {formatWhen(row.next_action_at)}
+                      {row.try_again === true
+                        ? 'Waits for Try again in the LinkedIn queue'
+                        : formatWhen(row.next_action_at)}
                     </td>
                     <td className="py-2 text-muted-foreground">
                       {row.exit_reason ?? ''}

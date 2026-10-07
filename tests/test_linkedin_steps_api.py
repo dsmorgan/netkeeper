@@ -429,7 +429,13 @@ async def test_ready_keeps_one_campaigns_and_counts_its_steps(
     ).json()
     assert (len(paged["items"]), paged["by_step"]) == (1, {"1": 2})  # every page's worth
     nobody = (await client.get(f"{BASE}/ready", params={"campaign_id": 999})).json()
-    assert nobody == {"items": [], "total": 0, "by_step": {}}
+    assert nobody == {
+        "items": [],
+        "total": 0,
+        "by_step": {},
+        "try_again": [],
+        "prefills_left_today": 10,
+    }
 
 
 async def test_options_say_whether_auto_send_may_be_chosen(
@@ -474,3 +480,128 @@ async def test_waiting_keeps_one_campaigns(
     assert [item["message_id"] for item in mine["items"]] == [message_id]
     other = (await client.get(f"{BASE}/waiting", params={"campaign_id": campaign_id + 1})).json()
     assert other == {"items": [], "total": 0}
+
+
+# --- try again (#445) -----------------------------------------------------------------------
+
+
+async def _typed_nothing(
+    client: httpx.AsyncClient, app: FastAPI, counts: dict[str, Any]
+) -> tuple[int, int]:
+    """A prefill whose run ended ``not_typed`` with ``counts``: the enrollment and run."""
+    [enrollment_id] = _seed(app)
+    claimed = await client.post(
+        f"{BASE}/prefill", json={"enrollment_id": enrollment_id}, headers=HEADERS
+    )
+    assert claimed.status_code == 202, claimed.text
+    run_id: int = claimed.json()["run_id"]
+    with session_scope(app.state.session_factory, write=True) as session:
+        user = _local(session)
+        outcome = MessageOutcome(
+            MessageOutcomeKind.NOT_TYPED, "the Message control could not be clicked", None, 0
+        )
+        assert record_prefill_outcome(
+            session,
+            user,
+            claimed.json()["message_id"],
+            outcome,
+            settings=app.state.settings,
+            now=NOW,
+        )
+        runs.finish_run(
+            session,
+            user,
+            run_id,
+            status=SyncRunStatus.ABORTED,
+            now=NOW,
+            stop_reason="not_typed",
+            counts=counts,
+        )
+    return enrollment_id, run_id
+
+
+async def test_a_step_that_typed_nothing_is_listed_for_try_again_and_retried(
+    client: httpx.AsyncClient, running_app: FastAPI, executor: FakeExecutor, with_runner: None
+) -> None:
+    clicked = {"message_click_attempted": True, "message_clicked": False, "li_prefills_spent": True}
+    enrollment_id, run_id = await _typed_nothing(client, running_app, clicked)
+
+    page = (await client.get(f"{BASE}/ready")).json()
+    assert (page["items"], page["total"]) == ([], 0)  # not ready: only Try again claims it
+    [row] = page["try_again"]
+    assert row["enrollment_id"] == enrollment_id and row["held_until"] is None
+    assert row["last_try"] == {
+        "reason": "the Message control could not be clicked",
+        "tries": 1,
+        "run_id": run_id,
+        "at": row["last_try"]["at"],
+        "click_attempted": True,
+        "budget_spent": True,
+        "counted_today": True,
+        "needs_confirmation": True,
+    }
+    assert isinstance(page["prefills_left_today"], int)
+    assert "Hi " not in str(page)
+
+    plain = await client.post(
+        f"{BASE}/prefill", json={"enrollment_id": enrollment_id}, headers=HEADERS
+    )
+    assert plain.status_code == 409
+    assert plain.json()["detail"]["reasons"] == ["try_again_needed"]
+    unconfirmed = await client.post(
+        f"{BASE}/prefill", json={"enrollment_id": enrollment_id, "retry": True}, headers=HEADERS
+    )
+    assert unconfirmed.status_code == 409
+    assert unconfirmed.json()["detail"]["reasons"] == ["confirm_no_bubble"]
+    assert len(_messages(running_app)) == 0 and len(executor.executed) == 1
+
+    confirmed = await client.post(
+        f"{BASE}/prefill",
+        json={"enrollment_id": enrollment_id, "retry": True, "no_bubble_open": True},
+        headers=HEADERS,
+    )
+    assert confirmed.status_code == 202, confirmed.text
+    assert confirmed.json()["enrollment_id"] == enrollment_id
+    assert len(executor.executed) == 2
+    # Claimed: it no longer waits for Try again, and holds the one open slot.
+    assert (await client.get(f"{BASE}/ready")).json()["try_again"] == []
+
+
+async def test_a_retry_that_never_clicked_needs_no_confirmation(
+    client: httpx.AsyncClient, running_app: FastAPI, executor: FakeExecutor, with_runner: None
+) -> None:
+    enrollment_id, _ = await _typed_nothing(client, running_app, {"li_prefills_spent": False})
+    [row] = (await client.get(f"{BASE}/ready")).json()["try_again"]
+    assert row["last_try"]["needs_confirmation"] is False
+    assert row["last_try"]["counted_today"] is False
+    retried = await client.post(
+        f"{BASE}/prefill", json={"enrollment_id": enrollment_id, "retry": True}, headers=HEADERS
+    )
+    assert retried.status_code == 202, retried.text
+
+
+async def test_a_retry_is_one_enrollment_and_the_confirmation_goes_with_it(
+    client: httpx.AsyncClient, running_app: FastAPI, executor: FakeExecutor, with_runner: None
+) -> None:
+    for body in (
+        {"next": True, "retry": True},
+        {"enrollment_id": 1, "no_bubble_open": True},
+        {"next": True, "no_bubble_open": True},
+    ):
+        response = await client.post(f"{BASE}/prefill", json=body, headers=HEADERS)
+        assert response.status_code == 422, body
+    assert _messages(running_app) == []
+
+
+async def test_the_enrollment_row_says_try_again_with_no_next_action(
+    client: httpx.AsyncClient, running_app: FastAPI, executor: FakeExecutor, with_runner: None
+) -> None:
+    enrollment_id, _ = await _typed_nothing(client, running_app, {})
+    with session_scope(running_app.state.session_factory) as session:
+        enrollment = get_scoped(session, _local(session), Enrollment, enrollment_id)
+        assert enrollment is not None
+        campaign_id = enrollment.campaign_id
+    page = (await client.get(f"/api/v1/campaigns/{campaign_id}/enrollments")).json()
+    [row] = page["items"]
+    assert (row["try_again"], row["next_action_at"]) == (True, None)
+    assert row["not_sent_error"] == "not_typed: the Message control could not be clicked"

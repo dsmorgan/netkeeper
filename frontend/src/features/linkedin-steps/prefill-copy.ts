@@ -46,6 +46,52 @@ export const TYPED_WHOLE =
 export const DRAFT_IN_BUBBLE =
   'A message bubble in Chrome already holds text, and netkeeper left it alone. Clear the text or close the bubble before you prefill again.'
 
+/** Try again (#445): a step whose last prefill typed nothing waits for you. */
+export const TRY_AGAIN_NOTE =
+  'The last prefill typed nothing. Each waits here until you click Try again; netkeeper never tries one again on its own.'
+
+/** After a `not_typed` prefill: where to try it again. */
+export const TRY_AGAIN_STEP = 'To try again, click Try again in the LinkedIn queue.'
+
+/** Asking before a retry whose last try clicked Message. */
+export function confirmBubbleTitle(name: string): string {
+  return `Is a message bubble for ${name} open in Chrome?`
+}
+export const CONFIRM_BUBBLE_BODY =
+  'The last try clicked Message, so a message bubble for this contact may still be open in Chrome. Close it before you try again: netkeeper refuses a page with two message bubbles, and a bubble can keep a draft.'
+export const CONFIRM_BUBBLE_LABEL = 'No bubble is open, try again'
+
+/** What the last try did, as the backend recorded it (`LastTryOut`). */
+export interface TryBudget {
+  budget_spent: boolean | null
+  counted_today: boolean | null
+}
+
+/** Whether the last try counted against today's `li_prefills` budget, in words. */
+export function budgetText(last: TryBudget): string {
+  if (last.counted_today === true) return "That try used one of today's LinkedIn prefills."
+  if (last.budget_spent === true) {
+    return "That try used a LinkedIn prefill from an earlier day, not one of today's."
+  }
+  if (last.budget_spent === false) {
+    return "That try stopped before it opened LinkedIn, so it didn't use one of today's LinkedIn prefills."
+  }
+  return "netkeeper can't tell whether that try used one of today's LinkedIn prefills."
+}
+
+/** How many prefills today's budget still allows. */
+export function prefillsLeftText(left: number): string {
+  if (left <= 0) return "Today's LinkedIn prefill budget is spent."
+  return left === 1
+    ? "1 of today's LinkedIn prefills is left."
+    : `${left} of today's LinkedIn prefills are left.`
+}
+
+/** "Tried once", "Tried 3 times in a row". */
+export function triesText(tries: number): string {
+  return tries <= 1 ? 'Tried once.' : `Tried ${tries} times in a row.`
+}
+
 /** The outcomes a prefill run records as `stop_reason`. */
 export type PrefillOutcome = 'prefilled' | 'not_typed' | 'too_long' | 'partially_typed' | 'unknown'
 
@@ -366,6 +412,7 @@ export function prefillEnding(
   if (bubble === 'draft') steps.push(DRAFT_IN_BUBBLE)
   if (bubble === 'open') steps.push(CLOSE_BUBBLE)
   if (bubble === 'maybe') steps.push(MAYBE_CLOSE_BUBBLE)
+  if (stopReason === 'not_typed') steps.push(TRY_AGAIN_STEP)
   return {
     title: 'Not prefilled. Nothing was typed in Chrome.',
     reason: why.text,

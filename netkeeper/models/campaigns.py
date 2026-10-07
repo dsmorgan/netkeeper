@@ -371,6 +371,12 @@ class Enrollment(UserOwned, TimestampMixin, Base):
     )
     not_sent_since: Mapped[datetime | None] = mapped_column(UTCDateTime)
     not_sent_error: Mapped[str | None] = mapped_column(String(500))
+    # The ``message_send`` run whose outcome was recorded last for this enrollment (#445;
+    # 0037). A ``not_typed`` prefill deletes its message, so this is where its run, and
+    # so whether it clicked Message or spent a ``li_prefills`` unit, is found again.
+    last_prefill_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sync_runs.id", ondelete="SET NULL")
+    )
 
     campaign: Mapped[Campaign] = relationship()
 
