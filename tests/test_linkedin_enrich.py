@@ -249,6 +249,34 @@ async def test_a_cancel_during_the_wait_stops_before_the_next_visit() -> None:
     assert gate.asked == [0, 1]
 
 
+async def test_a_cancel_during_the_scroll_stops_the_run_with_that_profile_unread() -> None:
+    """#177: the cancel reaches the scroll; the visit is not read, clicked, or harvested."""
+    browser = FakeBrowser.of(PROFILES)
+    harvests: list[ProfileHarvest] = []
+
+    async def on_harvest(harvest: ProfileHarvest) -> None:
+        harvests.append(harvest)
+
+    async def cancelled() -> bool:
+        return True
+
+    source = browser.source(sleep=_record_sleep(browser))
+    result = await run_enrichment(
+        _spec(PROFILES),
+        source,
+        Gate(),
+        on_harvest=on_harvest,
+        rng=random.Random(SEED),
+        clock=lambda: NOW,
+        cancelled=cancelled,
+    )
+
+    assert result.reason is StopReason.CANCELLED
+    assert harvests == [] and result.completed == ()
+    kinds = browser.kinds()
+    assert "scroll" in kinds and "details" not in kinds and "click" not in kinds
+
+
 async def test_the_visit_budget_caps_the_run_and_says_so() -> None:
     browser = FakeBrowser.of(PROFILES)
     gate = Gate()

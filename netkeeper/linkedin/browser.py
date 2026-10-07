@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import inspect
 import logging
 import os
 import random
@@ -180,6 +181,9 @@ class _TapContext(Protocol):
 #: The Network buffers the body tap's own session asks Chrome for (#200): one answer
 #: up to the observation's body limit, and a few of them at once. Chrome needs a
 #: buffer to stream from; it is the tap's session's own, not the one Playwright reads.
+#: The longest the dwell at the end of :meth:`BrowserRun.scroll` is waited out in one
+#: sleep when the caller supplies ``cancelled``: it polls between slices (#177).
+SCROLL_CANCEL_SLICE_S: Final = 1.0
 TAP_RESOURCE_BUFFER_BYTES: Final = 8 * 1024 * 1024
 TAP_TOTAL_BUFFER_BYTES: Final = 32 * 1024 * 1024
 
@@ -1444,7 +1448,7 @@ class BrowserRun:
         plan: ScrollPlan,
         *,
         sleep: Callable[[float], Awaitable[None]] = _real_sleep,
-        cancelled: Callable[[], bool] | None = None,
+        cancelled: Callable[[], bool | Awaitable[bool]] | None = None,
         rng: random.Random | None = None,
         rest_over: str | None = None,
     ) -> ScrollOutcome:
@@ -1503,11 +1507,14 @@ class BrowserRun:
         once per open tab, on its first ``scroll``: a later call's ``rest_over`` (or a
         later navigation on the same tab) does not move the pointer again.
 
-        ``cancelled``, when given, is polled once before the pointer-rest walk
-        begins, then again before every wheel event and again before the final
-        dwell, so a caller wired to spec 9.9's cooperative cancel ("checked
-        between profiles and inside sliced cooldowns") has somewhere to plug one
-        in; nothing here reads a database or a settings flag itself (spec 9.10
+        ``cancelled``, when given (a plain callable, or one that returns an
+        awaitable), is polled once before the pointer-rest walk begins, then
+        again before every wheel event and again before the final dwell. The
+        dwell is waited out in slices of at most :data:`SCROLL_CANCEL_SLICE_S`
+        and polled after each, so a cancel stops it within one slice (#177). A
+        caller wired to spec 9.9's cooperative cancel ("checked between profiles
+        and inside sliced cooldowns") has somewhere to plug one in; nothing here
+        reads a database or a settings flag itself (spec 9.10
         keeps that off this side of the boundary), so the check is the caller's
         to supply. A cancelled replay stops before moving the pointer at all, or
         before sending its remaining wheel events, or before waiting out the
@@ -1518,18 +1525,35 @@ class BrowserRun:
         started: letting it finish keeps the pointer from being left mid-hop.
         """
         page = cast(_ScrollablePage, await self.ensure_page())
-        if cancelled is not None and cancelled():
+
+        async def stopped() -> bool:
+            if cancelled is None:
+                return False
+            answer = cancelled()
+            return bool(await answer) if inspect.isawaitable(answer) else bool(answer)
+
+        if await stopped():
             return ScrollOutcome(page=page, cancelled=True)
         rest_rng = rng if rng is not None else random.Random()  # noqa: S311 -- pacing, not crypto
         await self._rest_pointer_over_content(page, sleep=sleep, rng=rest_rng, rest_over=rest_over)
         for step in plan.steps:
-            if cancelled is not None and cancelled():
+            if await stopped():
                 return ScrollOutcome(page=page, cancelled=True)
             await page.mouse.wheel(0, step.delta_px)
             await sleep(step.pause_s)
-        if cancelled is not None and cancelled():
+        if await stopped():
             return ScrollOutcome(page=page, cancelled=True)
-        await sleep(plan.dwell_s)
+        if cancelled is None:
+            await sleep(plan.dwell_s)
+            return ScrollOutcome(page=page, cancelled=False)
+        # #177: a cancel during the dwell is heard within one slice, not after the whole wait.
+        remaining = plan.dwell_s
+        while remaining > 0:
+            step_s = min(SCROLL_CANCEL_SLICE_S, remaining)
+            await sleep(step_s)
+            remaining -= step_s
+            if remaining > 0 and await stopped():
+                return ScrollOutcome(page=page, cancelled=True)
         return ScrollOutcome(page=page, cancelled=False)
 
     async def _rest_pointer_over_content(

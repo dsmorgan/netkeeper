@@ -531,6 +531,7 @@ async def enrich_contacts(
             rng=rng if rng is not None else random.Random(),  # noqa: S311 -- pacing, not crypto
             on_progress=progress,
             clock=clock,
+            cancelled=gate._cancelled,
         )
 
         def record_breaker(result: EnrichResult) -> None:
