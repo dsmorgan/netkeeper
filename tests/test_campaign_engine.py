@@ -1333,7 +1333,8 @@ def test_a_template_with_lint_errors_is_parked(world: World) -> None:
     assert blocked.next_action_at is None
     assert blocked.not_sent_error == (
         "blocked: the step's template has lint errors; "
-        "end this campaign, fix the template, and start a new campaign from it"
+        "fix the template, then have the step use its newest version"
+        " (Use newest version on the campaign page, or `netkeeper campaigns adopt-template`)"
     )
 
 
@@ -1353,7 +1354,8 @@ def test_an_active_campaign_using_a_removed_me_field_says_why_it_stopped(world: 
     assert world.messages() == []
     assert world.enrollment(enrollment_id).not_sent_error == (
         "blocked: template uses removed field me.*; "
-        "end this campaign, fix the template, and start a new campaign from it"
+        "fix the template, then have the step use its newest version"
+        " (Use newest version on the campaign page, or `netkeeper campaigns adopt-template`)"
     )
 
 

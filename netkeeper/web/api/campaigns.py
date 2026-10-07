@@ -200,6 +200,15 @@ class StepOut(BaseModel):
     outbound: dict[MessageStatus, int] = {}
     """The step's outbound messages by status, only the statuses it has: a LinkedIn
     step's ``prefilled``, ``sent`` and ``stale`` counts (#383)."""
+    newest_template_version: int | None = None
+    """The newest version of the step's template when it is newer than
+    ``template_version``: ``GET .../steps/{step_id}/adoption`` shows the change (#397)."""
+    template_adopted_at: datetime | None = None
+    """When a person had the step adopt the version it uses (#397); None if it never did."""
+    template_adopted_by: int | None = None
+    """The id of the user who adopted it."""
+    template_adopted_from_version: int | None = None
+    """The version the step used before that adoption."""
 
 
 class CampaignOut(BaseModel):
@@ -442,6 +451,10 @@ def _campaign_out(detail: service.CampaignDetail) -> CampaignOut:
                 fired=s.fired,
                 sent=s.sent,
                 outbound=dict(s.by_status),
+                newest_template_version=s.newest_version,
+                template_adopted_at=s.step.template_adopted_at,
+                template_adopted_by=s.step.template_adopted_by,
+                template_adopted_from_version=s.step.template_adopted_from_version,
             )
             for s in detail.steps
         ],

@@ -733,6 +733,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/campaigns/{campaign_id}/steps/{step_id}/adopt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Adopt
+         * @description Have the step use the newest version of its template, as the preview showed it.
+         *     Every message that exists keeps its text; enrollments the step has not fired for get
+         *     the new version. The confirm approves the step in it.
+         */
+        post: operations["adopt_step_template"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/steps/{step_id}/adoption": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Adoption
+         * @description What adopting the newest version of the step's template would change. Changes
+         *     nothing.
+         */
+        get: operations["step_template_adoption"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/campaigns/{campaign_id}/steps/{step_id}/schedule": {
         parameters: {
             query?: never;
@@ -3281,6 +3324,73 @@ export interface components {
             /** Missing */
             missing: components["schemas"]["MissingOut"][];
         };
+        /** AdoptIn */
+        AdoptIn: {
+            /**
+             * Confirm
+             * @default false
+             */
+            confirm: boolean;
+            /** Fingerprint */
+            fingerprint: string;
+        };
+        /** AdoptedOut */
+        AdoptedOut: {
+            /**
+             * Adopted At
+             * Format: date-time
+             */
+            adopted_at: string;
+            /** Affected Total */
+            affected_total: number;
+            campaign: components["schemas"]["CampaignOut"];
+            /** From Version */
+            from_version: number;
+            /** Released */
+            released: number;
+            /** To Version */
+            to_version: number;
+        };
+        /** AdoptionOut */
+        AdoptionOut: {
+            /** Affected */
+            affected: components["schemas"]["EnrollmentRefOut"][];
+            /** Affected Total */
+            affected_total: number;
+            /** Blocked */
+            blocked: components["schemas"]["MessagePreviewOut"][];
+            /** Blocked Total */
+            blocked_total: number;
+            /** Campaign Id */
+            campaign_id: number;
+            campaign_status: components["schemas"]["CampaignStatus"];
+            current: components["schemas"]["VersionOut"];
+            /** Diff */
+            diff: string;
+            /** Errors */
+            errors: components["schemas"]["LintIssueOut"][];
+            /** Fingerprint */
+            fingerprint: string;
+            /** Kept */
+            kept: {
+                [key: string]: number;
+            };
+            newest: components["schemas"]["VersionOut"];
+            /** Open Messages */
+            open_messages: components["schemas"]["OpenMessageOut"][];
+            /** Position */
+            position: number;
+            /** Refusal */
+            refusal: string | null;
+            /** Released */
+            released: number;
+            /** Samples */
+            samples: components["schemas"]["MessagePreviewOut"][];
+            /** Step Id */
+            step_id: number;
+            /** Warnings */
+            warnings: components["schemas"]["LintIssueOut"][];
+        };
         /** And */
         "And-Input": {
             /** Children */
@@ -4785,6 +4895,16 @@ export interface components {
             /** Total */
             total: number;
         };
+        /** EnrollmentRefOut */
+        EnrollmentRefOut: {
+            /** Contact Id */
+            contact_id: number;
+            /** Contact Name */
+            contact_name: string;
+            /** Enrollment Id */
+            enrollment_id: number;
+            status: components["schemas"]["EnrollmentStatus"];
+        };
         /**
          * EnrollmentStatus
          * @description One contact's state in one campaign: spec 11.3's state machine.
@@ -6152,6 +6272,19 @@ export interface components {
             authorization_url: string;
         };
         /**
+         * OpenMessageOut
+         * @description A message of the step still in flight: it keeps the text it was rendered with.
+         */
+        OpenMessageOut: {
+            /** Contact Name */
+            contact_name: string;
+            /** Enrollment Id */
+            enrollment_id: number;
+            /** Message Id */
+            message_id: number;
+            status: components["schemas"]["MessageStatus"];
+        };
+        /**
          * OptionsOut
          * @description What the step builder needs to know about LinkedIn steps (#383).
          */
@@ -7223,6 +7356,8 @@ export interface components {
             /** Id */
             id: number;
             mode: components["schemas"]["StepMode"];
+            /** Newest Template Version */
+            newest_template_version?: number | null;
             /**
              * Outbound
              * @default {}
@@ -7238,6 +7373,12 @@ export interface components {
             send_time: string | null;
             /** Sent */
             sent: number;
+            /** Template Adopted At */
+            template_adopted_at?: string | null;
+            /** Template Adopted By */
+            template_adopted_by?: number | null;
+            /** Template Adopted From Version */
+            template_adopted_from_version?: number | null;
             /** Template Id */
             template_id: number;
             /** Template Name */
@@ -8067,6 +8208,19 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /** VersionOut */
+        VersionOut: {
+            /** Body */
+            body: string;
+            /** Name */
+            name: string;
+            /** Subject */
+            subject: string | null;
+            /** Template Id */
+            template_id: number;
+            /** Version */
+            version: number;
         };
         /**
          * WaitingOut
@@ -9676,6 +9830,95 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    adopt_step_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+                step_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdoptIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdoptedOut"];
+                };
+            };
+            /** @description No such campaign or step */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused: see the preview's refusal, or it changed since the preview */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    step_template_adoption: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+                step_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdoptionOut"];
+                };
+            };
+            /** @description No such campaign or step */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

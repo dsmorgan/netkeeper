@@ -318,6 +318,13 @@ class CampaignStep(UserOwned, TimestampMixin, Base):
         default=StepCondition.ALWAYS,
     )
     same_thread: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # The latest adoption of a newer version of the step's template (#397; 0040): when,
+    # who (the user id, without a foreign key, as ``recent_contact_override_by``), and
+    # the version the step used before. NULL for a step that still uses the version it
+    # was activated with. :mod:`netkeeper.services.template_adoption` sets them.
+    template_adopted_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    template_adopted_by: Mapped[int | None] = mapped_column(Integer)
+    template_adopted_from_version: Mapped[int | None] = mapped_column(Integer)
 
     campaign: Mapped[Campaign] = relationship(back_populates="steps")
     template: Mapped[Template] = relationship()

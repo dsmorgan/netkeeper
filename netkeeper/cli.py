@@ -94,6 +94,7 @@ from netkeeper.services import (
     run_diagnostics,
     runs,
     simulate_campaign,
+    template_adoption,
 )
 from netkeeper.services import campaigns as campaign_service
 from netkeeper.services import mailboxes as mailbox_service
@@ -3687,6 +3688,105 @@ def campaigns_step_time(
     if warning is not None:
         typer.echo(f"warning: {warning}")
     typer.echo(f"campaign {campaign_id} step {position}: +{delay_days}d, {timing}")
+
+
+def _adoption_lines(p: template_adoption.AdoptionPreview) -> list[str]:
+    """What `adopt-template` shows before it asks."""
+    lines = [
+        f"step {p.position} of campaign {p.campaign_id} ({p.campaign_status.value}):"
+        f" {p.current.name} v{p.current.version} -> v{p.newest.version}",
+    ]
+    if p.diff:
+        lines.append("the change:")
+        lines.extend(f"  {line}" for line in p.diff.splitlines())
+    lines.extend(f"  error: {i.message}" for i in p.errors)
+    lines.extend(f"  warning: {i.message}" for i in p.warnings)
+    lines.append(
+        f"gets v{p.newest.version}: {p.affected_total} enrollments the step has not fired for"
+        + (f", {p.released} of them parked by the template and due again" if p.released else "")
+    )
+    lines.extend(
+        f"  - enrollment {e.enrollment_id}: {e.contact_name or 'unnamed contact'}"
+        f" ({e.status.value})"
+        for e in p.affected
+    )
+    if p.affected_total > len(p.affected):
+        lines.append(f"  ... and {p.affected_total - len(p.affected)} more")
+    if p.kept:
+        counts = ", ".join(f"{n} {status.value}" for status, n in sorted(p.kept.items()))
+        lines.append(f"keep the text they were rendered with: the step's messages ({counts})")
+    lines.extend(
+        f"  - in flight, unchanged: message {m.message_id} for enrollment {m.enrollment_id}:"
+        f" {m.contact_name or 'unnamed contact'} ({m.status.value})"
+        for m in p.open_messages
+    )
+    if p.blocked_total:
+        lines.append(f"blocked in v{p.newest.version}, never sent ({p.blocked_total}):")
+        lines.extend(
+            f"  - enrollment {m.enrollment_id}: {m.contact_name or 'unnamed contact'}: {m.blocked}"
+            for m in p.blocked
+        )
+    for m in p.samples:
+        lines.append(
+            f"v{p.newest.version} for enrollment {m.enrollment_id}:"
+            f" {m.contact_name or 'unnamed contact'}"
+        )
+        if m.blocked is not None:
+            lines.append(f"  blocked: {m.blocked}")
+        if m.subject is not None:
+            lines.append(f"  subject: {m.subject}")
+        if m.body is not None:
+            lines.extend(f"  | {line}" for line in m.body.splitlines() or [""])
+    return lines
+
+
+@campaigns_app.command("adopt-template")
+def campaigns_adopt_template(
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+    position: Annotated[int, typer.Argument(help="The step's position: 1 is the first.")],
+) -> None:
+    """Have an active or paused campaign's step use the newest version of its template.
+
+    GET /campaigns/{id}/steps/{step_id}/adoption, then POST .../adopt. It prints the
+    change, the new version's lint, the enrollments that get it, the messages that keep
+    their text, and a sample message, then asks you to confirm; there is no flag to skip
+    the question, because confirming approves the step in the new version. Every message
+    that exists, sent or in flight, keeps the text it was rendered with. Refused while
+    the new version has a lint error.
+    """
+    with _campaign_db() as factory:
+        # Read, then ask, then write: a writer held across the prompt would lock out serve.
+        with session_scope(factory) as session, _campaign_errors():
+            user = _local_user_or_exit(session)
+            step = campaign_review.step_at(session, user, campaign_id, position)
+            shown = template_adoption.preview(
+                session, user, campaign_id, step.id, now=datetime.now(UTC)
+            )
+        typer.echo("\n".join(_adoption_lines(shown)))
+        if shown.refusal is not None:
+            typer.echo(f"error: {shown.refusal}", err=True)
+            raise typer.Exit(code=1)
+        if not typer.confirm(
+            f"have step {position} use v{shown.newest.version} and approve it for"
+            f" {shown.affected_total} enrollments?"
+        ):
+            typer.echo(f"cancelled: step {position} still uses v{shown.current.version}")
+            raise typer.Exit(code=1)
+        with session_scope(factory, write=True) as session, _campaign_errors():
+            user = _local_user_or_exit(session)
+            result = template_adoption.adopt(
+                session,
+                user,
+                campaign_id,
+                shown.step_id,
+                fingerprint_seen=shown.fingerprint,
+                now=datetime.now(UTC),
+            )
+    released = f"; {result.released} parked enrollments are due again" if result.released else ""
+    typer.echo(
+        f"campaign {campaign_id} step {position} now uses v{result.to_version}"
+        f" (was v{result.from_version}){released}"
+    )
 
 
 def _refuse_activation(

@@ -29,6 +29,8 @@ import { stepTimeWarning } from '@/features/settings/sending-hours'
 import {
   CampaignApiError,
   ENROLLMENT_PAGE,
+  adoptStepTemplate,
+  adoptionQuery,
   archiveCampaign,
   campaignKeys,
   campaignQuery,
@@ -540,6 +542,8 @@ function StepRow({
   editing: boolean
   onEdit: (on: boolean) => void
 }) {
+  const [adopting, setAdopting] = useState(false)
+  const adoptable = campaign.status === 'active' || campaign.status === 'paused'
   return (
     <>
       <tr className="border-t border-border/60">
@@ -551,6 +555,30 @@ function StepRow({
           <span className="text-muted-foreground">
             v{step.template_version}, {step.channel === 'email' ? 'email' : 'LinkedIn'}
           </span>
+          {step.template_adopted_at != null && step.template_adopted_from_version != null && (
+            <span className="block text-xs text-muted-foreground">
+              Adopted from v{step.template_adopted_from_version}{' '}
+              {formatWhen(step.template_adopted_at)}
+            </span>
+          )}
+          {adoptable && step.newest_template_version != null && (
+            <span className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-muted-foreground">
+                v{step.newest_template_version} is newer.
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                aria-label={`Use v${step.newest_template_version} for step ${step.position}`}
+                onClick={() => setAdopting(true)}
+              >
+                Use newest version
+              </Button>
+            </span>
+          )}
+          {adopting && (
+            <AdoptDialog campaign={campaign} step={step} onClose={() => setAdopting(false)} />
+          )}
         </td>
         <td className="py-2 pr-3 text-muted-foreground">
           {timingText(step)}, {CONDITION_LABELS[step.condition].toLowerCase()}
@@ -603,6 +631,141 @@ function AutoSendStepState() {
     </span>
   ) : (
     <span className="block text-xs">off in config.toml: waits for you to prefill</span>
+  )
+}
+
+const LISTED = 10
+
+/**
+ * The confirm for adopting the newest version of a step's template (#397). It shows the
+ * change, the new version's lint, who gets it, and what keeps its text; confirming is
+ * the step's approval in the new version.
+ */
+function AdoptDialog({
+  campaign,
+  step,
+  onClose,
+}: {
+  campaign: Campaign
+  step: Step
+  onClose: () => void
+}) {
+  const queryClient = useQueryClient()
+  const preview = useQuery(adoptionQuery(campaign.id, step.id))
+  const adopt = useMutation({
+    mutationFn: () => {
+      if (preview.data === undefined) throw new Error('The change is still loading.')
+      return adoptStepTemplate(campaign.id, step.id, preview.data.fingerprint)
+    },
+    onSuccess: (done) => {
+      queryClient.setQueryData(campaignKeys.one(campaign.id), done.campaign)
+      void queryClient.invalidateQueries({ queryKey: campaignKeys.all })
+      onClose()
+    },
+  })
+  const p = preview.data
+  const refusal = p?.refusal ?? null
+  const kept = p === undefined ? 0 : Object.values(p.kept).reduce((a, n) => a + (n ?? 0), 0)
+  return (
+    <ConfirmDialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose()
+      }}
+      title={
+        p === undefined
+          ? `Use the newest version for step ${step.position}?`
+          : `Use v${p.newest.version} for step ${step.position}?`
+      }
+      confirmLabel="Use this version"
+      confirmVariant="default"
+      onConfirm={() => {
+        if (p === undefined || refusal !== null) return Promise.resolve()
+        return adopt.mutateAsync()
+      }}
+      pending={adopt.isPending || preview.isPending}
+      error={
+        adopt.isError
+          ? errorText(adopt.error)
+          : (refusal ?? (preview.isError ? errorText(preview.error) : null))
+      }
+    >
+      {p === undefined ? (
+        <p>Checking the new version…</p>
+      ) : (
+        <>
+          <p>
+            Step {p.position} uses {p.current.name} v{p.current.version}. Confirming approves v
+            {p.newest.version} for this step: enrollments the step has not reached yet get it.
+          </p>
+          <pre
+            aria-label="Changes"
+            className="max-h-48 overflow-auto rounded bg-muted/50 p-2 text-xs whitespace-pre-wrap"
+          >
+            {p.diff || 'No change to the text.'}
+          </pre>
+          {p.errors.length > 0 && (
+            <ul aria-label="Lint errors" className="list-disc pl-5 text-destructive">
+              {p.errors.map((issue, i) => (
+                <li key={i}>{issue.message}</li>
+              ))}
+            </ul>
+          )}
+          {p.warnings.length > 0 && (
+            <ul aria-label="Lint warnings" className="list-disc pl-5">
+              {p.warnings.map((issue, i) => (
+                <li key={i}>{issue.message}</li>
+              ))}
+            </ul>
+          )}
+          <p className="text-foreground">
+            {p.affected_total === 1
+              ? '1 enrollment gets the new version'
+              : `${p.affected_total} enrollments get the new version`}
+            {p.released > 0 &&
+              `, including ${p.released} the old version blocked; they are due again`}
+            .
+          </p>
+          {p.affected.length > 0 && (
+            <ul aria-label="Enrollments that get it" className="list-disc pl-5">
+              {p.affected.slice(0, LISTED).map((e) => (
+                <li key={e.enrollment_id}>{e.contact_name || 'Unnamed contact'}</li>
+              ))}
+              {p.affected_total > LISTED && <li>and {p.affected_total - LISTED} more</li>}
+            </ul>
+          )}
+          <p>
+            {kept === 0
+              ? 'The step has no messages yet.'
+              : `The step's ${kept} existing ${kept === 1 ? 'message keeps' : 'messages keep'} the text ${kept === 1 ? 'it was' : 'they were'} written with, including ${p.open_messages.length} still in progress.`}{' '}
+            A message already sent, drafted, prefilled or being sent never changes.
+          </p>
+          {p.blocked_total > 0 && (
+            <>
+              <p className="text-foreground">
+                Blocked in the new version, never sent ({p.blocked_total}):
+              </p>
+              <ul aria-label="Blocked in the new version" className="list-disc pl-5">
+                {p.blocked.slice(0, LISTED).map((m) => (
+                  <li key={m.enrollment_id}>
+                    {m.contact_name || 'Unnamed contact'}: {m.blocked}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {p.samples[0] !== undefined && (
+            <div aria-label="Sample message">
+              <p className="text-foreground">For {p.samples[0].contact_name || 'one contact'}:</p>
+              {p.samples[0].subject != null && <p>Subject: {p.samples[0].subject}</p>}
+              <pre className="max-h-40 overflow-auto rounded bg-muted/50 p-2 text-xs whitespace-pre-wrap">
+                {p.samples[0].body}
+              </pre>
+            </div>
+          )}
+        </>
+      )}
+    </ConfirmDialog>
   )
 }
 
