@@ -212,6 +212,14 @@ _LI_MESSAGE_LABEL: Final = {
 }
 
 
+_LI_MESSAGE_HEAT_NOTE: Final = {
+    ActionClass.LI_PREFILLS: "Heat still stops prefills once it reaches its skip threshold.",
+    ActionClass.LI_MESSAGES_AUTO: (
+        "Auto-send isn't built yet; when it is, heat stops it the same way."
+    ),
+}
+
+
 def li_message_risk_warning(action: ActionClass, settings: BudgetSettings) -> str | None:
     """The warning for a daily LinkedIn message budget above 20, or None (#447).
 
@@ -228,8 +236,7 @@ def li_message_risk_warning(action: ActionClass, settings: BudgetSettings) -> st
     return (
         f"{_LI_MESSAGE_LABEL[action]} are set to {day} a day, above {LI_MESSAGE_WARN_ABOVE} a day."
         " More LinkedIn messages a day make it more likely that LinkedIn"
-        " restricts your account or asks you to verify it. Heat still pauses prefills"
-        " after LinkedIn throttles you."
+        " restricts your account or asks you to verify it. " + _LI_MESSAGE_HEAT_NOTE[action]
     )
 
 

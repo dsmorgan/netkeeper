@@ -322,7 +322,11 @@ def test_serve_app_logs_the_linkedin_message_risk_once_above_20_a_day(
     ]
     if warns:
         assert len(risk) == 1 and risk[0].levelno == logging.WARNING
-        assert risk[0].getMessage().startswith(("LinkedIn prefills are", "Auto-sent LinkedIn"))
+        label = {
+            "li_prefills_per_day": "LinkedIn prefills",
+            "li_messages_auto_per_day": "Auto-sent LinkedIn messages",
+        }[field]
+        assert risk[0].getMessage().startswith(f"{label} are set to 21 a day")
     else:
         assert risk == []
 
