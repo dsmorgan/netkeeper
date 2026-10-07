@@ -152,11 +152,12 @@ class _ScrollablePage(PageLike, Protocol):
 
 
 class _CdpSessionLike(Protocol):
-    """The slice of a Playwright ``CDPSession`` the body tap (#200) and the Message
-    click's geometry read (#444) use, and nothing more.
+    """The slice of a Playwright ``CDPSession`` the body tap (#200), the Message
+    click's geometry read (#444), and the background tab's opening (#195) use, and
+    nothing more.
 
-    ``send`` is called in exactly those two methods, each with its own read-only
-    methods named as literals (``tests/test_browser_safety.py``); ``on`` only listens.
+    ``send`` is called only in those methods, each with its own methods named as
+    literals (``tests/test_browser_safety.py``); ``on`` only listens.
     """
 
     async def send(self, method: str, params: Mapping[str, Any] | None = None) -> Any: ...
@@ -167,15 +168,35 @@ class _CdpSessionLike(Protocol):
 
 
 class _TapContext(Protocol):
-    """``new_cdp_session``, borrowed by :meth:`BrowserRun._open_body_tap` (#200) and
-    :meth:`BrowserRun._read_click_geometry` (#444) alone.
+    """``new_cdp_session``, borrowed by :meth:`BrowserRun._open_body_tap` (#200),
+    :meth:`BrowserRun._read_click_geometry` (#444), and :meth:`BrowserRun._target_id`
+    (#195) alone.
 
     :class:`ContextLike` leaves every context mutator out so that reaching for one is
-    a type error; this protocol hands the one method those two need to them, the way
+    a type error; this protocol hands the one method those three need to them, the way
     :class:`_ObservablePage` borrows the listener methods.
     """
 
     async def new_cdp_session(self, page: Any) -> Any: ...
+
+
+class _TargetBrowser(Protocol):
+    """``new_browser_cdp_session``, borrowed by :meth:`BrowserRun._open_tab` alone (#195).
+
+    :class:`BrowserLike` leaves it out for the reason :class:`_TapContext` exists: a
+    browser-level session reaches every target. :meth:`BrowserRun._open_tab` sends it
+    ``Target.createTarget`` and ``Target.closeTarget`` and nothing else.
+    """
+
+    async def new_browser_cdp_session(self) -> Any: ...
+
+
+#: #195: how long :meth:`BrowserRun._open_tab` waits for the tab it created in the
+#: background to show up in the context's ``pages``, and how often it looks. Playwright
+#: adopts a new target within milliseconds; the wait only bounds a browser that never
+#: reports it.
+BACKGROUND_TAB_WAIT_S: Final = 5.0
+BACKGROUND_TAB_POLL_S: Final = 0.05
 
 
 #: The Network buffers the body tap's own session asks Chrome for (#200): one answer
@@ -1312,9 +1333,9 @@ class BrowserRun:
     Only :meth:`AttachBrowserProvider.run` builds one, and it takes the lock before
     the run exists, so there is no way to hold a tab without holding the lock.
 
-    The tab is this run's alone. It is opened lazily, reopened if the user closes it,
-    and closed at the end of the run; the context and the browser are left exactly as
-    they were found.
+    The tab is this run's alone. It is opened lazily, in the background (#195),
+    reopened if the user closes it, and closed at the end of the run; the context and
+    the browser are left exactly as they were found.
     """
 
     def __init__(
@@ -2745,7 +2766,7 @@ class BrowserRun:
         if page is not None:
             log.warning("the run's tab was closed; reopening it in the same context")
         try:
-            page = await self._attachment.context.new_page()
+            page = await self._open_tab()
         except Exception as exc:
             page = await self._reopen_after_reattach(exc)
         self._page = page
@@ -2768,11 +2789,97 @@ class BrowserRun:
         await _detach_quietly(self._attachment.detach)
         self._attachment = await self._provider._attach()
         try:
-            return await self._attachment.context.new_page()
+            return await self._open_tab()
         except Exception as exc:
             raise BrowserUnavailable(
                 "reattached to Chrome but still cannot open a tab; aborting the run"
             ) from exc
+
+    async def _open_tab(self) -> PageLike:
+        """Open this run's tab behind the tab you're on, without activating Chrome (#195).
+
+        ``context.new_page()`` sends ``Target.createTarget`` without ``background``,
+        which opens a foreground tab, and on macOS Chrome then activates its window and
+        takes keyboard focus from the app you're using. This sends it with
+        ``background: true`` instead, on a browser-level session, and never sends
+        ``Page.bringToFront`` or ``Target.activateTarget``. Navigating the tab later
+        doesn't activate it either. The tab still renders, scrolls, and paginates:
+        Playwright turns on focus emulation for every tab it attaches to, which keeps
+        a background tab visible to its page.
+
+        The tab is the run's because its target id matches the one Chrome answered,
+        read from each new tab's own ``Target.getTargetInfo``
+        (:meth:`_target_id`), never because it's the newest. A tab you open at the
+        same moment is left alone.
+
+        When a background tab can't be opened while the browser is still there (a
+        browser without the session, or one that never reports the tab), the run
+        opens its tab the way it used to, with ``new_page()``, and logs it: in front,
+        but working. A tab this created and couldn't identify is closed by its target
+        id. A browser that went away raises, for :meth:`_ensure_page`'s reattach.
+        Only a prefill or an auto-send brings its tab forward, once, at its start
+        (:meth:`bring_tab_forward`).
+        """
+        context = self._attachment.context
+        browser = self._attachment.browser
+        before = {id(page) for page in context.pages}
+        session: _CdpSessionLike | None = None
+        target_id: str | None = None
+        try:
+            session = cast(
+                _CdpSessionLike,
+                await cast(_TargetBrowser, browser).new_browser_cdp_session(),
+            )
+            created = await session.send(
+                "Target.createTarget", {"url": "about:blank", "background": True}
+            )
+            target_id = str(created["targetId"])
+            async with asyncio.timeout(BACKGROUND_TAB_WAIT_S):
+                while True:
+                    for page in context.pages:
+                        if id(page) in before or page.is_closed():
+                            continue
+                        before.add(id(page))
+                        if await self._target_id(page) == target_id:
+                            return page
+                    await asyncio.sleep(BACKGROUND_TAB_POLL_S)
+        except Exception as exc:
+            if not browser.is_connected():
+                raise
+            if session is not None and target_id is not None:
+                try:
+                    await session.send("Target.closeTarget", {"targetId": target_id})
+                except Exception as close_exc:
+                    log.debug("could not close the unidentified tab: %s", close_exc)
+            log.warning(
+                "could not open the run's tab in the background (%s); opening it in front",
+                type(exc).__name__,
+            )
+        finally:
+            if session is not None:
+                await _detach_quietly(session.detach)
+        return await context.new_page()
+
+    async def _target_id(self, page: PageLike) -> str | None:
+        """A tab's own CDP target id, or ``None`` when it can't be read (#195).
+
+        One page-level session, detached before this returns, that sends only
+        ``Target.getTargetInfo`` with no params: the session's own target. It reads;
+        the page sees nothing."""
+        context = cast(_TapContext, self._attachment.context)
+        try:
+            session = cast(_CdpSessionLike, await context.new_cdp_session(page))
+        except Exception as exc:
+            log.debug("could not read a new tab's target id: %s", exc)
+            return None
+        try:
+            info = await session.send("Target.getTargetInfo")
+            return str(info["targetInfo"]["targetId"])
+        except Exception as exc:
+            log.debug("could not read a new tab's target id: %s", exc)
+            return None
+        finally:
+            await _detach_quietly(session.detach)
 
 
 @runtime_checkable
