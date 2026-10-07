@@ -10,7 +10,6 @@ import logging
 import os
 import re
 import secrets
-import shutil
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -25,7 +24,7 @@ import uvicorn
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.exc import OperationalError, ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper import __version__, migrations
@@ -380,7 +379,11 @@ def config_adopt(ctx: typer.Context) -> None:
             "error: config adopt asks before it changes anything; run it in a terminal", err=True
         )
         raise typer.Exit(code=1)
-    original = path.read_text(encoding="utf-8")
+    try:
+        original = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        typer.echo(f"error: cannot read {path}: {exc}. Nothing was changed.", err=True)
+        raise typer.Exit(code=1) from exc
     try:
         adopt = config_adopt_service.plan(original, settings)
     except config_adopt_service.AdoptError as exc:
@@ -404,10 +407,9 @@ def config_adopt(ctx: typer.Context) -> None:
     try:
         if path.read_text(encoding="utf-8") != original:
             raise config_adopt_service.FileChanged(f"{path} changed since it was read")
-        backup = config_adopt_service.backup_path(path, datetime.now(UTC))
-        shutil.copy2(path, backup)
+        backup = config_adopt_service.write_backup(path, datetime.now(UTC))
     except (OSError, config_adopt_service.AdoptError) as exc:
-        typer.echo(f"error: {exc}. config.toml was not changed; nothing was stored.", err=True)
+        typer.echo(f"error: {exc}. {path.name} was not changed; nothing was stored.", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(f"backed up {path} to {backup}")
     engine = make_engine(database_url())
@@ -418,13 +420,20 @@ def config_adopt(ctx: typer.Context) -> None:
             user = _local_user_or_exit(session)
             for key, value in adopt.moved.items():
                 set_setting(session, user, ui_settings.KEY_PREFIX + key, value)
+    except (OSError, SQLAlchemyError) as exc:
+        typer.echo(
+            f"error: could not store the settings: {exc}. {path.name} was not changed and"
+            " nothing was stored.",
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
     finally:
         engine.dispose()
     try:
         config_adopt_service.rewrite(path, adopt.new_text, expected=original)
     except (OSError, config_adopt_service.AdoptError) as exc:
         typer.echo(
-            f"error: {exc}. config.toml was not changed, so its values still win; the"
+            f"error: {exc}. {path.name} was not changed, so its values still win; the"
             " Settings page has them too. Run config adopt again to finish.",
             err=True,
         )

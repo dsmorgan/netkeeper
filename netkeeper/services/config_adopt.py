@@ -178,6 +178,22 @@ class FileChanged(AdoptError):
     """The file changed after it was read; nothing was written to it."""
 
 
+def write_backup(path: Path, now: datetime) -> Path:
+    """Copy ``path`` to :func:`backup_path`, created exclusively (an existing file of that
+    name is an AdoptError, never overwritten), synced, with the original's mode."""
+    backup = backup_path(path, now)
+    data = path.read_bytes()
+    try:
+        with backup.open("xb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+    except FileExistsError as exc:
+        raise AdoptError(f"{backup} already exists") from exc
+    backup.chmod(stat.S_IMODE(path.stat().st_mode))
+    return backup
+
+
 def backup_path(path: Path, now: datetime) -> Path:
     """Where the backup goes: beside ``path``, named to the microsecond. AdoptError when
     that name is taken, so a backup is never overwritten."""
@@ -189,9 +205,11 @@ def backup_path(path: Path, now: datetime) -> Path:
 
 def rewrite(path: Path, text: str, *, expected: str) -> None:
     """Replace ``path``'s contents with ``text`` atomically: a temporary file in the same
-    directory, flushed and synced, with the original's mode, then ``os.replace``. The file
-    is read again first; :class:`FileChanged` if it is no longer ``expected``. On any
-    error the file is as it was."""
+    directory, flushed and synced, with the original's mode, then ``os.replace``, then the
+    directory synced. The file is read again first; :class:`FileChanged` if it is no
+    longer ``expected``. On any error before the rename the file is as it was. Only the
+    mode carries over: the file's owner, group, ACLs and extended attributes are the new
+    file's, not the original's."""
     if path.read_text(encoding="utf-8") != expected:
         raise FileChanged(f"{path} changed since it was read")
     mode = stat.S_IMODE(path.stat().st_mode)
@@ -206,3 +224,19 @@ def rewrite(path: Path, text: str, *, expected: str) -> None:
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
         raise
+    _sync_directory(path.parent)
+
+
+def _sync_directory(directory: Path) -> None:
+    """Make the rename durable. Best effort: the file is already replaced, so a failure
+    here (a file system that cannot sync a directory) must not read as "not changed"."""
+    try:
+        handle = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(handle)
+    except OSError:
+        pass
+    finally:
+        os.close(handle)

@@ -147,37 +147,55 @@ def test_adopt_refuses_without_a_terminal(
     assert _stored(local_db) == {}
 
 
-def test_only_budgets_the_cap_and_the_weekend_multiplier_are_clamped(tmp_path: Path) -> None:
-    """Lowering those is the safer direction; for the rest a clamp would loosen something
-    or change what it does, so the value stays in the file."""
-    text = """\
-[linkedin]
-weekend_multiplier = 1.5
+#: Every key whose file value above the hard maximum is clamped, with a value above it
+#: and the maximum it is stored at (written out, not read from the module).
+CLAMPED = [
+    ("linkedin.budget", "connection_pages_per_day", 500, 400),
+    ("linkedin.budget", "profile_visits_per_day", 300, 250),
+    ("linkedin.budget", "profile_visits_per_week", 2000, 1250),
+    ("linkedin.budget", "inbox_polls_per_day", 30, 24),
+    ("linkedin.budget", "li_prefills_per_day", 80, 50),
+    ("linkedin.budget", "li_messages_auto_per_day", 80, 50),
+    ("campaigns", "mailbox_daily_cap", 500, 400),
+    ("linkedin", "weekend_multiplier", 1.5, 1.0),
+]
 
-[campaigns]
-mailbox_daily_cap = 500
-send_spacing_floor_s = 5000
-send_spacing_median_s = 5000
-contacted_within_days_guard = 5000
-reply_poll_minutes = 2000
+#: Keys whose value above the page's maximum stays in the file: a clamp would loosen
+#: something (shorter spacing, a shorter guard) or change what it does.
+KEPT = [
+    ("campaigns", "send_spacing_floor_s", 5000),
+    ("campaigns", "send_spacing_median_s", 5000),
+    ("campaigns", "contacted_within_days_guard", 5000),
+    ("campaigns", "reply_poll_minutes", 2000),
+    ("backup", "keep", 500),
+]
 
-[backup]
-keep = 500
-"""
+
+def test_the_clamped_keys_are_exactly_these() -> None:
+    assert {f"{table}.{name}" for table, name, _, _ in CLAMPED} == config_adopt.CLAMP_SAFELY
+
+
+@pytest.mark.parametrize(("table", "name", "above", "stored"), CLAMPED)
+def test_a_key_where_lowering_is_safer_is_clamped(
+    tmp_path: Path, table: str, name: str, above: float, stored: float
+) -> None:
+    text = f"[{table}]\n{name} = {above}\n"
     adopt = config_adopt.plan(text, load_settings(_write(tmp_path, text)))
-    assert adopt.clamped == {
-        "linkedin.weekend_multiplier": (1.5, 1.0),
-        "campaigns.mailbox_daily_cap": (500, 400),
-    }
-    assert set(adopt.moved) == set(adopt.clamped)
-    assert set(adopt.kept) == {
-        "campaigns.send_spacing_floor_s",
-        "campaigns.send_spacing_median_s",
-        "campaigns.contacted_within_days_guard",
-        "campaigns.reply_poll_minutes",
-        "backup.keep",
-    }
-    assert tomllib.loads(adopt.new_text)["campaigns"]["reply_poll_minutes"] == 2000
+    key = f"{table}.{name}"
+    assert adopt.moved == {key: stored}
+    assert adopt.clamped == {key: (above, stored)}
+    assert name not in adopt.new_text
+
+
+@pytest.mark.parametrize(("table", "name", "above"), KEPT)
+def test_a_key_a_clamp_would_loosen_stays_in_the_file(
+    tmp_path: Path, table: str, name: str, above: int
+) -> None:
+    text = f"[{table}]\n{name} = {above}\n"
+    adopt = config_adopt.plan(text, load_settings(_write(tmp_path, text)))
+    key = f"{table}.{name}"
+    assert adopt.moved == {} and adopt.clamped == {}
+    assert key in adopt.kept and "hard maximum" in adopt.kept[key]
 
 
 def test_whitespace_in_a_table_header_is_understood(tmp_path: Path) -> None:
@@ -197,16 +215,45 @@ def test_the_backup_name_is_never_reused(tmp_path: Path) -> None:
         config_adopt.backup_path(path, now)
 
 
-def test_rewrite_is_atomic_keeps_the_mode_and_refuses_a_changed_file(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", [0o600, 0o644])
+def test_rewrite_is_atomic_keeps_the_mode_and_refuses_a_changed_file(
+    tmp_path: Path, mode: int
+) -> None:
     path = _write(tmp_path)
-    path.chmod(0o600)
+    path.chmod(mode)
     with pytest.raises(config_adopt.FileChanged):
         config_adopt.rewrite(path, "[web]\n", expected="something else")
     assert path.read_text(encoding="utf-8") == CONFIG
     config_adopt.rewrite(path, "[web]\n", expected=CONFIG)
     assert path.read_text(encoding="utf-8") == "[web]\n"
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.stat().st_mode) == mode
     assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_a_failed_rename_leaves_the_file_and_no_temporary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write(tmp_path)
+
+    def refuse(self: Path, target: Path) -> Path:
+        raise OSError("rename refused")
+
+    monkeypatch.setattr(Path, "replace", refuse)
+    with pytest.raises(OSError, match="rename refused"):
+        config_adopt.rewrite(path, "[web]\n", expected=CONFIG)
+    assert path.read_text(encoding="utf-8") == CONFIG
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["config.toml"]
+
+
+def test_the_backup_is_created_exclusively(tmp_path: Path) -> None:
+    path = _write(tmp_path)
+    path.chmod(0o640)
+    now = datetime(2026, 10, 7, 12, 0, 0, 1, tzinfo=UTC)
+    backup = config_adopt.write_backup(path, now)
+    assert backup.read_text(encoding="utf-8") == CONFIG
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o640
+    with pytest.raises(config_adopt.AdoptError, match="already exists"):
+        config_adopt.write_backup(path, now)
 
 
 def test_adopt_rewrites_a_symlinked_config_where_it_lives(
