@@ -493,6 +493,48 @@ describe('save and delete', () => {
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
   })
 
+  it('disables the subject for LinkedIn, and a save sends none', async () => {
+    const seen = mockApi(
+      routes([template({ channel: 'linkedin', subject: 'Left over' })], {
+        'GET /api/v1/templates/1': () =>
+          jsonResponse(template({ channel: 'linkedin', subject: 'Left over' })),
+        'PATCH /api/v1/templates/1': () =>
+          jsonResponse(template({ channel: 'linkedin', subject: null, body: 'Yo' })),
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: /^reconnect/ }))
+    const subject = await screen.findByLabelText('Subject')
+    expect(subject).toBeDisabled()
+    // A template saved before the rule opens without its subject.
+    expect(subject).toHaveValue('')
+    expect(screen.getByText('LinkedIn messages have no subject.')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Body'), { target: { value: 'Yo' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(requestsTo(seen, 'PATCH', '/api/v1/templates/1')).toHaveLength(1))
+    expect(requestsTo(seen, 'PATCH', '/api/v1/templates/1')[0]?.body).toMatchObject({
+      channel: 'linkedin',
+      subject: '',
+    })
+  })
+
+  it('drops a typed subject when the channel switches to LinkedIn, and shows the field again for email', async () => {
+    mockApi(routes([template()]))
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    const subject = await screen.findByLabelText('Subject')
+    expect(subject).toBeEnabled()
+    expect(screen.getByText('Required for email.')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Channel'), { target: { value: 'linkedin' } })
+    expect(subject).toBeDisabled()
+    expect(subject).toHaveValue('')
+
+    fireEvent.change(screen.getByLabelText('Channel'), { target: { value: 'email' } })
+    expect(subject).toBeEnabled()
+  })
+
   it('stops guarding once a dirty template is deleted', async () => {
     mockApi(
       routes([template()], {

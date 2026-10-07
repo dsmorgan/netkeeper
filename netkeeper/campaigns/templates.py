@@ -144,6 +144,12 @@ def _clean_subject(subject: str | None) -> str | None:
     return subject
 
 
+def _subject_for(channel: TemplateChannel, subject: str | None) -> str | None:
+    """The subject to store: a LinkedIn message has none, so any subject is dropped (#448)."""
+    cleaned = _clean_subject(subject)
+    return None if channel is TemplateChannel.LINKEDIN else cleaned
+
+
 def _check_body(body: str) -> str:
     if len(body) > TEMPLATE_BODY_MAX_LENGTH:
         raise InvalidTemplateValue(f"body is longer than {TEMPLATE_BODY_MAX_LENGTH} characters")
@@ -289,7 +295,7 @@ def create_template(
     """Store a new template, version 1, with its lint. Lint errors do not block a save."""
     _require_writer(session)
     cleaned_name = _clean_name(name)
-    cleaned_subject = _clean_subject(subject)
+    cleaned_subject = _subject_for(channel, subject)
     _check_body(body)
     _check_name_free(session, user, cleaned_name)
     row = Template(
@@ -321,7 +327,8 @@ def update_template(
     That is the same row, changed in place, unless the template :func:`is_in_use`:
     then it is a new row, one version up, pointing back at the old one, which is
     left exactly as it was. ``None`` (or :data:`UNSET` for ``subject``) leaves a
-    field alone; ``subject=None`` clears it.
+    field alone; ``subject=None`` clears it. A LinkedIn template never keeps a subject:
+    one given, or left over from before, is cleared by the save (#448).
     """
     _require_writer(session)
     row = get_template(session, user, template_id)
@@ -331,7 +338,7 @@ def update_template(
         )
     new_name = row.name if name is None else _clean_name(name)
     new_channel = row.channel if channel is None else channel
-    new_subject = row.subject if isinstance(subject, Unset) else _clean_subject(subject)
+    new_subject = _subject_for(new_channel, row.subject if isinstance(subject, Unset) else subject)
     new_body = row.body if body is None else _check_body(body)
     if (new_name, new_channel, new_subject, new_body) == (
         row.name,

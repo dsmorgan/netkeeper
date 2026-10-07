@@ -2279,7 +2279,10 @@ class TemplateCreate(BaseModel):
     name: TemplateName
     channel: TemplateChannel
     subject: TemplateSubject | None = None
-    """Blank is stored as no subject. An email template without one fails lint."""
+    """Blank is stored as no subject, and a LinkedIn template never keeps one.
+
+    An email template without one fails lint.
+    """
     body: TemplateBody
 
 
