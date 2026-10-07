@@ -207,3 +207,21 @@ async def test_serve_starts_its_scheduler_and_polls_from_the_settings_page(
 
 def _no_executor(factory: Any, bus: Any) -> Any:
     raise AssertionError("the recorded scheduler never builds an executor")
+
+
+async def test_the_auto_send_budget_warning_reads_the_settings_page(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """#343: with auto-send on in the file, the step options' #447 warning follows the
+    page's li_messages_auto value, not the file's."""
+    base = running_app.state.settings
+    running_app.state.settings = replace(
+        base, campaigns=replace(base.campaigns, linkedin_auto_send=True)
+    )
+    url = "/api/v1/campaigns/linkedin/options"
+    assert (await client.get(url)).json()["auto_send_warning"] is None  # 15, the default
+    assert (await _put(client, {"linkedin.budget.li_messages_auto_per_day": 25})).status_code == 200
+    warning = (await client.get(url)).json()["auto_send_warning"]
+    assert warning is not None and warning.startswith(
+        "Auto-sent LinkedIn messages are set to 25 a day"
+    )

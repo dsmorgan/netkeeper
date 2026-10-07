@@ -33,6 +33,7 @@ from test_linkedin_steps import LINKEDIN, Lane, make_lane
 from netkeeper.config import BudgetSettings, LinkedInSettings, Settings
 from netkeeper.linkedin.browser import (
     BrowserRun,
+    BrowserUnavailable,
     BubbleLayout,
     BubbleRecipient,
     SendClick,
@@ -89,6 +90,7 @@ from netkeeper.services.linkedin_steps import (
     record_prefill_outcome,
     waiting_for_you,
 )
+from netkeeper.services.settings_kv import set_setting
 from netkeeper.worker import BrowserWorker
 
 BODY = "Hi Zephyrine, good to see you!"
@@ -2309,3 +2311,47 @@ def test_the_opened_in_front_note_is_not_part_of_the_not_sent_reason() -> None:
 
     notes = f"not sent: the schedule is paused {runs.OPENED_IN_FRONT_NOTE}"
     assert _not_sent_reason(notes) == "the schedule is paused"
+
+
+# --- #343: the Settings page's values reach auto-send ---------------------------------
+
+
+async def test_the_handler_claims_by_the_settings_page_budget(lane: Lane) -> None:
+    """The file allows 15 auto-sends a day; the Settings page says 1, and 1 is spent.
+    The claim reads the page's value, per claim, so nothing is claimed."""
+    lane.enroll(contact=dict(CONTACT))
+    lane.write(lambda s, u: record_poll(s, u, NOW - timedelta(minutes=1)))
+
+    def page_and_spend(session: Session, user: User) -> None:
+        set_setting(session, user, "config.linkedin.budget.li_messages_auto_per_day", 1)
+        account = ensure_account(session, user)
+        key = budgets._day_key(account.id, ActionClass.LI_MESSAGES_AUTO, NOW.date())
+        set_setting(session, user, key, 1)
+
+    lane.write(page_and_spend)
+    handler = scheduled_runs._auto_send_handler(
+        lane.factory, cast(Any, None), cast(Any, _NoTasks()), AUTO, clock=lambda: NOW
+    )
+    account = lane.read(lambda s, u: ensure_account(s, u).id)
+    ctx = scheduler.JobContext(lane.user_id, account, scheduler.JobKind.AUTO_SEND, NOW, False)
+    assert await handler(ctx) is scheduler.JobOutcome.NOTHING_TO_SEND
+    assert lane.runs() == []
+
+
+async def test_a_browser_error_after_the_runner_started_is_not_given_back_unopened(
+    lane: Lane,
+) -> None:
+    """The browser fails once the runner has started (here, building its page source):
+    whether anything was opened is unknown, so the step is not handed back as unopened
+    (``opened`` None, #458), unlike a failure while attaching."""
+    a = Auto(lane)
+
+    def unavailable(run: BrowserRun, *, sleep: Any, clock: Any) -> PagePrefill:
+        raise BrowserUnavailable("Chrome went away")
+
+    a.worker._prefill_sources = unavailable
+    assert await a.execute() is runs.RunOutcome.RETRY_LATER
+    _no_send(a)
+    run = a.run()
+    assert not (run.notes or "").startswith(linkedin_steps.NOT_STARTED_NOTE)
+    assert (run.counts_json or {}).get("opened") is not False
