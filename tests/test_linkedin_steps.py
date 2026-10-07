@@ -130,7 +130,9 @@ class Lane:
         )
 
     def record(self, message_id: int, kind: MessageOutcomeKind, now: datetime = NOW) -> bool:
-        outcome = MessageOutcome(kind, "fixed words", "urn:li:msg_conversation:TEST1", 12)
+        # Refused before any key: nothing typed (record_prefill_outcome holds it to that).
+        typed = 0 if kind in (MessageOutcomeKind.NOT_TYPED, MessageOutcomeKind.TOO_LONG) else 12
+        outcome = MessageOutcome(kind, "fixed words", "urn:li:msg_conversation:TEST1", typed)
         return self.write(
             lambda s, u: record_prefill_outcome(
                 s, u, message_id, outcome, settings=self.settings, now=now
@@ -2063,3 +2065,20 @@ def test_the_tick_and_the_dashboard_leave_out_a_step_waiting_for_try_again(lane:
     assert result.skipped()[fresh] == (Skip.READY_TO_PREFILL,)
     fires, total = lane.read(lambda s, u: engine.upcoming(s, u, limit=10, include_linkedin=True))
     assert ([f.enrollment.id for f in fires], total) == ([fresh], 1)
+
+
+def test_a_not_typed_outcome_that_typed_something_is_refused(lane: Lane) -> None:
+    """not_typed lets Try again retype the step, so it must mean nothing was typed."""
+    enrollment_id = lane.enroll()
+    claim = lane.claim(enrollment_id)
+    assert claim.message_id is not None
+    outcome = MessageOutcome(MessageOutcomeKind.NOT_TYPED, "fixed words", None, 3)
+    with pytest.raises(ValueError, match="typed nothing"):
+        lane.write(
+            lambda s, u: record_prefill_outcome(
+                s, u, claim.message_id or 0, outcome, settings=lane.settings, now=NOW
+            )
+        )
+    [message] = lane.messages(enrollment_id)
+    assert message.status is MessageStatus.SCHEDULED  # nothing recorded
+    assert not linkedin_steps.needs_try_again(lane.enrollment(enrollment_id))
