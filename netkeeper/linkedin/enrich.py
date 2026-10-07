@@ -784,14 +784,15 @@ async def run_enrichment(
                     )
                     back = scroll_back_to_top(rng, depth_after(step.scroll))
                     pauses[-1] = pause
-                    clicks += 1
                     try:
                         info = await source.read_contact_info(
                             details.value, back=back, pause_s=pause, cancelled=cancelled
                         )
                     except ScrollCancelled:
                         log.info("enrichment: cancelled during the scroll back to the top")
+                        pauses[-1] = None  # no click was made, so no pause was waited
                         return await stop(StopReason.CANCELLED)
+                    clicks += 1
                     if _contact_info_lost(info):
                         # #405: the overlay answered and Chrome kept no body. Not the
                         # route: the profile is saved without it (below), and nothing

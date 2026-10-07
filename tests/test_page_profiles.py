@@ -20,7 +20,7 @@ import json
 import logging
 import random
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -50,7 +50,7 @@ from run_fakes import fake_provider
 from voyager_pages import PEOPLE, Person
 
 from netkeeper.linkedin import browser as browser_module
-from netkeeper.linkedin.browser import BrowserUnavailable
+from netkeeper.linkedin.browser import SCROLL_CANCEL_SLICE_S, BrowserUnavailable
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.enrich import (
     MAX_UNREADABLE_IN_A_ROW,
@@ -117,6 +117,7 @@ async def visit(
     origin: str = ORIGIN,
     limits: ObservationLimits | None = None,
     on_sleep: Callable[[float], None] | None = None,
+    cancelled: Callable[[], Awaitable[bool]] | None = None,
 ) -> Visit:
     provider, _ = fake_provider(site)
     harvests: list[ProfileHarvest] = []
@@ -148,6 +149,7 @@ async def visit(
             on_harvest=on_harvest,
             rng=random.Random(7),
             clock=lambda: NOW,
+            cancelled=cancelled,
         )
     return Visit(result=result, harvests=harvests, sleeps=sleeps)
 
@@ -539,6 +541,83 @@ async def test_a_tab_that_leaves_the_profile_while_scrolling_gets_no_click(
         assert out.result.outcome is Outcome.CHECKPOINT and out.harvests == []
     else:
         assert out.outcomes == [Outcome.ROUTE_CHANGED]
+
+
+# --- a cancel during a scroll (#177) ------------------------------------------------------------
+
+
+def _wheels_seen(site: ProfileSite, *, up: bool = False) -> bool:
+    """Whether the tab has sent a wheel event down the page (or, with ``up``, back up it)."""
+    if not site.tabs:
+        return False
+    return any((dy < 0) is up for _, dy in tab_of(site).mouse.wheels)
+
+
+async def test_a_cancel_during_the_dwell_stops_the_run_before_any_read_or_click(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    site = ProfileSite([ProfilePage(PRIYA), ProfilePage(MATEO)])
+    slices: list[float] = []
+
+    async def cancelled() -> bool:
+        return len(slices) >= 1
+
+    out = await visit(
+        site,
+        [target(PRIYA), target(MATEO)],
+        on_sleep=lambda s: slices.append(s) if s == SCROLL_CANCEL_SLICE_S else None,
+        cancelled=cancelled,
+    )
+    assert out.result.reason is StopReason.CANCELLED
+    assert site.clicks == [] and site.lookups == []
+    assert out.harvests == [] and out.result.completed == ()
+    # The visit ended at the cancelled slice: no lazy-card wait, no read, nothing after it.
+    assert out.sleeps[-1] == SCROLL_CANCEL_SLICE_S
+    # The scroll itself reported the cancel; the visit did not carry on to the back scroll.
+    assert "cancelled during the scroll of visit 1" in caplog.text
+    assert "scroll back to the top" not in caplog.text
+
+
+async def test_a_cancel_during_the_scroll_back_to_the_top_stops_before_the_click() -> None:
+    site = ProfileSite([ProfilePage(PRIYA), ProfilePage(MATEO)])
+
+    async def cancelled() -> bool:
+        return _wheels_seen(site, up=True)
+
+    out = await visit(site, [target(PRIYA), target(MATEO)], cancelled=cancelled)
+    assert out.result.reason is StopReason.CANCELLED
+    assert site.clicks == [] and out.harvests == [] and out.result.completed == ()
+    # No click was made, so none is counted and no pause is recorded for it.
+    assert out.result.clicks == 0 and out.result.click_pauses_s == (None,)
+
+
+async def test_a_wall_met_while_scrolling_wins_over_a_cancel() -> None:
+    """ADR 0002: the run must record the checkpoint (heat, flag), not a plain cancel."""
+    site = ProfileSite([ProfilePage(PRIYA, tab_after_scroll=CHECKPOINT_URL)])
+
+    async def cancelled() -> bool:
+        return _wheels_seen(site)
+
+    out = await visit(site, [target(PRIYA)], cancelled=cancelled)
+    assert out.result.reason is StopReason.RESPONSE
+    assert out.result.outcome is Outcome.CHECKPOINT
+    assert site.clicks == [] and out.harvests == []
+
+
+async def test_a_wall_met_scrolling_back_wins_over_a_cancel() -> None:
+    site = ProfileSite([ProfilePage(PRIYA)])
+
+    async def cancelled() -> bool:
+        if not _wheels_seen(site, up=True):
+            return False
+        tab_of(site)._url = CHECKPOINT_URL  # the wall arrives during the same scroll
+        return True
+
+    out = await visit(site, [target(PRIYA)], cancelled=cancelled)
+    assert out.result.reason is StopReason.RESPONSE
+    assert out.result.outcome is Outcome.CHECKPOINT
+    assert site.clicks == [] and out.harvests == []
 
 
 async def test_a_slug_that_reads_like_a_wall_is_still_a_profile() -> None:
