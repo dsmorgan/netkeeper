@@ -113,8 +113,14 @@ CONTEXT_MUTATORS = frozenset(
 # stays on the list above -- a raw session can reach every mutator there is -- and is
 # allowed at exactly one site, the body tap's, whose session may send exactly the
 # read-only methods below and nothing else (`test_the_one_cdp_session_is_read_only`).
+#
+# ADR 0007's amendment for #444 adds a second site: the Message click's geometry read,
+# whose session sends seven read-only DOM and Page reads (below), then detaches.
 ALLOWED_CONTEXT_MUTATIONS = frozenset(
-    {(LINKEDIN / "browser.py", "BrowserRun._open_body_tap", "new_cdp_session")}
+    {
+        (LINKEDIN / "browser.py", "BrowserRun._open_body_tap", "new_cdp_session"),
+        (LINKEDIN / "browser.py", "BrowserRun._read_click_geometry", "new_cdp_session"),
+    }
 )
 #: What the body tap's session may send, each named as a literal at its one call,
 #: with the only params keys it may pass (a dict literal):
@@ -123,12 +129,49 @@ ALLOWED_CONTEXT_MUTATIONS = frozenset(
 #:   request and nothing the page can see; Playwright's own session already sends it.
 #: - ``Network.streamResourceContent``: Chrome forwards an answer's data to this
 #:   session as it arrives. It alters, blocks, delays, and adds no request.
+#:
+#: And what the Message click's geometry session may send (ADR 0007's amendment, #444):
+#:
+#: - ``Page.getLayoutMetrics``: the viewport's size. It changes nothing.
+#: - ``DOM.getDocument`` (depth 0), ``DOM.querySelectorAll``, ``DOM.describeNode``: the
+#:   contact's Message links and the nodes inside each. Reads of the DOM tree.
+#: - ``DOM.getBoxModel``, ``DOM.getContentQuads``: a link's box, and the quads Playwright's
+#:   own click reads to find where it presses. Reads.
+#: - ``DOM.getNodeForLocation``: which element the page would hit at a point, as
+#:   ``elementFromPoint`` answers it. It runs no script and dispatches no event.
 READ_ONLY_CDP_METHODS: dict[str, frozenset[str]] = {
     "Network.enable": frozenset({"maxTotalBufferSize", "maxResourceBufferSize"}),
     "Network.streamResourceContent": frozenset({"requestId"}),
+    "Page.getLayoutMetrics": frozenset(),
+    "DOM.getDocument": frozenset({"depth"}),
+    "DOM.querySelectorAll": frozenset({"nodeId", "selector"}),
+    "DOM.describeNode": frozenset({"nodeId", "depth"}),
+    "DOM.getBoxModel": frozenset({"nodeId"}),
+    "DOM.getContentQuads": frozenset({"nodeId"}),
+    "DOM.getNodeForLocation": frozenset({"x", "y", "ignorePointerEventsNone"}),
 }
-#: The one function whose ``send`` calls reach a CDP session, and how many it makes.
-CDP_SENDERS = {(LINKEDIN / "browser.py", "BrowserRun._open_body_tap"): 2}
+#: The functions whose ``send`` calls reach a CDP session, and how many each makes.
+CDP_SENDERS = {
+    (LINKEDIN / "browser.py", "BrowserRun._open_body_tap"): 2,
+    (LINKEDIN / "browser.py", "BrowserRun._read_click_geometry"): 7,
+}
+#: Which of those methods each function may send: neither borrows the other's.
+CDP_SENDER_METHODS = {
+    (LINKEDIN / "browser.py", "BrowserRun._open_body_tap"): frozenset(
+        {"Network.enable", "Network.streamResourceContent"}
+    ),
+    (LINKEDIN / "browser.py", "BrowserRun._read_click_geometry"): frozenset(
+        {
+            "Page.getLayoutMetrics",
+            "DOM.getDocument",
+            "DOM.querySelectorAll",
+            "DOM.describeNode",
+            "DOM.getBoxModel",
+            "DOM.getContentQuads",
+            "DOM.getNodeForLocation",
+        }
+    ),
+}
 #: The only observations that open the body tap, each once (ADR 0006's amendment):
 #: the connections sync's (#200) and each enrichment visit's, whose tap streams only
 #: its lazy cards and the Contact info overlay (#203).
@@ -859,6 +902,8 @@ def test_the_one_cdp_session_is_read_only() -> None:
     assert not outside, "a CDP send outside the body tap:\n" + "\n".join(str(i) for i in outside)
     for item in found:
         assert item.method in READ_ONLY_CDP_METHODS, f"{item.where}: sends {item.method!r}"
+        site = (item.where.path, item.where.function)
+        assert item.method in CDP_SENDER_METHODS[site], f"{item.where}: sends {item.method!r}"
         assert item.params == READ_ONLY_CDP_METHODS[item.method], (
             f"{item.where}: {item.method} with params {item.params}"
         )
@@ -1754,11 +1799,38 @@ def test_the_message_click_is_bound_to_the_contacts_href() -> None:
         and receiver.func.attr == "nth"
     )
     ands = [
-        call for where, call in _calls_named(source, "and_") if where == "BrowserRun.click_message"
+        ast.unparse(call)
+        for where, call in _calls_named(source, "and_")
+        if where == "BrowserRun.click_message"
     ]
-    assert len(ands) == 1
-    built = ast.unparse(ands[0])
-    assert "locator" in built and "[href=" in built
+    # #444: the top card's control is the href-bound locator narrowed again, never a
+    # locator of its own.
+    assert len(ands) == 2
+    assert ands[0].startswith("controls.and_(tab.locator(") and "[href=" in ands[0]
+    assert ands[1] == "bound.and_(after_heading)"
+    # Every control the click can be sent to is drawn from the href-bound locator.
+    method = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "click_message"
+    )
+    appended = [
+        ast.unparse(node.args[0])
+        for node in ast.walk(method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "append"
+        and ast.unparse(node.func.value) == "candidates"
+    ]
+    assert sorted(appended) == ["top.first", "visible.nth(index)"]
+    assigned = {
+        ast.unparse(node.targets[0]): ast.unparse(node.value)
+        for node in ast.walk(method)
+        if isinstance(node, ast.Assign) and len(node.targets) == 1
+    }
+    assert assigned["visible"] == "bound.filter(visible=True)"
+    assert assigned["top"] == "bound.and_(after_heading).filter(visible=True)"
+    assert assigned["target"] == "candidates[index]"
 
 
 def test_bring_to_front_is_called_once_at_the_prefills_start() -> None:

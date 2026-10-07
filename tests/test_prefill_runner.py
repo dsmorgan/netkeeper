@@ -176,6 +176,9 @@ async def test_a_prefill_types_the_message_and_records_it_from_the_typing_start(
         "message_click_attempted": True,
         "message_clicked": True,
         "li_prefills_spent": True,
+        # The fake has no CDP, so the click chose without the page's geometry (#444).
+        "message_click_target": "unchecked",
+        "message_click_failure": None,
     }
 
 
@@ -365,6 +368,10 @@ class RaisingSource:
     def message_clicked(self) -> bool:
         return self._clicked
 
+    @property
+    def message_click_diagnostics(self) -> dict[str, str | None]:
+        return {"message_click_target": "top_card", "message_click_failure": "intercepted"}
+
     async def prefill(
         self, spec: MessageJobSpec, plan: TypingPlan, *, cancelled: Any
     ) -> PrefillResult:
@@ -389,6 +396,19 @@ async def test_a_source_that_raises_is_not_typed_before_a_key_and_unknown_after(
         assert message is not None and message.status is status
         assert (message.error or "").startswith("unknown")
         assert "Zephyrine" not in (message.error or "")
+
+
+async def test_a_source_that_raises_after_its_click_still_records_the_click_category(
+    lane: Lane,
+) -> None:
+    """#444: which control was chosen and the click's failure category reach the run's
+    counts even when the source raised, as fixed words."""
+    f = Fixture(lane, MessagingSite(ZEPHYRINE))
+    f.worker._prefill_sources = lambda run, *, sleep, clock: RaisingSource(0, attempted=True)
+    await f.execute()
+    counts = f.run().counts_json or {}
+    assert counts["message_click_target"] == "top_card"
+    assert counts["message_click_failure"] == "intercepted"
 
 
 # --- the click is recorded on every path (S3) ---------------------------------------------
@@ -662,6 +682,10 @@ class RecordingSource:
 
     def __init__(self) -> None:
         self.calls = 0
+
+    @property
+    def message_click_diagnostics(self) -> dict[str, str | None]:
+        return {}
 
     async def prefill(
         self, spec: MessageJobSpec, plan: TypingPlan, *, cancelled: Any

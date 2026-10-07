@@ -595,7 +595,7 @@ async def test_another_composer_on_the_page_refuses(hidden: bool) -> None:
         other = f'<div style="display:none">{other}</div>'
     ran = await prefill(MessagingSite(ZEPHYRINE, before=other))
     assert_no_keys(ran)
-    assert "more than one message composer" in ran.result.outcome.reason
+    assert "another message composer is on the page" in ran.result.outcome.reason
 
 
 async def test_two_messaging_dialogs_refuse_even_without_a_second_composer() -> None:
@@ -603,7 +603,7 @@ async def test_two_messaging_dialogs_refuse_even_without_a_second_composer() -> 
     for bubble in (Bubble(ZEPHYRINE), Bubble(ZEPHYRINE, None, dialog_root=True)):
         ran = await prefill(MessagingSite(ZEPHYRINE, bubble=bubble, before=dialog))
         assert_no_keys(ran)
-        assert "more than one message bubble" in ran.result.outcome.reason
+        assert "another message bubble is on the page" in ran.result.outcome.reason
 
 
 async def test_a_url_change_before_the_first_key_types_nothing() -> None:

@@ -927,6 +927,7 @@ describe('every recorded phrase has words (S1 drift guard)', () => {
       'the tab left the profile before the click',
       'the Message control could not be read',
       'no Message control is visible',
+      'no Message control is on screen with nothing over it; close or move what covers it',
     ]) {
       expect(prefillReason(phrase).bubble).toBe('closed')
     }
@@ -1004,8 +1005,10 @@ describe('prefill refusal reasons in plain words', () => {
     'another_compose',
     'recipient_name_mismatch',
     'recipient_name_unreadable',
-    'there is more than one message composer, or none; close other bubbles',
-    'more than one message bubble is open; close the others',
+    'no message composer is on the page',
+    'another message composer is on the page, in an open or minimized bubble; close the other bubbles',
+    'another message bubble is on the page, open or minimized; close the others',
+    'no Message control is on screen with nothing over it; close or move what covers it',
     "the conversation's bubble is not open",
     'the page shows a new-message bubble, not the conversation',
     "the composer is not in the conversation's bubble",

@@ -367,6 +367,12 @@ class PrefillSource(Protocol):
     @property
     def message_clicked(self) -> bool: ...
 
+    @property
+    def message_click_diagnostics(self) -> Mapping[str, str | None]:
+        """Which Message control was chosen and why a click that raised failed, as fixed
+        categories (#444), for the run's counts; empty when no control was chosen."""
+        ...
+
     async def prefill(
         self, spec: MessageJobSpec, plan: TypingPlan, *, cancelled: Cancelled
     ) -> PrefillResult: ...

@@ -174,6 +174,10 @@ class PagePrefill:
     def message_clicked(self) -> bool:
         return self._run.message_clicked
 
+    @property
+    def message_click_diagnostics(self) -> dict[str, str | None]:
+        return self._run.message_click_diagnostics
+
     async def prefill(
         self, spec: MessageJobSpec, plan: TypingPlan, *, cancelled: Cancelled
     ) -> PrefillResult:

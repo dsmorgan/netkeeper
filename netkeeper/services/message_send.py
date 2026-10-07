@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Final
@@ -150,6 +150,7 @@ def record(
     click_attempted: bool | None = None,
     clicked: bool | None = None,
     budget_spent: bool | None = None,
+    click_diagnostics: Mapping[str, str | None] | None = None,
 ) -> PrefillReport:
     """Record ``outcome`` on run ``run_id``'s claimed message, and end the run, in one
     writer transaction. A run with no claimed message only ends ``failed``.
@@ -205,6 +206,9 @@ def record(
                     else {"message_click_attempted": click_attempted, "message_clicked": clicked}
                 ),
                 **({} if budget_spent is None else {"li_prefills_spent": budget_spent}),
+                # For CP8 (#444): which Message control was chosen, and why a click that
+                # raised failed, as fixed categories. Empty when no control was chosen.
+                **(click_diagnostics or {}),
             },
             error=None if prefilled else outcome.reason,
         )
@@ -228,6 +232,7 @@ def record_quietly(
     click_attempted: bool | None = None,
     clicked: bool | None = None,
     budget_spent: bool | None = None,
+    click_diagnostics: Mapping[str, str | None] | None = None,
 ) -> None:
     """:func:`record` on the way out of a refusal or a cancel: a failed write is logged."""
     try:
@@ -241,6 +246,7 @@ def record_quietly(
             click_attempted=click_attempted,
             clicked=clicked,
             budget_spent=budget_spent,
+            click_diagnostics=click_diagnostics,
         )
     except Exception:
         log.exception("could not record how prefill run %d ended", run_id)
@@ -420,6 +426,7 @@ async def run_prefill(
             click_attempted=source.message_click_attempted,
             clicked=source.message_clicked,
             budget_spent=True,
+            click_diagnostics=source.message_click_diagnostics,
         )
         raise
     except Exception as exc:
@@ -441,6 +448,7 @@ async def run_prefill(
         click_attempted=source.message_click_attempted,
         clicked=source.message_clicked,
         budget_spent=True,
+        click_diagnostics=source.message_click_diagnostics,
     )
 
 
