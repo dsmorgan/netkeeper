@@ -572,8 +572,8 @@ class BrowserWorker:
                 # #343: the scheduler's timetable was built from the active hours serve
                 # started with; a window narrowed on the Settings page since applies
                 # here at once. Runs a person starts are checked where they start, and
-                # an auto-send (ADR 0008) is checked by message_send.prepare, with these
-                # same settings and its own words.
+                # an auto-send (ADR 0008) is checked by run_prefill's gates()
+                # (message_send), with these same settings and its own words.
                 try:
                     runs.refuse_if_outside_active_hours(settings.linkedin, now=self._clock())
                 except (runs.OutsideActiveHours, runs.RunError) as exc:
