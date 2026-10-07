@@ -214,6 +214,8 @@ class PageProfiles:
         self._components: list[tuple[bytes, str | None, bool]] = []
         self._redirects: list[str] = []
         self._stopped: Answer[None] | None = None
+        #: Whether the last :meth:`scroll` stopped early because the caller's cancel fired (#177).
+        self._scroll_cancelled = False
         self._clicked = False
         #: The fixed phrase for this visit's profile screen, when one arrived but
         #: its body could not be read (#197); ``None`` otherwise.
@@ -264,10 +266,13 @@ class PageProfiles:
             return blocked
         return await self._read_screen()
 
-    async def scroll(self, plan: ScrollPlan) -> None:
+    async def scroll(
+        self, plan: ScrollPlan, *, cancelled: Callable[[], Awaitable[bool]] | None = None
+    ) -> bool:
         if self._stopped is not None:
-            return
-        self._stopped = await self._scroll(plan)
+            return True
+        self._stopped = await self._scroll(plan, cancelled=cancelled)
+        return not self._scroll_cancelled
 
     async def read_profile(self, public_id: str) -> Answer[ProfileDetails]:
         if self._stopped is None:
@@ -751,11 +756,16 @@ class PageProfiles:
 
     # --- the tab ----------------------------------------------------------------------
 
-    async def _scroll(self, plan: ScrollPlan) -> Answer[None] | None:
+    async def _scroll(
+        self, plan: ScrollPlan, *, cancelled: Callable[[], Awaitable[bool]] | None = None
+    ) -> Answer[None] | None:
         if self._sleep is None:
-            outcome = await self._run.scroll(plan, rng=self._rng)
+            outcome = await self._run.scroll(plan, cancelled=cancelled, rng=self._rng)
         else:
-            outcome = await self._run.scroll(plan, sleep=self._sleep, rng=self._rng)
+            outcome = await self._run.scroll(
+                plan, sleep=self._sleep, cancelled=cancelled, rng=self._rng
+            )
+        self._scroll_cancelled = outcome.cancelled
         self._require_observed(outcome.page)
         return self._still_here(outcome.page.url)
 

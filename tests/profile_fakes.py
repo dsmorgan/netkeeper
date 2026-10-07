@@ -264,8 +264,11 @@ class FakeBrowser:
             return Answer(Outcome.NOT_FOUND, masked(landed))
         return Answer(Outcome.OK, masked(landed))
 
-    async def scroll(self, plan: ScrollPlan) -> None:
+    async def scroll(
+        self, plan: ScrollPlan, *, cancelled: Callable[[], Awaitable[bool]] | None = None
+    ) -> bool:
         self._record("scroll", plan)
+        return not (cancelled is not None and await cancelled())
 
     async def read_profile(self, public_id: str) -> Answer[ProfileDetails]:
         self._record("details", self._slug)

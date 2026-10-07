@@ -1228,3 +1228,38 @@ async def test_the_legacy_lock_goes_with_the_named_partner_account() -> None:
         assert activity_lock.inspect(activity_lock.LEGACY_SHARED_KEY).held
     async with provider.run(SINGLE_ACCOUNT_KEY):
         assert not activity_lock.inspect(activity_lock.LEGACY_SHARED_KEY).held
+
+
+async def test_a_cancel_during_the_dwell_stops_it_within_one_slice() -> None:
+    """#177: with ``cancelled`` given, the dwell is waited out in slices and polled."""
+    from netkeeper.linkedin.browser import SCROLL_CANCEL_SLICE_S
+
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    plan = make_plan((1, 0.1), dwell_s=9.0)
+    sleeper = Sleeper()
+
+    async def cancelled_after_two_slices() -> bool:  # an awaitable callback is accepted
+        return sleeper.waits.count(SCROLL_CANCEL_SLICE_S) >= 2
+
+    async with provider.run() as run:
+        await _prime_pointer(run)
+        outcome = await run.scroll(plan, sleep=sleeper, cancelled=cancelled_after_two_slices)
+
+    assert outcome.cancelled is True
+    assert sleeper.waits == [0.1, SCROLL_CANCEL_SLICE_S, SCROLL_CANCEL_SLICE_S]
+
+
+async def test_an_uncancelled_dwell_is_waited_out_in_full_in_slices() -> None:
+    from netkeeper.linkedin.browser import SCROLL_CANCEL_SLICE_S
+
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    sleeper = Sleeper()
+
+    async with provider.run() as run:
+        await _prime_pointer(run)
+        outcome = await run.scroll(make_plan(dwell_s=2.5), sleep=sleeper, cancelled=lambda: False)
+
+    assert outcome.cancelled is False
+    assert sleeper.waits == [SCROLL_CANCEL_SLICE_S, SCROLL_CANCEL_SLICE_S, 0.5]

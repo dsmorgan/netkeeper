@@ -539,8 +539,14 @@ class ProfileSource(Protocol):
         """
         ...
 
-    async def scroll(self, plan: ScrollPlan) -> None:
-        """Replay ``plan`` on the profile page: the wheel events, their pauses, the dwell."""
+    async def scroll(
+        self, plan: ScrollPlan, *, cancelled: Callable[[], Awaitable[bool]] | None = None
+    ) -> bool:
+        """Replay ``plan`` on the profile page: the wheel events, their pauses, the dwell.
+
+        ``cancelled``, when given, is asked between wheel events and during the dwell.
+        ``False`` when it said yes and the replay stopped early (#177); ``True``
+        otherwise, including when no ``cancelled`` was given."""
         ...
 
     async def read_profile(self, public_id: str) -> Answer[ProfileDetails]:
@@ -636,6 +642,7 @@ async def run_enrichment(
     rng: random.Random,
     on_progress: ProgressSink = _no_progress,
     clock: Callable[[], datetime] = _utcnow,
+    cancelled: Callable[[], Awaitable[bool]] | None = None,
 ) -> EnrichResult:
     """Visit the spec's targets in order, to its stopping point, and say why it stopped.
 
@@ -647,6 +654,9 @@ async def run_enrichment(
     then, for each visit that clicks, the pause before the click and the scroll
     back to the top; a seeded one replays all of it. The waits *between* profiles
     are the gate's; the pause before a click is the source's to wait out.
+    ``cancelled`` (spec 9.9) is handed to the source's scroll, so a cancel interrupts
+    the scroll and its dwell instead of waiting for the visit to end (#177): the run
+    then stops ``cancelled`` with that profile unread, not harvested, and not completed.
     """
     planned = min(len(spec.targets), spec.visit_budget)
     pacing = stretched(spec.pacing, spec.heat_multiplier)
@@ -737,7 +747,9 @@ async def run_enrichment(
         mismatch = False
         deferred = False
         if page.outcome is Outcome.OK:
-            await source.scroll(step.scroll)
+            if not await source.scroll(step.scroll, cancelled=cancelled):
+                log.info("enrichment: cancelled during the scroll of visit %d", visits)
+                return await stop(StopReason.CANCELLED)
             details = await source.read_profile(slug)
             answers.append(details)
             if details.outcome is Outcome.OK:
