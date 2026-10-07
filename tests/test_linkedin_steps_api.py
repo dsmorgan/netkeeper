@@ -434,7 +434,7 @@ async def test_ready_keeps_one_campaigns_and_counts_its_steps(
         "total": 0,
         "by_step": {},
         "try_again": [],
-        "prefills_left_today": 10,
+        "prefills_left_today": 15,
     }
 
 

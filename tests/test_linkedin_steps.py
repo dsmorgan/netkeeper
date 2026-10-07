@@ -1841,7 +1841,7 @@ def test_a_retry_still_runs_the_channel_checks(lane: Lane) -> None:
             settings=lane.settings.linkedin.budget,
         )
 
-    for _ in range(9):  # the lane's runs spent nothing; ten is the day's default
+    for _ in range(14):  # the lane's runs spent nothing; fifteen is the day's default (#447)
         lane.write(spend)
     left = lane.read(
         lambda s, u: linkedin_steps.prefills_left_today(s, u, now=NOW, settings=lane.settings)
