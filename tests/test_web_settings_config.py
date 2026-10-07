@@ -12,7 +12,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from isolation.harness import acting_as
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import Settings
@@ -194,9 +194,13 @@ async def test_serve_starts_its_scheduler_and_polls_from_each_users_settings_pag
         set_setting(session, other, "config.campaigns.reply_poll_minutes", 30)
         user_id, other_id = user.id, other.id
     hours: list[Any] = []
+    wholes: list[Settings | None] = []
 
-    def scheduler(*args: Any, active_hours: Any = None, **kwargs: Any) -> _Stopped:
+    def scheduler(
+        *args: Any, active_hours: Any = None, campaign_settings: Settings | None = None
+    ) -> _Stopped:
         hours.append(active_hours)
+        wholes.append(campaign_settings)
         return _Stopped()
 
     monkeypatch.setattr("netkeeper.web.app.start_serve_scheduler", scheduler)
@@ -212,6 +216,19 @@ async def test_serve_starts_its_scheduler_and_polls_from_each_users_settings_pag
         (provider,) = hours
         assert provider(users[user_id]) == (time(7, 15), time(19, 45))
         assert provider(users[other_id]) == (time(10, 0), time(16, 0))
+        # The auto-send handler's base is the settings serve started with, never another
+        # user's page values on their own: unresolved it is the file's settings, and each
+        # claim lays that user's page values on top (ADR 0008, #343).
+        (whole,) = wholes
+        assert whole is not None
+        assert ui_settings.unresolve(whole) == Settings()
+        with session_scope(factory) as session:
+            second = session.get(User, other_id)
+            assert second is not None
+            assert ui_settings.resolve(session, second, whole).linkedin.active_hours == (
+                "10:00",
+                "16:00",
+            )
         (monitor,) = _Monitor.instances
         assert (monitor.interval_for(user_id), monitor.interval_for(other_id)) == (180, 1800)
         sender = served.state.campaign_engine.sender
@@ -239,3 +256,24 @@ async def test_the_auto_send_budget_warning_reads_the_settings_page(
     assert warning is not None and warning.startswith(
         "Auto-sent LinkedIn messages are set to 25 a day"
     )
+
+
+async def test_the_posture_report_names_a_setting_serve_cannot_read(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """#464: a persistent read failure shows to the person, not only in the log."""
+    with session_scope(running_app.state.session_factory) as session:
+        first = session.scalars(select(User)).first()
+        assert first is not None
+        user_id = first.id
+    before = (await client.get("/api/v1/posture")).json()
+    failures = running_app.state.read_failures
+    with pytest.raises(RuntimeError), failures.watching(user_id, "active hours"):
+        raise RuntimeError("boom")
+    after = (await client.get("/api/v1/posture")).json()
+    added = [w for w in after["warnings"] if w not in before["warnings"]]
+    assert len(added) == 1 and "active hours" in added[0]
+    assert after["ok"] is False
+    with running_app.state.read_failures.watching(user_id, "active hours"):
+        pass  # read again: cleared
+    assert (await client.get("/api/v1/posture")).json()["warnings"] == before["warnings"]

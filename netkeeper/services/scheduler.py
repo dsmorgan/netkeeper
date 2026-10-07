@@ -1619,18 +1619,25 @@ def build_scheduler(
     jitter = rng if rng is not None else random.Random()  # noqa: S311 -- pacing jitter, not crypto
     scheduler = AsyncIOScheduler()
 
-    for user, account_id in accounts():
+    # Users whose schedule could not be established because their window was unreadable
+    # (#464). Their stored due times are from an earlier run of serve and have had no
+    # catch-up, so nothing fires for them until establishing succeeds at a heartbeat.
+    unestablished: set[int] = set()
+
+    def establish(user: User, account_id: int) -> bool:
         user_start, user_end = active_start, active_end
         if active_hours is not None:
             try:
                 user_start, user_end = active_hours(user)
             except Exception:
-                log.exception(
-                    "scheduler: could not read the active hours of user %d; their schedule"
-                    " is not established, so nothing fires for them until serve restarts",
-                    user.id,
-                )
-                continue
+                if user.id not in unestablished:
+                    log.exception(
+                        "scheduler: could not read the active hours of user %d; nothing fires"
+                        " for them until their schedule is established (tried again at each"
+                        " heartbeat)",
+                        user.id,
+                    )
+                return False
         with session_scope(session_factory, write=True) as session:
             sync_account_schedule(
                 session,
@@ -1643,13 +1650,29 @@ def build_scheduler(
                 active_start=user_start,
                 active_end=user_end,
             )
+        return True
+
+    for user, account_id in accounts():
+        if not establish(user, account_id):
+            unestablished.add(user.id)
+
+    def _ready() -> list[tuple[User, int]]:
+        ready: list[tuple[User, int]] = []
+        for user, account_id in accounts():
+            if user.id in unestablished:
+                if not establish(user, account_id):
+                    continue
+                unestablished.discard(user.id)
+                log.info("scheduler: established the schedule of user %d", user.id)
+            ready.append((user, account_id))
+        return ready
 
     async def _heartbeat() -> None:
         # The accounts are read off the event loop too (#259); poll_once runs each
         # of its sessions there.
         await poll_once(
             session_factory,
-            await off_loop(lambda: list(accounts())),
+            await off_loop(_ready),
             now=clock(),
             registry=registry,
             schedules=schedules,

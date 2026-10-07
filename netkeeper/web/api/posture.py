@@ -23,10 +23,17 @@ from fastapi import APIRouter, Request
 from netkeeper.models.base import utcnow
 from netkeeper.services import posture as posture_service
 from netkeeper.services.linkedin_accounts import account_id_for
+from netkeeper.services.read_failures import ReadFailures
 from netkeeper.web.deps import CurrentUser, SessionDep, effective_settings
 from netkeeper.web.schemas import PostureOut, ProtectionOut
 
 router = APIRouter(tags=["posture"])
+
+
+def _unreadable(request: Request, user_id: int) -> list[str]:
+    """What the running ``serve`` could not read of this user's settings (#464)."""
+    failures: ReadFailures | None = getattr(request.app.state, "read_failures", None)
+    return [] if failures is None else failures.describe(user_id)
 
 
 @router.get("/posture", operation_id="get_posture")
@@ -36,6 +43,7 @@ def get_posture(request: Request, user: CurrentUser, session: SessionDep) -> Pos
     report = posture_service.posture(
         session, user, account_id, now=utcnow(), settings=settings, probe=None
     )
+    unreadable = _unreadable(request, user.id)
     return PostureOut(
         checked_at=report.checked_at,
         timezone=report.timezone,
@@ -52,9 +60,9 @@ def get_posture(request: Request, user: CurrentUser, session: SessionDep) -> Pos
             )
             for protection in report.protections
         ],
-        warnings=list(report.warnings),
+        warnings=[*report.warnings, *unreadable],
         notes=list(report.notes),
         gaps=list(report.gaps),
-        ok=report.ok,
+        ok=report.ok and not unreadable,
         verdict=posture_service.verdict(report),
     )
