@@ -101,6 +101,34 @@ def test_names_are_trimmed_and_blank_subjects_are_no_subject(writer: Session, us
     assert row.name == "spaced" and row.subject is None
 
 
+def test_a_linkedin_template_never_stores_a_subject(writer: Session, user: User) -> None:
+    """#448: a LinkedIn message has no subject, so a save drops one rather than keeping it."""
+    row = _create(writer, user, channel=LINKEDIN, subject="Hello")
+    assert row.subject is None
+    assert row.lint_json == []
+
+
+def test_switching_a_template_to_linkedin_drops_its_subject(writer: Session, user: User) -> None:
+    row = _create(writer, user, channel=EMAIL, subject="Hello")
+    changed = update_template(writer, user, row.id, channel=LINKEDIN)
+    assert (changed.channel, changed.subject, changed.lint_json) == (LINKEDIN, None, [])
+    again = update_template(writer, user, row.id, subject="Back again")
+    assert again.subject is None
+
+
+def test_a_save_clears_the_subject_a_linkedin_template_had_before(
+    writer: Session, user: User
+) -> None:
+    """A row from before #448 still loads and lints; the next save heals it."""
+    row = _create(writer, user, channel=LINKEDIN, subject=None)
+    row.subject = "Left over"
+    writer.flush()
+    assert [i.rule for i in activation_errors(row)] == [LintRule.LINKEDIN_SUBJECT]
+    healed = update_template(writer, user, row.id, body="Hi {{ first_name }}, again")
+    assert healed.subject is None
+    assert activation_errors(healed) == []
+
+
 @pytest.mark.parametrize(
     ("fields", "message"),
     [

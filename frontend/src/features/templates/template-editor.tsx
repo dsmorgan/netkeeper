@@ -87,7 +87,10 @@ export function TemplateEditor({
   const bodyRef = useRef<HTMLTextAreaElement>(null)
   // The field an insert goes into, and the fields you have been in: one you never
   // focused has no cursor of yours, so an insert there goes at the end.
-  const [target, setTarget] = useState<InsertTarget>('body')
+  const [pickedTarget, setTarget] = useState<InsertTarget>('body')
+  // A LinkedIn template has no subject to insert into.
+  const noSubject = draft.channel === 'linkedin'
+  const target: InsertTarget = noSubject ? 'body' : pickedTarget
   const focused = useRef(new Set<InsertTarget>())
   const caret = useRef<PendingCaret | null>(null)
   const [bodyScroll, setBodyScroll] = useState(0)
@@ -141,7 +144,9 @@ export function TemplateEditor({
 
   const set = (patch: Partial<TemplateDraft>) => {
     setUndo(null) // an edit ends the chance to undo a paste
-    onDraftChange({ ...draft, ...patch })
+    const next = { ...draft, ...patch }
+    // A LinkedIn message has no subject: it is dropped, so it is never linted, saved or sent.
+    onDraftChange(next.channel === 'linkedin' ? { ...next, subject: '' } : next)
   }
 
   const fieldOf = (which: InsertTarget) =>
@@ -181,7 +186,11 @@ export function TemplateEditor({
   }
 
   const applyPaste = ({ subject, body }: AppliedStep) => {
-    const next = { ...draft, body, ...(subject === null ? {} : { subject }) }
+    const next = {
+      ...draft,
+      body,
+      ...(subject === null || noSubject ? {} : { subject }),
+    }
     const overwrites =
       (draft.subject !== '' && next.subject !== draft.subject) ||
       (draft.body !== '' && next.body !== draft.body)
@@ -279,6 +288,7 @@ export function TemplateEditor({
               ref={subjectRef}
               value={draft.subject}
               readOnly={locked}
+              disabled={noSubject}
               aria-invalid={partHasError('subject') || undefined}
               aria-describedby={
                 subjectIssues.length > 0 ? `${ids.subjectHint} ${ids.subjectLint}` : ids.subjectHint
@@ -287,7 +297,7 @@ export function TemplateEditor({
               onChange={(event) => set({ subject: event.target.value })}
             />
             <p id={ids.subjectHint} className="text-xs text-muted-foreground">
-              Required for email. A LinkedIn message has no subject line.
+              {noSubject ? 'LinkedIn messages have no subject.' : 'Required for email.'}
             </p>
             <Findings stale={shownStale}>
               <InlineLint id={ids.subjectLint} label="Subject lint" shown={subjectIssues} />

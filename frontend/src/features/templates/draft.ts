@@ -5,10 +5,12 @@ import type { TemplateDraft, TemplateOut } from './api'
 export const LINT_DEBOUNCE_MS = 400
 
 export function draftOf(template: TemplateOut | null): TemplateDraft {
+  const channel = template?.channel ?? 'email'
   return {
     name: template?.name ?? '',
-    channel: template?.channel ?? 'email',
-    subject: template?.subject ?? '',
+    channel,
+    // A LinkedIn message has no subject, so a template from before that rule opens without one.
+    subject: channel === 'linkedin' ? '' : (template?.subject ?? ''),
     body: template?.body ?? '',
   }
 }

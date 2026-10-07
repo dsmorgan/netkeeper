@@ -62,6 +62,23 @@ async def test_create_list_get_update_delete(client: httpx.AsyncClient) -> None:
     assert (await client.get("/api/v1/templates")).json() == []
 
 
+async def test_a_linkedin_template_drops_a_subject_on_create_and_update(
+    client: httpx.AsyncClient,
+) -> None:
+    """#448: the API ignores a subject on a LinkedIn template, so none is stored or sent."""
+    created = await _create(client, channel="linkedin", subject="Hello")
+    assert created["subject"] is None and created["lint"] == []
+    url = f"/api/v1/templates/{created['id']}"
+    patched = await client.patch(url, json={"subject": "Hi again"}, headers=CSRF)
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["subject"] is None and patched.json()["lint"] == []
+    email = await _create(client, name="mail", channel="email", subject="Hello")
+    switched = await client.patch(
+        f"/api/v1/templates/{email['id']}", json={"channel": "linkedin"}, headers=CSRF
+    )
+    assert switched.json()["subject"] is None
+
+
 async def test_lint_errors_are_reported_not_refused(client: httpx.AsyncClient) -> None:
     created = await _create(client, subject=None, body="{{ step.__class__ }}")
     assert {i["rule"] for i in created["lint"]} == {
