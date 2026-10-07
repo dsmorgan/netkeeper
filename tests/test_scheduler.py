@@ -1051,7 +1051,7 @@ async def test_a_tripped_inbox_owner_breaker_skips_an_inbox_fire(
     )
     assert calls == 0
     assert result is not None and result.fired is False
-    assert result.skipped_reason == "inbox_owner_mismatch"
+    assert result.skipped_reason == "inbox_owner_breaker"
     assert result.next_due is not None
     assert result.next_due > NOW + DEFAULT_SCHEDULES[scheduler.JobKind.INBOX].interval
 
@@ -1079,7 +1079,7 @@ async def test_a_corrupt_inbox_owner_row_skips_an_inbox_fire(
 
     result, calls = await _fire_after(session_factory, scheduler.JobKind.INBOX, corrupt)
     assert calls == 0
-    assert result is not None and result.skipped_reason == "inbox_owner_mismatch"
+    assert result is not None and result.skipped_reason == "inbox_owner_breaker"
 
 
 @pytest.mark.parametrize("kind", [*_CONNECTIONS, scheduler.JobKind.ENRICH])

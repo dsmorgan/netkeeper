@@ -521,7 +521,7 @@ class BrowserWorker:
                     facts.account_id,
                 )
                 return (
-                    "inbox_owner_mismatch",
+                    "inbox_owner_breaker",
                     "the inbox owner breaker is tripped for this account",
                 )
             if (

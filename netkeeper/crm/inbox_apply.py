@@ -312,22 +312,20 @@ def owner_matches(session: Session, user: User, owner_urn: str | None) -> bool:
 
 def owner_mismatch_fix(session: Session, user: User) -> str:
     """What to do about an ``owner_mismatch`` poll (#443), in the one sentence every
-    surface shares. :func:`owner_matches` compares the self contact's ``li_urn`` first, so
-    forgetting the recorded owner fixes the mismatch only when the self contact has none.
-    Read-only."""
+    surface shares. Chrome signed in to the wrong account is the common cause. Otherwise
+    :func:`owner_matches` decides which case this is: it compares the self contact's
+    ``li_urn`` first, so forgetting the recorded owner fixes the mismatch only when the
+    self contact has none. Read-only."""
     from netkeeper.crm.self_contact import get_self_contact
 
+    signed_in = "if Chrome is signed in to another LinkedIn account, sign back in to yours"
     me = get_self_contact(session, user)
     if me is not None and me.li_urn:
         return (
-            "your self contact's LinkedIn profile (its `li_urn`) names another account than"
-            " the one signed in: correct it, then run `netkeeper linkedin inbox` by hand"
-            " (`netkeeper linkedin inbox-forget-owner` does not help while it is set)"
+            f"{signed_in}; otherwise your own contact's LinkedIn ID does not match this"
+            " mailbox, and netkeeper cannot edit it yet"
         )
-    return (
-        "if you changed LinkedIn accounts, run `netkeeper linkedin inbox-forget-owner`,"
-        " then `netkeeper linkedin inbox` by hand"
-    )
+    return f"{signed_in}; otherwise run `netkeeper linkedin inbox-forget-owner`"
 
 
 def forget_owner(session: Session, user: User) -> bool:

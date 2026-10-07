@@ -951,7 +951,12 @@ def test_the_cli_forgets_the_recorded_owner_after_confirmation(
 def test_a_skipped_first_poll_fire_is_a_skip_and_the_owner_stop_names_its_cure() -> None:
     assert scheduler.JobOutcome.FIRST_POLL_BY_HAND in scheduler.SKIPPED_AFTER_GATE
     assert scheduler.JobOutcome.FIRST_POLL_BY_HAND.value == "first_inbox_poll"
-    assert "inbox-forget-owner" in (runs.describe_stop_reason("owner_mismatch") or "")
+    text = runs.describe_stop_reason("owner_mismatch") or ""
+    assert (
+        "sign back in to yours" in text
+        and "otherwise run `netkeeper linkedin inbox-forget-owner`" in text
+    )
+    assert "cannot edit it yet" in text
 
 
 def test_the_cli_acknowledges_a_short_first_poll(cli_db: sessionmaker[Session]) -> None:
@@ -1237,3 +1242,24 @@ async def test_owner_mismatch_polls_trip_the_owner_breaker_at_two_and_a_complete
     assert (state.count, state.tripped) == (0, False)
     # An owner mismatch never moves the inbox breaker.
     assert _inbox_breaker(session_factory, user_id).count == 0
+
+
+@pytest.mark.parametrize("ending", ["route_changed", "not_found", "observation_failed"])
+async def test_other_endings_leave_the_owner_streak_where_it_was(
+    session_factory: sessionmaker[Session], user_id: int, ending: str
+) -> None:
+    assert await _poll(session_factory, user_id, replace(delta(), owner_urn=OWNER_A)) == READ
+    assert (
+        await _poll(session_factory, user_id, replace(delta(), owner_urn=OWNER_B))
+        == "owner_mismatch"
+    )
+    assert _owner_breaker(session_factory, user_id).count == 1
+    if ending == "observation_failed":
+        with pytest.raises(ObservationFailed):
+            await _poll(session_factory, user_id, ObservationFailed("unreadable"))
+    else:
+        stop = InboxReadStopped(Outcome(ending), final_url="https://x.invalid/w")
+        await _poll(session_factory, user_id, stop)
+    assert _owner_breaker(session_factory, user_id).count == 1
+    assert await _poll(session_factory, user_id, delta(complete=False)) == INCOMPLETE
+    assert _owner_breaker(session_factory, user_id).count == 1

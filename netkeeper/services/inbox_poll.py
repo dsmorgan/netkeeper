@@ -269,16 +269,16 @@ async def poll_inbox(
                 now=clock(),
             )
 
-    def record_owner_breaker(*, owner_mismatch: bool, completed: bool) -> None:
-        """#443: the owner-mismatch streak, in its own writer session, after the poll's
-        ending is written. Never touches the other streaks."""
+    def record_owner_cleared() -> None:
+        """#443: a completed poll clears the owner-mismatch streak, in its own writer
+        session. (A mismatch is counted in ``apply_and_finish``'s transaction.)"""
         with session_scope(factory, write=True) as session:
             route_breaker.record_inbox_owner(
                 session,
                 _load_user(session, user_id),
                 account_id,
-                owner_mismatch=owner_mismatch,
-                completed=completed,
+                owner_mismatch=False,
+                completed=True,
                 now=clock(),
             )
 
@@ -298,6 +298,15 @@ async def poll_inbox(
                         now=clock(),
                         stop_reason=OWNER_MISMATCH,
                         counts=_zero_counts(),
+                    )
+                    # #443: counted in the same transaction as the ending.
+                    route_breaker.record_inbox_owner(
+                        session,
+                        user,
+                        account_id,
+                        owner_mismatch=True,
+                        completed=False,
+                        now=clock(),
                     )
                     return None
                 counts = inbox_apply.apply_delta(
@@ -379,9 +388,8 @@ async def poll_inbox(
         if counts is not None and reason != INCOMPLETE:
             # The poll completed: a poll that reads again clears the inbox breaker.
             await off_loop(record_breaker, route_changed=False, completed=True)
-            await off_loop(record_owner_breaker, owner_mismatch=False, completed=True)
+            await off_loop(record_owner_cleared)
         if counts is None:
-            await off_loop(record_owner_breaker, owner_mismatch=True, completed=False)
             log.error(
                 "inbox poll %d: the page showed another mailbox; nothing written", started_run_id
             )
