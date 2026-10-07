@@ -664,7 +664,7 @@ def test_a_spent_budget_is_refused(lane: Lane) -> None:
 
     def spend(session: Session, user: User) -> None:
         account = ensure_account(session, user).id
-        for _ in range(10):
+        for _ in range(BudgetSettings().li_prefills_per_day):
             budgets.consume(
                 session,
                 user,
