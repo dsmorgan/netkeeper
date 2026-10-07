@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 import factories
 import pytest
+import typer
 from campaign_fakes import ARMED_FOR_SEND, make_mailbox
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -505,13 +506,13 @@ def test_enroll_refuses_the_override_for_contact_recorded_while_asking(
             )
         return True
 
-    monkeypatch.setattr(cli_module.typer, "confirm", answer_yes_after_a_new_contact)
+    monkeypatch.setattr(typer, "confirm", answer_yes_after_a_new_contact)
     result = _run(
         "campaigns", "enroll", str(campaign_id), "--override-recent-contact", str(contact_id)
     )
 
     assert result.exit_code == 0, result.output
-    assert "recent-contact guard overridden for 0 of 1 contacts" in result.output
+    assert "recent-contact guard overridden for 0 of 1 contact" in result.output
     assert (
         f"contact {contact_id} not overridden: contacted again since you looked; review again"
         in result.output
@@ -566,14 +567,19 @@ def test_enroll_overrides_the_recent_contact_guard_after_asking(
         "campaigns", "enroll", str(campaign_id), "--override-recent-contact", named, input="n\n"
     )
     assert declined.exit_code == 1
-    assert "enroll 2 contacts anyway? Someone contacted them in the last 30 days" in (
-        declined.output
+    # Only the contact the recent-contact guard alone skips is counted.
+    assert "enroll 1 contact anyway? Someone contacted it in the last 30 days" in (declined.output)
+    assert (
+        f"contact {world.contacts[3]} (" in declined.output
+        and "skipped (do-not-contact; contacted in the last 30 days); only the recent-contact"
+        " guard is overridable"
+        in declined.output
     )
     assert "cancelled: nobody was enrolled" in declined.output
     # Each contact's last contact, as the override will use it.
     assert (
-        f"contact {world.contacts[0]}: last contacted {contacted:%Y-%m-%d %H:%M} UTC (email)"
-        in declined.output
+        f"): last contacted {contacted:%Y-%m-%d %H:%M} UTC (email)" in declined.output
+        and f"contact {world.contacts[0]} (" in declined.output
     )
 
     accepted = _run(
@@ -581,7 +587,7 @@ def test_enroll_overrides_the_recent_contact_guard_after_asking(
     )
     assert accepted.exit_code == 0, accepted.output
     assert "1 enrolled" in accepted.output
-    assert "recent-contact guard overridden for 1 of 2 contacts" in accepted.output
+    assert "recent-contact guard overridden for 1 of 1 contact" in accepted.output
     with session_scope(world.factory) as session:
         user = _local(session)
         rows = {

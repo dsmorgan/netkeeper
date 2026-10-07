@@ -290,7 +290,9 @@ def test_the_override_never_enrolls_a_contact_without_a_linkedin_member_id(
 
     assert result.enrolled == ()
     [verdict] = result.verdicts
-    assert verdict.reasons == (Reason.NO_LINKEDIN,)
+    # Another guard skips it: it keeps every reason, and nothing is overridden.
+    assert verdict.reasons == (Reason.NO_LINKEDIN, Reason.CONTACTED_RECENTLY)
+    assert not verdict.overridden and verdict.override_refused is None
 
 
 def test_the_enrollment_records_who_overrode_and_when(writer: Session, user: User) -> None:
@@ -617,16 +619,72 @@ def test_contact_recorded_after_the_person_looked_is_refused_not_overridden(
     assert writer.scalars(scoped(user, Enrollment)).all() == []
 
 
-def test_the_cutoff_is_the_contact_shown(writer: Session, user: User) -> None:
+def test_the_cutoff_is_never_later_than_the_contact_as_it_is(writer: Session, user: User) -> None:
+    """The shown time only detects a stale view: shown later than the real last contact
+    (a contact since deleted, or a client that sends now), the cutoff is the real one."""
     campaign = _draft(writer, user)
     named = _contacted(writer, user)
-    shown = RECENT + timedelta(minutes=1)  # the person saw a contact since deleted
 
     campaign_engine.enroll(
-        writer, user, campaign.id, [named.id], now=NOW, override_recent_contact={named.id: shown}
+        writer, user, campaign.id, [named.id], now=NOW, override_recent_contact={named.id: NOW}
     )
 
-    assert _enrollment(writer, user, campaign, named).recent_contact_cutoff == shown
+    enrollment = _enrollment(writer, user, campaign, named)
+    assert enrollment.recent_contact_cutoff == RECENT
+    # A contact recorded later, dated between the real last contact and the shown time.
+    campaign.status = CampaignStatus.ACTIVE
+    enrollment.status = EnrollmentStatus.ACTIVE
+    add_interaction(writer, user, named.id, InteractionKind.CALL, RECENT + timedelta(days=1))
+    writer.flush()
+    verdict = check_step(writer, user, enrollment, campaign.steps[0], now=NOW)
+    assert verdict.reasons == (Reason.CONTACTED_RECENTLY,)
+
+
+def test_a_last_contact_dated_exactly_now_is_overridable(writer: Session, user: User) -> None:
+    """The future boundary: ``now`` itself is not the future, in the review or at enroll."""
+    campaign = _draft(writer, user)
+    named = _contacted(writer, user, at=NOW)
+    _audience(writer, user, campaign, [named])
+
+    [row] = campaign_review.guard_report(writer, user, campaign, now=NOW).skipped
+    assert (row.overridable, row.override_note) == (True, None)
+
+    result = campaign_engine.enroll(
+        writer,
+        user,
+        campaign.id,
+        [named.id],
+        now=NOW,
+        override_recent_contact=_seen(named.id, at=NOW),
+    )
+    assert (result.overridden, result.override_refused) == ((named.id,), ())
+
+
+def test_another_guards_reason_wins_over_a_stale_view(writer: Session, user: User) -> None:
+    campaign = _draft(writer, user)
+    blocked = _contacted(writer, user, do_not_contact=True)
+    add_interaction(writer, user, blocked.id, InteractionKind.CALL, RECENT + timedelta(days=1))
+
+    [verdict] = check_enrollment(
+        writer, user, campaign, [blocked.id], now=NOW, override_recent_contact=_seen(blocked.id)
+    )
+
+    assert verdict.reasons == (Reason.DO_NOT_CONTACT, Reason.CONTACTED_RECENTLY)
+    assert (verdict.override_refused, verdict.override_cutoff) == (None, None)
+
+
+def test_a_future_last_contact_is_refused_as_future_even_when_shown(
+    writer: Session, user: User
+) -> None:
+    campaign = _draft(writer, user)
+    ahead = _contacted(writer, user, at=NOW + timedelta(days=1))
+
+    [verdict] = check_enrollment(
+        writer, user, campaign, [ahead.id], now=NOW, override_recent_contact=_seen(ahead.id)
+    )
+
+    assert verdict.override_refused == OVERRIDE_FUTURE
+    assert not verdict.overridden
 
 
 def test_a_named_contact_outside_the_window_is_not_marked_overridden(

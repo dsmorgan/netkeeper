@@ -449,9 +449,9 @@ class EnrollResult:
     already: tuple[int, ...]
     verdicts: tuple[Verdict, ...]
     overridden: tuple[int, ...] = ()
+    """The contacts enrolled only because a person overrode the recent-contact guard (#446)."""
     override_refused: tuple[tuple[int, str], ...] = ()
     """``(contact_id, why)`` for each override :func:`check_enrollment` refused (#446)."""
-    """The contacts enrolled only because a person overrode the recent-contact guard (#446)."""
 
 
 ENROLLING_STATUSES: Final[frozenset[CampaignStatus]] = frozenset(
