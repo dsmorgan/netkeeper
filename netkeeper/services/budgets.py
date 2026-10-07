@@ -374,6 +374,34 @@ def consume(
     return BudgetSnapshot(action=action, day=day, week=week)
 
 
+def release(
+    session: Session,
+    user: User,
+    account_id: int,
+    action: ActionClass,
+    *,
+    spent_at: datetime,
+    settings: BudgetSettings,
+) -> BudgetSnapshot:
+    """Give back one unit :func:`consume` spent at ``spent_at``, for a unit that did
+    nothing it is counted for (ADR 0008: an auto-send that typed nothing sent nothing).
+    The unit comes off the local day (and week) it was spent in, whenever this runs, and
+    never below zero. Needs a writer session."""
+    _require_writer(session, "budgets.release")
+    period = LocalPeriod.at(user, spent_at)
+    limits = _limits_for(action, settings)
+    day_key = _day_key(account_id, action, period.day)
+    day_count = max(_read_count(session, user, day_key) - 1, 0)
+    set_setting(session, user, day_key, day_count)
+    week = None
+    if limits.week is not None:
+        week_key = _week_key(account_id, action, period)
+        week_count = max(_read_count(session, user, week_key) - 1, 0)
+        set_setting(session, user, week_key, week_count)
+        week = PeriodBudget(count=week_count, limit=limits.week)
+    return BudgetSnapshot(action=action, day=PeriodBudget(day_count, limits.day), week=week)
+
+
 def configured_default(
     action: ActionClass, settings: BudgetSettings, period: Period = "day"
 ) -> int | None:

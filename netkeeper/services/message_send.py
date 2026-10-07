@@ -20,6 +20,20 @@ In order, and nothing later runs when an earlier step refuses:
    and the run's ending in one transaction. A ``prefilled`` outcome's ``prefilled_at``
    is the moment typing started, before the first key.
 
+**Auto-send** (ADR 0008). A ``message_send`` run the scheduler recorded (``scheduled``,
+:func:`netkeeper.services.linkedin_steps.claim_auto_send`) is an auto-send. Before the
+lock it must still be one: ``[campaigns] linkedin_auto_send`` on and the step's mode
+``auto_send``, or it records ``not_typed`` and nothing opens. Under the lock it must be
+inside active hours, the session unflagged and heat under its skip threshold (heat pauses
+an auto-send outright, as it does a prefill), and today's ``li_messages_auto`` budget
+(:func:`auto_send_allowance`) not spent;
+then it spends one ``li_messages_auto`` and one ``profile_visits`` unit (never
+``li_prefills``). Only then is a :class:`~netkeeper.linkedin.messaging.SendPermit` built,
+here and nowhere else, and handed to the source with the spec. Its ``recheck`` asks the
+flag, active hours, the session flag, heat and a cancel again just before the click.
+``send_clicked`` is recorded like ``prefilled`` (the inbox poll confirms the send), with
+``send_clicked_at``; a refusal after the whole body was typed is ``prefilled``.
+
 A prefill is never retried or resumed: ``partially_typed`` and ``unknown`` are failures
 a person clears. Every refusal before the first key is ``not_typed``, which gives the
 claim back (P4-09). The body is read from the database here and goes nowhere but the
@@ -47,26 +61,45 @@ from netkeeper.linkedin.messaging import (
     MessageOutcomeKind,
     PrefillResult,
     PrefillSource,
+    SendPermit,
     plan_refusal,
     plan_typing,
 )
 from netkeeper.linkedin.pacing import TypingPlan, TypingPlanError
 from netkeeper.models import (
+    CampaignStep,
     Contact,
+    Enrollment,
     Message,
     MessageDirection,
     MessageStatus,
+    StepMode,
     SyncRunKind,
     SyncRunStatus,
+    SyncRunTrigger,
     TemplateChannel,
     User,
 )
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import budgets, runs
+from netkeeper.services import campaign_engine as engine
 from netkeeper.services import heat as heat_service
 from netkeeper.services.budgets import ActionClass, BudgetExceeded
+from netkeeper.services.campaign_guards import check_step
+from netkeeper.services.linkedin_accounts import schedule_paused, scheduled_runs_armed
 from netkeeper.services.linkedin_session import flag_session
-from netkeeper.services.linkedin_steps import record_prefill_outcome
+from netkeeper.services.linkedin_steps import (
+    AUTO_SEND_HOLD_BUBBLE,
+    AUTO_SEND_HOLD_TAB,
+    BUBBLE_LEFT_OPEN_NOTE,
+    NOT_SENT_NOTE,
+    NOT_STARTED_NOTE,
+    SEND_UNCONFIRMED_NOTE,
+    auto_send_hold,
+    give_back_unopened,
+    hold_auto_send,
+    record_prefill_outcome,
+)
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +114,7 @@ CANCEL_POLL_S: Final = 1.0
 
 _ENDINGS: Final[dict[MessageOutcomeKind, SyncRunStatus]] = {
     MessageOutcomeKind.PREFILLED: SyncRunStatus.COMPLETED,
+    MessageOutcomeKind.SEND_CLICKED: SyncRunStatus.COMPLETED,
     MessageOutcomeKind.NOT_TYPED: SyncRunStatus.ABORTED,
     MessageOutcomeKind.TOO_LONG: SyncRunStatus.ABORTED,
     MessageOutcomeKind.PARTIALLY_TYPED: SyncRunStatus.FAILED,
@@ -105,6 +139,13 @@ class PreparedPrefill:
     scheduled_at: datetime
     spec: MessageJobSpec
     plan: TypingPlan = field(repr=False)
+
+    @property
+    def auto_send(self) -> bool:
+        """Whether this run is an auto-send (ADR 0008): its spec's mode, which
+        :func:`prepare` sets only for a scheduled run of an ``auto_send`` step with
+        ``[campaigns] linkedin_auto_send`` on."""
+        return self.spec.mode == "auto_send"
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,16 +192,52 @@ def record(
     clicked: bool | None = None,
     budget_spent: bool | None = None,
     click_diagnostics: Mapping[str, str | None] | None = None,
+    send_clicked_at: datetime | None = None,
+    send_refusal: str | None = None,
+    bubble_closed: bool | None = None,
+    close_refusal: str | None = None,
+    tab_closed: bool = False,
+    send_unconfirmed: str | None = None,
+    opened: bool | None = None,
 ) -> PrefillReport:
     """Record ``outcome`` on run ``run_id``'s claimed message, and end the run, in one
     writer transaction. A run with no claimed message only ends ``failed``.
+    ``send_clicked_at`` is an auto-send's click (ADR 0008); ``send_refusal`` is why an
+    auto-send that typed the whole body did not click, kept in the run's notes, as is
+    ``close_refusal``, why a sent bubble was left open (D1).
+
+    An auto-send whose Message click was attempted and whose tab it did not close
+    (anything but a landed Send with its bubble closed, D3) left a message bubble open
+    in Chrome: auto-send is held (:func:`~netkeeper.services.linkedin_steps.hold_auto_send`)
+    until the person closes it and resumes, in the same transaction.
 
     ``budget_spent`` is whether the run spent its ``li_prefills`` and ``profile_visits``
     units (step 2 of the module docstring): the queue says whether a ``not_typed`` try
-    counted against today's budget (#445). Left out of the counts when unknown."""
+    counted against today's budget (#445). An auto-send's runner passes ``None`` once
+    its source ran, since it spends ``li_messages_auto`` instead, so the count is left
+    out and a person's Try again asks them to confirm no bubble is open.
+
+    ``opened`` false says the run stopped before it opened anything (a refusal before the
+    navigation: a lapse, a gate, a busy browser). An auto-send stopped there is not
+    ``not_typed``: its step is given back with its due time
+    (:func:`~netkeeper.services.linkedin_steps.give_back_unopened`), so a later fire tries
+    it again by itself, and it is never listed for Try again (#458 final review)."""
     with session_scope(factory, write=True) as session:
         user = _load_user(session, user_id)
-        if runs.get_run(session, user, run_id).status is not SyncRunStatus.RUNNING:
+        run = runs.get_run(session, user, run_id)
+        auto = run.trigger is SyncRunTrigger.SCHEDULED
+        if auto and click_attempted and not tab_closed:
+            # Whatever else happens to the record, a bubble may be open: hold auto-send,
+            # whether or not the run is still running (#458 review, SF3).
+            hold_auto_send(
+                session,
+                user,
+                run.linkedin_account_id,
+                reason=AUTO_SEND_HOLD_TAB if bubble_closed else AUTO_SEND_HOLD_BUBBLE,
+                now=now,
+                run_id=run_id,
+            )
+        if run.status is not SyncRunStatus.RUNNING:
             log.debug("prefill run %d already ended; its outcome stays as recorded", run_id)
             return PrefillReport(run_id, None)
         message = _claimed(session, user, run_id)
@@ -176,6 +253,25 @@ def record(
                 error="the run has no claimed LinkedIn message",
             )
             return PrefillReport(run_id, None)
+        if auto and opened is False and outcome.kind is MessageOutcomeKind.NOT_TYPED:
+            give_back_unopened(session, user, message.id, now=now)
+            runs.finish_run(
+                session,
+                user,
+                run_id,
+                status=SyncRunStatus.ABORTED,
+                now=now,
+                stop_reason=outcome.kind.value,
+                counts={"opened": False, "typed_chars": 0},
+                notes=(f"{NOT_STARTED_NOTE}{outcome.reason}",),
+                error=outcome.reason,
+            )
+            log.info("auto-send run %d stopped before opening anything; the step stays due", run_id)
+            return PrefillReport(run_id, outcome)
+        typed_whole = outcome.kind in (
+            MessageOutcomeKind.PREFILLED,
+            MessageOutcomeKind.SEND_CLICKED,
+        )
         record_prefill_outcome(
             session,
             user,
@@ -183,9 +279,12 @@ def record(
             outcome,
             settings=settings,
             now=now,
-            prefilled_at=prefilled_at if outcome.kind is MessageOutcomeKind.PREFILLED else None,
+            prefilled_at=prefilled_at if typed_whole else None,
+            send_clicked_at=(
+                send_clicked_at if outcome.kind is MessageOutcomeKind.SEND_CLICKED else None
+            ),
         )
-        prefilled = outcome.kind is MessageOutcomeKind.PREFILLED
+        prefilled = typed_whole
         runs.finish_run(
             session,
             user,
@@ -209,7 +308,29 @@ def record(
                 # For CP8 (#444): which Message control was chosen, and why a click that
                 # raised failed, as fixed categories. Empty when no control was chosen.
                 **(click_diagnostics or {}),
+                # ADR 0008: whether an auto-send's one Send click landed, and whether it
+                # then closed the sent bubble (D1) and its own tab (D3).
+                **(
+                    {
+                        "send_clicked": outcome.kind is MessageOutcomeKind.SEND_CLICKED,
+                        "bubble_closed": bool(bubble_closed),
+                        "tab_closed": tab_closed,
+                    }
+                    if auto
+                    else {}
+                ),
             },
+            notes=tuple(
+                note
+                for note in (
+                    None if send_refusal is None else f"{NOT_SENT_NOTE}{send_refusal}",
+                    None
+                    if send_unconfirmed is None
+                    else f"{SEND_UNCONFIRMED_NOTE}{send_unconfirmed}",
+                    None if close_refusal is None else f"{BUBBLE_LEFT_OPEN_NOTE}{close_refusal}",
+                )
+                if note is not None
+            ),
             error=None if prefilled else outcome.reason,
         )
     log.info(
@@ -233,8 +354,11 @@ def record_quietly(
     clicked: bool | None = None,
     budget_spent: bool | None = None,
     click_diagnostics: Mapping[str, str | None] | None = None,
+    tab_closed: bool = False,
+    opened: bool | None = None,
 ) -> None:
-    """:func:`record` on the way out of a refusal or a cancel: a failed write is logged."""
+    """:func:`record` on the way out of a refusal or a cancel: a failed write is logged,
+    and an auto-send's hold is still written (:func:`hold_quietly`)."""
     try:
         record(
             factory,
@@ -247,9 +371,36 @@ def record_quietly(
             clicked=clicked,
             budget_spent=budget_spent,
             click_diagnostics=click_diagnostics,
+            tab_closed=tab_closed,
+            opened=opened,
         )
     except Exception:
         log.exception("could not record how prefill run %d ended", run_id)
+        if click_attempted and not tab_closed:
+            hold_quietly(factory, user_id, run_id, now=now)
+
+
+def hold_quietly(
+    factory: sessionmaker[Session], user_id: int, run_id: int, *, now: datetime
+) -> None:
+    """Hold auto-send, in a transaction of its own, when the outcome could not be recorded
+    after an auto-send's Message click (#458 review, SF3). A manual run holds nothing. A
+    failed write is logged."""
+    try:
+        with session_scope(factory, write=True) as session:
+            user = _load_user(session, user_id)
+            run = runs.get_run(session, user, run_id)
+            if run.trigger is SyncRunTrigger.SCHEDULED:
+                hold_auto_send(
+                    session,
+                    user,
+                    run.linkedin_account_id,
+                    reason=AUTO_SEND_HOLD_BUBBLE,
+                    now=now,
+                    run_id=run_id,
+                )
+    except Exception:
+        log.exception("could not hold auto-send after run %d", run_id)
 
 
 def prepare(
@@ -271,11 +422,19 @@ def prepare(
         if run.kind is not SyncRunKind.MESSAGE_SEND:
             raise ValueError(f"run {run_id} is a {run.kind.value} run, not message_send")
         account_id = run.linkedin_account_id
+        scheduled = run.trigger is SyncRunTrigger.SCHEDULED
         message = _claimed(session, user, run_id)
         if message is None:
             claimed = None
+            step_mode = None
         else:
             contact = get_scoped(session, user, Contact, message.contact_id)
+            step = (
+                None
+                if message.step_id is None
+                else get_scoped(session, user, CampaignStep, message.step_id)
+            )
+            step_mode = None if step is None else step.mode
             claimed = (
                 message.id,
                 message.scheduled_at,
@@ -289,15 +448,28 @@ def prepare(
         return PrefillReport(run_id, None)
     message_id, scheduled_at, body, urn, public_id = claimed
 
-    def refuse(outcome: MessageOutcome) -> PrefillReport:
+    def refuse(outcome: MessageOutcome, *, opened: bool | None = None) -> PrefillReport:
         # Before the lock, so no budget. No source ran, so the click keys stay out (the
         # UI then reads the reason's words); no budget spent says no navigation either.
         return record(
-            factory, user_id, run_id, outcome, settings=settings, now=clock(), budget_spent=False
+            factory,
+            user_id,
+            run_id,
+            outcome,
+            settings=settings,
+            now=clock(),
+            budget_spent=False,
+            opened=opened,
         )
 
     if lapsed(scheduled_at, now):
-        return refuse(_not_typed("the claim lapsed"))
+        return refuse(_not_typed("the claim lapsed"), opened=False)
+    if scheduled:
+        # ADR 0008: a run nobody watches types only as an auto-send, and only while it
+        # still is one. Nothing is opened, spent, or typed otherwise.
+        refusal = auto_send_refusal(settings, step_mode)
+        if refusal is not None:
+            return refuse(_not_typed(refusal), opened=False)
     if not body:
         return refuse(_not_typed("the message has no body"))
     try:
@@ -305,7 +477,7 @@ def prepare(
             recipient_urn=urn or "",
             recipient_public_id=public_id,
             body=body,
-            mode="prefill",
+            mode="auto_send" if scheduled else "prefill",
             typing_seed=secrets.randbits(64) if seed is None else seed,
         )
     except ValueError:
@@ -317,6 +489,66 @@ def prepare(
         return refuse(plan_refusal(exc))
     assert scheduled_at is not None  # lapsed() refuses a claim without one
     return PreparedPrefill(run_id, message_id, account_id, scheduled_at, spec, plan)
+
+
+def still_wanted(session: Session, user: User, run_id: int, *, now: datetime) -> str | None:
+    """Whether the claimed message is still one to send (ADR 0008, #458 final review),
+    read live, before the navigation and again just before the Send click: still
+    ``scheduled``; its step still ``auto_send``; no reply on the enrollment; and the
+    step still passes its guards (:func:`~netkeeper.services.campaign_guards.check_step`:
+    the enrollment and the campaign ``active``, the contact not do-not-contact, and the
+    rest). ``None`` when it is; otherwise why not, in fixed words. Read-only."""
+    message = _claimed(session, user, run_id)
+    if message is None:
+        return "the claimed message is no longer waiting to be sent"
+    step = (
+        None
+        if message.step_id is None
+        else get_scoped(session, user, CampaignStep, message.step_id)
+    )
+    if step is None or step.mode is not StepMode.AUTO_SEND:
+        return "the step is not an auto-send step"
+    enrollment = get_scoped(session, user, Enrollment, message.enrollment_id)
+    if enrollment is None:
+        return "the enrollment is gone"
+    if engine._reply_at(session, user, enrollment.id) is not None:
+        return "a reply arrived"
+    verdict = check_step(session, user, enrollment, step, now=now)
+    if not verdict.eligible:
+        return "the step no longer passes its guards"
+    return None
+
+
+def auto_send_refusal(settings: Settings, mode: StepMode | None) -> str | None:
+    """Why an auto-send may not run (ADR 0008), in fixed words, or ``None``: the config
+    flag off, or a step whose mode is not ``auto_send``."""
+    if not settings.campaigns.linkedin_auto_send:
+        return "auto-send is off"
+    if mode is not StepMode.AUTO_SEND:
+        return "the step is not an auto-send step"
+    return None
+
+
+def auto_send_allowance(
+    session: Session, user: User, account_id: int, *, now: datetime, settings: Settings
+) -> tuple[int, int]:
+    """Today's ``li_messages_auto`` count and its daily limit (ADR 0008): the configured
+    budget clamped to its hard maximum (:func:`netkeeper.services.budgets.status`).
+
+    An auto-send runs only while the count is below the limit: unlike
+    ``budgets.consume`` alone, which lets one unit over, this never sends past it. Heat
+    doesn't shrink the limit. Like every LinkedIn message run, an auto-send is paused
+    outright while heat is at its skip threshold (:func:`runs.refuse_if_flagged_or_hot`).
+    Read-only."""
+    snapshot = budgets.status(
+        session,
+        user,
+        account_id,
+        ActionClass.LI_MESSAGES_AUTO,
+        now=now,
+        settings=settings.linkedin.budget,
+    )
+    return snapshot.day.count, snapshot.day.limit
 
 
 def lapsed(scheduled_at: datetime | None, now: datetime) -> bool:
@@ -350,37 +582,88 @@ async def run_prefill(
             click_attempted=False,
             clicked=False,
             budget_spent=False,
+            opened=False,
         )
+
+    auto = prepared.auto_send
+
+    def gates(session: Session, user: User) -> str | None:
+        """The gates checked before the navigation and again before an auto-send's click."""
+        now = clock()
+        if auto:
+            refusal = auto_send_refusal(settings, StepMode.AUTO_SEND)
+            if refusal is not None:
+                return refusal
+            # Live reads, asked again before the click: disarming or pausing scheduled
+            # runs, or a hold, stops an auto-send mid-run (#458 review).
+            if not scheduled_runs_armed(session, user, prepared.account_id):
+                return "scheduled runs are disarmed"
+            if schedule_paused(session, user, prepared.account_id):
+                return "the schedule is paused"
+            if auto_send_hold(session, user, prepared.account_id) is not None:
+                return "auto-send is held until the open message bubbles are closed"
+            changed = still_wanted(session, user, run_id, now=now)
+            if changed is not None:
+                return changed
+            try:
+                runs.refuse_if_outside_active_hours(settings.linkedin, now=now)
+            except runs.OutsideActiveHours:
+                return "outside LinkedIn's active hours"
+            except runs.RunError:
+                return "LinkedIn's active hours do not parse"
+        try:
+            runs.refuse_if_flagged_or_hot(
+                session, user, prepared.account_id, now=now, settings=settings.linkedin
+            )
+        except runs.SessionFlagged:
+            return "the LinkedIn session is flagged"
+        except runs.HeatSkipped:
+            return "heat is too high"
+        if runs.cancel_requested(session, user, run_id):
+            return "cancelled"
+        return None
+
+    spent_at: datetime | None = None
 
     def spend() -> str | None:
         """``None`` when the prefill may navigate; otherwise why it stops first."""
+        nonlocal spent_at
         with session_scope(factory, write=True) as session:
-            user = _load_user(session, user_id)
-            try:
-                runs.refuse_if_flagged_or_hot(
-                    session, user, prepared.account_id, now=clock(), settings=settings.linkedin
-                )
-            except runs.SessionFlagged:
-                return "the LinkedIn session is flagged"
-            except runs.HeatSkipped:
-                return "heat is too high"
-            if runs.cancel_requested(session, user, run_id):
-                return "cancelled"
+            refusal = gates(session, _load_user(session, user_id))
+            if refusal is not None:
+                return refusal
         try:
             with session_scope(factory, write=True) as session:
                 user = _load_user(session, user_id)
-                for action in (ActionClass.LI_PREFILLS, ActionClass.PROFILE_VISITS):
+                if auto:
+                    count, limit = auto_send_allowance(
+                        session, user, prepared.account_id, now=clock(), settings=settings
+                    )
+                    if count >= limit:
+                        return "today's auto-send budget is spent"
+                # An auto-send spends li_messages_auto, never li_prefills (ADR 0008).
+                first = ActionClass.LI_MESSAGES_AUTO if auto else ActionClass.LI_PREFILLS
+                at = clock()
+                for action in (first, ActionClass.PROFILE_VISITS):
                     budgets.consume(
                         session,
                         user,
                         prepared.account_id,
                         action,
-                        now=clock(),
+                        now=at,
                         settings=settings.linkedin.budget,
                     )
+            spent_at = at
         except BudgetExceeded:
             return "today's LinkedIn budget is spent"
         return None
+
+    def recheck_gates() -> str | None:
+        with session_scope(factory) as session:
+            return gates(session, _load_user(session, user_id))
+
+    async def recheck() -> str | None:
+        return await off_loop(recheck_gates)
 
     refused = await off_loop(spend)
     if refused is not None:
@@ -395,6 +678,7 @@ async def run_prefill(
             click_attempted=False,
             clicked=False,
             budget_spent=False,
+            opened=False,
         )
 
     asked_at = 0.0
@@ -413,48 +697,135 @@ async def run_prefill(
         return was_cancelled
 
     try:
-        result = await source.prefill(prepared.spec, prepared.plan, cancelled=cancelled)
+        if auto:
+            # ADR 0008: the one place a SendPermit is built, after every gate above held
+            # and li_messages_auto was spent.
+            permit = SendPermit(recheck=recheck)
+            result = await source.prefill(
+                prepared.spec, prepared.plan, cancelled=cancelled, permit=permit
+            )
+        else:
+            result = await source.prefill(prepared.spec, prepared.plan, cancelled=cancelled)
     except asyncio.CancelledError:
         await off_loop(
             record_quietly,
             factory,
             user_id,
             run_id,
-            _after_failure(source.keys_sent, "interrupted"),
+            _after_failure(source.keys_sent, "interrupted", send_attempted=_sent(source)),
             settings=settings,
             now=clock(),
             click_attempted=source.message_click_attempted,
             clicked=source.message_clicked,
-            budget_spent=True,
+            budget_spent=None if auto else True,
             click_diagnostics=source.message_click_diagnostics,
         )
         raise
     except Exception as exc:
         log.error("prefill run %d failed (%s)", run_id, type(exc).__name__)
         result = PrefillResult(
-            _after_failure(source.keys_sent, f"the prefill failed ({type(exc).__name__})")
+            _after_failure(
+                source.keys_sent,
+                f"the prefill failed ({type(exc).__name__})",
+                send_attempted=_sent(source),
+            )
         )
-    if result.wall is not None:
-        await off_loop(_record_wall, factory, user_id, prepared.account_id, result, settings, clock)
-    return await off_loop(
-        record,
-        factory,
-        user_id,
-        run_id,
-        result.outcome,
-        settings=settings,
-        now=clock(),
-        prefilled_at=result.typing_started_at,
-        click_attempted=source.message_click_attempted,
-        clicked=source.message_clicked,
-        budget_spent=True,
-        click_diagnostics=source.message_click_diagnostics,
-    )
+    tab_closed = bool(getattr(source, "tab_closed", False))
+    try:
+        # Neither of these may keep the outcome (and an auto-send's hold) from being
+        # recorded below (#458 review): a failure is logged, a cancel records first.
+        if result.wall is not None:
+            await off_loop(
+                _record_wall, factory, user_id, prepared.account_id, result, settings, clock
+            )
+        if (
+            auto
+            and spent_at is not None
+            and source.keys_sent == 0
+            and not _sent(source)
+            and result.outcome.kind in _NOTHING_TYPED
+        ):
+            # Nothing was typed, so nothing was sent: the li_messages_auto unit goes back,
+            # to the day it was spent. The profile visit doesn't: the profile was (almost
+            # always) opened.
+            await off_loop(
+                _release_auto_send, factory, user_id, prepared.account_id, settings, spent_at
+            )
+    except asyncio.CancelledError:
+        await off_loop(
+            record_quietly,
+            factory,
+            user_id,
+            run_id,
+            result.outcome,
+            settings=settings,
+            now=clock(),
+            click_attempted=source.message_click_attempted,
+            clicked=source.message_clicked,
+            tab_closed=tab_closed,
+            click_diagnostics=source.message_click_diagnostics,
+        )
+        raise
+    except Exception:
+        log.exception("prefill run %d: the wall or the refund could not be written", run_id)
+    try:
+        return await off_loop(
+            record,
+            factory,
+            user_id,
+            run_id,
+            result.outcome,
+            settings=settings,
+            now=clock(),
+            prefilled_at=result.typing_started_at,
+            click_attempted=source.message_click_attempted,
+            clicked=source.message_clicked,
+            send_clicked_at=result.send_clicked_at,
+            send_refusal=result.send_refusal,
+            bubble_closed=result.bubble_closed,
+            close_refusal=result.close_refusal,
+            tab_closed=tab_closed,
+            send_unconfirmed=result.send_unconfirmed,
+            budget_spent=None if auto else True,
+            click_diagnostics=source.message_click_diagnostics,
+        )
+    except Exception:
+        if source.message_click_attempted and not tab_closed:
+            await off_loop(hold_quietly, factory, user_id, run_id, now=clock())
+        raise
 
 
-def _after_failure(keys_sent: int, reason: str) -> MessageOutcome:
-    """``not_typed`` when no key call was attempted, ``unknown`` once one was."""
-    if keys_sent == 0:
+def _sent(source: PrefillSource) -> bool:
+    """Whether the source attempted its Send click (ADR 0008); a source with no Send says no."""
+    return bool(getattr(source, "send_attempted", False))
+
+
+_NOTHING_TYPED: Final = frozenset({MessageOutcomeKind.NOT_TYPED, MessageOutcomeKind.TOO_LONG})
+
+
+def _release_auto_send(
+    factory: sessionmaker[Session],
+    user_id: int,
+    account_id: int,
+    settings: Settings,
+    spent_at: datetime,
+) -> None:
+    with session_scope(factory, write=True) as session:
+        budgets.release(
+            session,
+            _load_user(session, user_id),
+            account_id,
+            ActionClass.LI_MESSAGES_AUTO,
+            spent_at=spent_at,
+            settings=settings.linkedin.budget,
+        )
+
+
+def _after_failure(keys_sent: int, reason: str, *, send_attempted: bool = False) -> MessageOutcome:
+    """``not_typed`` when no key call was attempted, ``unknown`` once one was. An attempted
+    Send click (ADR 0008) counts as a key: after it the outcome is never ``not_typed``, so
+    it is never given back or offered again."""
+    if keys_sent == 0 and not send_attempted:
         return _not_typed(reason)
     return MessageOutcome(MessageOutcomeKind.UNKNOWN, reason, None, 0)
 

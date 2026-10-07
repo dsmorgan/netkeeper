@@ -281,10 +281,13 @@ class BrowserWorker:
             prepared = ready
         self._publish("run.started", run_id, user_id, {"kind": facts.kind.value})
         outcome = runs.RunOutcome.DONE
+        # Whether run_prefill was reached: before it, nothing was opened (#458 review).
+        runner_started = False
         try:
             # wait=False, the default: a prefill never waits for the lock (ADR 0007).
             async with self.provider.run(activity_lock.account_key(facts.account_id)) as browser:
                 if prepared is not None:
+                    runner_started = True
                     await message_send.run_prefill(
                         self._factory,
                         user_id,
@@ -306,6 +309,7 @@ class BrowserWorker:
                     "the browser was busy"
                     if isinstance(exc, BrowserBusy)
                     else "the browser was unavailable",
+                    opened=None if runner_started else False,
                 )
             await off_loop(
                 self._finish, run_id, user_id, SyncRunStatus.FAILED, reason, runs.describe(exc)
@@ -346,7 +350,9 @@ class BrowserWorker:
         base = self._campaign_settings if self._campaign_settings is not None else Settings()
         return dataclasses.replace(base, linkedin=self._settings)
 
-    async def _prefill_not_typed(self, run_id: int, user_id: int, reason: str) -> None:
+    async def _prefill_not_typed(
+        self, run_id: int, user_id: int, reason: str, *, opened: bool | None = False
+    ) -> None:
         """Give a prefill's claim back, ``not_typed``, when its run ended before the runner
         started, so no budget was spent (#445). The click keys stay out, as for any path
         that ran no source. A run the runner recorded is not recorded again."""
@@ -359,6 +365,8 @@ class BrowserWorker:
             settings=self._prefill_settings(),
             now=self._clock(),
             budget_spent=False,
+            # Before the runner, nothing was opened: an auto-send's step stays due (#458).
+            opened=opened,
         )
 
     async def _run_job(

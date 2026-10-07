@@ -116,6 +116,12 @@ from netkeeper.services.linkedin_session import (
     last_session_evidence,
     session_flag,
 )
+from netkeeper.services.linkedin_steps import (
+    AUTO_SEND_HOLD_CLEAR,
+    AutoSendHold,
+    auto_send_budget_warning,
+    auto_send_hold,
+)
 from netkeeper.services.runs import latest_run
 from netkeeper.services.runs import view as run_view
 from netkeeper.services.scheduler import (
@@ -128,6 +134,7 @@ from netkeeper.services.scheduler import (
     HeatGate,
     HeatSkip,
     JobKind,
+    served_schedules,
     stored_due,
 )
 
@@ -220,6 +227,10 @@ MISSING_MEANS: Final[dict[JobKind, str]] = {
     JobKind.CONNECTIONS_INCREMENTAL: "the daily sync never runs, so new connections wait",
     JobKind.ENRICH: "enrichment never runs on its own",
     JobKind.INBOX: "the LinkedIn inbox poll never runs on its own, so LinkedIn replies wait",
+    JobKind.AUTO_SEND: (
+        "auto-send never runs; `netkeeper serve` schedules it at start while"
+        " `[campaigns] linkedin_auto_send` is on, so restart it after turning that on"
+    ),
 }
 
 #: The Gmail reply poll is late once a mailbox's last complete poll is older than this
@@ -501,7 +512,9 @@ def posture(
     gate = settings.linkedin.heat if heat_gate is None else heat_gate
     effective_heat = settings.linkedin.heat if isinstance(gate, HeatSkip) else gate
     heat_posture = _heat_posture(session, user, account_id, now=now, heat_settings=effective_heat)
-    scheduler = _scheduler_posture(session, user, account_id, gate=gate)
+    scheduler = _scheduler_posture(
+        session, user, account_id, gate=gate, auto_send=settings.campaigns.linkedin_auto_send
+    )
     budgets = {
         action: budget_status(session, user, account_id, action, now=now, settings=linkedin.budget)
         for action in ActionClass
@@ -537,7 +550,7 @@ def posture(
         _weekend_damping(linkedin.weekend_multiplier, local_now),
         _pacing(linkedin.pacing, _profile_visit_cap(settings)),
         _warmup_ramp(settings, today),
-        _auto_send(settings),
+        _auto_send(settings, auto_send_hold(session, user, account_id)),
         *(_budget(action, budgets[action], settings) for action in ActionClass),
         _heat(heat_posture, effective_heat),
         _heat_skip_gate(gate),
@@ -632,14 +645,14 @@ ENFORCED_BY: Final[dict[str, tuple[str, ...]]] = {
 #: this report or a rehearsal. Code that exists but nothing starts enforces
 #: nothing. Since P2-10 the connections sync and enrichment runners are live --
 #: ``netkeeper linkedin sync``/``enrich``, the runs API, and ``serve``'s
-#: scheduler all reach them through ``netkeeper.worker`` -- and since P4-08 the
-#: inbox poll's runner is too (``netkeeper linkedin inbox`` and the runs API),
-#: spending ``inbox_polls`` before every read. What is left is the budgets whose jobs
-#: do not exist yet: LinkedIn auto-send and the LinkedIn prefill. Kept in sync by
+#: scheduler all reach them through ``netkeeper.worker`` -- since P4-08 the
+#: inbox poll's runner is too, since P4-03 the prefill's, and since P4-04 (#384,
+#: ADR 0008) the same runner spends ``li_messages_auto`` before an auto-send opens
+#: the profile. Nothing is left. Kept in sync by
 #: ``test_the_unenforced_list_is_what_the_package_actually_shows``, which is the
 #: whole point: a hand-maintained list of "not wired up yet" is wrong the week
 #: after it is written.
-UNENFORCED_TODAY: Final[tuple[str, ...]] = (f"{_CONSUME}[{_ACTION_CLASS}.LI_MESSAGES_AUTO]",)
+UNENFORCED_TODAY: Final[tuple[str, ...]] = ()
 
 
 def _unenforced_protections() -> tuple[str, ...]:
@@ -655,14 +668,22 @@ def _unenforced_protections() -> tuple[str, ...]:
 _UNENFORCED_TEXT: Final = ", ".join(_unenforced_protections())
 
 
+_UNWIRED_SENTENCE: Final = (
+    " The protections listed next have no enforcing caller that netkeeper runs yet:"
+    f" {_UNENFORCED_TEXT}; each is a setting rather than a brake until one does."
+    if _UNENFORCED_TEXT
+    else " Every budget it lists has an enforcing caller that netkeeper runs."
+)
+
+
 GAPS: Final[tuple[str, ...]] = (
     "**this report reads configuration and counters, never callers.** It can"
     " tell you a limit is set and how much of it is spent; it cannot tell you"
-    " that the code which will do the work remembers to ask. The protections"
-    f" listed next have no enforcing caller that netkeeper runs yet: {_UNENFORCED_TEXT}."
-    " Its job (LinkedIn auto-send) does not exist yet, so that limit is a setting"
-    " rather than a brake until it does. The LinkedIn prefill's runner spends"
-    " `li_prefills` and `profile_visits` before it opens the profile. The connections"
+    " that the code which will do the work remembers to ask."
+    f"{_UNWIRED_SENTENCE}"
+    " The LinkedIn prefill's runner spends `li_prefills` and `profile_visits` before"
+    " it opens the profile, and for an auto-send (ADR 0008) `li_messages_auto` in place"
+    " of `li_prefills`. Heat pauses both outright at its skip threshold. The connections"
     " sync and enrichment runners are wired: `netkeeper linkedin sync` and `enrich`,"
     " the runs API, and `netkeeper serve`'s scheduler reach them. The inbox poll's"
     " runner spends `inbox_polls` before every read; `netkeeper linkedin inbox`, the"
@@ -680,7 +701,8 @@ GAPS: Final[tuple[str, ...]] = (
     " and attaches as a second CDP client. Nothing in netkeeper deletes it; only a"
     " manual `rm` can cause this, so leave `locks/` alone while `netkeeper serve` runs.",
     "`netkeeper serve` runs the scheduler for the connections syncs,"
-    " enrichment, and the LinkedIn inbox poll. A"
+    " enrichment, the LinkedIn inbox poll, and LinkedIn auto-send while"
+    " `[campaigns] linkedin_auto_send` is on. A"
     " scheduled run fires only while the scheduled-runs row above says armed;"
     " this report reads that flag from the database and cannot see a scheduler"
     " some process was started with differently.",
@@ -1266,8 +1288,9 @@ def _pacing(pacing: PacingSettings, cap: int) -> Protection:
     )
 
 
-def _auto_send(settings: Settings) -> Protection:
-    """ADR 0004: LinkedIn messages are prefilled for a person to send, not sent."""
+def _auto_send(settings: Settings, hold: AutoSendHold | None = None) -> Protection:
+    """ADR 0004: LinkedIn messages are prefilled for a person to send, not sent. With
+    auto-send on (ADR 0008), a hold says why auto-send stopped and how to clear it."""
     if not settings.campaigns.linkedin_auto_send:
         return Protection(
             name="manual linkedin sends",
@@ -1284,6 +1307,13 @@ def _auto_send(settings: Settings) -> Protection:
             "campaigns.linkedin_auto_send is true, so netkeeper sends LinkedIn messages"
             " itself rather than prefilling them for you to send. ADR 0004 defaults it"
             " off: an automated send is the action LinkedIn restricts hardest",
+            # #447: a daily auto-send budget above 20 is warned about with it (ADR 0008).
+            *filter(None, (auto_send_budget_warning(settings),)),
+            *(
+                ()
+                if hold is None
+                else (f"auto-send is held: {hold.reason}. {AUTO_SEND_HOLD_CLEAR}",)
+            ),
         ),
     )
 
@@ -2222,7 +2252,7 @@ def _heat_posture(
 
 
 def _scheduler_posture(
-    session: Session, user: User, account_id: int, *, gate: HeatGate
+    session: Session, user: User, account_id: int, *, gate: HeatGate, auto_send: bool = False
 ) -> SchedulerPosture:
     """What the scheduler is set to do, read through its own public functions.
 
@@ -2237,7 +2267,8 @@ def _scheduler_posture(
             schedule.interval.total_seconds() / 3600,
             stored_due(session, user, account_id, kind),
         )
-        for kind, schedule in DEFAULT_SCHEDULES.items()
+        # Auto-send (ADR 0008) only while its flag is on: then `serve` schedules it.
+        for kind, schedule in served_schedules(auto_send).items()
     )
     not_applicable = tuple(
         (kind.value, NOT_SERVED_BECAUSE.get(kind, "no runner, so `netkeeper serve` skips it"))
@@ -2495,9 +2526,9 @@ def verdict(report: PostureReport) -> str:
     """What this report is entitled to claim, which is narrower than "you are safe".
 
     The report reads configuration and counters. It cannot see whether the code
-    that will do the work calls the enforcement -- and today, for two of the
-    budgets, nothing does (:data:`UNENFORCED_TODAY`, stated in
-    :data:`GAPS`). So a clean report says *nothing is misconfigured*, which is
+    that will do the work calls the enforcement every time it should; it checks only
+    that a live caller exists (:data:`UNENFORCED_TODAY`, stated in :data:`GAPS`).
+    So a clean report says *nothing is misconfigured*, which is
     true and worth a great deal, rather than *every protection is in force*,
     which would be the same sentence on the day a protection works and the day
     it was never wired.

@@ -3254,3 +3254,46 @@ def test_0038_downgrades_to_enrollments_without_an_override(migration_engine: En
         assert _count(connection, "enrollments") == 1
         assert _count(connection, "messages") == 1
     migrations.upgrade(migration_engine, "0038")
+
+
+# --- an auto-sent message's Send click (0039, #384) ----------------------------------------
+
+
+def test_0039_adds_send_clicked_at_and_frees_the_open_slot_for_an_auto_sent_message(
+    migration_engine: Engine,
+) -> None:
+    migrations.upgrade(migration_engine, "0038")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+    migrations.upgrade(migration_engine, "0039")
+    columns = {c["name"] for c in inspect(migration_engine).get_columns("messages")}
+    assert "send_clicked_at" in columns
+    with migration_engine.begin() as connection:
+        row = connection.execute(text("SELECT send_clicked_at FROM messages WHERE id = 1"))
+        assert row.scalar_one() is None  # no existing message was auto-sent
+        # An auto-sent message (Send clicked) is prefilled but holds no open slot.
+        connection.execute(
+            text(
+                "UPDATE messages SET channel = 'linkedin', status = 'prefilled',"
+                " send_clicked_at = :t WHERE id = 1"
+            ),
+            {"t": STAMP},
+        )
+        _insert_message(connection, id=2, enrollment_id=1, contact_id=1, step_id=1)
+        connection.execute(
+            text("UPDATE messages SET channel = 'linkedin', status = 'scheduled' WHERE id = 2")
+        )
+    # A second open prefill is still refused.
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_message(connection, id=3, enrollment_id=1, contact_id=1, step_id=1)
+        connection.execute(
+            text("UPDATE messages SET channel = 'linkedin', status = 'prefilled' WHERE id = 3")
+        )
+
+
+def test_0039_downgrades_to_messages_without_send_clicked_at(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0039")
+    migrations.downgrade(migration_engine, "0038")
+    columns = {c["name"] for c in inspect(migration_engine).get_columns("messages")}
+    assert "send_clicked_at" not in columns
+    migrations.upgrade(migration_engine, "0039")

@@ -10,6 +10,16 @@ export const ONE_AT_A_TIME = 'One prefill at a time: send or discard the open on
 export { TYPING } from './prefill-copy'
 export const REVIEW_AND_SEND = 'Review it in Chrome and click Send yourself.'
 
+/** An `auto_send` step in the queue (ADR 0008), with auto-send on or off in config.toml. */
+export const AUTO_SEND_STEP_ON =
+  'Auto-send: netkeeper sends it on its own schedule. You can still prefill it yourself.'
+export const AUTO_SEND_STEP_OFF =
+  'Auto-send step, but auto-send is off in config.toml, so it waits for you to prefill it.'
+
+/** A stale message auto-send clicked Send for (ADR 0008). */
+export const AUTO_SENT_STALE =
+  'Auto-sent three days ago or more, and the inbox poll never saw it sent. Check the conversation in Chrome: if it went, check now; if not, discard it.'
+
 /** A prefilled message this old is stale (spec 11.6): it no longer holds the one slot. */
 export const STALE_AFTER_DAYS = 3
 
@@ -26,6 +36,8 @@ export const REASON_TEXT: Readonly<Record<string, string>> = {
   run_in_progress: 'another LinkedIn run is going; wait for it to finish',
   prefill_open: 'another prefill is open: send or discard it first',
   outside_active_hours: "it's outside your LinkedIn active hours",
+  auto_send_off: 'auto-send is off in config.toml',
+  not_an_auto_send_step: "this step isn't an auto-send step",
   bad_active_hours: "your LinkedIn active hours can't be read; fix them in the config",
   not_a_linkedin_step: "this enrollment's next step isn't a LinkedIn step",
   no_step: 'this enrollment has no next step',

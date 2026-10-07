@@ -182,6 +182,10 @@ class JobKind(enum.StrEnum):
     CONNECTIONS_INCREMENTAL = "connections_incremental"
     ENRICH = "enrich"
     INBOX = "inbox"
+    #: LinkedIn auto-send (P4-04, ADR 0008): one ``auto_send`` step per fire, as a
+    #: ``message_send`` run. Scheduled only while ``[campaigns] linkedin_auto_send``
+    #: is on (:func:`served_schedules`).
+    AUTO_SEND = "auto_send"
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +230,11 @@ class JobOutcome(enum.Enum):
     """The inbox poll's handler found no live enrollment with a LinkedIn contact
     (P4-08): it recorded no run and attached to nothing. The fire counts as skipped."""
 
+    NOTHING_TO_SEND = "nothing_to_send"
+    """The auto-send handler claimed nothing (ADR 0008): auto-send is off, the spacing
+    since the last auto-send has not passed, or no ``auto_send`` step could be claimed.
+    It recorded no run and attached to nothing. The fire counts as skipped."""
+
 
 #: The outcomes that say the handler started nothing: the fire was skipped, not run.
 SKIPPED_AFTER_GATE: Final = frozenset(
@@ -234,6 +243,7 @@ SKIPPED_AFTER_GATE: Final = frozenset(
         JobOutcome.DISARMED_AFTER_GATE,
         JobOutcome.NOTHING_TO_WATCH,
         JobOutcome.FIRST_POLL_BY_HAND,
+        JobOutcome.NOTHING_TO_SEND,
     }
 )
 
@@ -355,6 +365,25 @@ NOT_DONE_JITTER: Final = timedelta(hours=3)
 #: registered-but-inert (a due time for a job that can only fail would read in
 #: ``netkeeper posture`` as a job that runs).
 SERVED_SCHEDULES: Final[dict[JobKind, JobSchedule]] = dict(DEFAULT_SCHEDULES)
+
+#: ADR 0008: how often the auto-send kind asks for a due ``auto_send`` step. Each fire
+#: sends at most one, and only once the spacing since the last auto-send passed
+#: (:data:`AUTO_SEND_SPACING_MIN` to :data:`AUTO_SEND_SPACING_MAX`), inside active hours.
+AUTO_SEND_INTERVAL: Final = timedelta(minutes=10)
+#: The spacing between two auto-sends, drawn uniformly per send, in minutes.
+AUTO_SEND_SPACING_MIN: Final = 20.0
+AUTO_SEND_SPACING_MAX: Final = 45.0
+AUTO_SEND_SCHEDULE: Final = JobSchedule(JobKind.AUTO_SEND, AUTO_SEND_INTERVAL)
+
+
+def served_schedules(auto_send: bool) -> dict[JobKind, JobSchedule]:
+    """What ``netkeeper serve`` schedules: :data:`SERVED_SCHEDULES`, plus auto-send only
+    while ``[campaigns] linkedin_auto_send`` is on (ADR 0008). With it off the kind has
+    no due time and no fire at all."""
+    schedules = dict(SERVED_SCHEDULES)
+    if auto_send:
+        schedules[JobKind.AUTO_SEND] = AUTO_SEND_SCHEDULE
+    return schedules
 
 
 # --- the heat gate: on unless explicitly, namedly disabled (spec 9.7) --------

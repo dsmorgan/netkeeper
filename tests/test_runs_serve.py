@@ -229,6 +229,7 @@ async def test_a_disarmed_serve_never_touches_the_browser_across_a_week(
             user = _local(session)
             user_id, account = user.id, ensure_account(session, user).id
         registry = serve_registry(factory, app.state.executor, app.state.tasks, clock=clock)
+        assert scheduler.JobKind.AUTO_SEND not in registry  # ADR 0008: off by default
         for kind, handler in registry.items():
             outcome = await handler(
                 scheduler.JobContext(

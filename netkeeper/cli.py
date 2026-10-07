@@ -124,6 +124,11 @@ from netkeeper.services.linkedin_session import (
     record_session_evidence,
     session_flag,
 )
+from netkeeper.services.linkedin_steps import (
+    AUTO_SEND_HOLD_CLEAR,
+    auto_send_hold,
+    resume_auto_send,
+)
 from netkeeper.services.pacing import profiles as pacing_profiles
 from netkeeper.services.posture import SessionProbe, describe_active_hours, posture
 from netkeeper.services.posture import render as render_posture
@@ -1253,6 +1258,44 @@ def linkedin_inbox_acknowledge(ctx: typer.Context) -> None:
         if cleared
         else "nothing to acknowledge: no first inbox poll fell short"
     )
+
+
+@linkedin_app.command("auto-send-resume")
+def linkedin_auto_send_resume() -> None:
+    """Resume auto-send after it held because a message bubble was left open in Chrome.
+
+    Close every LinkedIn message bubble in the netkeeper Chrome window first (send or
+    discard what is in it): the next auto-send refuses a page that still shows one. This
+    asks you to confirm, and runs only at a terminal; there is no `--yes`, because a
+    script can't have looked at Chrome. It touches no browser and visits nothing.
+    """
+    if not sys.stdin.isatty():
+        typer.echo("refused: run this at a terminal, after you have looked at Chrome", err=True)
+        raise typer.Exit(code=2)
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:  # read: no write lock while we prompt
+            user = _local_user_or_exit(session)
+            hold = auto_send_hold(session, user, account_id_for(session, user))
+        if hold is None:
+            typer.echo("auto-send is not held")
+            return
+        typer.echo(f"auto-send is held since {hold.since:%Y-%m-%d %H:%M UTC}: {hold.reason}")
+        typer.echo(AUTO_SEND_HOLD_CLEAR)
+        if not typer.confirm(
+            "Have you closed every LinkedIn message bubble in the netkeeper Chrome window?",
+            default=False,
+        ):
+            typer.echo("cancelled: auto-send stays held")
+            raise typer.Exit(code=1)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            resumed = resume_auto_send(session, user, account_id_for(session, user))
+    finally:
+        engine.dispose()
+    typer.echo("auto-send resumed" if resumed else "auto-send was not held")
 
 
 @linkedin_app.command("inbox-forget-owner")

@@ -21,7 +21,7 @@ import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Callout, EmptyState, ErrorNote, LoadingNote } from '@/features/crm/controls'
 import { listsQuery } from '@/features/crm/api'
-import { readyQuery } from '@/features/linkedin-steps/api'
+import { readyQuery, stepOptionsQuery } from '@/features/linkedin-steps/api'
 import { LinkedInStepsSection } from '@/features/linkedin-steps/linkedin-steps-section'
 import { sendingHoursQuery } from '@/features/settings/api'
 import { stepTimeWarning } from '@/features/settings/sending-hours'
@@ -558,6 +558,7 @@ function StepRow({
         </td>
         <td className="py-2 pr-3 text-muted-foreground">
           {MODE_LABELS[step.mode]}
+          {step.mode === 'auto_send' && <AutoSendStepState />}
           {step.channel === 'linkedin' && <LinkedInStepCounts step={step} ready={ready} />}
         </td>
         <td className="py-2 pr-3 tabular-nums">{step.fired}</td>
@@ -586,6 +587,22 @@ function StepRow({
         </tr>
       )}
     </>
+  )
+}
+
+/**
+ * Whether an `auto_send` step sends on its own (ADR 0008): only while `[campaigns]
+ * linkedin_auto_send` is on in config.toml. With it off, the step waits for a prefill.
+ */
+function AutoSendStepState() {
+  const options = useQuery(stepOptionsQuery)
+  if (!options.isSuccess) return null
+  return options.data.auto_send ? (
+    <span className="block text-xs font-medium text-destructive">
+      on: netkeeper clicks Send itself
+    </span>
+  ) : (
+    <span className="block text-xs">off in config.toml: waits for you to prefill</span>
   )
 }
 

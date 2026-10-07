@@ -22,6 +22,7 @@ The offline behavior tests and the opt-in smoke suite are the other two layers.
 from __future__ import annotations
 
 import ast
+import dataclasses
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from functools import cache
@@ -346,6 +347,11 @@ ALLOWED_INPUTS = frozenset(
         # ADR 0007, decision 5, option B (the maintainer's choice, 2026-10-06): one
         # Locator.focus() on the verified composer, never a click.
         (LINKEDIN / "browser.py", "BrowserRun._focus_seam", "focus"),
+        # ADR 0008 (#384): auto-send's one click on Send, behind every gate.
+        (LINKEDIN / "browser.py", "BrowserRun.click_send", "click"),
+        # ADR 0008, decision D1: after a landed Send, one click on the sent bubble's own
+        # close control ("Close your conversation with <name>"), in the verified dialog.
+        (LINKEDIN / "browser.py", "BrowserRun.close_sent_bubble", "click"),
     }
 )
 
@@ -1758,16 +1764,41 @@ def locator_strings(source: str) -> Iterator[tuple[int, str]]:
                         yield node.lineno, text
 
 
+#: ADR 0008: the one function whose locators may name Send, and the strings it may use.
+SEND_LOCATOR_SITE = (LINKEDIN / "browser.py", "BrowserRun._send_control")
+
+
+def scoped_locator_strings(source: str) -> Iterator[tuple[str, int, str]]:
+    """:func:`locator_strings`, each with the function its call sits in."""
+    tree = parse(source)
+    scopes = _scoped(tree)
+    lines = {
+        node.lineno: scopes.get(id(node), "")
+        for node in walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in LOCATOR_BUILDERS
+    }
+    for line, text in locator_strings(source):
+        yield lines.get(line, ""), line, text
+
+
 def test_no_locator_under_linkedin_names_send_or_submit() -> None:
-    """ADR 0007: nothing under ``netkeeper/linkedin/`` builds a locator from a string that
-    names Send or Submit, so the form's ``button[type="submit"]`` is never located."""
-    findings = [
-        f"{path}:{line}: {text!r}"
-        for path in python_files(LINKEDIN)
-        for line, text in locator_strings(read_source(path))
-        if any(word in text.casefold() for word in SEND_WORDS)
-    ]
+    """ADR 0007, as ADR 0008 amends it: nothing under ``netkeeper/linkedin/`` builds a
+    locator from a string that names Send or Submit, except ``BrowserRun._send_control``,
+    which names exactly ``"Send"`` and nothing else, and which only ``click_send`` calls."""
+    findings = []
+    allowed = []
+    for path in python_files(LINKEDIN):
+        for where, line, text in scoped_locator_strings(read_source(path)):
+            if not any(word in text.casefold() for word in SEND_WORDS):
+                continue
+            if (path, where) == SEND_LOCATOR_SITE:
+                allowed.append(text)
+            else:
+                findings.append(f"{path}:{line}: {text!r}")
     assert not findings, findings
+    assert allowed and set(allowed) == {"Send"}, allowed
     browser = read_source(LINKEDIN / "browser.py")
     assert len(list(locator_strings(browser))) >= 10, "the scanner reads no locator strings"
 
@@ -2151,3 +2182,161 @@ def test_the_rest_target_is_not_a_new_input() -> None:
     body = source[source.index(helper) : source.index("def _viewport_size")]
     for banned in (".hover(", ".click(", ".evaluate(", ".focus(", ".move("):
         assert banned not in body
+
+
+# --- ADR 0008: auto-send's one click on Send (#384) ---------------------------------------
+
+
+def test_the_one_send_click_is_click_sends_and_its_locators_are_built_there_only() -> None:
+    """ADR 0008: one ``click`` in ``click_send`` (``ALLOWED_INPUTS`` pins it, in
+    :func:`test_the_one_page_input_is_the_contact_info_click`); ``click_send`` reached
+    only from ``PagePrefill.prefill``; the Send locators (``_send_control``) and their
+    checks (``_send_refusal``) reached only from ``click_send``."""
+    names = ("click_send", "_send_control", "_send_refusal")
+    reaches: dict[str, list[tuple[Path, str]]] = {name: [] for name in names}
+    for path in python_files(PACKAGE):
+        source = read_source(path)
+        for name in names:
+            if name in source:
+                reaches[name] += [(path, i.function) for i, _ in name_reaches(source, name, path)]
+    assert reaches["click_send"] == [(LINKEDIN / "page_messaging.py", "PagePrefill.prefill")]
+    for helper in ("_send_control", "_send_refusal"):
+        assert reaches[helper] == [(LINKEDIN / "browser.py", "BrowserRun.click_send")], helper
+
+
+def _enclosing_ifs(tree: ast.AST, target: ast.AST) -> list[str]:
+    """The tests of every ``if`` whose body holds ``target``, outermost first."""
+    found: list[str] = []
+
+    def walk(node: ast.AST, tests: list[str]) -> bool:
+        if node is target:
+            found.extend(tests)
+            return True
+        for child in ast.iter_child_nodes(node):
+            inner = tests
+            if isinstance(node, ast.If) and child in node.body:
+                inner = [*tests, ast.unparse(node.test)]
+            if walk(child, inner):
+                return True
+        return False
+
+    walk(tree, [])
+    return found
+
+
+def test_click_send_is_called_only_for_an_auto_send_spec_with_a_permit_after_typing() -> None:
+    """ADR 0008: ``PagePrefill.prefill`` calls ``click_send`` only under an ``if`` that
+    needs the whole body typed, the ``auto_send`` mode, and a permit, and only after
+    ``type_into_composer``."""
+    source = read_source(LINKEDIN / "page_messaging.py")
+    tree = parse(source)
+    [call] = [
+        node
+        for node in walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "click_send"
+    ]
+    guard = " and ".join(_enclosing_ifs(tree, call))
+    for needed in ("TypingEnd.TYPED", "spec.mode == 'auto_send'", "permit is not None"):
+        assert needed in guard, guard
+    typed = [
+        i.line
+        for i, _ in name_reaches(source, "type_into_composer")
+        if i.function.endswith("prefill")
+    ]
+    assert typed and typed[0] < call.lineno
+
+
+def _permit_builds(source: str | ast.AST) -> Iterator[tuple[str, ast.Call]]:
+    tree = parse(source) if isinstance(source, str) else source
+    scopes = _scoped(tree)
+    for node in walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name == "SendPermit":
+                yield scopes.get(id(node), ""), node
+
+
+def test_a_send_permit_is_built_only_by_the_runner_after_the_auto_send_budget() -> None:
+    """ADR 0008: ``SendPermit(...)`` is built in one place, ``message_send.run_prefill``,
+    under ``if auto:``, and that function spends ``li_messages_auto`` (through
+    ``budgets.consume``) and checks the strict allowance before it navigates."""
+    builds = [
+        (path, where)
+        for path in python_files(PACKAGE)
+        if "SendPermit" in (text := read_source(path))
+        for where, _ in _permit_builds(text)
+    ]
+    runner = PACKAGE / "services" / "message_send.py"
+    assert builds == [(runner, "run_prefill")]
+    source = read_source(runner)
+    tree = parse(source)
+    [(_, call)] = list(_permit_builds(tree))
+    assert _enclosing_ifs(tree, call) == ["auto"]
+    body = source[source.index("async def run_prefill") : source.index("def _after_failure")]
+    assert "ActionClass.LI_MESSAGES_AUTO if auto else ActionClass.LI_PREFILLS" in body
+    assert "auto_send_allowance(" in body and "count >= limit" in body
+    assert "auto_send_refusal(settings, StepMode.AUTO_SEND)" in body
+    assert "refuse_if_outside_active_hours" in body
+    # And only prepare decides a run is an auto-send: a scheduled run, flag on, step mode.
+    prepare = source[source.index("def prepare(") : source.index("def auto_send_refusal")]
+    assert 'mode="auto_send" if scheduled else "prefill"' in prepare
+    assert "auto_send_refusal(settings, step_mode)" in prepare
+
+
+def test_auto_send_needs_the_flag_and_the_mode() -> None:
+    """The flag and the mode are both read by the one check the runner makes."""
+    from netkeeper.config import Settings
+    from netkeeper.models import StepMode
+    from netkeeper.services.message_send import auto_send_refusal
+
+    off = Settings()
+    on = dataclasses.replace(
+        off, campaigns=dataclasses.replace(off.campaigns, linkedin_auto_send=True)
+    )
+    assert off.campaigns.linkedin_auto_send is False
+    assert auto_send_refusal(off, StepMode.AUTO_SEND) == "auto-send is off"
+    assert auto_send_refusal(on, StepMode.PREFILL) == "the step is not an auto-send step"
+    assert auto_send_refusal(on, None) == "the step is not an auto-send step"
+    assert auto_send_refusal(on, StepMode.AUTO_SEND) is None
+
+
+def test_the_sent_bubble_and_tab_are_closed_only_after_a_landed_send() -> None:
+    """ADR 0008, D1 and D3: ``close_sent_bubble`` is reached only from
+    ``PagePrefill.prefill`` under ``if send.clicked``, after ``click_send``;
+    ``_close_control`` only from ``close_sent_bubble``; and ``close_sent_tab`` only from
+    ``PagePrefill._end_after_click`` under ``if self._run.bubble_closed``."""
+    source = read_source(LINKEDIN / "page_messaging.py")
+    tree = parse(source)
+    names = ("close_sent_bubble", "_close_control", "close_sent_tab")
+    reaches: dict[str, list[tuple[Path, str]]] = {name: [] for name in names}
+    for path in python_files(PACKAGE):
+        text = read_source(path)
+        for name in names:
+            if name in text:
+                reaches[name] += [(path, i.function) for i, _ in name_reaches(text, name, path)]
+    assert reaches["close_sent_bubble"] == [(LINKEDIN / "page_messaging.py", "PagePrefill.prefill")]
+    assert reaches["_close_control"] == [(LINKEDIN / "browser.py", "BrowserRun.close_sent_bubble")]
+    assert reaches["close_sent_tab"] == [
+        (LINKEDIN / "page_messaging.py", "PagePrefill._end_after_click")
+    ]
+
+    def call(name: str) -> ast.Call:
+        [found] = [
+            node
+            for node in walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == name
+        ]
+        return found
+
+    guard = _enclosing_ifs(tree, call("close_sent_bubble"))
+    assert "send.clicked" in guard and "unconfirmed is None" in guard, guard
+    assert any(k.arg == "confirmed" for k in call("close_sent_bubble").keywords)
+    assert call("click_send").lineno < call("close_sent_bubble").lineno
+    assert _enclosing_ifs(tree, call("close_sent_tab")) == ["self._run.bubble_closed"]
+    clicks = [i for i in package_inputs() if i.function == "BrowserRun.close_sent_bubble"]
+    assert [i.name for i in clicks] == ["click"]

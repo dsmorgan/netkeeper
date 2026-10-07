@@ -142,6 +142,7 @@ API_PATHS = {
     "/api/v1/campaigns/linkedin/ready",
     "/api/v1/campaigns/linkedin/waiting",
     "/api/v1/campaigns/linkedin/options",
+    "/api/v1/campaigns/linkedin/auto-send/resume",
     "/api/v1/campaigns/linkedin/prefill",
     "/api/v1/campaigns/linkedin/messages/{message_id}/check",
     "/api/v1/campaigns/linkedin/messages/{message_id}/discard",

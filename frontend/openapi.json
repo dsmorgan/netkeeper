@@ -433,6 +433,55 @@
         "title": "ArchiveReportOut",
         "type": "object"
       },
+      "AutoSendHoldOut": {
+        "description": "An auto-send hold (ADR 0008): fixed words, never page text.",
+        "properties": {
+          "how_to_clear": {
+            "title": "How To Clear",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "since",
+          "how_to_clear"
+        ],
+        "title": "AutoSendHoldOut",
+        "type": "object"
+      },
+      "AutoSendResumeIn": {
+        "properties": {
+          "confirm": {
+            "default": false,
+            "title": "Confirm",
+            "type": "boolean"
+          }
+        },
+        "title": "AutoSendResumeIn",
+        "type": "object"
+      },
+      "AutoSendResumed": {
+        "properties": {
+          "resumed": {
+            "title": "Resumed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "resumed"
+        ],
+        "title": "AutoSendResumed",
+        "type": "object"
+      },
       "AutotagRuleCreate": {
         "properties": {
           "enabled": {
@@ -8476,6 +8525,27 @@
           "auto_send": {
             "title": "Auto Send",
             "type": "boolean"
+          },
+          "auto_send_hold": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AutoSendHoldOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "auto_send_warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auto Send Warning"
           }
         },
         "required": [
@@ -9188,6 +9258,11 @@
       "ReadyOut": {
         "description": "One due LinkedIn step. The contact is named and nothing more: no message text.",
         "properties": {
+          "auto_send": {
+            "default": false,
+            "title": "Auto Send",
+            "type": "boolean"
+          },
           "campaign_id": {
             "title": "Campaign Id",
             "type": "integer"
@@ -13316,6 +13391,11 @@
       "WaitingOut": {
         "description": "One LinkedIn message waiting for you. No message text.",
         "properties": {
+          "auto_sent": {
+            "default": false,
+            "title": "Auto Sent",
+            "type": "boolean"
+          },
           "campaign_id": {
             "title": "Campaign Id",
             "type": "integer"
@@ -13343,6 +13423,17 @@
           "message_id": {
             "title": "Message Id",
             "type": "integer"
+          },
+          "not_sent_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Not Sent Reason"
           },
           "partly_typed": {
             "title": "Partly Typed",
@@ -13789,6 +13880,41 @@
           }
         },
         "summary": "Create Campaign",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/linkedin/auto-send/resume": {
+      "post": {
+        "description": "You closed the message bubbles in Chrome: auto-send may go again (ADR 0008). It\nchanges nothing in LinkedIn. Needs ``{\"confirm\": true}``; idempotent.",
+        "operationId": "resume_linkedin_auto_send",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutoSendResumeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutoSendResumed"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "`confirm` was not true"
+          }
+        },
+        "summary": "Resume Auto Send",
         "tags": [
           "campaigns"
         ]

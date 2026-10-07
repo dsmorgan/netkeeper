@@ -295,7 +295,7 @@ The inbox page opens `GET /realtime/connect` (`text/event-stream`), subscribes w
 | The composer | Exactly one `role="textbox"` named `Write a message…` in that bubble, empty | Captured | None, two, or not empty: no key |
 | Focus | Focus the composer by role and name before typing | **Assumed**: where focus lands is unknown | |
 | Newlines | Shift+Enter | Captured: never sends | |
-| Send | `button[type="submit"]` named `Send`: never clicked | Captured | |
+| Send | `button[type="submit"]` named `Send`: the prefill never clicks it; auto-send ([ADR 0008](adr/0008-auto-send.md)) clicks it once, behind its gates, and then the existing bubble's `Close your conversation with <name>` | Captured | Not exactly one, not in the composer's form, hidden or disabled: no click |
 | Typing indicator | The page's own `action=typing` posts, about every 5 s | Captured | Not netkeeper's to stop |
 | A send the person made | A new owner message in that conversation, `deliveredAt` after the hand-over | Captured | |
 | Message length | 8,000 characters | **Assumed** (P4-11) | |
