@@ -20,11 +20,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
-from netkeeper.config import Settings
 from netkeeper.models.base import utcnow
 from netkeeper.services import posture as posture_service
 from netkeeper.services.linkedin_accounts import account_id_for
-from netkeeper.web.deps import CurrentUser, SessionDep
+from netkeeper.web.deps import CurrentUser, SessionDep, effective_settings
 from netkeeper.web.schemas import PostureOut, ProtectionOut
 
 router = APIRouter(tags=["posture"])
@@ -32,7 +31,7 @@ router = APIRouter(tags=["posture"])
 
 @router.get("/posture", operation_id="get_posture")
 def get_posture(request: Request, user: CurrentUser, session: SessionDep) -> PostureOut:
-    settings: Settings = request.app.state.settings
+    settings = effective_settings(request, session, user)
     account_id = account_id_for(session, user)
     report = posture_service.posture(
         session, user, account_id, now=utcnow(), settings=settings, probe=None

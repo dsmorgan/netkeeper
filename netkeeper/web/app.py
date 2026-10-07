@@ -44,6 +44,12 @@ from netkeeper.crm.tags import ensure_default_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import install_scope_guard
+from netkeeper.services import ui_settings
+from netkeeper.services.budgets import (
+    ActionClass,
+    li_message_risk_warning,
+    profile_visit_risk_warning,
+)
 from netkeeper.services.campaign_engine import CampaignEngine, Sender
 from netkeeper.services.campaign_sender import GmailSender
 from netkeeper.services.events import EventBus
@@ -111,14 +117,18 @@ def create_app(
             tasks = _start(app, active, resolved)
             teardown.push_async_callback(tasks.cancel_all)
             app.state.gmail_endpoints = gmail
+            # What serve reads once, at startup, comes from the local user's settings in
+            # force (#343): config.toml, then the Settings page. Everything else
+            # resolves per request, tick or run.
+            started: Settings = app.state.started_settings
             if extractor is not None:
                 serving = start_serve_scheduler(
                     extractor,
                     app.state.session_factory,
                     app.state.bus,
                     tasks,
-                    resolved.linkedin,
-                    campaign_settings=resolved,
+                    started.linkedin,
+                    campaign_settings=started,
                 )
                 teardown.callback(serving.stop)
                 app.state.executor = serving.executor
@@ -126,7 +136,7 @@ def create_app(
                 monitor = MailboxMonitor(
                     app.state.session_factory,
                     app.state.bus,
-                    interval_s=_poll_minutes(resolved) * 60,
+                    interval_s=_poll_minutes(started) * 60,
                     endpoints=gmail,
                 )
                 teardown.push_async_callback(monitor.stop)
@@ -135,7 +145,7 @@ def create_app(
                 sender = (
                     campaign_sender
                     if campaign_sender is not None
-                    else _gmail_sender(app.state.session_factory, gmail, resolved)
+                    else _gmail_sender(app.state.session_factory, gmail, started)
                 )
                 campaigns = CampaignEngine(app.state.session_factory, resolved, sender)
                 teardown.push_async_callback(campaigns.stop)
@@ -179,12 +189,19 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
         # One whose account's browser lock is held right now belongs to a live
         # process (a `netkeeper linkedin sync` in a terminal) and is left alone.
         fail_interrupted_runs(session, now=utcnow())
+        started = ui_settings.resolve(session, user, settings)
+        local_user_id = user.id
+        _log_settings_page_risks(settings, started)
         log.info(
             "database at revision %s, local user %d", migrations.current_revision(engine), user.id
         )
     bus = EventBus()
     tasks = TaskRunner(bus)
     app.state.settings = settings
+    # The local user's settings in force at startup (#343): what the scheduler, the
+    # mailbox poll and the reply interval run with until serve restarts.
+    app.state.started_settings = started
+    app.state.started_user_id = local_user_id
     app.state.engine = engine
     app.state.session_factory = factory
     app.state.bus = bus
@@ -200,6 +217,23 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     app.state.mailbox_monitor = None
     app.state.campaign_engine = None
     return tasks
+
+
+def _log_settings_page_risks(file: Settings, started: Settings) -> None:
+    """Log the risk warnings a Settings-page value earns, as ``serve_app`` logs the file's
+    (#318, #447). Only those the file's own settings did not already earn: those were
+    logged before the database was open."""
+    if not started.ui_keys:
+        return
+    budget, logged = started.linkedin.budget, file.linkedin.budget
+    pairs = [(profile_visit_risk_warning(budget), profile_visit_risk_warning(logged))]
+    pairs += [
+        (li_message_risk_warning(action, budget), li_message_risk_warning(action, logged))
+        for action in (ActionClass.LI_PREFILLS, ActionClass.LI_MESSAGES_AUTO)
+    ]
+    for warning, already in pairs:
+        if warning is not None and warning != already:
+            log.warning("%s (set in Settings)", warning)
 
 
 def _gmail_sender(

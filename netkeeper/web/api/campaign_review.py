@@ -47,7 +47,7 @@ from netkeeper.models.base import utcnow
 from netkeeper.services import campaign_review as service
 from netkeeper.services import campaigns as campaign_service
 from netkeeper.services.mailboxes import MailboxNotFound, MailboxNotReady, open_gmail
-from netkeeper.web.deps import CurrentUser, SessionDep, read_only
+from netkeeper.web.deps import CurrentUser, SessionDep, effective_settings, read_only
 from netkeeper.web.errors import ApiError
 from netkeeper.web.schemas import LintIssueOut
 
@@ -266,9 +266,8 @@ def _missing_out(missing: Any) -> list[MissingOut]:
     ]
 
 
-def _settings(request: Request) -> Settings:
-    settings: Settings = request.app.state.settings
-    return settings
+def _settings(request: Request, session: Session, user: User) -> Settings:
+    return effective_settings(request, session, user)
 
 
 def _message_out(m: service.MessagePreview) -> MessagePreviewOut:
@@ -583,7 +582,7 @@ def activate_campaign(
     try:
         starts_at = campaign_service.resolve_start(
             user,
-            settings=_settings(request),
+            settings=_settings(request, session, user),
             now=now,
             starts_at=None if body is None else body.starts_at,
         )
@@ -594,7 +593,7 @@ def activate_campaign(
             session,
             user,
             campaign_id,
-            settings=_settings(request),
+            settings=_settings(request, session, user),
             now=now,
             starts_at=starts_at,
         )

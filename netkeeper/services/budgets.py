@@ -164,8 +164,9 @@ def profile_visit_week_note(settings: BudgetSettings) -> str | None:
         return None
     return (
         f"The weekly limit ({week:,}) is below {PROFILE_VISIT_DAYS_PER_WEEK} times your daily"
-        f" limit ({day:,}); remove profile_visits_per_week from config.toml to use"
-        f" {PROFILE_VISIT_DAYS_PER_WEEK} times daily ({derived:,})."
+        f" limit ({day:,}); set the weekly limit to automatic in Settings, or remove"
+        f" profile_visits_per_week from config.toml, to use {PROFILE_VISIT_DAYS_PER_WEEK}"
+        f" times daily ({derived:,})."
     )
 
 

@@ -115,3 +115,32 @@ export async function saveSelfContact(body: SelfContactIn): Promise<SelfContact>
   if (data === undefined) throw failure(error, response, 'PUT /settings/self-contact')
   return data
 }
+
+export type ConfigSettings = components['schemas']['ConfigOut']
+export type ConfigField = components['schemas']['ConfigFieldOut']
+
+/**
+ * The settings you change here instead of in `config.toml` (#343): each with its value
+ * in force, where it comes from (default, Settings or config.toml, which wins), when a
+ * change applies, and the warnings and notes the value earns.
+ */
+export const configSettingsQuery = queryOptions({
+  queryKey: ['config-settings'] as const,
+  queryFn: async ({ signal }): Promise<ConfigSettings> => {
+    const { data, error, response } = await api.GET('/api/v1/settings/config', { signal })
+    if (data === undefined) throw failure(error, response, 'GET /settings/config')
+    return data
+  },
+})
+
+/**
+ * Store new values, all or none: `null` goes back to the default. 422 names each value
+ * refused (above its hard maximum, a key config.toml sets, and so on).
+ */
+export async function saveConfigSettings(values: Record<string, unknown>): Promise<ConfigSettings> {
+  const { data, error, response } = await api.PUT('/api/v1/settings/config', {
+    body: { values },
+  })
+  if (data === undefined) throw failure(error, response, 'PUT /settings/config')
+  return data
+}

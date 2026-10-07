@@ -13,9 +13,11 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.config import Settings
 from netkeeper.crm.confirmation import Signer
 from netkeeper.db import session_scope
 from netkeeper.models import User, UserKind
+from netkeeper.services import ui_settings
 from netkeeper.services.events import EventBus
 from netkeeper.services.tasks import TaskRunner
 
@@ -151,6 +153,19 @@ def current_user(request: Request, session: SessionDep) -> User:
 
 
 CurrentUser = Annotated[User, Depends(current_user)]
+
+
+def file_settings(request: Request) -> Settings:
+    """What ``serve`` loaded at startup: ``config.toml`` over the defaults, never the
+    Settings page's values (those are per user: :func:`effective_settings`)."""
+    settings: Settings = request.app.state.settings
+    return settings
+
+
+def effective_settings(request: Request, session: Session, user: User) -> Settings:
+    """The settings in force for ``user`` now: ``config.toml``, then the Settings page,
+    then the defaults (#343). Resolved per request, so a change applies to the next one."""
+    return ui_settings.resolve(session, user, file_settings(request))
 
 
 def get_bus(request: Request) -> EventBus:

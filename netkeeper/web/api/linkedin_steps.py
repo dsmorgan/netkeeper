@@ -53,7 +53,7 @@ from netkeeper.services import linkedin_steps as service
 from netkeeper.services import runs
 from netkeeper.services.linkedin_accounts import account_id_for
 from netkeeper.services.scheduled_runs import submit_run
-from netkeeper.web.deps import CurrentUser, SessionDep, Tasks
+from netkeeper.web.deps import CurrentUser, SessionDep, Tasks, effective_settings
 from netkeeper.web.schemas import RunAccepted
 
 router = APIRouter(prefix="/campaigns/linkedin", tags=["campaigns"])
@@ -67,9 +67,8 @@ Limit = Annotated[int, Query(ge=1, le=service.READY_PAGE_MAX, description="Items
 Offset = Annotated[int, Query(ge=0, description="Items to skip.")]
 
 
-def _settings(request: Request) -> Settings:
-    settings: Settings = request.app.state.settings
-    return settings
+def _settings(request: Request, session: Session, user: User) -> Settings:
+    return effective_settings(request, session, user)
 
 
 def _executor(request: Request) -> runs.RunExecutor:
@@ -279,7 +278,7 @@ def list_ready(
         session,
         user,
         now=now,
-        settings=_settings(request),
+        settings=_settings(request, session, user),
         limit=limit,
         offset=offset,
         campaign_id=campaign_id,
@@ -289,7 +288,7 @@ def list_ready(
         if campaign_id is None
         else service.ready_by_step(session, user, now=now, campaign_id=campaign_id)
     )
-    settings = _settings(request)
+    settings = _settings(request, session, user)
     retries = service.try_again(session, user, now=now, settings=settings, campaign_id=campaign_id)
     return ReadyPage(
         items=[
@@ -366,7 +365,8 @@ def _not_sent_reason(notes: str | None) -> str | None:
 @router.get("/options", operation_id="get_linkedin_step_options")
 def get_options(request: Request, user: CurrentUser, session: SessionDep) -> OptionsOut:
     """Whether ``auto_send`` may be chosen for a LinkedIn step: the config flag."""
-    settings = _settings(request)
+    # Auto-send itself is file-only (#343); the budget warning reads the page's values.
+    settings = _settings(request, session, user)
     hold = service.auto_send_hold(session, user, account_id_for(session, user))
     return OptionsOut(
         auto_send=settings.campaigns.linkedin_auto_send,
@@ -452,7 +452,7 @@ async def prefill(
     work. A refusal answers ``409`` with its reasons; what the refusal changed (a reply
     that ended the enrollment, a step parked) is kept."""
     executor = _executor(request)
-    settings = _settings(request)
+    settings = _settings(request, session, user)
     now = utcnow()
     try:
         if body.next:
@@ -512,7 +512,7 @@ async def check_sent(
     executor = _executor(request)
     try:
         run = service.check_sent(
-            session, user, message_id, now=utcnow(), settings=_settings(request)
+            session, user, message_id, now=utcnow(), settings=_settings(request, session, user)
         )
     except service.PrefillNotWaiting as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -548,7 +548,7 @@ def discard(
     moves to its next step or completes. Nothing changes in LinkedIn."""
     try:
         message = service.discard(
-            session, user, message_id, settings=_settings(request), now=utcnow()
+            session, user, message_id, settings=_settings(request, session, user), now=utcnow()
         )
     except service.PrefillNotWaiting as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

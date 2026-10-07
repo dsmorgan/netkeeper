@@ -55,6 +55,7 @@ from netkeeper.services.budgets import ActionClass
 from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.linkedin_session import flag_session, session_flag
 from netkeeper.services.linkedin_steps import record_prefill_outcome
+from netkeeper.services.settings_kv import set_setting
 from netkeeper.worker import BrowserWorker
 
 CONTACT = {"li_urn": ZEPHYRINE.urn, "li_public_id": ZEPHYRINE.slug, "first_name": "Zephyrine"}
@@ -669,8 +670,17 @@ def test_the_interleave_gap_follows_a_prefill_run(lane: Lane) -> None:
 def test_settings_carry_the_workers_linkedin_section(lane: Lane) -> None:
     provider: AttachBrowserProvider = fake_provider(MessagingSite(ZEPHYRINE))[0]
     worker = BrowserWorker(provider, lane.factory, lane.settings.linkedin)
-    assert worker._prefill_settings().linkedin is lane.settings.linkedin
-    assert isinstance(worker._prefill_settings(), Settings)
+    resolved = worker._resolved(lane.user_id)
+    assert resolved.linkedin == lane.settings.linkedin
+    assert isinstance(resolved, Settings)
+
+
+def test_a_run_uses_the_settings_page_values(lane: Lane) -> None:
+    """#343: each run reads the user's Settings-page values as it starts."""
+    provider: AttachBrowserProvider = fake_provider(MessagingSite(ZEPHYRINE))[0]
+    worker = BrowserWorker(provider, lane.factory, lane.settings.linkedin)
+    lane.write(lambda s, u: set_setting(s, u, "config.linkedin.budget.li_prefills_per_day", 7))
+    assert worker._resolved(lane.user_id).linkedin.budget.li_prefills_per_day == 7
 
 
 class RecordingSource:

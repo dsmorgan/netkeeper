@@ -175,7 +175,7 @@ from netkeeper.models import (
 )
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped, scoped, scoped_contacts
-from netkeeper.services import inbox_hold, sending_hours
+from netkeeper.services import inbox_hold, sending_hours, ui_settings
 from netkeeper.services.campaign_guards import (
     UNSENDABLE_EMAIL_STATUSES,
     ChannelReason,
@@ -2637,9 +2637,16 @@ def tick_user(
     Nothing is claimed once ``stopping()`` is true: a claim is a send to come.
     """
     result = TickResult(user_id)
+    # The Settings page's values (#343), read again each tick, so a change applies within
+    # a minute; the whole tick (reconcile, claims, records) uses this one reading.
+    with session_scope(factory) as session:
+        reader = session.get(User, user_id)
+        if reader is None:
+            return result
+        in_force = ui_settings.resolve(session, reader, settings)
     if isinstance(sender, Reconciler) and not stopping():
         try:
-            sender.reconcile(factory, user_id, settings=settings, now=clock())
+            sender.reconcile(factory, user_id, settings=in_force, now=clock())
         except Exception:  # what it could not settle waits for the next tick
             log.exception("reconciling campaign messages failed for user %d", user_id)
     claims: list[_Claim] = []
@@ -2652,7 +2659,7 @@ def tick_user(
                 return result
             now = clock()
             gate = sender if isinstance(sender, ArmGated) else None
-            claim = _Chooser(session, user, settings, now, result, rng, gate).choose()
+            claim = _Chooser(session, user, in_force, now, result, rng, gate).choose()
         if claim is None:
             break
         claims.append(claim)
@@ -2661,7 +2668,7 @@ def tick_user(
             user = session.get(User, user_id)
             if user is None:
                 return result
-            _record(session, user, settings, claim, outcome, now=clock())
+            _record(session, user, in_force, claim, outcome, now=clock())
         result.fired.append((claim.firing, outcome))
     return result
 

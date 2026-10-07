@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 import typer
 import uvicorn
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, ProgrammingError
@@ -95,6 +96,7 @@ from netkeeper.services import (
     runs,
     simulate_campaign,
     template_adoption,
+    ui_settings,
 )
 from netkeeper.services import campaigns as campaign_service
 from netkeeper.services import mailboxes as mailbox_service
@@ -238,12 +240,48 @@ def main(
     setup_logging()
 
 
-def _load_settings_or_exit(state: CliState) -> Settings:
+def _file_settings_or_exit(state: CliState) -> Settings:
+    """``config.toml`` over the defaults, without the Settings page's values: for
+    ``serve`` (which resolves them per user itself) and commands that only read
+    file-only keys."""
     try:
         return load_settings(state.config)
     except ConfigError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+
+
+def _load_settings_or_exit(state: CliState) -> Settings:
+    """The settings in force for the local user (#343): ``config.toml``, then the
+    Settings page's values, then the defaults. A command run by hand obeys the same
+    budgets and hours the web UI shows."""
+    return _with_settings_page(_file_settings_or_exit(state))
+
+
+def _with_settings_page(settings: Settings) -> Settings:
+    """``settings`` with the local user's Settings-page values, when there are any to
+    read: no database yet (a SQLite file that does not exist), no ``settings_kv``
+    table, or no local user leaves them as they are, and creates nothing."""
+    url = database_url()
+    parsed = make_url(url)
+    if parsed.get_backend_name() == "sqlite" and (
+        not parsed.database or not Path(parsed.database).is_file()
+    ):
+        return settings
+    engine = make_engine(url)
+    try:
+        with engine.connect() as connection:
+            if not sa_inspect(connection).has_table("settings_kv"):
+                return settings
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = session.scalars(
+                select(User).where(User.kind == UserKind.LOCAL).order_by(User.id)
+            ).first()
+            return settings if user is None else ui_settings.resolve(session, user, settings)
+    finally:
+        engine.dispose()
 
 
 def _display_url(url: str) -> str:
@@ -279,7 +317,7 @@ def serve(
 ) -> None:
     """Run the web server: the API, the event stream, and the built frontend."""
     state = ctx.ensure_object(CliState)
-    settings = _load_settings_or_exit(state)
+    settings = _file_settings_or_exit(state)
     bind_host = settings.web.host if host is None else host
     bind_port = settings.web.port if port is None else port
     # log_config=None keeps uvicorn's records on the root logger set up in main().
@@ -303,12 +341,15 @@ def config_show(ctx: typer.Context) -> None:
 
     An unset ``profile_visits_per_week`` has no TOML value to print, so the
     weekly limit it derives (5 x the daily limit in force, #318) follows the
-    daily line as a comment.
+    daily line as a comment. Values from the Settings page (#343) are included, and
+    a comment first names them: config.toml wins over them for any key it sets.
     """
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
     source = "defaults" if settings.source_path is None else str(settings.source_path)
     paths = _PathsBlock(data_dir=str(data_dir()), config=source)
+    if settings.ui_keys:
+        typer.echo(f"# from the Settings page: {', '.join(sorted(settings.ui_keys))}")
     typer.echo(_with_derived_week(render_toml(settings), settings), nl=False)
     typer.echo()
     typer.echo(render_toml(paths, table="paths"), nl=False)
@@ -332,7 +373,7 @@ def _with_derived_week(rendered: str, settings: Settings) -> str:
 def db_upgrade(ctx: typer.Context) -> None:
     """Apply pending migrations, then make sure the local user and its self contact exist."""
     state = ctx.ensure_object(CliState)
-    settings = _load_settings_or_exit(state)
+    settings = _file_settings_or_exit(state)
     url = database_url()
     engine = make_engine(url)
     try:
@@ -381,7 +422,7 @@ def openapi_export(
 ) -> None:
     """Write the OpenAPI schema as JSON with sorted keys (the input to `make gen-client`)."""
     state = ctx.ensure_object(CliState)
-    settings = _load_settings_or_exit(state)
+    settings = _file_settings_or_exit(state)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(openapi_json(create_app(settings)), encoding="utf-8")
     typer.echo(f"wrote {out}")
@@ -409,7 +450,7 @@ def browser_launch(
     exactly one place that knows how to build it; nothing here restates the logic.
     """
     state = ctx.ensure_object(CliState)
-    settings = _load_settings_or_exit(state)
+    settings = _file_settings_or_exit(state)
     cdp_url = settings.linkedin.cdp_url
     profile = data_dir() / CHROME_PROFILE_DIRNAME
     if as_json:
@@ -1245,7 +1286,7 @@ def linkedin_inbox_acknowledge(ctx: typer.Context) -> None:
     It touches no browser and visits nothing.
     """
     state = ctx.ensure_object(CliState)
-    _load_settings_or_exit(state)
+    _file_settings_or_exit(state)
     engine = make_engine(database_url())
     try:
         factory = make_session_factory(engine)
@@ -1315,7 +1356,7 @@ def linkedin_inbox_forget_owner(
     is compared first and this command does not change it.)
     """
     state = ctx.ensure_object(CliState)
-    _load_settings_or_exit(state)
+    _file_settings_or_exit(state)
     if not yes and not typer.confirm(
         "Forget the recorded LinkedIn mailbox? The next inbox poll records whichever"
         " account the page shows.",

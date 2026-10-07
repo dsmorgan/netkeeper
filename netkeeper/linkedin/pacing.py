@@ -471,8 +471,8 @@ def outside_window_message(
     """The one sentence a run stopped or refused by active hours says (#213).
 
     For example: "outside active hours (08:30-21:30 America/New_York); the next
-    window opens at 08:30 tomorrow. Change `[linkedin] active_hours` in
-    config.toml to adjust." The log line, the run's note, a refused manual run,
+    window opens at 08:30 tomorrow. Change the active hours in Settings to
+    adjust." The log line, the run's note, a refused manual run,
     and the API's answer all use this, so a person reads one wording wherever
     they meet it. ``tz``'s name is printed as given (a :class:`ZoneInfo`'s key).
     """
@@ -483,8 +483,7 @@ def outside_window_message(
     when = {0: "today", 1: "tomorrow"}.get(days, f"on {opens:%A}")
     return (
         f"outside active hours ({start:%H:%M}-{end:%H:%M} {zone.key}); the next window"
-        f" opens at {opens:%H:%M} {when}. Change `[linkedin] active_hours` in"
-        " config.toml to adjust."
+        f" opens at {opens:%H:%M} {when}. Change the active hours in Settings to adjust."
     )
 
 

@@ -62,7 +62,7 @@ DEFAULT = (time(8, 30), time(21, 30))
 def test_before_the_window_it_opens_today() -> None:
     assert outside_window_message(THREE_AM, NEW_YORK, start=DEFAULT[0], end=DEFAULT[1]) == (
         "outside active hours (08:30-21:30 America/New_York); the next window opens at"
-        " 08:30 today. Change `[linkedin] active_hours` in config.toml to adjust."
+        " 08:30 today. Change the active hours in Settings to adjust."
     )
 
 
@@ -110,7 +110,7 @@ async def test_the_api_refuses_a_manual_run_outside_the_window_and_records_nothi
 
     assert refused.status_code == 409
     assert refused.json()["detail"].startswith("outside active hours (08:30-21:30")
-    assert "`[linkedin] active_hours`" in refused.json()["detail"]
+    assert "Change the active hours in Settings" in refused.json()["detail"]
     assert connector.attaches == 0 and _rows(bare_engine) == []
 
 
@@ -183,7 +183,7 @@ def test_the_cli_refuses_a_manual_run_outside_the_window_and_records_nothing(
 
     assert result.exit_code == 1
     assert "outside active hours" in result.output
-    assert "Change `[linkedin] active_hours` in config.toml" in result.output
+    assert "Change the active hours in Settings" in result.output
     with session_scope(cli_db) as session:
         user = ensure_local_user(session, settings=Settings())
         assert runs.list_runs(session, user)[1] == 0

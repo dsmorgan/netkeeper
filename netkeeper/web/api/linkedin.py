@@ -52,6 +52,7 @@ from typing import Annotated, Final
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from netkeeper.config import LinkedInSettings
 from netkeeper.crm.inbox_apply import clear_short_first_poll
@@ -90,7 +91,7 @@ from netkeeper.services.linkedin_session import (
 from netkeeper.services.scheduled_runs import seed_served_schedule, submit_run
 from netkeeper.services.scheduler import SERVED_SCHEDULES, stored_due
 from netkeeper.services.visit_budget import todays_visits
-from netkeeper.web.deps import CurrentUser, SessionDep, Tasks
+from netkeeper.web.deps import CurrentUser, SessionDep, Tasks, effective_settings, file_settings
 from netkeeper.web.schemas import (
     BrowserHealthOut,
     BrowserLaunchOut,
@@ -157,9 +158,8 @@ def _run_out(session: SessionDep, user: User, run: SyncRun) -> RunOut:
     )
 
 
-def _settings(request: Request) -> LinkedInSettings:
-    settings: LinkedInSettings = request.app.state.settings.linkedin
-    return settings
+def _settings(request: Request, session: Session, user: User) -> LinkedInSettings:
+    return effective_settings(request, session, user).linkedin
 
 
 def _executor(request: Request) -> runs.RunExecutor:
@@ -220,11 +220,11 @@ async def start_run(
     """
     executor = _executor(request)
     try:
-        runs.refuse_if_outside_active_hours(_settings(request), now=utcnow())
+        runs.refuse_if_outside_active_hours(_settings(request, session, user), now=utcnow())
         # After the hours check, so a refused request writes no row at all (#294).
         account = ensure_account(session, user)
         runs.refuse_if_flagged_or_hot(
-            session, user, account.id, now=utcnow(), settings=_settings(request)
+            session, user, account.id, now=utcnow(), settings=_settings(request, session, user)
         )
         run = runs.create_run(
             session,
@@ -369,9 +369,9 @@ async def resume_run(
     account = ensure_account(session, user)
     try:
         enrich_plan.load_plan(session, user, run_id)  # 404 before any 409: is there a plan?
-        runs.refuse_if_outside_active_hours(_settings(request), now=utcnow())
+        runs.refuse_if_outside_active_hours(_settings(request, session, user), now=utcnow())
         runs.refuse_if_flagged_or_hot(
-            session, user, account.id, now=utcnow(), settings=_settings(request)
+            session, user, account.id, now=utcnow(), settings=_settings(request, session, user)
         )
         run = enrich_plan.start_resume(
             session, user, run_id, now=utcnow(), max_visits=body.max_visits
@@ -406,7 +406,7 @@ def _submit(
 @router.get("/budget", operation_id="get_linkedin_budget")
 def get_budget(request: Request, user: CurrentUser, session: SessionDep) -> BudgetStatusOut:
     """Every action class's counters against its limits, and today's profile-visit chain."""
-    settings = _settings(request)
+    settings = _settings(request, session, user)
     account_id = account_id_for(session, user)
     now = utcnow()
     snapshots = [
@@ -491,7 +491,11 @@ def clear_heat(
 
 def _heat_out(request: Request, session: SessionDep, user: User) -> HeatOut:
     heat = posture_service.heat_status(
-        session, user, account_id_for(session, user), now=utcnow(), settings=_settings(request)
+        session,
+        user,
+        account_id_for(session, user),
+        now=utcnow(),
+        settings=_settings(request, session, user),
     )
     return HeatOut(
         score=heat.score,
@@ -601,7 +605,7 @@ def arm_schedule(
         )
     now = utcnow()
     arm_scheduled_runs(session, user, now=now)
-    seed_served_schedule(session, user, _settings(request), now=now)
+    seed_served_schedule(session, user, _settings(request, session, user), now=now)
     return _schedule_out(request, session, user)
 
 
@@ -687,7 +691,7 @@ def acknowledge_inbox_first_poll(user: CurrentUser, session: SessionDep) -> Inbo
 
 
 def _status_out(request: Request, session: SessionDep, user: User) -> LinkedInStatusOut:
-    settings = _settings(request)
+    settings = _settings(request, session, user)
     account = find_account(session, user)
     account_id = account_id_for(session, user)
     flag = session_flag(session, user)
@@ -723,7 +727,7 @@ def get_browser_health(
     account = find_account(session, user)
     account_id = account_id_for(session, user)
     row = posture_service.session_row(
-        session, user, account_id, now=now, settings=_settings(request)
+        session, user, account_id, now=now, settings=_settings(request, session, user)
     )
     evidence = last_session_evidence(session, user, account_id)
     unreachable = (
@@ -762,7 +766,7 @@ def get_browser(request: Request, user: CurrentUser) -> BrowserLaunchOut:
     the instructions are the same for everyone -- but every route here resolves
     the current user (spec 14.1), local mode's single user included.
     """
-    cdp_url = _settings(request).cdp_url
+    cdp_url = file_settings(request).linkedin.cdp_url  # file-only, never on the Settings page
     profile = data_dir() / CHROME_PROFILE_DIRNAME
     return BrowserLaunchOut(
         cdp_url=cdp_url,

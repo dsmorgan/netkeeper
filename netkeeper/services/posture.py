@@ -137,6 +137,11 @@ from netkeeper.services.scheduler import (
     served_schedules,
     stored_due,
 )
+from netkeeper.services.setting_checks import (
+    active_window_check,
+    auto_send_warnings,
+    weekend_multiplier_warnings,
+)
 
 # --- the thresholds this module judges by -----------------------------------
 # Spec 9.6's hard maxima and Appendix C's defaults live in the modules that
@@ -178,15 +183,6 @@ MAX_BLOCKS_BEFORE_SKIP: Final = 5
 #: the rest of the day"; under an hour, a throttle is forgotten before the next
 #: burst starts.
 MIN_HALF_LIFE_HOURS: Final = 1.0
-
-#: An active window longer than this has stopped being a window. Appendix B's
-#: default is 08:30 to 21:30, which is 13 hours; 16 leaves room for someone who
-#: genuinely keeps long hours while still catching a window dialed open to 22.
-MAX_ACTIVE_WINDOW_HOURS: Final = 16.0
-
-#: Spec 9.5 damps weekend budgets by multiplying them. At 1.0 the damping does
-#: nothing; above it, the "damping" raises weekend budgets above weekday ones.
-WEEKEND_DAMPING_CEILING: Final = 1.0
 
 #: The shortest median gap between profile views this report will call
 #: human-like. Appendix C picks 25 seconds because that is how long a person
@@ -1058,28 +1054,9 @@ def _active_hours(
             ),
         )
     start, end = window
-    span_hours = _window_hours(start, end)
-    status = Status.ON
-    if start == end:
-        status = Status.OFF
-        warnings.append(
-            "the window starts and ends at the same time, which means active all 24"
-            " hours: no tick is ever parked for a window start"
-        )
-    elif span_hours > MAX_ACTIVE_WINDOW_HOURS:
-        status = Status.OFF
-        warnings.append(
-            f"the window is {span_hours:.1f} hours long, past the {MAX_ACTIVE_WINDOW_HOURS:.0f}"
-            " this report treats as still being a window. Appendix B's default is 08:30"
-            " to 21:30, 13 hours"
-        )
-    elif start > end:
-        warnings.append(
-            f"the window runs overnight ({start:%H:%M} to {end:%H:%M}), so netkeeper is"
-            " active at hours your own browsing is not. Spec 9.1 leans on your organic"
-            " activity as cover traffic, and a sidecar that is busiest while the account"
-            " is otherwise asleep has none. If those really are your hours, this is fine"
-        )
+    on_or_off, window_warnings = active_window_check(start, end)
+    status = Status.ON if on_or_off == "on" else Status.OFF
+    warnings.extend(window_warnings)
     inside = is_active_at(now, zone, start=start, end=end)
     where = "inside" if inside else "outside"
     opens = next_window_start(now, zone, start=start).astimezone(zone)
@@ -1096,10 +1073,16 @@ def active_hours_source(settings: Settings) -> str:
     """Where ``[linkedin] active_hours`` came from: the config file's path, or the defaults.
 
     Shown beside the window (#213) so a person who wants a different one knows
-    which file to edit, or that there is none yet and the default is in force.
+    where to change it: the Settings page, the file that pins it, or nowhere yet
+    because the default is in force (#343: the file wins over the Settings page).
     """
+    key = "linkedin.active_hours"
+    if key in settings.ui_keys:
+        return "Settings (the web UI)"
     if settings.source_path is None:
         return "the defaults (no config.toml)"
+    if settings.file_keys is not None and key not in settings.file_keys:
+        return f"the defaults ({settings.source_path} does not set it)"
     return str(settings.source_path)
 
 
@@ -1144,29 +1127,9 @@ def _weekend_damping(multiplier: float, local_now: datetime) -> Protection:
     value = f"x{multiplier:g} on Sat/Sun; today is {weekday}"
     if applied:
         value += " (applied)"
-    if multiplier < 0:
-        return Protection(
-            name="weekend damping",
-            status=Status.OFF,
-            value=value,
-            warnings=(
-                f"linkedin.weekend_multiplier is {multiplier:g}, which is not a multiplier"
-                " any budget can be scaled by",
-            ),
-        )
-    if multiplier >= WEEKEND_DAMPING_CEILING:
-        raised = (
-            " and raises them above a weekday's" if multiplier > WEEKEND_DAMPING_CEILING else ""
-        )
-        return Protection(
-            name="weekend damping",
-            status=Status.OFF,
-            value=value,
-            warnings=(
-                f"linkedin.weekend_multiplier is {multiplier:g}, so weekend budgets are not"
-                f" damped at all{raised}. Appendix B's default is 0.5",
-            ),
-        )
+    warnings = weekend_multiplier_warnings(multiplier)
+    if warnings:
+        return Protection(name="weekend damping", status=Status.OFF, value=value, warnings=warnings)
     return Protection(name="weekend damping", status=Status.ON, value=value)
 
 
@@ -1304,9 +1267,7 @@ def _auto_send(settings: Settings, hold: AutoSendHold | None = None) -> Protecti
         status=Status.OFF,
         value="auto-send ON",
         warnings=(
-            "campaigns.linkedin_auto_send is true, so netkeeper sends LinkedIn messages"
-            " itself rather than prefilling them for you to send. ADR 0004 defaults it"
-            " off: an automated send is the action LinkedIn restricts hardest",
+            *auto_send_warnings(settings.campaigns),
             # #447: a daily auto-send budget above 20 is warned about with it (ADR 0008).
             *filter(None, (auto_send_budget_warning(settings),)),
             *(
@@ -2393,12 +2354,6 @@ def _parse_window(active_hours: tuple[str, str]) -> tuple[time, time] | None:
         return time.fromisoformat(active_hours[0]), time.fromisoformat(active_hours[1])
     except (ValueError, IndexError):
         return None
-
-
-def _window_hours(start: time, end: time) -> float:
-    """The window's length in hours, wrapping past midnight when it has to."""
-    minutes = ((end.hour * 60 + end.minute) - (start.hour * 60 + start.minute)) % (24 * 60)
-    return 24.0 if start == end else minutes / 60
 
 
 def _host_of(url: str) -> str | None:
