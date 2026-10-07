@@ -24,6 +24,7 @@ from __future__ import annotations
 import ast
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 import boundary
@@ -395,6 +396,41 @@ class Finding:
         return f"{self.path}:{self.line}: {self.detail}"
 
 
+# --- One parse per file per run -----------------------------------------------------------
+#
+# Every check below reads the same ~100 modules, and an AST walk costs far more than the
+# parse, so a test that re-walked the package for each rule took 10-20 s on a loaded
+# machine (#452). These helpers share the work across the session: ``read_source`` reads a
+# file once, ``parse`` parses a source once, ``walk`` lists a tree's nodes once (in
+# ``ast.walk`` order), and ``_scoped`` maps its scopes once. The results are shared, so a
+# check must never mutate a tree or a scope map. To add a pin, call ``read_source``,
+# ``parse``, ``walk`` and ``_scoped`` where you would have called ``read_text``,
+# ``ast.parse``, ``ast.walk`` and a scope builder; the assertion itself is unchanged.
+
+
+@cache
+def read_source(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+@cache
+def _parse_cached(source: str) -> ast.Module:
+    return ast.parse(source)
+
+
+def parse(source: str) -> ast.Module:
+    return _parse_cached(source)
+
+
+@cache
+def _walk_cached(tree: ast.AST) -> tuple[ast.AST, ...]:
+    return tuple(ast.walk(tree))
+
+
+def walk(tree: ast.AST) -> tuple[ast.AST, ...]:
+    return _walk_cached(tree)
+
+
 def python_files(root: Path) -> list[Path]:
     return sorted(root.rglob("*.py"))
 
@@ -410,7 +446,7 @@ def package_of(path: Path) -> str:
 
 def called_names(source: str) -> Iterator[tuple[int, str]]:
     """Every called name in ``source``: ``a.b.c()`` yields ``c``, ``f()`` yields ``f``."""
-    for node in ast.walk(ast.parse(source)):
+    for node in walk(parse(source)):
         if not isinstance(node, ast.Call):
             continue
         if isinstance(node.func, ast.Attribute):
@@ -443,7 +479,7 @@ def reached_names(source: str, path: Path = MEMORY) -> Iterator[tuple[int, str]]
     the list entry, in a diff someone reads.
     """
     yield from called_names(source)
-    for node in ast.walk(ast.parse(source)):
+    for node in walk(parse(source)):
         if isinstance(node, ast.Attribute):
             yield node.lineno, node.attr
         elif isinstance(node, ast.ImportFrom):
@@ -492,9 +528,9 @@ def dynamic_attribute_reads(source: str, path: Path = MEMORY) -> Iterator[Findin
     argument, no name at all), and when the reader itself is held rather than called
     (``read = getattr``), since nothing on the later call says it is one.
     """
-    tree = ast.parse(source)
+    tree = parse(source)
     called: set[int] = set()
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
@@ -511,7 +547,7 @@ def dynamic_attribute_reads(source: str, path: Path = MEMORY) -> Iterator[Findin
             ok = bool(names) and len(literal) == len(names) and not starred
         if not ok:
             yield Finding(path, node.lineno, f"{name}() with a name that is not a literal")
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if id(node) in called:
             continue
         if isinstance(node, ast.Name) and node.id in DYNAMIC_ATTRIBUTE_READERS:
@@ -527,7 +563,7 @@ def imported_names(source: str, path: Path = MEMORY) -> Iterator[tuple[int, str]
     ``from ..models import User`` reads as ``netkeeper.models``. Skipping that step
     would leave every rule here answerable with a dot.
     """
-    for node in ast.walk(ast.parse(source)):
+    for node in walk(parse(source)):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 yield node.lineno, alias.name
@@ -564,7 +600,7 @@ def scan(
     files = [path for root in roots for path in python_files(root)]
     assert len(files) >= at_least, f"the scan found only {len(files)} files; is the path right?"
     for path in files:
-        findings.extend(check(path.read_text(encoding="utf-8"), path))
+        findings.extend(check(read_source(path), path))
     return findings
 
 
@@ -608,7 +644,7 @@ def api_request_sends(source: str, path: Path = MEMORY) -> Iterator[Finding]:
 
     ``request.new_context`` is refused by the context rule (``new_context``).
     """
-    for node in ast.walk(ast.parse(source)):
+    for node in walk(parse(source)):
         if not isinstance(node, ast.Attribute):
             continue
         if node.attr == "request" and _is_super_call(node.value):
@@ -667,22 +703,10 @@ def page_inputs(
     click can be told apart from the same call anywhere else, including elsewhere in
     ``browser.py``. A bare name (``type(x)``, ``check()``) is not a page input.
     """
-    tree = ast.parse(source)
-    scopes: dict[ast.AST, str] = {}
-
-    def enclose(node: ast.AST, name: str) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
-                inner = f"{name}.{child.name}" if name else child.name
-                scopes[child] = inner
-                enclose(child, inner)
-            else:
-                scopes[child] = name
-                enclose(child, name)
-
-    enclose(tree, "")
-    for node in ast.walk(tree):
-        where = scopes.get(node, "")
+    tree = parse(source)
+    scopes = _scoped(tree)
+    for node in walk(tree):
+        where = scopes.get(id(node), "")
         if isinstance(node, ast.Attribute) and node.attr in names:
             yield Input(path, node.lineno, where, node.attr)
         elif isinstance(node, ast.ImportFrom):
@@ -773,23 +797,13 @@ def cdp_sends(source: str, path: Path = MEMORY) -> Iterator[CdpSend]:
     """Every reach of ``send`` in ``source``, the way :func:`reached_names` reads a name:
     an attribute, called or not, and a literal handed to ``getattr``, ``attrgetter``,
     or ``methodcaller``."""
-    tree = ast.parse(source)
+    tree = parse(source)
     calls: dict[int, ast.Call] = {}
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             calls[id(node.func)] = node
-    scopes: dict[int, str] = {}
-
-    def enclose(node: ast.AST, name: str) -> None:
-        for child in ast.iter_child_nodes(node):
-            inner = name
-            if isinstance(child, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
-                inner = f"{name}.{child.name}" if name else child.name
-            scopes[id(child)] = inner
-            enclose(child, inner)
-
-    enclose(tree, "")
-    for node in ast.walk(tree):
+    scopes = _scoped(tree)
+    for node in walk(tree):
         where = Input(path, getattr(node, "lineno", 0), scopes.get(id(node), ""), "send")
         if isinstance(node, ast.Attribute) and node.attr == "send":
             call = calls.get(id(node))
@@ -839,7 +853,7 @@ def test_the_one_cdp_session_is_read_only() -> None:
         item
         for root in BROWSER_ROOTS
         for path in ([root] if root.is_file() else python_files(root))
-        for item in cdp_sends(path.read_text(encoding="utf-8"), path)
+        for item in cdp_sends(read_source(path), path)
     ]
     outside = [i.where for i in found if (i.where.path, i.where.function) not in CDP_SENDERS]
     assert not outside, "a CDP send outside the body tap:\n" + "\n".join(str(i) for i in outside)
@@ -857,8 +871,11 @@ def test_the_one_cdp_session_is_read_only() -> None:
         )
 
 
+@cache
 def _scoped(tree: ast.AST) -> dict[int, str]:
-    """Each node's enclosing ``Class.method`` (or function) name, by node id."""
+    """Each node's enclosing ``Class.method`` (or function) name, by node id.
+
+    Cached per tree, and the result is shared: read it, never write to it."""
     scopes: dict[int, str] = {}
 
     def enclose(node: ast.AST, name: str) -> None:
@@ -881,14 +898,14 @@ def name_reaches(source: str, name: str, path: Path = MEMORY) -> Iterator[tuple[
     ``getattr``, ``attrgetter``, or ``methodcaller`` -- each with whether it is a direct
     call that passes no ``tap`` and no ``**`` keywords (the one harmless way to reach
     ``observe``)."""
-    tree = ast.parse(source)
+    tree = parse(source)
     scopes = _scoped(tree)
     calls = {
         id(node.func): node
-        for node in ast.walk(tree)
+        for node in walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
-    for node in ast.walk(tree):
+    for node in walk(tree):
         where = scopes.get(id(node), "")
         if isinstance(node, ast.Attribute) and node.attr == name:
             call = calls.get(id(node))
@@ -929,9 +946,7 @@ def test_only_the_named_observations_open_the_body_tap() -> None:
         for root in BROWSER_ROOTS
         for path in ([root] if root.is_file() else python_files(root))
     ]
-    found = [
-        item for path in files for item in tap_observations(path.read_text(encoding="utf-8"), path)
-    ]
+    found = [item for path in files for item in tap_observations(read_source(path), path)]
     sites = sorted((item.path, item.function) for item in found)
     assert sites == sorted(TAP_OBSERVERS), "a body tap opened somewhere new:\n" + "\n".join(
         str(item) for item in found
@@ -939,7 +954,7 @@ def test_only_the_named_observations_open_the_body_tap() -> None:
     openers = [
         item
         for path in files
-        for item, _ in name_reaches(path.read_text(encoding="utf-8"), "_open_body_tap", path)
+        for item, _ in name_reaches(read_source(path), "_open_body_tap", path)
     ]
     assert [(i.path, i.function) for i in openers] == [TAP_OPENER], "\n".join(
         str(i) for i in openers
@@ -1044,7 +1059,7 @@ def test_the_observing_modules_only_listen_and_scroll() -> None:
     findings: list[Finding] = []
     for path in OBSERVING_MODULES:
         assert path.exists(), f"{path} moved; point OBSERVING_MODULES at its new home"
-        findings.extend(page_drivers(path.read_text(encoding="utf-8"), path))
+        findings.extend(page_drivers(read_source(path), path))
     assert not findings, complain(findings, "an observing module drives the page:")
 
 
@@ -1061,7 +1076,7 @@ def package_inputs(
     files = [path for root in roots for path in python_files(root)]
     assert len(files) >= 20, "the scan found too few files; is the path right?"
     for path in files:
-        for item in page_inputs(path.read_text(encoding="utf-8"), path, names):
+        for item in page_inputs(read_source(path), path, names):
             if item.name in BROWSER_ONLY_INPUTS and not _in_browser_roots(path):
                 continue
             found.append(item)
@@ -1265,9 +1280,7 @@ def test_no_attribute_is_read_by_a_name_the_scanners_cannot_see() -> None:
     assert PACKAGE / "cli.py" in files and PACKAGE / "worker.py" in files
     assert len(files) >= 20, "the scan found too few files; is the path right?"
     findings = [
-        finding
-        for path in files
-        for finding in dynamic_attribute_reads(path.read_text(encoding="utf-8"), path)
+        finding for path in files for finding in dynamic_attribute_reads(read_source(path), path)
     ]
     assert not findings, complain(findings, "an attribute named by a value, not a literal:")
 
@@ -1479,7 +1492,7 @@ def test_the_browser_only_names_are_read_where_a_page_can_be_reached() -> None:
     raw = [
         i
         for path in python_files(PACKAGE / "services")
-        for i in page_inputs(path.read_text(encoding="utf-8"), path)
+        for i in page_inputs(read_source(path), path)
     ]
     assert any(i.name == "clear" for i in raw)
     assert all(i.name in BROWSER_ONLY_INPUTS for i in raw)
@@ -1582,9 +1595,9 @@ SEND_WORDS = ("send", "submit")
 
 def _calls_named(source: str, name: str) -> Iterator[tuple[str, ast.Call]]:
     """Every call ``x.<name>(...)`` in ``source``, with its enclosing function."""
-    tree = ast.parse(source)
+    tree = parse(source)
     scopes = _scoped(tree)
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -1614,7 +1627,7 @@ def test_the_only_key_pressed_anywhere_is_shift_enter() -> None:
     found = [
         (path, where, argument)
         for path in python_files(PACKAGE)
-        for where, argument in press_arguments(path.read_text(encoding="utf-8"))
+        for where, argument in press_arguments(read_source(path))
     ]
     assert found == [(LINKEDIN / "browser.py", "BrowserRun.type_into_composer", SHIFT_ENTER)]
 
@@ -1638,13 +1651,13 @@ def test_newlines_are_allowed_only_with_the_shift_enter_press() -> None:
     the module constant is the only switch."""
     from netkeeper.linkedin import pacing
 
-    browser = (LINKEDIN / "browser.py").read_text(encoding="utf-8")
+    browser = read_source(LINKEDIN / "browser.py")
     if pacing.SHIFT_ENTER_NEWLINES_ALLOWED:
         assert press_arguments(browser) == [("BrowserRun.type_into_composer", SHIFT_ENTER)]
     passing = [
         f"{path}:{node.lineno}"
         for path in python_files(PACKAGE)
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        for node in walk(parse(read_source(path)))
         if isinstance(node, ast.Call)
         and any(keyword.arg == "allow_newlines" for keyword in node.keywords)
         # typing_plan's own forwarding of its parameter to its private body
@@ -1681,9 +1694,9 @@ def _string_constants(tree: ast.Module) -> dict[str, list[str]]:
 def locator_strings(source: str) -> Iterator[tuple[int, str]]:
     """Every string a locator-building call is given: its arguments and its ``has_text``
     and ``name`` keywords, literal or through a module constant (followed one step)."""
-    tree = ast.parse(source)
+    tree = parse(source)
     constants = _string_constants(tree)
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
             continue
         if node.func.attr not in LOCATOR_BUILDERS:
@@ -1706,11 +1719,11 @@ def test_no_locator_under_linkedin_names_send_or_submit() -> None:
     findings = [
         f"{path}:{line}: {text!r}"
         for path in python_files(LINKEDIN)
-        for line, text in locator_strings(path.read_text(encoding="utf-8"))
+        for line, text in locator_strings(read_source(path))
         if any(word in text.casefold() for word in SEND_WORDS)
     ]
     assert not findings, findings
-    browser = (LINKEDIN / "browser.py").read_text(encoding="utf-8")
+    browser = read_source(LINKEDIN / "browser.py")
     assert len(list(locator_strings(browser))) >= 10, "the scanner reads no locator strings"
 
 
@@ -1729,7 +1742,7 @@ def test_the_locator_scanner_sees_a_send_button() -> None:
 def test_the_message_click_is_bound_to_the_contacts_href() -> None:
     """ADR 0007: the click in ``click_message`` is on a locator narrowed with ``and_`` to
     an ``[href=...]`` match, never on a bare ``nth`` of the role locator."""
-    source = (LINKEDIN / "browser.py").read_text(encoding="utf-8")
+    source = read_source(LINKEDIN / "browser.py")
     clicks = [
         call for where, call in _calls_named(source, "click") if where == "BrowserRun.click_message"
     ]
@@ -1755,18 +1768,18 @@ def test_bring_to_front_is_called_once_at_the_prefills_start() -> None:
     fronts = [
         (path, item.function)
         for path in python_files(PACKAGE)
-        for item, _ in name_reaches(path.read_text(encoding="utf-8"), "bring_to_front", path)
+        for item, _ in name_reaches(read_source(path), "bring_to_front", path)
     ]
     assert fronts == [(LINKEDIN / "browser.py", "BrowserRun.bring_tab_forward")]
     callers = [
         (path, item.function, item.line)
         for path in python_files(PACKAGE)
-        for item, _ in name_reaches(path.read_text(encoding="utf-8"), "bring_tab_forward", path)
+        for item, _ in name_reaches(read_source(path), "bring_tab_forward", path)
     ]
     assert [(p, f) for p, f, _ in callers] == [
         (LINKEDIN / "page_messaging.py", "PagePrefill.prefill")
     ]
-    source = (LINKEDIN / "page_messaging.py").read_text(encoding="utf-8")
+    source = read_source(LINKEDIN / "page_messaging.py")
     clicks = [
         i.line
         for i, _ in name_reaches(source, "click_message")
@@ -1780,7 +1793,7 @@ def test_hand_over_is_reached_only_from_the_prefill() -> None:
     reaches = [
         (path, item.function)
         for path in python_files(PACKAGE)
-        for item, _ in name_reaches(path.read_text(encoding="utf-8"), "hand_over", path)
+        for item, _ in name_reaches(read_source(path), "hand_over", path)
     ]
     assert reaches == [(LINKEDIN / "page_messaging.py", "PagePrefill._end_after_click")]
 
@@ -1792,7 +1805,7 @@ def test_the_prefill_methods_are_called_only_from_the_prefill() -> None:
         reaches = [
             (path, item.function)
             for path in python_files(PACKAGE)
-            for item, _ in name_reaches(path.read_text(encoding="utf-8"), name, path)
+            for item, _ in name_reaches(read_source(path), name, path)
         ]
         assert reaches == [(LINKEDIN / "page_messaging.py", "PagePrefill.prefill")], name
 
@@ -1808,7 +1821,7 @@ def test_the_one_focus_is_the_seams_and_nothing_holds_a_key() -> None:
     seams = [
         (path, item.function)
         for path in python_files(PACKAGE)
-        for item, _ in name_reaches(path.read_text(encoding="utf-8"), "_focus_seam", path)
+        for item, _ in name_reaches(read_source(path), "_focus_seam", path)
     ]
     assert seams == [(LINKEDIN / "browser.py", "BrowserRun.type_into_composer")]
     clicks = [i for i in package_inputs() if i.function == "BrowserRun._focus_seam"]
@@ -1828,7 +1841,7 @@ def test_only_the_inbox_poll_gives_scroll_a_rest_target() -> None:
     passing = [
         path
         for path in python_files(PACKAGE)
-        for _where, call in _calls_named(path.read_text(encoding="utf-8"), "scroll")
+        for _where, call in _calls_named(read_source(path), "scroll")
         if any(keyword.arg == "rest_over" for keyword in call.keywords)
     ]
     assert sorted(set(passing)) == sorted(REST_OVER_CALLERS)
@@ -1837,7 +1850,7 @@ def test_only_the_inbox_poll_gives_scroll_a_rest_target() -> None:
 def test_the_rest_target_is_not_a_new_input() -> None:
     """The new code reads boxes (``bounding_box``, ``count``) and moves nothing itself:
     ``move`` is still reached only inside ``_rest_pointer_over_content``."""
-    source = (LINKEDIN / "browser.py").read_text(encoding="utf-8")
+    source = read_source(LINKEDIN / "browser.py")
     assert not [
         item
         for item in page_inputs(source)
