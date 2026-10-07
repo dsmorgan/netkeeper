@@ -57,6 +57,9 @@ class MessageOutcomeKind(enum.StrEnum):
     - ``too_long``: refused before any key: the body is over the composer's ceiling.
     - ``partially_typed``: some of the body went in, then the run stopped.
     - ``unknown``: the run cannot say what the composer holds.
+    - ``send_clicked``: auto-send only (ADR 0008): the whole body was typed, every gate
+      held, and the one click on **Send** landed. The next inbox poll confirms the
+      send, as it confirms a send the person made.
     """
 
     PREFILLED = "prefilled"
@@ -64,6 +67,7 @@ class MessageOutcomeKind(enum.StrEnum):
     PARTIALLY_TYPED = "partially_typed"
     TOO_LONG = "too_long"
     UNKNOWN = "unknown"
+    SEND_CLICKED = "send_clicked"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,13 +91,15 @@ class MessageJobSpec:
     out of ``repr`` and never logged.
 
     ``recipient_urn`` is the contact's ``urn:li:fsd_profile:<id>``;
-    ``recipient_public_id`` the vanity slug the profile is opened by.
+    ``recipient_public_id`` the vanity slug the profile is opened by. ``mode`` is
+    ``prefill``, or ``auto_send`` for a step the scheduler sends (ADR 0008). The mode
+    alone never sends: the page clicks Send only with a :class:`SendPermit` as well.
     """
 
     recipient_urn: str
     recipient_public_id: str | None
     body: str = field(repr=False)
-    mode: Literal["prefill"]
+    mode: Literal["prefill", "auto_send"]
     typing_seed: int
 
     def __post_init__(self) -> None:
@@ -101,8 +107,8 @@ class MessageJobSpec:
             raise ValueError("a prefill's recipient is an urn:li:fsd_profile URN")
         if any(c in self.profile_id for c in "/?#&=,()% "):
             raise ValueError("a prefill's recipient URN holds an unexpected character")
-        if self.mode != "prefill":
-            raise ValueError("P4-03 only prefills; auto-send is P4-04")
+        if self.mode not in ("prefill", "auto_send"):
+            raise ValueError("a LinkedIn step's mode is prefill or auto_send")
 
     @property
     def profile_id(self) -> str:
@@ -331,6 +337,54 @@ def conversation_from_thread_request(url: str, thread_id: str) -> str | None:
     return urn
 
 
+# --- auto-send's proof that the message went (ADR 0008, #458 review) -------------------
+
+#: The page's own send: ``POST <this path>?action=createMessage``, answered with the message
+#: it created (``docs/linkedin-messaging-shapes.md``, "Sending"). netkeeper only reads it.
+MESSAGES_CREATE_PATH: Final = "/voyager/api/voyagerMessagingDashMessengerMessages"
+CREATE_MESSAGE_ACTION: Final = "createMessage"
+
+
+def _send_text(text: str) -> str:
+    """Text as the send proof compares it: CR and CRLF as one newline, a no-break space as
+    a space, and no trailing newline (a composer's last ``<br>``)."""
+    return text.replace("\r\n", "\n").replace("\r", "\n").replace("\u00a0", " ").rstrip("\n")
+
+
+def is_create_message(url: str) -> bool:
+    """Whether ``url`` is the page's own send (``?action=createMessage``)."""
+    split = urlsplit(url)
+    if split.path.rstrip("/") != MESSAGES_CREATE_PATH:
+        return False
+    return parse_qs(split.query).get("action") == [CREATE_MESSAGE_ACTION]
+
+
+def send_answer_refusal(
+    status: int, body: str | None, expected: str, conversation_urn: str | None
+) -> str | None:
+    """``None`` when one ``createMessage`` answer proves the message went: status 200, its
+    ``value.body.text`` the typed text, and its ``value.conversationUrn`` this
+    conversation's when that is known. Otherwise why not, in fixed words."""
+    if status != 200:
+        return "the send answer was an error"
+    if body is None:
+        return "the send answer could not be read"
+    try:
+        answer = json.loads(body)
+    except ValueError:
+        return "the send answer could not be read"
+    value = _mapping(answer, "value")
+    sent = _mapping(value, "body")
+    text = None if sent is None else sent.get("text")
+    if value is None or not isinstance(text, str):
+        return "the send answer has an unexpected shape"
+    if _send_text(text) != _send_text(expected):
+        return "the send answer holds other text"
+    if conversation_urn is not None and value.get("conversationUrn") != conversation_urn:
+        return "the send answer is for another conversation"
+    return None
+
+
 # --- the source seam ------------------------------------------------------------------
 
 
@@ -345,9 +399,41 @@ class PrefillResult:
     typing_started_at: datetime | None = None
     wall: Outcome | None = None
     wall_url: str | None = field(default=None, repr=False)
+    #: Auto-send only (ADR 0008): when the Send click was sent, taken just before it.
+    send_clicked_at: datetime | None = None
+    #: Auto-send only: why Send was not clicked after the whole body was typed, in
+    #: fixed words. The typed text stays in the composer for the person.
+    send_refusal: str | None = None
+    #: Auto-send only (ADR 0008, D1): after a landed Send, whether the run closed the
+    #: sent bubble, and why not, in fixed words. ``None`` when nothing was sent.
+    bubble_closed: bool | None = None
+    close_refusal: str | None = None
+    #: Auto-send only: why a landed Send click is not proven to have sent the message
+    #: (no ``createMessage`` answer, an error, other text). Then nothing is closed.
+    send_unconfirmed: str | None = None
 
 
 Cancelled = Callable[[], Awaitable[bool]]
+
+#: A send gate checked again just before the click: ``None`` when it still holds, or
+#: why not, in fixed words.
+SendRecheck = Callable[[], Awaitable[str | None]]
+
+
+@dataclass(frozen=True, slots=True)
+class SendPermit:
+    """ADR 0008: the page may click **Send** once, for this run, only while holding one.
+
+    :func:`netkeeper.services.message_send.run_prefill` builds it, and nothing else in
+    the package does (``tests/test_browser_safety.py``), only after the run's gates
+    held: ``[campaigns] linkedin_auto_send`` on, the step's mode ``auto_send``, a
+    scheduled run, inside active hours, heat under its skip threshold, today's
+    ``li_messages_auto`` budget not spent, and ``budgets.consume`` for it
+    done. ``recheck`` asks the time-bound gates again (the flag, active hours, the
+    session flag, heat, a cancel) just before the click, after the dwell.
+    """
+
+    recheck: SendRecheck = field(repr=False)
 
 
 class PrefillSource(Protocol):
@@ -374,5 +460,10 @@ class PrefillSource(Protocol):
         ...
 
     async def prefill(
-        self, spec: MessageJobSpec, plan: TypingPlan, *, cancelled: Cancelled
+        self,
+        spec: MessageJobSpec,
+        plan: TypingPlan,
+        *,
+        cancelled: Cancelled,
+        permit: SendPermit | None = None,
     ) -> PrefillResult: ...

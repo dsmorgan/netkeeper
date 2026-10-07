@@ -373,7 +373,7 @@ class RaisingSource:
         return {"message_click_target": "top_card", "message_click_failure": "intercepted"}
 
     async def prefill(
-        self, spec: MessageJobSpec, plan: TypingPlan, *, cancelled: Any
+        self, spec: MessageJobSpec, plan: TypingPlan, *, cancelled: Any, permit: Any = None
     ) -> PrefillResult:
         if self._error is not None:
             raise self._error
@@ -688,7 +688,7 @@ class RecordingSource:
         return {}
 
     async def prefill(
-        self, spec: MessageJobSpec, plan: TypingPlan, *, cancelled: Any
+        self, spec: MessageJobSpec, plan: TypingPlan, *, cancelled: Any, permit: Any = None
     ) -> PrefillResult:
         self.calls += 1
         raise AssertionError("the prefill ran")

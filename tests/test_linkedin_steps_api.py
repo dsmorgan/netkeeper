@@ -138,6 +138,7 @@ async def test_ready_lists_due_linkedin_steps_with_no_message_text(
         "contact_name",
         "due",
         "held_until",
+        "auto_send",
     }
     assert "Hi " not in response.text
 
@@ -441,11 +442,19 @@ async def test_ready_keeps_one_campaigns_and_counts_its_steps(
 async def test_options_say_whether_auto_send_may_be_chosen(
     client: httpx.AsyncClient, running_app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    assert (await client.get(f"{BASE}/options")).json() == {"auto_send": False}
+    assert (await client.get(f"{BASE}/options")).json() == {
+        "auto_send": False,
+        "auto_send_warning": None,
+        "auto_send_hold": None,
+    }
     settings = running_app.state.settings
     on = replace(settings, campaigns=replace(settings.campaigns, linkedin_auto_send=True))
     monkeypatch.setattr(running_app.state, "settings", on)
-    assert (await client.get(f"{BASE}/options")).json() == {"auto_send": True}
+    assert (await client.get(f"{BASE}/options")).json() == {
+        "auto_send": True,
+        "auto_send_warning": None,
+        "auto_send_hold": None,
+    }
 
 
 async def test_a_linkedin_steps_counts_by_status_are_on_the_campaign(
@@ -626,3 +635,57 @@ async def test_the_enrollment_row_says_try_again_only_for_a_linkedin_step(
         enrollment_id = enrollment.id
     [row] = (await client.get(f"/api/v1/campaigns/{campaign_id}/enrollments")).json()["items"]
     assert (row["id"], row["try_again"]) == (enrollment_id, False)
+
+
+# --- the auto-send hold (ADR 0008, #458 review) -------------------------------------------
+
+
+def _hold(app: FastAPI) -> tuple[int, int]:
+    """Hold the local user's auto-send, and another user's too; their account ids."""
+    from netkeeper.services.linkedin_steps import AUTO_SEND_HOLD_BUBBLE, hold_auto_send
+
+    with session_scope(app.state.session_factory, write=True) as session:
+        user = _local(session)
+        mine = ensure_account(session, user).id
+        hold_auto_send(session, user, mine, reason=AUTO_SEND_HOLD_BUBBLE, now=NOW, run_id=1)
+        other = factories.make_user(session, kind=UserKind.HOSTED)
+        theirs = ensure_account(session, other).id
+        hold_auto_send(session, other, theirs, reason=AUTO_SEND_HOLD_BUBBLE, now=NOW, run_id=2)
+        return mine, theirs
+
+
+def _held(app: FastAPI) -> tuple[bool, bool]:
+    from netkeeper.services.linkedin_steps import auto_send_hold
+
+    with session_scope(app.state.session_factory) as session:
+        user = _local(session)
+        other = session.scalars(select(User).where(User.kind == UserKind.HOSTED)).one()
+        return (
+            auto_send_hold(session, user, ensure_account(session, user).id) is not None,
+            auto_send_hold(session, other, ensure_account(session, other).id) is not None,
+        )
+
+
+async def test_options_carry_the_hold_and_how_to_clear_it(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    _hold(running_app)
+    hold = (await client.get(f"{BASE}/options")).json()["auto_send_hold"]
+    assert hold["reason"] == "a message bubble is open in Chrome"
+    assert "netkeeper linkedin auto-send-resume" in hold["how_to_clear"]
+
+
+async def test_resume_needs_the_csrf_header_and_confirm_and_is_idempotent_and_scoped(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    _hold(running_app)
+    url = f"{BASE}/auto-send/resume"
+    assert (await client.post(url, json={"confirm": True})).status_code == 403
+    assert (await client.post(url, json={}, headers=HEADERS)).status_code == 422
+    assert (await client.post(url, json={"confirm": False}, headers=HEADERS)).status_code == 422
+    assert _held(running_app) == (True, True)
+    first = await client.post(url, json={"confirm": True}, headers=HEADERS)
+    assert first.status_code == 200 and first.json() == {"resumed": True}
+    again = await client.post(url, json={"confirm": True}, headers=HEADERS)
+    assert again.json() == {"resumed": False}
+    assert _held(running_app) == (False, True)  # another user's hold is untouched

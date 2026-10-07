@@ -15,3 +15,4 @@ An ADR records one decision, the context that forced it, and its consequences. T
 | [0005](0005-user-boundary-from-the-first-migration.md) | Carry a user boundary from the first migration | Accepted |
 | [0006](0006-observe-dont-request.md) | Observe, don't request | Accepted |
 | [0007](0007-prefill-inputs.md) | The prefill's inputs: one Message click, typing into one verified composer, never Enter | Accepted |
+| [0008](0008-auto-send.md) | Auto-send: one click on Send, behind every gate | Proposed |

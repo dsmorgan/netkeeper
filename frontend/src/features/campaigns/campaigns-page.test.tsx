@@ -586,6 +586,44 @@ describe('a campaign with a LinkedIn step (#383)', () => {
     expect(ready.every((c) => c.query.get('campaign_id') === '5')).toBe(true)
   })
 
+  it.each([
+    [true, 'on: netkeeper clicks Send itself'],
+    [false, 'off in config.toml: waits for you to prefill'],
+  ])('says whether an auto-send step sends itself (flag %s)', async (on, text) => {
+    mockFetch(
+      campaignBackend(
+        {
+          campaign: campaign({
+            status: 'active',
+            steps: [{ ...LINKEDIN_STEP, mode: 'auto_send' as const }],
+            mailbox_id: null,
+          }),
+          review: review(),
+        },
+        {
+          'GET /api/v1/campaigns/linkedin/ready': () =>
+            jsonResponse({ items: [], total: 0, by_step: {} }),
+          'GET /api/v1/campaigns/linkedin/waiting': () => jsonResponse({ items: [], total: 0 }),
+          'GET /api/v1/campaigns/linkedin/options': () => jsonResponse({ auto_send: on }),
+          'GET /api/v1/linkedin/status': () =>
+            jsonResponse({
+              session_flag: null,
+              session_flagged_at: null,
+              heat_tripped: false,
+              armed: false,
+              schedule_paused: false,
+              running_run_id: null,
+              can_start_runs: true,
+            }),
+        },
+      ),
+    )
+    await renderApp('/campaigns/5')
+
+    expect(await screen.findByText(text)).toBeVisible()
+    expect(screen.getByText('Auto-send')).toBeVisible()
+  })
+
   it('shows no LinkedIn counts or queue for an email-only campaign', async () => {
     mockFetch(campaignBackend({ campaign: campaign({ status: 'active' }), review: review() }))
     await renderApp('/campaigns/5')

@@ -25,6 +25,7 @@ export type PrefillRefusal = Schemas['PrefillRefused']
 export type Discarded = Schemas['DiscardedOut']
 export type StepOptions = Schemas['OptionsOut']
 export type RunAccepted = Schemas['RunAccepted']
+export type AutoSendResumed = Schemas['AutoSendResumed']
 
 /**
  * A refused request: its status and sentence, and for a refused prefill (`409`) the
@@ -166,6 +167,18 @@ export async function checkSent(messageId: number): Promise<RunAccepted> {
     { params: { path: { message_id: messageId } } },
   )
   if (data === undefined) fail(response.status, error, 'could not start the inbox check')
+  return data
+}
+
+/**
+ * You closed the message bubbles in Chrome: auto-send may go again (ADR 0008). It
+ * changes nothing in LinkedIn.
+ */
+export async function resumeAutoSend(): Promise<AutoSendResumed> {
+  const { data, error, response } = await api.POST('/api/v1/campaigns/linkedin/auto-send/resume', {
+    body: { confirm: true },
+  })
+  if (data === undefined) fail(response.status, error, 'could not resume auto-send')
   return data
 }
 

@@ -393,8 +393,11 @@ class Enrollment(UserOwned, TimestampMixin, Base):
 
 OPEN_PREFILL_WHERE = (
     "channel = 'linkedin' AND direction = 'out' AND status IN ('scheduled', 'prefilled')"
+    " AND send_clicked_at IS NULL"
 )
-"""The rows ``uq_messages_one_open_prefill`` holds to one per user: an open prefill."""
+"""The rows ``uq_messages_one_open_prefill`` holds to one per user: an open prefill. An
+auto-sent message (``send_clicked_at`` set, ADR 0008; 0039) waits on the inbox poll, not
+on the person, and is not one."""
 
 
 class Message(UserOwned, TimestampMixin, Base):
@@ -464,6 +467,9 @@ class Message(UserOwned, TimestampMixin, Base):
     # When the person discarded a LinkedIn prefill (P4-09; 0036): the next step's delay
     # counts from it, as from a send. Nothing else sets it.
     discarded_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # When auto-send's one click on Send was sent for it (P4-04, ADR 0008; 0039). It
+    # stays ``prefilled`` until the inbox poll sees it sent. NULL for everything else.
+    send_clicked_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     sync_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("sync_runs.id", ondelete="SET NULL"), index=True
     )

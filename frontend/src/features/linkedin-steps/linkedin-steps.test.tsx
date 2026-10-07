@@ -26,7 +26,16 @@ import { FakeEventSource, resetFakeEventSource } from '@/test/fake-event-source'
 import { jsonResponse, mockFetch } from '@/test/fetch'
 
 import type { ReadyItem, ReadyPage, TryAgainItem, WaitingItem, WaitingPage } from './api'
-import { ONE_AT_A_TIME, REVIEW_AND_SEND, ageText, reasonText, threadUrl } from './format'
+import {
+  AUTO_SEND_STEP_OFF,
+  AUTO_SEND_STEP_ON,
+  AUTO_SENT_STALE,
+  ONE_AT_A_TIME,
+  REVIEW_AND_SEND,
+  ageText,
+  reasonText,
+  threadUrl,
+} from './format'
 import { LinkedInStepsSection } from './linkedin-steps-section'
 import reasons from './prefill-reasons.json'
 import {
@@ -66,6 +75,7 @@ function readyItem(overrides: Partial<ReadyItem> = {}): ReadyItem {
     contact_name: 'Rosalind Quillfeather',
     due: hoursAgo(1),
     held_until: null,
+    auto_send: false,
     ...overrides,
   }
 }
@@ -113,6 +123,8 @@ function waitingItem(overrides: Partial<WaitingItem> = {}): WaitingItem {
     contact_id: 42,
     contact_name: 'Tobias Marrowbone',
     prefilled_at: hoursAgo(2),
+    not_sent_reason: null,
+    auto_sent: false,
     ...overrides,
   }
 }
@@ -397,6 +409,73 @@ describe('the LinkedIn queue', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  it('marks an auto-send step in the queue, sent on schedule while the flag is on', async () => {
+    renderSection({
+      'GET /api/v1/campaigns/linkedin/options': () => jsonResponse({ auto_send: true }),
+      'GET /api/v1/campaigns/linkedin/ready': () =>
+        jsonResponse(readyPage([readyItem({ auto_send: true })])),
+    })
+    const row = await screen.findByRole('listitem', { name: 'Rosalind Quillfeather, step 1' })
+    expect(within(row).getByText('Auto-send')).toBeVisible()
+    expect(row).toHaveTextContent(AUTO_SEND_STEP_ON)
+    // A person can still prefill it; that never clicks Send.
+    expect(within(row).getByRole('button', { name: 'Prefill Rosalind Quillfeather' })).toBeEnabled()
+  })
+
+  it('says an auto-send step waits for a prefill while the flag is off', async () => {
+    renderSection({
+      'GET /api/v1/campaigns/linkedin/ready': () =>
+        jsonResponse(readyPage([readyItem({ auto_send: true }), readyItem({ enrollment_id: 34 })])),
+    })
+    const rows = await screen.findAllByRole('listitem', { name: 'Rosalind Quillfeather, step 1' })
+    expect(rows[0]).toHaveTextContent(AUTO_SEND_STEP_OFF)
+    expect(within(rows[0]!).getByText('Auto-send step')).toBeVisible()
+    expect(rows[1]).not.toHaveTextContent(/Auto-send/)
+  })
+
+  it('shows the budget warning with auto-send on', async () => {
+    const warning =
+      'Auto-sent LinkedIn messages are set to 30 a day, above 20 a day. More LinkedIn messages a day make it more likely that LinkedIn restricts your account or asks you to verify it.'
+    renderSection({
+      'GET /api/v1/campaigns/linkedin/options': () =>
+        jsonResponse({ auto_send: true, auto_send_warning: warning }),
+    })
+    const note = (await screen.findByText('Auto-send on')).closest('[role="note"]')
+    expect(note).toHaveTextContent(warning)
+  })
+
+  it('says why auto-send is held and resumes it when you say the bubbles are closed', async () => {
+    let held = true
+    const { calls } = renderSection({
+      'GET /api/v1/campaigns/linkedin/options': () =>
+        jsonResponse({
+          auto_send: true,
+          auto_send_hold: held
+            ? {
+                reason: 'a message bubble is open in Chrome',
+                since: hoursAgo(1),
+                how_to_clear: 'Close every LinkedIn message bubble, then resume auto-send.',
+              }
+            : null,
+        }),
+      'POST /api/v1/campaigns/linkedin/auto-send/resume': () => {
+        held = false
+        return jsonResponse({ resumed: true })
+      },
+    })
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Auto-send is held: a message bubble is open in Chrome.')
+    expect(alert).toHaveTextContent('Close every LinkedIn message bubble')
+    fireEvent.click(within(alert).getByRole('button', { name: /resume auto-send/ }))
+    await waitFor(() =>
+      expect(posts(calls, '/api/v1/campaigns/linkedin/auto-send/resume')).toHaveLength(1),
+    )
+    expect(posts(calls, '/api/v1/campaigns/linkedin/auto-send/resume')[0]?.body).toEqual({
+      confirm: true,
+    })
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+  })
+
   it('says auto-send is unknown when the setting cannot be read', async () => {
     renderSection({
       'GET /api/v1/campaigns/linkedin/options': () => jsonResponse({ detail: 'boom' }, 500),
@@ -407,6 +486,31 @@ describe('the LinkedIn queue', () => {
 })
 
 describe('waiting for you', () => {
+  it('says why an auto-send typed a message but did not send it', async () => {
+    renderSection({
+      'GET /api/v1/campaigns/linkedin/waiting': () =>
+        jsonResponse(waitingPage([waitingItem({ not_sent_reason: 'the schedule is paused' })])),
+    })
+    const row = await screen.findByRole('listitem', { name: 'Tobias Marrowbone, prefilled' })
+    expect(row).toHaveTextContent(
+      "Auto-send typed it but didn't click Send: The LinkedIn schedule is paused, so netkeeper sent nothing.",
+    )
+  })
+
+  it('says a stale auto-sent message was never seen sent', async () => {
+    renderSection({
+      'GET /api/v1/campaigns/linkedin/waiting': () =>
+        jsonResponse(
+          waitingPage([
+            waitingItem({ status: 'stale', auto_sent: true, prefilled_at: hoursAgo(80) }),
+          ]),
+        ),
+    })
+    const row = await screen.findByRole('listitem', { name: 'Tobias Marrowbone, stale' })
+    expect(within(row).getByText('Auto-sent')).toBeVisible()
+    expect(row).toHaveTextContent(AUTO_SENT_STALE)
+  })
+
   it('asks you to send a prefilled message yourself, with its age and both actions', async () => {
     renderSection({
       'GET /api/v1/campaigns/linkedin/waiting': () => jsonResponse(waitingPage([waitingItem()])),
@@ -913,12 +1017,19 @@ describe('every recorded phrase has words (S1 drift guard)', () => {
   it.each(reasons)('%s', (phrase) => {
     const sample = phrase.replace(
       '{}',
-      phrase.startsWith('after typing') ? 'the composer does not hold focus' : 'x',
+      /^(after typing|before Send)/.test(phrase) ? 'the composer does not hold focus' : 'x',
     )
     const words = prefillReason(sample)
     expect(words.text).not.toBe(sample)
     expect(words.text).toMatch(/^(netkeeper |[A-Z])/)
     expect(words.text).not.toMatch(/_/)
+  })
+
+  it('reads an auto-send refusal before Send through the phrase it carries', () => {
+    const words = prefillReason('before Send: the composer does not hold focus')
+    expect(words.text).toBe('Before Send, the message box lost focus, so netkeeper stopped.')
+    expect(prefillReason('the composer is not in one message form').text).toMatch(/Send button/)
+    expect(prefillEnding('send_clicked', null)).toBeNull()
   })
 
   it('places each click-stage refusal', () => {

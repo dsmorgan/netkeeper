@@ -162,6 +162,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/campaigns/linkedin/auto-send/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume Auto Send
+         * @description You closed the message bubbles in Chrome: auto-send may go again (ADR 0008). It
+         *     changes nothing in LinkedIn. Needs ``{"confirm": true}``; idempotent.
+         */
+        post: operations["resume_linkedin_auto_send"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/campaigns/linkedin/messages/{message_id}/check": {
         parameters: {
             query?: never;
@@ -3437,6 +3458,34 @@ export interface components {
              */
             unfamiliar_message_files: string[];
         };
+        /**
+         * AutoSendHoldOut
+         * @description An auto-send hold (ADR 0008): fixed words, never page text.
+         */
+        AutoSendHoldOut: {
+            /** How To Clear */
+            how_to_clear: string;
+            /** Reason */
+            reason: string;
+            /**
+             * Since
+             * Format: date-time
+             */
+            since: string;
+        };
+        /** AutoSendResumeIn */
+        AutoSendResumeIn: {
+            /**
+             * Confirm
+             * @default false
+             */
+            confirm: boolean;
+        };
+        /** AutoSendResumed */
+        AutoSendResumed: {
+            /** Resumed */
+            resumed: boolean;
+        };
         /** AutotagRuleCreate */
         AutotagRuleCreate: {
             /**
@@ -6109,6 +6158,9 @@ export interface components {
         OptionsOut: {
             /** Auto Send */
             auto_send: boolean;
+            auto_send_hold?: components["schemas"]["AutoSendHoldOut"] | null;
+            /** Auto Send Warning */
+            auto_send_warning?: string | null;
         };
         /** Or */
         "Or-Input": {
@@ -6430,6 +6482,11 @@ export interface components {
          * @description One due LinkedIn step. The contact is named and nothing more: no message text.
          */
         ReadyOut: {
+            /**
+             * Auto Send
+             * @default false
+             */
+            auto_send: boolean;
             /** Campaign Id */
             campaign_id: number;
             /** Campaign Name */
@@ -8016,6 +8073,11 @@ export interface components {
          * @description One LinkedIn message waiting for you. No message text.
          */
         WaitingOut: {
+            /**
+             * Auto Sent
+             * @default false
+             */
+            auto_sent: boolean;
             /** Campaign Id */
             campaign_id: number;
             /** Campaign Name */
@@ -8030,6 +8092,8 @@ export interface components {
             interrupted: boolean;
             /** Message Id */
             message_id: number;
+            /** Not Sent Reason */
+            not_sent_reason?: string | null;
             /** Partly Typed */
             partly_typed: boolean;
             /** Prefilled At */
@@ -8389,6 +8453,37 @@ export interface operations {
                 content?: never;
             };
             /** @description A value a campaign cannot be made from */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    resume_linkedin_auto_send: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AutoSendResumeIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutoSendResumed"];
+                };
+            };
+            /** @description `confirm` was not true */
             422: {
                 headers: {
                     [name: string]: unknown;

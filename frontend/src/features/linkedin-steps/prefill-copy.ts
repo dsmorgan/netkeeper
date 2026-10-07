@@ -4,7 +4,8 @@
  * bubble the run may have left open.
  *
  * A prefill run records its outcome as `stop_reason` (`prefilled`, `not_typed`,
- * `too_long`, `partially_typed`, `unknown`) and the reason as `error`: a fixed phrase,
+ * `too_long`, `partially_typed`, `unknown`, and an auto-send's `send_clicked`, ADR 0008)
+ * and the reason as `error`: a fixed phrase,
  * or one of three codes (`netkeeper/linkedin/browser.py`, `page_messaging.py`,
  * `messaging.py`, `services/message_send.py`). None of them holds message text, a name,
  * or a URL. A phrase this file does not know is shown as the backend wrote it.
@@ -93,7 +94,8 @@ export function triesText(tries: number): string {
 }
 
 /** The outcomes a prefill run records as `stop_reason`. */
-export type PrefillOutcome = 'prefilled' | 'not_typed' | 'too_long' | 'partially_typed' | 'unknown'
+export type PrefillOutcome =
+  'prefilled' | 'not_typed' | 'too_long' | 'partially_typed' | 'unknown' | 'send_clicked'
 
 const OUTCOMES: readonly string[] = [
   'prefilled',
@@ -101,6 +103,7 @@ const OUTCOMES: readonly string[] = [
   'too_long',
   'partially_typed',
   'unknown',
+  'send_clicked',
 ]
 
 export function isPrefillOutcome(reason: string | null): reason is PrefillOutcome {
@@ -114,6 +117,7 @@ export const OUTCOME_TEXT: Readonly<Record<PrefillOutcome, string>> = {
   too_long: 'nothing typed: the message is too long to type',
   partially_typed: 'part of the message was typed',
   unknown: 'part of the message may have been typed',
+  send_clicked: 'auto-send typed the message and clicked Send',
 }
 
 /** Whether the refusal followed the Message click, so a bubble may be open. */
@@ -229,10 +233,92 @@ const BEFORE_CLICK: readonly Rule[] = [
     text: "A Message button on the profile doesn't open a message to this contact.",
     bubble: 'closed',
   },
+  // Auto-send's own gates (ADR 0008), checked before anything opens.
+  {
+    match: 'auto-send is off',
+    text: 'Auto-send is off in config.toml, so netkeeper sent nothing.',
+    bubble: 'closed',
+  },
+  {
+    match: 'the step is not an auto-send step',
+    text: "The step isn't an auto-send step, so netkeeper didn't send it.",
+    bubble: 'closed',
+  },
+  {
+    match: "outside LinkedIn's active hours",
+    text: "It's outside your LinkedIn active hours.",
+    bubble: 'closed',
+  },
+  {
+    match: "LinkedIn's active hours do not parse",
+    text: "Your LinkedIn active hours can't be read; fix them in config.toml.",
+    bubble: 'closed',
+  },
+  {
+    match: "today's auto-send budget is spent",
+    text: "Today's auto-send budget is spent.",
+    bubble: 'closed',
+  },
+  {
+    match: 'a reply arrived',
+    text: 'The contact replied while netkeeper typed, so it did not send.',
+    bubble: 'closed',
+  },
+  {
+    match: 'the claimed message is no longer waiting to be sent',
+    text: 'The message changed while netkeeper typed, so it did not send.',
+    bubble: 'closed',
+  },
+  {
+    match: 'the enrollment is gone',
+    text: 'The enrollment is gone, so netkeeper did not send.',
+    bubble: 'closed',
+  },
+  {
+    match: 'the step no longer passes its guards',
+    text: 'The campaign, the enrollment or the contact changed (paused, removed, or marked do not contact, for example), so netkeeper did not send.',
+    bubble: 'closed',
+  },
+  {
+    match: 'scheduled runs are disarmed',
+    text: 'Scheduled LinkedIn runs are disarmed, so netkeeper sent nothing.',
+    bubble: 'closed',
+  },
+  {
+    match: 'the schedule is paused',
+    text: 'The LinkedIn schedule is paused, so netkeeper sent nothing.',
+    bubble: 'closed',
+  },
+  {
+    match: 'auto-send is held until the open message bubbles are closed',
+    text: 'Auto-send is held: a message bubble is open in Chrome. Close it, then resume auto-send on the LinkedIn queue.',
+    bubble: 'closed',
+  },
 ]
 
 /** The refusals that follow the click, and the ones that can't say. */
 const AFTER_CLICK: readonly Rule[] = [
+  // Auto-send's Send click (ADR 0008): the whole message was typed first.
+  {
+    match: 'the Send control could not be clicked',
+    text: "Chrome didn't take netkeeper's click on Send, so netkeeper can't tell whether the message went.",
+    bubble: 'open',
+  },
+  {
+    match: /^the Send control|Send control$|^the composer is not in one message form$/,
+    text: "The Send button didn't look the way netkeeper expects, so it didn't click it.",
+    bubble: 'open',
+  },
+  {
+    match: /^Send was already clicked$|^no send permit$|^the send gates could not be checked$/,
+    text: "netkeeper didn't click Send: a check before the click didn't pass.",
+    bubble: 'open',
+  },
+  {
+    match: 'the whole body was not typed',
+    text: "The whole message wasn't typed, so netkeeper didn't click Send.",
+    bubble: 'open',
+  },
   {
     match: 'the Message control was already clicked',
     text: 'netkeeper had already clicked Message in this run.',
@@ -352,10 +438,16 @@ export interface PrefillReason {
 }
 
 const AFTER_TYPING = 'after typing: '
+/** Auto-send's prefix (ADR 0008): the composer changed after typing, before Send. */
+const BEFORE_SEND = 'before Send: '
 
 /** One recorded reason in plain words, and whether it can leave a bubble open. */
 export function prefillReason(error: string | null): PrefillReason {
   if (error === null || error === '') return { text: 'No reason was recorded.', bubble: 'maybe' }
+  if (error.startsWith(BEFORE_SEND)) {
+    const inner = prefillReason(error.slice(BEFORE_SEND.length))
+    return { text: `Before Send, ${lowerFirst(inner.text)}`, bubble: inner.bubble }
+  }
   const afterTyping = error.startsWith(AFTER_TYPING)
   const phrase = afterTyping ? error.slice(AFTER_TYPING.length) : error
   for (const rule of RULES) {
@@ -412,7 +504,8 @@ export function prefillEnding(
   error: string | null,
   counts: Readonly<Record<string, unknown>> | null = null,
 ): PrefillEnding | null {
-  if (!isPrefillOutcome(stopReason) || stopReason === 'prefilled') return null
+  if (!isPrefillOutcome(stopReason) || stopReason === 'prefilled' || stopReason === 'send_clicked')
+    return null
   const why = prefillReason(error)
   if (stopReason === 'partially_typed' || stopReason === 'unknown') {
     return {

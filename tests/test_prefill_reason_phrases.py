@@ -46,14 +46,28 @@ OUTCOME_CALLS = frozenset(
         "TypingResult",
         "MessageOutcome",
         "_prefill_not_typed",
+        # ADR 0008: why the one Send click did not happen.
+        "SendClick",
     }
 )
 #: Checks whose returns (and first assignments) are a refusal phrase.
 REFUSING_FUNCTIONS = frozenset(
-    {"_bubble_refusal", "_composer_refusal", "message_control_refusal", "spend", "_await_bubble"}
+    {
+        "_bubble_refusal",
+        "_composer_refusal",
+        "message_control_refusal",
+        "spend",
+        "_await_bubble",
+        # ADR 0008: auto-send's gates and its Send control.
+        "gates",
+        "auto_send_refusal",
+        "still_wanted",
+        "_send_refusal",
+    }
 )
-#: Not a refusal: what a prefill that typed records.
-NOT_REASONS = frozenset({"typed"})
+#: Not a refusal: what a prefill that typed records, and an auto-send whose Send click
+#: landed (ADR 0008). Neither reaches a run's ``error``.
+NOT_REASONS = frozenset({"typed", "Send was clicked"})
 
 
 def _final_constants(tree: ast.Module) -> dict[str, str]:
@@ -165,7 +179,7 @@ def _is_reason_position(call: str, node: ast.Call, arg: ast.expr) -> bool:
         return node.args.index(arg) == 1 if arg in node.args else True
     if call == "TypingResult":
         return arg in node.args and node.args.index(arg) == 1
-    if call == "MessageClick":
+    if call in ("MessageClick", "SendClick"):
         return arg in node.args and node.args.index(arg) == 2
     if call == "_after_failure":
         return arg in node.args and node.args.index(arg) == 1
@@ -201,6 +215,17 @@ PASS_THROUGH = frozenset(
         (_P, "prefill", "option.reason"),
         # spend() returns a phrase; run_prefill passes it on to _not_typed.
         (_M, "run_prefill", "refused"),
+        # ADR 0008: spend() and recheck_gates hand on gates()' phrase (scanned), and
+        # prepare hands on auto_send_refusal's (scanned).
+        (_M, "spend", "refusal"),
+        (_M, "gates", "refusal"),
+        (_M, "gates", "changed"),
+        (_M, "prepare", "refusal"),
+        # click_send passes on the permit's recheck (gates(), scanned), _send_control's
+        # refusal (scanned), and _composer_refusal's (scanned).
+        (_B, "click_send", "gate"),
+        (_B, "click_send", "refusal"),
+        (_B, "click_send", "changed"),
     }
 )
 

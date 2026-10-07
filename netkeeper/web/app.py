@@ -118,6 +118,7 @@ def create_app(
                     app.state.bus,
                     tasks,
                     resolved.linkedin,
+                    campaign_settings=resolved,
                 )
                 teardown.callback(serving.stop)
                 app.state.executor = serving.executor

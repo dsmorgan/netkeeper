@@ -41,6 +41,7 @@ from netkeeper.linkedin.errors import BrowserBusy as BrowserBusy
 from netkeeper.linkedin.errors import BrowserError as BrowserError
 from netkeeper.linkedin.errors import BrowserUnavailable as BrowserUnavailable
 from netkeeper.linkedin.messaging import (
+    SendPermit,
     composer_text,
     composer_text_matches,
     plan_control_characters,
@@ -391,6 +392,12 @@ class _MessagingLocator(Protocol):
         timeout: float | None = None,  # noqa: ASYNC109 -- Playwright's own signature
     ) -> None: ...
 
+    async def is_enabled(
+        self,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109 -- Playwright's own signature
+    ) -> bool: ...
+
 
 class _KeyboardLike(Protocol):
     """The three keyboard calls ADR 0007 allows, in :meth:`BrowserRun.type_into_composer`
@@ -484,6 +491,28 @@ FOCUS_INPUT_AUTHORIZED: Final = True
 FOCUS_TIMEOUT_MS: Final = 1_000.0
 #: How long one read of an attribute or the composer's text may wait, in milliseconds.
 MESSAGING_READ_TIMEOUT_MS: Final = 1_000.0
+#: ADR 0008, auto-send's one click: the composer form's submit button, by role and name,
+#: exact (``Open send options`` beside it never matches), and the ``type`` it must carry.
+SEND_CONTROL_ROLE: Final = "button"
+SEND_CONTROL_NAME: Final = "Send"
+SEND_CONTROL_TYPE: Final = "submit"
+#: The verified composer's own form, found upward from it, never by its ``msg-form-`` id.
+COMPOSER_FORM: Final = "xpath=ancestor::form[1]"
+#: How long Playwright may wait for Send to be clickable, in milliseconds.
+SEND_CLICK_TIMEOUT_MS: Final = 1_000.0
+#: Time between the press and the release of the Send click, in milliseconds.
+SEND_PRESS_MS: Final = 90.0
+#: ADR 0008 (decision D1): after a landed Send, the existing-conversation bubble's own
+#: close control, ``Close your conversation with <the header link's name>`` (the
+#: 2026-10-05 capture, ``docs/linkedin-messaging-shapes.md``), by role and exact name.
+CLOSE_CONTROL_ROLE: Final = "button"
+CLOSE_CONTROL_PREFIX: Final = "Close your conversation with "
+#: How long the run waits, reading only, for the composer to empty after Send, and then
+#: for the bubble to go after its close click, in seconds, and in how many reads.
+CLOSE_WAIT_S: Final = 5.0
+CLOSE_WAIT_POLLS: Final = 25
+#: How long Playwright may wait for the close control to be clickable, in milliseconds.
+CLOSE_CLICK_TIMEOUT_MS: Final = 1_000.0
 
 
 class BubbleLayout(enum.StrEnum):
@@ -788,6 +817,45 @@ class TypingEnd(enum.StrEnum):
 
     UNKNOWN = "unknown"
     """The tab, the browser, or a key call failed after the first key."""
+
+
+@dataclass(frozen=True, slots=True)
+class _SendControl:
+    """The Send control's locators: the composer's form, every button named Send on the
+    page, and the one of those in that form."""
+
+    forms: _MessagingLocator
+    on_page: _MessagingLocator
+    control: _MessagingLocator
+
+
+@dataclass(frozen=True, slots=True)
+class SendClick:
+    """What :meth:`BrowserRun.click_send` did (ADR 0008).
+
+    ``attempted`` is true once the click was sent to Playwright, whether or not it
+    landed: from then on nobody knows whether the message went, and nothing clicks
+    again. ``clicked_at`` is taken just before the click. A refusal before the click is
+    fixed words in ``refusal``; ``composer_changed`` says whether it was the composer
+    itself (its text, its recipient, its focus, or another composer) that no longer
+    held, rather than a gate or the Send control."""
+
+    clicked: bool
+    attempted: bool
+    refusal: str | None = None
+    composer_changed: bool = False
+    clicked_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BubbleClose:
+    """What :meth:`BrowserRun.close_sent_bubble` did (ADR 0008, D1). ``closed`` is true
+    only when the close click landed and the composer then went from the page.
+    ``refusal`` is fixed words."""
+
+    closed: bool
+    attempted: bool
+    refusal: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1278,6 +1346,17 @@ class BrowserRun:
         self._handed_over = False
         #: Whether :meth:`_focus_seam` ran (ADR 0007, option B): at most once per run.
         self._focus_used = False
+        #: ADR 0008: set once the Send click is sent. Nothing clicks Send twice.
+        self._send_attempted = False
+        #: Whether :meth:`type_into_composer` ended with the whole body in the composer.
+        self._typed_whole = False
+        #: ADR 0008: whether the Send click landed (sent, and the page took it).
+        self._send_landed = False
+        #: ADR 0008, D1 and D3: the one close click on the sent bubble, whether the bubble
+        #: then went, and whether the run closed its own tab after that.
+        self._close_attempted = False
+        self._bubble_closed = False
+        self._tab_closed = False
 
     @property
     def keys_sent(self) -> int:
@@ -1303,6 +1382,21 @@ class BrowserRun:
             return {}
         failure = self._click_failure.value if self._click_failure is not None else None
         return {"message_click_target": self._click_target.value, "message_click_failure": failure}
+
+    @property
+    def bubble_closed(self) -> bool:
+        """Whether :meth:`close_sent_bubble` closed the sent message's bubble (ADR 0008)."""
+        return self._bubble_closed
+
+    @property
+    def tab_closed(self) -> bool:
+        """Whether :meth:`close_sent_tab` closed this run's tab after a sent message."""
+        return self._tab_closed
+
+    @property
+    def send_attempted(self) -> bool:
+        """Whether this run sent its one Send click (ADR 0008), whatever its result."""
+        return self._send_attempted
 
     @property
     def fronted(self) -> int:
@@ -2076,7 +2170,256 @@ class BrowserRun:
         if final is not None:
             end = TypingEnd.UNKNOWN if self._lost(page) else TypingEnd.PARTIALLY_TYPED
             return TypingResult(end, f"after typing: {final}", len(body), started_at)
+        self._typed_whole = True
         return TypingResult(TypingEnd.TYPED, "typed", len(body), started_at)
+
+    async def click_send(
+        self,
+        body: str,
+        recipient: BubbleRecipient,
+        *,
+        permit: SendPermit,
+        dwell_s: float,
+        clock: Callable[[], datetime],
+        sleep: Callable[[float], Awaitable[None]] = _real_sleep,
+        another_compose: Callable[[], bool] | None = None,
+    ) -> SendClick:
+        """ADR 0008's one input: one click on **Send**, for auto-send alone.
+
+        Reached only from :meth:`PagePrefill.prefill
+        <netkeeper.linkedin.page_messaging.PagePrefill.prefill>`, for an ``auto_send``
+        spec, with the :class:`~netkeeper.linkedin.messaging.SendPermit` only the runner
+        builds, after :meth:`type_into_composer` typed the whole body. In order, and
+        nothing is clicked when any step refuses:
+
+        1. Refuses without a permit, without a landed Message click and a whole body
+           typed this run, and once a Send click was already sent: never twice.
+        2. Waits ``dwell_s``, the pause a person takes to read what they wrote.
+        3. Asks the permit's ``recheck`` (the flag, arming, a pause, active hours, the
+           session flag, heat, the auto-send hold, a cancel) again.
+        4. Checks the composer again as before every key (ADR 0007), focus aside: one
+           composer on the page, the bubble and its recipient, the tab's url, no later
+           compose option, and the text exactly ``body`` (what typing verified).
+        5. Finds Send: exactly one button named exactly "Send" on the page, hidden
+           ones counted; it sits in the verified composer's own form, carries
+           ``type="submit"``, and is visible and enabled.
+        6. Checks the composer once more, every check of step 4 and, last, focus.
+        7. Clicks once, at the control's own box, with nothing awaited between the
+           focus read and the click. A click that fails is never tried again.
+        """
+        page = self._page
+        # Checked at run time too: the type alone binds nothing a caller can't ignore.
+        if not isinstance(cast(object, permit), SendPermit):
+            return SendClick(False, False, "no send permit")
+        if self._send_attempted:
+            return SendClick(False, False, "Send was already clicked")
+        if page is None or page.is_closed() or not self._message_click_landed:
+            return SendClick(False, False, "no tab with a clicked Message control", True)
+        if not self._typed_whole or not body:
+            return SendClick(False, False, "the whole body was not typed", True)
+        await sleep(dwell_s)
+        try:
+            gate = await permit.recheck()
+        except Exception as exc:
+            log.warning("a send gate could not be checked (%s)", type(exc).__name__)
+            return SendClick(False, False, "the send gates could not be checked")
+        if gate is not None:
+            return SendClick(False, False, gate)
+        tab = cast(_MessagingPage, page)
+        composer = tab.get_by_role(
+            COMPOSER_ROLE, name=COMPOSER_NAME, exact=True, include_hidden=True
+        )
+        # The composer first, so a page that changed under it reads as the composer's
+        # change (``partially_typed``), not as an odd Send control.
+        changed = await self._composer_refusal(
+            tab, composer, recipient, body, focus=False, another_compose=another_compose
+        )
+        if changed is not None:
+            return SendClick(False, False, changed, True)
+        send = self._send_control(tab, composer)
+        try:
+            refusal = await self._send_refusal(send)
+        except Exception as exc:
+            log.info("the Send control could not be read (%s)", type(exc).__name__)
+            return SendClick(False, False, "the Send control could not be read")
+        if refusal is not None:
+            return SendClick(False, False, refusal)
+        # Last, the composer as before every key: focus is the last read before the click.
+        changed = await self._composer_refusal(
+            tab, composer, recipient, body, another_compose=another_compose
+        )
+        if changed is not None:
+            return SendClick(False, False, changed, True)
+        clicked_at = clock()
+        self._send_attempted = True
+        try:
+            await send.control.click(delay=SEND_PRESS_MS, timeout=SEND_CLICK_TIMEOUT_MS)
+        except Exception as exc:
+            log.warning("the Send control could not be clicked (%s)", type(exc).__name__)
+            return SendClick(
+                False, True, "the Send control could not be clicked", clicked_at=clicked_at
+            )
+        self._send_landed = True
+        return SendClick(True, True, clicked_at=clicked_at)
+
+    async def close_sent_bubble(
+        self,
+        recipient: BubbleRecipient,
+        *,
+        confirmed: bool,
+        sleep: Callable[[float], Awaitable[None]] = _real_sleep,
+    ) -> BubbleClose:
+        """ADR 0008, decision D1: close the bubble a landed, proven Send left, by its own
+        close control, once. Reached only from ``PagePrefill.prefill``.
+
+        Refuses, clicking nothing, unless all of these hold:
+
+        - the Send click landed this run, and nothing was closed yet;
+        - ``confirmed``: the caller holds the page's own ``createMessage`` answer
+          proving the message went;
+        - the composer reads empty within :data:`CLOSE_WAIT_S`, and again right before
+          the click (LinkedIn clears it once the message went);
+        - exactly one ``Messaging`` dialog is on the page, hidden ones counted, holding
+          the composer, whose header ``h2`` holds exactly one link, to
+          ``/in/<the contact's profile id>/``;
+        - exactly one button in that dialog is named exactly
+          ``Close your conversation with <that link's name>``, and it is visible.
+
+        Then one click, never retried; closed only when the composer then leaves the
+        page."""
+        page = self._page
+        if page is None or page.is_closed() or not self._send_landed:
+            return BubbleClose(False, False, "Send did not land")
+        if confirmed is not True:
+            return BubbleClose(False, False, "the send was not confirmed")
+        if self._close_attempted:
+            return BubbleClose(False, False, "the bubble's close control was already clicked")
+        tab = cast(_MessagingPage, page)
+        composer = tab.get_by_role(
+            COMPOSER_ROLE, name=COMPOSER_NAME, exact=True, include_hidden=True
+        )
+        try:
+            emptied = False
+            for _ in range(CLOSE_WAIT_POLLS):
+                if _one_composer(await composer.count()) and await _read_composer(composer) == "":
+                    emptied = True
+                    break
+                await sleep(CLOSE_WAIT_S / CLOSE_WAIT_POLLS)
+            if not emptied:
+                return BubbleClose(False, False, "the composer did not empty after Send")
+            control = await self._close_control(tab, composer, recipient)
+        except Exception as exc:
+            log.info("the sent bubble could not be read (%s)", type(exc).__name__)
+            return BubbleClose(False, False, "the sent bubble could not be read")
+        if isinstance(control, str):
+            return BubbleClose(False, False, control)
+        try:
+            # Last, the composer again: text back in it means the send didn't hold.
+            if await _read_composer(composer) != "":
+                return BubbleClose(False, False, "the composer did not empty after Send")
+        except Exception as exc:
+            log.info("the sent bubble could not be read (%s)", type(exc).__name__)
+            return BubbleClose(False, False, "the sent bubble could not be read")
+        self._close_attempted = True
+        try:
+            await control.click(delay=SEND_PRESS_MS, timeout=CLOSE_CLICK_TIMEOUT_MS)
+        except Exception as exc:
+            log.warning("the bubble's close control could not be clicked (%s)", type(exc).__name__)
+            return BubbleClose(False, True, "the bubble's close control could not be clicked")
+        try:
+            for _ in range(CLOSE_WAIT_POLLS):
+                if await composer.count() == 0:
+                    self._bubble_closed = True
+                    return BubbleClose(True, True)
+                await sleep(CLOSE_WAIT_S / CLOSE_WAIT_POLLS)
+        except Exception as exc:
+            log.info("the closed bubble could not be read (%s)", type(exc).__name__)
+        return BubbleClose(False, True, "the bubble did not close")
+
+    async def _close_control(
+        self, tab: _MessagingPage, composer: _MessagingLocator, recipient: BubbleRecipient
+    ) -> _MessagingLocator | str:
+        """The sent bubble's one close control, or why there isn't one. Reads only."""
+        dialogs = tab.get_by_role(BUBBLE_ROLE, name=BUBBLE_NAME, exact=True, include_hidden=True)
+        if await dialogs.count() != 1 or await dialogs.filter(has=composer).count() != 1:
+            return "the sent message is not in one conversation bubble"
+        links = dialogs.locator(BUBBLE_HEADER_LINK)
+        if await links.count() != 1:
+            return "the sent bubble's header does not name one person"
+        href = await links.get_attribute("href", timeout=MESSAGING_READ_TIMEOUT_MS)
+        if not _is_profile_link(
+            href, f"{PROFILE_PATH_PREFIX}{recipient.profile_id}/", fold_case=False
+        ):
+            return "the sent bubble is for someone else"
+        name = await _accessible_name(tab, links, "link")
+        if name is None:
+            return "the sent bubble's name could not be read"
+        closes = dialogs.get_by_role(
+            CLOSE_CONTROL_ROLE,
+            name=f"{CLOSE_CONTROL_PREFIX}{name}",
+            exact=True,
+            include_hidden=True,
+        )
+        if await closes.count() != 1:
+            return "the sent bubble does not have one close control for this person"
+        visible = closes.filter(visible=True)
+        if await visible.count() != 1:
+            return "the sent bubble's close control is not visible"
+        return visible
+
+    async def close_sent_tab(self) -> None:
+        """ADR 0008, decision D3: close this run's tab once its sent message's bubble
+        closed. Reached only from ``page_messaging.py``, and only after
+        :meth:`close_sent_bubble` closed the bubble; anything else hands the tab over
+        instead (:meth:`hand_over`). Detaches either way; the context and the browser
+        are left as they were."""
+        if not self._bubble_closed:
+            raise RuntimeError("the tab is closed only after its sent bubble closed")
+        if self._closed:
+            return
+        self._closed = True
+        observations, self._observations = self._observations, []
+        for observation in observations:
+            await observation.close()
+        page, self._page = self._page, None
+        if page is not None and not page.is_closed():
+            try:
+                await page.close()
+                self._tab_closed = True
+            except Exception as exc:
+                log.info("could not close the sent message's tab (%s)", type(exc).__name__)
+        await _detach_quietly(self._attachment.detach)
+
+    def _send_control(self, tab: _MessagingPage, composer: _MessagingLocator) -> _SendControl:
+        """The locators for the verified composer's Send control (ADR 0008). Builds only:
+        the one place a locator names Send (``tests/test_browser_safety.py``)."""
+        forms = composer.locator(COMPOSER_FORM)
+        sends = tab.get_by_role(
+            SEND_CONTROL_ROLE, name=SEND_CONTROL_NAME, exact=True, include_hidden=True
+        )
+        in_form = forms.get_by_role(
+            SEND_CONTROL_ROLE, name=SEND_CONTROL_NAME, exact=True, include_hidden=True
+        )
+        return _SendControl(forms, sends, sends.and_(in_form))
+
+    @staticmethod
+    async def _send_refusal(send: _SendControl) -> str | None:
+        """Why ``send`` isn't the one Send control to click, or ``None``. Reads only."""
+        if await send.forms.count() != 1:
+            return "the composer is not in one message form"
+        if await send.on_page.count() != 1:
+            return "the page does not show exactly one Send control"
+        control = send.control
+        if await control.count() != 1:
+            return "the Send control is not in the composer's form"
+        kind = await control.get_attribute("type", timeout=MESSAGING_READ_TIMEOUT_MS)
+        if kind != SEND_CONTROL_TYPE:
+            return "the Send control is not the form's submit button"
+        if await control.filter(visible=True).count() != 1:
+            return "the Send control is not visible"
+        if not await control.is_enabled(timeout=MESSAGING_READ_TIMEOUT_MS):
+            return "the Send control is disabled"
+        return None
 
     async def _composer_refusal(
         self,

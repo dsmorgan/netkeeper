@@ -30,32 +30,52 @@ and enrichment). A handler:
    nobody, so the week's full sync is not done, and the scheduler offers it again
    a day later instead of a week later.
 
+The auto-send kind (ADR 0008, scheduled only while ``[campaigns] linkedin_auto_send``
+is on) has a handler of its own, :func:`_auto_send_handler`. It checks the flag again,
+waits out the spacing since the last auto-send, and claims one due ``auto_send`` step
+(:func:`netkeeper.services.linkedin_steps.claim_auto_send`), which records its scheduled
+``message_send`` run; then it runs that run like any other. When it claims nothing it
+answers :attr:`~netkeeper.services.scheduler.JobOutcome.NOTHING_TO_SEND`.
+
 Nothing here imports the browser: the worker arrives as a
 :class:`~netkeeper.services.runs.RunExecutor` (``tests/test_browser_safety.py``).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import random
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Final
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.config import LinkedInSettings
+from netkeeper.config import LinkedInSettings, Settings
 from netkeeper.crm.inbox_apply import has_anything_to_watch
 from netkeeper.db import off_loop, session_scope
-from netkeeper.models import SyncRunKind, SyncRunTrigger, User, UserKind
+from netkeeper.models import SyncRun, SyncRunKind, SyncRunTrigger, User, UserKind
 from netkeeper.models.base import utcnow
+from netkeeper.scoping import scoped
 from netkeeper.services import runs
 from netkeeper.services.events import EventBus
-from netkeeper.services.linkedin_accounts import find_account, schedule_paused
+from netkeeper.services.linkedin_accounts import (
+    find_account,
+    schedule_paused,
+    scheduled_runs_armed,
+)
+from netkeeper.services.linkedin_steps import (
+    auto_send_budget_warning,
+    auto_send_hold,
+    claim_auto_send,
+)
 from netkeeper.services.scheduler import (
+    AUTO_SEND_SPACING_MAX,
+    AUTO_SEND_SPACING_MIN,
     SERVED_SCHEDULES,
     JobContext,
     JobHandler,
@@ -64,6 +84,7 @@ from netkeeper.services.scheduler import (
     JobRegistry,
     build_scheduler,
     seed_missing_kinds,
+    served_schedules,
     stored_due,
 )
 from netkeeper.services.tasks import TaskRunner
@@ -90,15 +111,23 @@ def serve_registry(
     tasks: TaskRunner,
     *,
     clock: Callable[[], datetime],
+    settings: Settings | None = None,
 ) -> JobRegistry:
     """One handler per kind in :data:`RUN_KIND` and :data:`INBOX_RUN_KIND`, each recording
-    and running a scheduled run. The inbox handler first checks there is anyone to watch."""
+    and running a scheduled run. The inbox handler first checks there is anyone to watch.
+    The auto-send kind's handler is registered only when ``settings`` turn
+    ``[campaigns] linkedin_auto_send`` on (ADR 0008)."""
     registry: dict[JobKind, JobHandler] = {
         kind: _handler(factory, executor, tasks, run_kind, clock=clock)
         for kind, run_kind in RUN_KIND.items()
     }
     for kind, run_kind in INBOX_RUN_KIND.items():
         registry[kind] = _handler(factory, executor, tasks, run_kind, clock=clock, watch_check=True)
+    if settings is not None and settings.campaigns.linkedin_auto_send:
+        # ADR 0008: with the flag off there is no auto-send handler at all.
+        registry[JobKind.AUTO_SEND] = _auto_send_handler(
+            factory, executor, tasks, settings, clock=clock
+        )
     return registry
 
 
@@ -202,6 +231,81 @@ def _handler(
     return handle
 
 
+def auto_send_spacing_left(session: Session, user: User, now: datetime) -> timedelta:
+    """How long until the next auto-send may start (ADR 0008): the spacing after the
+    newest ``message_send`` run, an auto-send or a prefill a person started, drawn once
+    per run between
+    :data:`~netkeeper.services.scheduler.AUTO_SEND_SPACING_MIN` and
+    :data:`~netkeeper.services.scheduler.AUTO_SEND_SPACING_MAX` minutes, less the time
+    since it started. Zero when there is none, or the spacing has passed. Read-only."""
+    last = session.scalars(
+        scoped(user, SyncRun)
+        .where(SyncRun.kind == SyncRunKind.MESSAGE_SEND)
+        .order_by(SyncRun.started_at.desc(), SyncRun.id.desc())
+        .limit(1)
+    ).first()
+    if last is None:
+        return timedelta(0)
+    # Seeded by the run's id, so one run's spacing is the same at every heartbeat.
+    minutes = random.Random(last.id).uniform(AUTO_SEND_SPACING_MIN, AUTO_SEND_SPACING_MAX)  # noqa: S311 -- pacing
+    return max(last.started_at + timedelta(minutes=minutes) - now, timedelta(0))
+
+
+def _auto_send_handler(
+    factory: sessionmaker[Session],
+    executor: runs.RunExecutor,
+    tasks: TaskRunner,
+    settings: Settings,
+    *,
+    clock: Callable[[], datetime],
+) -> JobHandler:
+    """The auto-send fire (ADR 0008): claim one due ``auto_send`` step and run it."""
+
+    def claim(ctx: JobContext) -> int | str:
+        """The claimed run's id, or why nothing was claimed, in fixed words."""
+        if not settings.campaigns.linkedin_auto_send:
+            return "auto-send is off"
+        with session_scope(factory, write=True) as session:
+            user = session.get(User, ctx.user_id)
+            if user is None:
+                return "no such user"
+            if schedule_paused(session, user, ctx.account_id):
+                raise _SchedulePaused
+            if not scheduled_runs_armed(session, user, ctx.account_id):
+                raise runs.ScheduledRunsDisarmed("scheduled runs are disarmed")
+            if auto_send_hold(session, user, ctx.account_id) is not None:
+                return "auto-send is held until the open message bubbles are closed"
+            now = clock()
+            if auto_send_spacing_left(session, user, now) > timedelta(0):
+                return "the spacing since the last auto-send has not passed"
+            claimed = claim_auto_send(session, user, now=now, settings=settings)
+            if claimed is None:
+                return "no auto-send step is ready"
+            if not claimed.claimed or claimed.run_id is None:
+                return ", ".join(claimed.reasons)
+            return claimed.run_id
+
+    async def handle(ctx: JobContext) -> JobOutcome | None:
+        try:
+            claimed = await off_loop(claim, ctx)
+        except _SchedulePaused:
+            log.info("scheduled auto-send not started: the schedule is paused")
+            return JobOutcome.PAUSED_AFTER_GATE
+        except runs.ScheduledRunsDisarmed:
+            log.error("scheduled auto-send reached a disarmed account past the arm gate")
+            return JobOutcome.DISARMED_AFTER_GATE
+        if isinstance(claimed, str):
+            log.info("scheduled auto-send claimed nothing: %s", claimed)
+            return JobOutcome.NOTHING_TO_SEND
+        task_id, result = submit_run(tasks, executor, claimed, ctx.user_id)
+        await tasks.wait(task_id)
+        if result() is runs.RunOutcome.RETRY_LATER:
+            return JobOutcome.RETRY_LATER
+        return None
+
+    return handle
+
+
 def _lost_answers(factory: sessionmaker[Session], user_id: int, run_id: int) -> int:
     """How many answers run ``run_id`` lost (#200); 0 for a run or user that is gone."""
     with session_scope(factory) as session:
@@ -254,6 +358,8 @@ def start_serve_scheduler(
     bus: EventBus,
     tasks: TaskRunner,
     settings: LinkedInSettings,
+    *,
+    campaign_settings: Settings | None = None,
 ) -> ServeScheduler:
     """Build the executor and the scheduler for every local user's account, and start it.
 
@@ -261,16 +367,20 @@ def start_serve_scheduler(
     a heartbeat, and a fire on a disarmed account is skipped by the arm gate
     (``build_scheduler``'s default, never turned off here). The scheduler runs
     :data:`~netkeeper.services.scheduler.SERVED_SCHEDULES` only (the inbox poll
-    included since P4-01) with the configured heat gate and active hours.
+    included since P4-01) with the configured heat gate and active hours, and auto-send
+    (ADR 0008) only while ``campaign_settings`` turn ``[campaigns] linkedin_auto_send`` on.
     """
     executor = extractor.executor(factory, bus)
     _quiet_the_heartbeat()
     start, end = (time.fromisoformat(value) for value in settings.active_hours)
+    whole = campaign_settings if campaign_settings is not None else Settings()
+    whole = dataclasses.replace(whole, linkedin=settings)
+    schedules = served_schedules(whole.campaigns.linkedin_auto_send)
     built = build_scheduler(
         factory,
         _local_accounts(factory),
-        registry=serve_registry(factory, executor, tasks, clock=extractor.clock),
-        schedules=SERVED_SCHEDULES,
+        registry=serve_registry(factory, executor, tasks, clock=extractor.clock, settings=whole),
+        schedules=schedules,
         active_start=start,
         active_end=end,
         heat_settings=settings.heat,
@@ -278,7 +388,14 @@ def start_serve_scheduler(
         clock=extractor.clock,
     )
     built.start()
-    log.info("scheduler started: %s", ", ".join(kind.value for kind in SERVED_SCHEDULES))
+    log.info("scheduler started: %s", ", ".join(kind.value for kind in schedules))
+    if JobKind.AUTO_SEND in schedules:
+        log.warning(
+            "LinkedIn auto-send is on: netkeeper clicks Send itself for auto_send steps (ADR 0008)"
+        )
+        warning = auto_send_budget_warning(whole)
+        if warning is not None:
+            log.warning("%s", warning)
     return ServeScheduler(executor=executor, scheduler=built)
 
 

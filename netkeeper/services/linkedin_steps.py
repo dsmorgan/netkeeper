@@ -43,6 +43,16 @@ runs, and the LinkedIn ones besides. It refuses with the reasons when:
   run per account; a ``message_send`` run is never scheduled, and is recorded only
   with the claim's gate token, :data:`netkeeper.services.runs.MESSAGE_SEND_GATE`).
 
+**Auto-send** (ADR 0008, P4-04). With ``[campaigns] linkedin_auto_send`` on, the
+scheduler (never a person) claims a due ``auto_send`` step through
+:func:`claim_auto_send`: every check above, the step's mode ``auto_send``, and the
+``li_messages_auto`` budget in place of ``li_prefills``. Its run is a **scheduled**
+``message_send`` run, recorded only with :data:`netkeeper.services.runs.AUTO_SEND_GATE`.
+A person may still prefill an ``auto_send`` step by hand; that never clicks Send. An
+auto-sent message (``send_clicked``) is recorded ``prefilled`` with ``send_clicked_at``:
+it waits on the inbox poll, not on the person, so it holds no open slot, and
+:func:`waiting_for_you` lists it only once it goes ``stale``.
+
 **Step approvals** (#339) are the review gate's: a campaign is ``active`` only once
 every step, LinkedIn steps included, was approved, so a claim on a campaign that is
 not ``active`` is refused first. LinkedIn steps have no test send.
@@ -127,6 +137,7 @@ from netkeeper.models import (
     Message,
     MessageDirection,
     MessageStatus,
+    StepMode,
     SyncRun,
     SyncRunKind,
     SyncRunStatus,
@@ -148,6 +159,7 @@ from netkeeper.services.campaign_guards import (
 )
 from netkeeper.services.linkedin_accounts import account_id_for, ensure_account
 from netkeeper.services.linkedin_session import last_session_evidence, session_flag
+from netkeeper.services.settings_kv import delete_setting, get_setting, set_setting
 
 log = logging.getLogger(__name__)
 
@@ -155,6 +167,7 @@ __all__ = [
     "PREFILL_STALE_AFTER",
     "PrefillClaim",
     "Refusal",
+    "claim_auto_send",
     "claim_prefill",
     "discard",
     "linkedin_positions",
@@ -223,6 +236,8 @@ class Refusal(enum.StrEnum):
     CONFIRM_NO_BUBBLE = "confirm_no_bubble"
     """A retry after a run that clicked Message, without the person saying no message
     bubble for the contact is open (#445)."""
+    AUTO_SEND_OFF = "auto_send_off"
+    NOT_AUTO_SEND = "not_an_auto_send_step"
 
 
 #: Refusals about the user, not the enrollment: every other enrollment would get the
@@ -273,6 +288,111 @@ def start_message_send_run(session: Session, user: User, now: datetime) -> SyncR
         trigger=SyncRunTrigger.MANUAL,
         now=now,
         gate=runs.MESSAGE_SEND_GATE,
+    )
+
+
+def auto_send_budget_warning(settings: Settings) -> str | None:
+    """#447's warning for a daily ``li_messages_auto`` limit above 20
+    (:func:`netkeeper.services.budgets.li_message_risk_warning`), to show wherever
+    auto-send is on (ADR 0008). ``None`` while auto-send is off."""
+    if not settings.campaigns.linkedin_auto_send:
+        return None
+    return budgets.li_message_risk_warning(
+        budgets.ActionClass.LI_MESSAGES_AUTO, settings.linkedin.budget
+    )
+
+
+#: The run notes' prefixes for an auto-send (ADR 0008): :mod:`netkeeper.services.message_send`
+#: writes them and the Waiting for you API reads them, so both split on the same words.
+NOT_SENT_NOTE: Final = "not sent: "
+SEND_UNCONFIRMED_NOTE: Final = "send not confirmed: "
+BUBBLE_LEFT_OPEN_NOTE: Final = "bubble left open: "
+NOT_STARTED_NOTE: Final = "not started: "
+
+# --- the auto-send hold (ADR 0008, #384 review B1) -----------------------------------
+
+#: Why auto-send stops until the person acts: an auto-send left a message bubble open in
+#: Chrome (any refusal after its Message click, a Send whose bubble it could not close),
+#: or refused a page that already held one. The next auto-send would refuse the same page,
+#: so working through the next enrollments would only spend clicks and profile visits.
+AUTO_SEND_HOLD_BUBBLE: Final = "a message bubble is open in Chrome"
+
+#: Why auto-send stops when an auto-send run stopped mid-run with no outcome recorded (the
+#: process went away): nobody knows what its tab and bubble hold.
+AUTO_SEND_HOLD_INTERRUPTED: Final = "an auto-send stopped mid-run, so a message bubble may be open"
+
+#: Why auto-send stops when a sent message's bubble closed but its tab didn't.
+AUTO_SEND_HOLD_TAB: Final = "a tab is left open in Chrome"
+
+#: What the person does to let auto-send go again.
+AUTO_SEND_HOLD_CLEAR: Final = (
+    "Close every LinkedIn message bubble (and the tab netkeeper left) in the netkeeper"
+    " Chrome window, sending or discarding what is in it first. Then resume auto-send:"
+    ' click "I closed the bubbles, resume auto-send" on the LinkedIn queue, or run'
+    " `netkeeper linkedin auto-send-resume`."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AutoSendHold:
+    """Auto-send is held for the account: why (fixed words), since when, and the run."""
+
+    reason: str
+    since: datetime
+    run_id: int | None
+
+
+def _hold_key(account_id: int) -> str:
+    return f"linkedin.auto_send.hold.{account_id}"
+
+
+def auto_send_hold(session: Session, user: User, account_id: int) -> AutoSendHold | None:
+    """The account's auto-send hold, or ``None``. Read-only."""
+    raw = get_setting(session, user, _hold_key(account_id))
+    if not isinstance(raw, dict):
+        return None
+    run_id = raw.get("run_id")
+    return AutoSendHold(
+        reason=str(raw.get("reason", AUTO_SEND_HOLD_BUBBLE)),
+        since=datetime.fromisoformat(str(raw["since"])),
+        run_id=run_id if isinstance(run_id, int) else None,
+    )
+
+
+def hold_auto_send(
+    session: Session, user: User, account_id: int, *, reason: str, now: datetime, run_id: int
+) -> None:
+    """Hold auto-send for the account until :func:`resume_auto_send`. Needs a writer."""
+    engine._require_writer(session, "hold_auto_send")
+    set_setting(
+        session,
+        user,
+        _hold_key(account_id),
+        {"reason": reason, "since": now.isoformat(), "run_id": run_id},
+    )
+    log.warning("auto-send held for account %d after run %d: %s", account_id, run_id, reason)
+
+
+def resume_auto_send(session: Session, user: User, account_id: int) -> bool:
+    """The person closed the bubbles: auto-send may go again. True when a hold was lifted.
+    Needs a writer."""
+    engine._require_writer(session, "resume_auto_send")
+    lifted = delete_setting(session, user, _hold_key(account_id))
+    if lifted:
+        log.info("auto-send resumed for account %d", account_id)
+    return lifted
+
+
+def start_auto_send_run(session: Session, user: User, now: datetime) -> SyncRun:
+    """Record the **scheduled** ``message_send`` run an auto-send claim names (ADR 0008).
+    :func:`runs.create_run` refuses it on a disarmed account, like any scheduled run."""
+    return runs.create_run(
+        session,
+        user,
+        SyncRunKind.MESSAGE_SEND,
+        trigger=SyncRunTrigger.SCHEDULED,
+        now=now,
+        gate=runs.AUTO_SEND_GATE,
     )
 
 
@@ -604,6 +724,8 @@ def _open_prefill(session: Session, user: User, now: datetime) -> Message | None
                 Message.status == MessageStatus.SCHEDULED,
                 and_(
                     Message.status == MessageStatus.PREFILLED,
+                    # An auto-sent message waits on the inbox poll, not the person.
+                    Message.send_clicked_at.is_(None),
                     or_(
                         Message.prefilled_at.is_(None),
                         Message.prefilled_at > now - PREFILL_STALE_AFTER,
@@ -623,12 +745,18 @@ def _open_detail(message: Message) -> str:
 
 
 def channel_state(
-    session: Session, user: User, *, now: datetime, settings: Settings
+    session: Session,
+    user: User,
+    *,
+    now: datetime,
+    settings: Settings,
+    action: budgets.ActionClass = budgets.ActionClass.LI_PREFILLS,
 ) -> ChannelState:
     """Spec 11.9's last bullet for LinkedIn. ``browser_ok``: no session flag, heat under its
     skip threshold, and the last evidence says the session is logged in (None, unknown,
     without any). ``browser_budget_left``: what today's ``li_prefills`` and
-    ``profile_visits`` budgets (and this week's visits) still allow, the least of them."""
+    ``profile_visits`` budgets (and this week's visits) still allow, the least of them.
+    An auto-send claim passes ``action`` ``li_messages_auto`` in place of ``li_prefills``."""
     account_id = account_id_for(session, user)
     linkedin = settings.linkedin
     browser_ok: bool | None
@@ -641,9 +769,9 @@ def channel_state(
         evidence = last_session_evidence(session, user, account_id)
         browser_ok = None if evidence is None else evidence.logged_in
     left: list[int] = []
-    for action in (budgets.ActionClass.LI_PREFILLS, budgets.ActionClass.PROFILE_VISITS):
+    for spent in (action, budgets.ActionClass.PROFILE_VISITS):
         snapshot = budgets.status(
-            session, user, account_id, action, now=now, settings=linkedin.budget
+            session, user, account_id, spent, now=now, settings=linkedin.budget
         )
         left.append(snapshot.day.remaining)
         if snapshot.week is not None:
@@ -664,6 +792,7 @@ class _Claimer:
         *,
         retry: bool = False,
         no_bubble_open: bool = False,
+        auto: bool = False,
     ) -> None:
         self.session = session
         self.user = user
@@ -672,6 +801,8 @@ class _Claimer:
         self.start_run = start_run
         self.retry = retry
         self.no_bubble_open = no_bubble_open
+        #: An auto-send claim (ADR 0008): the scheduler's, for an ``auto_send`` step.
+        self.auto = auto
 
     def refuse(
         self, enrollment: Enrollment, *reasons: str, detail: str | None = None
@@ -713,6 +844,10 @@ class _Claimer:
             return self.refuse(enrollment, Refusal.NO_STEP)
         if step.channel is not TemplateChannel.LINKEDIN:
             return self.refuse(enrollment, Refusal.NOT_A_LINKEDIN_STEP)
+        if self.auto and not self.settings.campaigns.linkedin_auto_send:
+            return self.refuse(enrollment, Refusal.AUTO_SEND_OFF)
+        if self.auto and step.mode is not StepMode.AUTO_SEND:
+            return self.refuse(enrollment, Refusal.NOT_AUTO_SEND)
         # Try again (#445): a step whose latest prefill typed nothing is claimed only by a
         # retry, and a retry claims only such a step. Neither refusal changes anything.
         waiting = needs_try_again(enrollment)
@@ -801,7 +936,17 @@ class _Claimer:
             return self.refuse(enrollment, Refusal.BAD_ACTIVE_HOURS, detail=str(exc))
         channel = check_channel(
             TemplateChannel.LINKEDIN,
-            channel_state(session, user, now=now, settings=self.settings),
+            channel_state(
+                session,
+                user,
+                now=now,
+                settings=self.settings,
+                action=(
+                    budgets.ActionClass.LI_MESSAGES_AUTO
+                    if self.auto
+                    else budgets.ActionClass.LI_PREFILLS
+                ),
+            ),
         )
         if channel:
             return self.refuse(enrollment, *(r.value for r in channel))
@@ -913,10 +1058,11 @@ class _Claimer:
         enrollment.next_action_at = None
         session.flush()
         log.info(
-            "campaign %d: step %d for enrollment %d claimed for a prefill as message %d (run %d)",
+            "campaign %d: step %d for enrollment %d claimed for %s as message %d (run %d)",
             campaign.id,
             step.position,
             enrollment.id,
+            "an auto-send" if self.auto else "a prefill",
             message.id,
             run.id,
         )
@@ -955,6 +1101,99 @@ def claim_prefill(
     return _Claimer(
         session, user, now, settings, start_run, retry=retry, no_bubble_open=no_bubble_open
     ).claim(enrollment_id)
+
+
+def _interrupted_auto_send(session: Session, user: User, *, now: datetime) -> int | None:
+    """The run of an auto-send whose message is still claimed while its run is over or
+    left behind (it stopped mid-run, with no outcome recorded), or ``None``. A run still
+    ``running`` counts once :func:`netkeeper.services.runs` would call it stale (older
+    than ``STALE_AFTER``, its browser lock free): a restart within that window must still
+    hold. A live run doesn't count. Read-only."""
+    rows = session.execute(
+        scoped(user, Message)
+        .join(SyncRun, and_(SyncRun.id == Message.sync_run_id, SyncRun.user_id == user.id))
+        .with_only_columns(SyncRun)
+        .where(
+            Message.channel == TemplateChannel.LINKEDIN,
+            Message.direction == MessageDirection.OUT,
+            Message.status == MessageStatus.SCHEDULED,
+            SyncRun.kind == SyncRunKind.MESSAGE_SEND,
+            SyncRun.trigger == SyncRunTrigger.SCHEDULED,
+        )
+        .order_by(SyncRun.id)
+    ).scalars()
+    held = runs.browser_held_for(session)
+    for run in rows:
+        if run.status is not SyncRunStatus.RUNNING or runs._stale(run, now=now, held=held):
+            return run.id
+    return None
+
+
+def claim_auto_send(
+    session: Session,
+    user: User,
+    *,
+    now: datetime,
+    settings: Settings,
+    start_run: StartRun = start_auto_send_run,
+) -> PrefillClaim | None:
+    """The scheduler's auto-send claim (ADR 0008): the oldest ready ``auto_send`` step that
+    can be claimed, with its scheduled run. ``None`` when ``[campaigns]
+    linkedin_auto_send`` is off or no ``auto_send`` step is ready. Every refusal
+    :func:`claim_prefill` makes applies, plus the step's mode, the flag, and
+    ``li_messages_auto`` in place of ``li_prefills``. Stops at the first refusal about
+    the user (:data:`USER_REFUSALS`), as :func:`claim_next` does. ``None`` too while
+    auto-send is held (:func:`auto_send_hold`). A person never calls this. Needs a
+    writer session."""
+    engine._require_writer(session, "claim_auto_send")
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    if not settings.campaigns.linkedin_auto_send:
+        return None
+    account_id = account_id_for(session, user)
+    if auto_send_hold(session, user, account_id) is not None:
+        return None
+    interrupted = _interrupted_auto_send(session, user, now=now)
+    if interrupted is not None:
+        # A process that went away mid-run wrote no hold: write it now (#458 final review).
+        hold_auto_send(
+            session,
+            user,
+            account_id,
+            reason=AUTO_SEND_HOLD_INTERRUPTED,
+            now=now,
+            run_id=interrupted,
+        )
+        return None
+    # A hot account or a spent day would only abort the run: claim nothing (#458 review).
+    if heat_service.should_skip(
+        session, user, account_id, now=now, settings=settings.linkedin.heat
+    ):
+        return None
+    spent = budgets.status(
+        session,
+        user,
+        account_id,
+        budgets.ActionClass.LI_MESSAGES_AUTO,
+        now=now,
+        settings=settings.linkedin.budget,
+    ).day
+    if spent.count >= spent.limit:
+        return None
+    # Only auto_send steps, oldest due first, so a long queue of prefill steps never
+    # hides one (#458 review).
+    enrollments = session.scalars(
+        _ready_statement(user, now, None)
+        .where(CampaignStep.mode == StepMode.AUTO_SEND)
+        .order_by(Enrollment.next_action_at, Enrollment.id)
+        .limit(READY_PAGE_MAX)
+    ).all()
+    last: PrefillClaim | None = None
+    for enrollment in enrollments:
+        last = _Claimer(session, user, now, settings, start_run, auto=True).claim(enrollment.id)
+        if last.claimed or USER_REFUSALS.intersection(last.reasons):
+            return last
+    return last
 
 
 def claim_next(
@@ -1009,8 +1248,12 @@ def record_prefill_outcome(
     settings: Settings,
     now: datetime,
     prefilled_at: datetime | None = None,
+    send_clicked_at: datetime | None = None,
 ) -> bool:
     """Record what the ``message_send`` run did with a claimed message (P4-03 calls this).
+
+    ``send_clicked`` (auto-send, ADR 0008) is recorded as ``prefilled`` is, with
+    ``send_clicked_at`` (``now`` when not given): the inbox poll confirms it.
 
     See the module docstring for each outcome. ``prefilled_at`` is when typing started,
     taken before the first key (#382, ADR 0007): a ``prefilled`` message's
@@ -1033,6 +1276,10 @@ def record_prefill_outcome(
     message = _claimed_message(session, user, message_id)
     if message is None:
         return False
+    if send_clicked_at is not None and (
+        send_clicked_at.tzinfo is None or send_clicked_at.utcoffset() is None
+    ):
+        raise ValueError("send_clicked_at must be timezone-aware")
     reason = f"{outcome.kind.value}: {outcome.reason}"[: engine.ERROR_MAX_LENGTH]
     kind = outcome.kind
     # The run goes on the enrollment, whatever the outcome: after a ``not_typed`` it is
@@ -1040,15 +1287,20 @@ def record_prefill_outcome(
     engine._enrollment(
         session, user, message.enrollment_id
     ).last_prefill_run_id = message.sync_run_id
-    if kind is MessageOutcomeKind.PREFILLED:
+    if kind in (MessageOutcomeKind.PREFILLED, MessageOutcomeKind.SEND_CLICKED):
         message.status = MessageStatus.PREFILLED
         message.prefilled_at = now if prefilled_at is None else prefilled_at
+        if kind is MessageOutcomeKind.SEND_CLICKED:
+            message.send_clicked_at = now if send_clicked_at is None else send_clicked_at
         message.li_conversation_urn = outcome.conversation_urn or message.li_conversation_urn
         message.error = None
         session.flush()
         engine._clear_not_sent(session, user, message.enrollment_id)
         engine._after_settling(session, user, settings, message, fired=True)
-        log.info("message %d is prefilled; it waits for the person to send it", message.id)
+        if kind is MessageOutcomeKind.SEND_CLICKED:
+            log.info("message %d: Send was clicked; the inbox poll confirms it", message.id)
+        else:
+            log.info("message %d is prefilled; it waits for the person to send it", message.id)
         return True
     if kind in (MessageOutcomeKind.NOT_TYPED, MessageOutcomeKind.TOO_LONG):
         # Parked either way. A not_typed step waits for Try again (#445); too long now is
@@ -1070,6 +1322,27 @@ def record_prefill_outcome(
         kind.value,
         enrollment.id,
     )
+    return True
+
+
+def give_back_unopened(session: Session, user: User, message_id: int, *, now: datetime) -> bool:
+    """An auto-send stopped before it opened anything (ADR 0008, #458 final review): the
+    claim's row goes, and the enrollment is due again at the time it was claimed, with
+    no ``not_typed`` note and no count, so it is never listed for Try again and a later
+    auto-send fire claims it by itself. False when the message is not a claimed one.
+    Needs a writer session."""
+    engine._require_writer(session, "give_back_unopened")
+    message = _claimed_message(session, user, message_id)
+    if message is None:
+        return False
+    enrollment = engine._enrollment(session, user, message.enrollment_id)
+    due = message.scheduled_at or now
+    session.delete(message)
+    session.flush()
+    if enrollment.status in (EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED):
+        enrollment.next_action_at = due
+    session.flush()
+    log.info("enrollment %d: the auto-send opened nothing; due again at %s", enrollment.id, due)
     return True
 
 
@@ -1116,6 +1389,12 @@ class WaitingPrefill:
     def partly_typed(self) -> bool:
         return self.message.status is MessageStatus.FAILED
 
+    @property
+    def auto_sent(self) -> bool:
+        """Whether auto-send clicked Send for it (ADR 0008): a ``stale`` one was never
+        seen sent by the inbox poll."""
+        return self.message.send_clicked_at is not None
+
 
 def waiting_for_you(
     session: Session, user: User, *, limit: int, offset: int = 0, campaign_id: int | None = None
@@ -1144,7 +1423,9 @@ def waiting_for_you(
             Message.channel == TemplateChannel.LINKEDIN,
             Message.direction == MessageDirection.OUT,
             or_(
-                Message.status.in_(WAITING_STATUSES),
+                # An auto-sent message waits on the inbox poll; once stale, on the person.
+                and_(Message.status == MessageStatus.PREFILLED, Message.send_clicked_at.is_(None)),
+                Message.status == MessageStatus.STALE,
                 and_(Message.status == MessageStatus.SCHEDULED, SyncRun.id.is_(None)),
                 _is_partly_typed(),
             ),

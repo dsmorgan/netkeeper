@@ -93,6 +93,7 @@ from netkeeper.services.scheduler import (
     SERVED_SCHEDULES,
     HeatGate,
     JobKind,
+    served_schedules,
     sync_account_schedule,
 )
 from netkeeper.services.settings_kv import delete_setting, set_setting
@@ -442,8 +443,10 @@ CASES = [
     Case(
         id="LinkedIn auto-send turned on",
         settings=_campaigns(linkedin_auto_send=True),
-        warns=("manual linkedin sends",),
-        off=("manual linkedin sends",),
+        # ADR 0008: `serve` schedules auto-send at start, so a schedule established
+        # before the flag went on is missing it until `serve` restarts, and says so.
+        warns=("manual linkedin sends", "scheduled jobs"),
+        off=("manual linkedin sends", "scheduled jobs"),
     ),
     Case(
         id="a daily budget configured past spec 9.6's hard max",
@@ -780,6 +783,7 @@ def test_several_protections_off_at_once_all_warn(writer: Session, user: User) -
         "weekend damping",
         "manual linkedin sends",
         "heat",
+        "scheduled jobs",  # auto-send is not scheduled until `serve` restarts (ADR 0008)
     }
     assert len(report.warnings) >= 5
 
@@ -1219,27 +1223,21 @@ def test_a_clean_report_claims_configuration_and_not_enforcement(
     assert "nothing is misconfigured" in text
     assert "in force" not in text.split("nothing is misconfigured")[1]
     assert "never callers" in text
-    for name in _report(writer, user).protections:
-        if name.name == "budget li_messages_auto":
-            # Collapsed: the report wraps its lines, and a name may straddle a break.
-            covered = text.split("not covered by this report:")[1]
-            assert name.name in " ".join(covered.split())
+    # P4-04 (#384): every budget now has a live caller, and the gap says so.
+    covered = " ".join(text.split("not covered by this report:")[1].split())
+    assert "Every budget it lists has an enforcing caller that netkeeper runs." in covered
 
 
 def test_the_gap_lists_the_protections_nothing_enforces_yet(writer: Session, user: User) -> None:
     gaps = " ".join(_report(writer, user).gaps)
 
-    # The sentence after the colon, up to its period. (This used to split on
-    # "never callers", whose next character is the period ending that bold
-    # phrase, so every "not in" below it compared against an empty string.)
-    unwired = gaps.split("no enforcing caller that netkeeper runs yet:")[1].split(".")[0]
-    assert unwired.strip()
-
-    # Since P2-10 the runners and the scheduler are live (netkeeper.worker), and since
-    # P4-08 the inbox poll's runner, so what is left is the budgets whose jobs do not
-    # exist yet -- and nothing the runners enforce may still be listed as unwired.
-    # P4-03 (#382): the prefill's runner spends li_prefills, so only auto-send is left.
-    assert unwired.strip() == "budget li_messages_auto"
+    # Since P2-10 the runners and the scheduler are live (netkeeper.worker), since P4-08
+    # the inbox poll's runner, since P4-03 the prefill's, and since P4-04 (#384) the same
+    # runner spends li_messages_auto for an auto-send: nothing is left unwired.
+    assert UNENFORCED_TODAY == ()
+    assert "no enforcing caller that netkeeper runs yet" not in gaps
+    assert "Every budget it lists has an enforcing caller that netkeeper runs." in gaps
+    unwired = ""
     for name in (
         "budget li_prefills",
         "budget inbox_polls",
@@ -1883,7 +1881,8 @@ def test_a_served_schedule_is_on_and_names_each_kind(writer: Session) -> None:
     )
     assert report.scheduler.unscheduled == ()
     assert report.scheduler.not_applicable == ()
-    assert set(SERVED_SCHEDULES) == set(JobKind)
+    # Auto-send is served only while its flag is on (ADR 0008).
+    assert set(SERVED_SCHEDULES) == set(JobKind) - {JobKind.AUTO_SEND}
 
 
 def test_a_missing_served_kind_is_off_and_says_what_that_means(writer: Session) -> None:
@@ -1899,8 +1898,9 @@ def test_a_missing_served_kind_is_off_and_says_what_that_means(writer: Session) 
 
 
 def test_every_served_kind_has_a_meaning_when_missing() -> None:
-    assert set(MISSING_MEANS) == set(SERVED_SCHEDULES)
-    assert set(NOT_SERVED_BECAUSE) == set(JobKind) - set(SERVED_SCHEDULES)
+    # Auto-send is served only while its flag is on (ADR 0008), and then it has one too.
+    assert set(MISSING_MEANS) == set(served_schedules(True))
+    assert set(NOT_SERVED_BECAUSE) == set()
 
 
 def test_the_reply_poll_is_late_after_three_intervals() -> None:

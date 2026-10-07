@@ -22,23 +22,36 @@
   counts as fired, and the enrollment moves on.
 
 Nothing here touches the browser. The minute tick never claims a LinkedIn step: only
-these requests, which a person makes, do.
+these requests, which a person makes, do, and the scheduler's auto-send fire (ADR 0008)
+for an ``auto_send`` step while ``[campaigns] linkedin_auto_send`` is on.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, model_validator
+from sqlalchemy.orm import Session
 
 from netkeeper.config import Settings
-from netkeeper.models import Contact, Enrollment, EnrollmentStatus, MessageStatus
+from netkeeper.models import (
+    Contact,
+    Enrollment,
+    EnrollmentStatus,
+    MessageStatus,
+    StepMode,
+    SyncRun,
+    SyncRunTrigger,
+    User,
+)
 from netkeeper.models.base import utcnow
-from netkeeper.scoping import get_scoped
+from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import linkedin_steps as service
 from netkeeper.services import runs
+from netkeeper.services.linkedin_accounts import account_id_for
 from netkeeper.services.scheduled_runs import submit_run
 from netkeeper.web.deps import CurrentUser, SessionDep, Tasks
 from netkeeper.web.schemas import RunAccepted
@@ -83,6 +96,9 @@ class ReadyOut(BaseModel):
     due: datetime
     held_until: datetime | None
     """When the sending hours let it go; null for now."""
+    auto_send: bool = False
+    """The step's mode is ``auto_send`` (ADR 0008): while ``[campaigns]
+    linkedin_auto_send`` is on, the scheduler sends it; a person may still prefill it."""
 
 
 class LastTryOut(BaseModel):
@@ -141,6 +157,31 @@ class OptionsOut(BaseModel):
     auto_send: bool
     """``[campaigns] linkedin_auto_send``: whether a step may be ``auto_send``. Off by
     default (ADR 0004); the builder offers the mode only when it is on."""
+    auto_send_warning: str | None = None
+    """With auto-send on, the warning for a daily ``li_messages_auto`` budget above 20
+    (#447, ADR 0008); null otherwise."""
+    auto_send_hold: AutoSendHoldOut | None = None
+    """Why auto-send stopped until you act (an auto-send left a message bubble open in
+    Chrome), and how to clear it; null when it isn't held."""
+
+
+class AutoSendHoldOut(BaseModel):
+    """An auto-send hold (ADR 0008): fixed words, never page text."""
+
+    reason: str
+    since: datetime
+    how_to_clear: str
+
+
+class AutoSendResumeIn(BaseModel):
+    confirm: bool = False
+    """Must be true: you closed the message bubbles in Chrome (as arming and clearing the
+    session flag ask)."""
+
+
+class AutoSendResumed(BaseModel):
+    resumed: bool
+    """Whether a hold was lifted (false when there was none)."""
 
 
 class WaitingOut(BaseModel):
@@ -164,6 +205,12 @@ class WaitingOut(BaseModel):
     contact_id: int
     contact_name: str
     prefilled_at: datetime | None
+    not_sent_reason: str | None = None
+    """For a message auto-send typed but didn't send (ADR 0008): why it stopped before
+    Send, in the run's fixed words. Null for everything else."""
+    auto_sent: bool = False
+    """Auto-send clicked Send for it (ADR 0008). Listed only once ``stale``: the inbox poll
+    never saw it sent."""
 
 
 class WaitingPage(BaseModel):
@@ -255,6 +302,7 @@ def list_ready(
                 contact_name=_name(row.contact),
                 due=row.due,
                 held_until=row.held_until,
+                auto_send=row.step.mode is StepMode.AUTO_SEND,
             )
             for row in rows
         ],
@@ -286,10 +334,66 @@ def list_ready(
     )
 
 
+def _auto_send_notes(
+    session: Session, user: User, run_ids: Iterable[int | None]
+) -> dict[int | None, str]:
+    """The notes of the auto-send runs among ``run_ids``, in one query."""
+    wanted = {run_id for run_id in run_ids if run_id is not None}
+    if not wanted:
+        return {}
+    rows = session.execute(
+        scoped(user, SyncRun)
+        .with_only_columns(SyncRun.id, SyncRun.notes)
+        .where(SyncRun.id.in_(wanted), SyncRun.trigger == SyncRunTrigger.SCHEDULED)
+    )
+    return {run_id: notes for run_id, notes in rows if notes}
+
+
+def _not_sent_reason(notes: str | None) -> str | None:
+    """Why an auto-send typed the message but didn't click Send, from its run's notes."""
+    if notes is None or not notes.startswith(service.NOT_SENT_NOTE):
+        return None
+    reason = notes.removeprefix(service.NOT_SENT_NOTE)
+    for later in (service.SEND_UNCONFIRMED_NOTE, service.BUBBLE_LEFT_OPEN_NOTE):
+        reason = reason.split(f" {later}")[0]
+    return reason
+
+
 @router.get("/options", operation_id="get_linkedin_step_options")
-def get_options(request: Request, user: CurrentUser) -> OptionsOut:
+def get_options(request: Request, user: CurrentUser, session: SessionDep) -> OptionsOut:
     """Whether ``auto_send`` may be chosen for a LinkedIn step: the config flag."""
-    return OptionsOut(auto_send=_settings(request).campaigns.linkedin_auto_send)
+    settings = _settings(request)
+    hold = service.auto_send_hold(session, user, account_id_for(session, user))
+    return OptionsOut(
+        auto_send=settings.campaigns.linkedin_auto_send,
+        auto_send_warning=service.auto_send_budget_warning(settings),
+        auto_send_hold=(
+            None
+            if hold is None
+            else AutoSendHoldOut(
+                reason=hold.reason, since=hold.since, how_to_clear=service.AUTO_SEND_HOLD_CLEAR
+            )
+        ),
+    )
+
+
+@router.post(
+    "/auto-send/resume",
+    operation_id="resume_linkedin_auto_send",
+    responses={422: {"description": "`confirm` was not true"}},
+)
+def resume_auto_send(
+    body: AutoSendResumeIn, user: CurrentUser, session: SessionDep
+) -> AutoSendResumed:
+    """You closed the message bubbles in Chrome: auto-send may go again (ADR 0008). It
+    changes nothing in LinkedIn. Needs ``{"confirm": true}``; idempotent."""
+    if not body.confirm:
+        raise HTTPException(
+            status_code=422, detail="confirm that you closed the message bubbles in Chrome"
+        )
+    return AutoSendResumed(
+        resumed=service.resume_auto_send(session, user, account_id_for(session, user))
+    )
 
 
 @router.get("/waiting", operation_id="list_linkedin_waiting")
@@ -304,6 +408,7 @@ def list_waiting(
     rows, total = service.waiting_for_you(
         session, user, limit=limit, offset=offset, campaign_id=campaign_id
     )
+    notes = _auto_send_notes(session, user, (row.message.sync_run_id for row in rows))
     return WaitingPage(
         items=[
             WaitingOut(
@@ -317,6 +422,8 @@ def list_waiting(
                 contact_id=row.contact.id,
                 contact_name=_name(row.contact),
                 prefilled_at=row.message.prefilled_at,
+                not_sent_reason=_not_sent_reason(notes.get(row.message.sync_run_id)),
+                auto_sent=row.auto_sent,
             )
             for row in rows
         ],

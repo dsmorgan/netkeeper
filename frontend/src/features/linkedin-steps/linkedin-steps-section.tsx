@@ -15,6 +15,9 @@
  *   apart, with why, how many tries, and whether the last one used today's budget. A
  *   person clicks Try again for one; when the last try clicked Message, it first asks
  *   them to confirm no message bubble for that contact is open in Chrome.
+ * - **Auto-send** (ADR 0008): an `auto_send` step is marked in the queue, and says
+ *   whether `[campaigns] linkedin_auto_send` is on. Only `config.toml` turns it on;
+ *   nothing here does. A stale message auto-send clicked Send for says so.
  *
  * A part-typed prefill is never retried: a person clears the composer in Chrome and
  * discards it. No message text is shown anywhere here; netkeeper never closes the tab.
@@ -41,6 +44,7 @@ import {
   linkedinStepKeys,
   prefill,
   readyQuery,
+  resumeAutoSend,
   stepOptionsQuery,
   waitingQuery,
   type PrefillTarget,
@@ -49,6 +53,9 @@ import {
   type WaitingItem,
 } from './api'
 import {
+  AUTO_SEND_STEP_OFF,
+  AUTO_SEND_STEP_ON,
+  AUTO_SENT_STALE,
   ONE_AT_A_TIME,
   REVIEW_AND_SEND,
   ageText,
@@ -96,6 +103,38 @@ function useInvalidateSteps() {
   }
 }
 
+/**
+ * Auto-send is held (ADR 0008): an auto-send left a message bubble open in Chrome, so
+ * nothing else is sent until you close it and resume.
+ */
+function AutoSendHold() {
+  const options = useQuery(stepOptionsQuery)
+  const queryClient = useQueryClient()
+  const resume = useMutation({
+    mutationFn: resumeAutoSend,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: linkedinStepKeys.all })
+    },
+  })
+  const hold = options.data?.auto_send_hold
+  if (hold == null) return null
+  return (
+    <Callout tone="warning" role="alert" title={`Auto-send is held: ${hold.reason}.`}>
+      <p>{hold.how_to_clear}</p>
+      <p className="text-muted-foreground">Held since {formatWhen(hold.since)}.</p>
+      <Button
+        size="sm"
+        className="mt-2"
+        disabled={resume.isPending}
+        onClick={() => resume.mutate()}
+      >
+        I closed the bubbles, resume auto-send
+      </Button>
+      {resume.isError && <ErrorNote label="Auto-send did not resume." error={resume.error} />}
+    </Callout>
+  )
+}
+
 function AutoSendBadge() {
   const options = useQuery(stepOptionsQuery)
   if (options.isPending) return null
@@ -117,6 +156,9 @@ function AutoSendBadge() {
     >
       <Badge variant="destructive">Auto-send on</Badge>
       netkeeper sends LinkedIn messages itself. See Settings, Posture.
+      {options.data.auto_send_warning != null && (
+        <span className="block w-full">{options.data.auto_send_warning}</span>
+      )}
     </p>
   ) : (
     <p className="flex flex-wrap items-center gap-2">
@@ -130,6 +172,8 @@ function AutoSendBadge() {
 
 export function LinkedInQueueCard({ campaignId, run }: { campaignId?: number; run: PrefillRun }) {
   const ready = useQuery(readyQuery(campaignId ?? null))
+  const options = useQuery(stepOptionsQuery)
+  const autoSendOn = options.data?.auto_send === true
   // Every campaign's: one open prefill anywhere holds the slot.
   const waiting = useQuery(waitingQuery())
   const invalidate = useInvalidateSteps()
@@ -166,6 +210,7 @@ export function LinkedInQueueCard({ campaignId, run }: { campaignId?: number; ru
       </CardHeader>
       <CardContent className="flex flex-col gap-3 text-sm">
         <AutoSendBadge />
+        <AutoSendHold />
         <FirstPollNote />
         {!typing && <p className="text-muted-foreground">{PREFILL_NOTE}</p>}
         {typing && (
@@ -227,6 +272,7 @@ export function LinkedInQueueCard({ campaignId, run }: { campaignId?: number; ru
                 <ReadyRow
                   key={item.enrollment_id}
                   item={item}
+                  autoSendOn={autoSendOn}
                   showCampaign={campaignId === undefined}
                   disabled={blocked || held(item, now)}
                   onPrefill={() => start.mutate({ enrollmentId: item.enrollment_id })}
@@ -262,11 +308,13 @@ function held(item: ReadyItem | TryAgainItem, now: Date): boolean {
 
 function ReadyRow({
   item,
+  autoSendOn,
   showCampaign,
   disabled,
   onPrefill,
 }: {
   item: ReadyItem
+  autoSendOn: boolean
   showCampaign: boolean
   disabled: boolean
   onPrefill: () => void
@@ -297,6 +345,16 @@ function ReadyRow({
         </>
       )}
       <span className="text-muted-foreground">step {item.step_position}</span>
+      {item.auto_send && (
+        <span className="flex flex-wrap items-center gap-2">
+          <Badge variant={autoSendOn ? 'destructive' : 'outline'}>
+            {autoSendOn ? 'Auto-send' : 'Auto-send step'}
+          </Badge>
+          <span className="text-muted-foreground">
+            {autoSendOn ? AUTO_SEND_STEP_ON : AUTO_SEND_STEP_OFF}
+          </span>
+        </span>
+      )}
       {item.held_until !== null && (
         <span className="text-muted-foreground">
           held by your sending hours until {formatWhen(item.held_until)}
@@ -593,6 +651,7 @@ function WaitingRow({
           </>
         )}
         {state === 'stale' && <Badge variant="outline">Stale</Badge>}
+        {item.auto_sent && <Badge variant="destructive">Auto-sent</Badge>}
         {state === 'interrupted' && <Badge variant="destructive">Stopped</Badge>}
         {state === 'partly_typed' && <Badge variant="destructive">Part typed</Badge>}
         {state === 'prefilled' || state === 'stale' ? (
@@ -601,7 +660,12 @@ function WaitingRow({
           </span>
         ) : null}
       </div>
-      <p>{STATE_TEXT[state]}</p>
+      <p>{item.auto_sent && state === 'stale' ? AUTO_SENT_STALE : STATE_TEXT[state]}</p>
+      {item.not_sent_reason != null && (
+        <p className="text-muted-foreground">
+          Auto-send typed it but didn&apos;t click Send: {prefillReason(item.not_sent_reason).text}
+        </p>
+      )}
       {state === 'partly_typed' && <p>{PARTLY_TYPED_SENT_ANYWAY}</p>}
       <div className="flex flex-wrap items-center gap-2">
         {(state === 'prefilled' || state === 'stale') && (

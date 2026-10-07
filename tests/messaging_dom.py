@@ -22,6 +22,7 @@ Nothing here came from a capture, and nothing here makes a request.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping
@@ -36,6 +37,7 @@ from messaging_pages import (
     Member,
     compose_option_answer,
     compose_option_url,
+    conversation_urn,
     existing_bubble_html,
     messages_sync_url,
     never_messaged_bubble_html,
@@ -420,6 +422,17 @@ class FakeLocator:
                 return _unique(out)
 
             return self._then(following, f".locator({selector})")
+        if selector == "xpath=ancestor::form[1]":
+
+            def form(found: list[Element]) -> list[Element]:
+                out: list[Element] = []
+                for element in found:
+                    nearest = next((a for a in element.ancestors() if a.tag == "form"), None)
+                    if nearest is not None:
+                        out.append(nearest)
+                return _unique(out)
+
+            return self._then(form, f".locator({selector})")
         assert not selector.startswith("xpath="), f"the fake can't read {selector!r}"
 
         def under(found: list[Element]) -> list[Element]:
@@ -498,6 +511,12 @@ class FakeLocator:
 
     async def click(self, *, delay: float | None = None, timeout: float | None = None) -> None:  # noqa: ASYNC109
         await self._page.clicked(self._one())
+
+    async def is_enabled(self, *, timeout: float | None = None) -> bool:  # noqa: ASYNC109
+        self._page.read_log.append(f"is_enabled{self.desc}")
+        self._page.reads += 1
+        self._page.before_read()
+        return "disabled" not in self._one().attrs
 
     async def focus(self, *, timeout: float | None = None) -> None:  # noqa: ASYNC109
         """``Locator.focus()``: focuses the one element, unless the page ignores it."""
@@ -660,8 +679,8 @@ class MessagingTab(FakePage):
         self.site.navigated(self, url)
         return None
 
-    def emit(self, url: str, body: str, status: int = 200) -> None:
-        request = FakeRequest("GET", "fetch", None, url=url)
+    def emit(self, url: str, body: str, status: int = 200, method: str = "GET") -> None:
+        request = FakeRequest(method, "fetch", None, url=url)
         response = FakeResponse(url, status, body.encode(), request)
         for handler in list(self.listeners["response"]):
             handler(response)
@@ -712,6 +731,11 @@ class MessagingTab(FakePage):
         assert composer is not None
         bubble = self.site.bubble
         text = self.draft + self.typed
+        form = next((a for a in composer.ancestors() if a.tag == "form"), None)
+        if form is not None and text and not self.site.send_stays_disabled:
+            for element in form.elements():
+                if element.tag == "button" and element.attrs.get("type") == "submit":
+                    element.attrs.pop("disabled", None)
         if text.endswith(" "):
             text = text[:-1] + "\u00a0"  # a contenteditable shows a trailing space this way
         composer.children = []
@@ -745,6 +769,42 @@ class MessagingTab(FakePage):
 
     async def clicked(self, element: Element) -> None:
         self.clicks.append(element)
+        if element.tag == "button" and element.attrs.get("type") == "submit":
+            # The Send click (ADR 0008): the page sends what the composer holds, answers
+            # with the message it created, and then empties the composer, as LinkedIn does.
+            text = self.draft + self.typed
+            self.site.sent.append(text)
+            if self.site.send_error is not None:
+                raise self.site.send_error
+            bubble = self.site.bubble
+            known = bubble.existing_conversation if bubble is not None else None
+            conversation = None if known is None else conversation_urn(known)
+            answer = (
+                self.site.send_answer(text, conversation)
+                if self.site.send_answer is not None
+                else None
+            )
+            if answer is not None:
+                status, body = answer
+                self.emit(SEND_URL, body, status, method="POST")
+            if self.site.send_clears:
+                self.draft = ""
+                self.typed = ""
+                self._render_composer()
+            if self.site.after_send is not None:
+                self.site.after_send(self)
+            return
+        if element.tag == "button" and _visible_text(element).strip().startswith("Close "):
+            # A bubble's close control: the bubble goes, and its draft with it.
+            self.site.closed_bubbles += 1
+            if self.site.close_error is not None:
+                raise self.site.close_error
+            if self.site.close_ignored:
+                return
+            dialog = next((a for a in element.ancestors() if a.attrs.get("role") == "dialog"), None)
+            if dialog is not None and dialog.parent is not None:
+                dialog.parent.children.remove(dialog)
+            return
         if self.site.click_error is not None:
             raise self.site.click_error
         bubble = self.site.bubble
@@ -783,6 +843,24 @@ class MessagingSite(FakeContext):
         self.focus_error: BaseException | None = None
         self.focus_ignored = False
         self.after_key: dict[int, Callable[[MessagingTab], None]] = {}
+        #: Auto-send (ADR 0008): what each Send click sent, an error the click raises,
+        #: and a Send button that never enables.
+        self.sent: list[str] = []
+        self.send_error: BaseException | None = None
+        self.send_stays_disabled = False
+        self.send_clears = True
+        #: Changes the page right after a Send click (a test's hook).
+        self.after_send: Callable[[MessagingTab], None] | None = None
+        #: The page's createMessage answer to a Send of this text: ``(status, body)``, or
+        #: ``None`` for no answer at all. The default is LinkedIn's: 200, the same text.
+        self.send_answer: Callable[[str, str | None], tuple[int, str] | None] | None = (
+            send_answer_ok
+        )
+        #: The bubble's close control (ADR 0008, D1): clicks counted, an error it raises,
+        #: and a page that ignores it.
+        self.closed_bubbles = 0
+        self.close_error: BaseException | None = None
+        self.close_ignored = False
         self.stray_keys: list[str] = []
         self.navigations: list[str] = []
         #: The layout viewport the geometry session reports (#444); ``None`` means the
@@ -888,6 +966,18 @@ class MessagingSite(FakeContext):
                 self._later(tab, bubble.focus_after_reads, focus)
             elif bubble.focus_composer:
                 tab.focused = new[-1]
+
+
+#: The page's own send request (ADR 0008 reads its answer).
+SEND_URL = f"{HOST}/voyager/api/voyagerMessagingDashMessengerMessages?action=createMessage"
+
+
+def send_answer_ok(text: str, conversation: str | None = None) -> tuple[int, str]:
+    """LinkedIn's ``createMessage`` answer: 200, ``value.body.text`` the text sent."""
+    value: dict[str, Any] = {"body": {"attributes": [], "text": text}}
+    if conversation is not None:
+        value["conversationUrn"] = conversation
+    return 200, json.dumps({"value": value})
 
 
 def profile_url(member: Member) -> str:

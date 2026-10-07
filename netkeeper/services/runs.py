@@ -9,8 +9,9 @@ and it reports back through :func:`record_progress` and :func:`finish_run`.
 **Who may start a run.** :func:`create_run` is the one door, and it refuses:
 
 * a kind with no runner (``message_send``);
-* a **scheduled** ``message_send``, ever: a LinkedIn prefill runs only when a person
-  asks for it (P4-09). This holds before and after the kind has a runner;
+* a **scheduled** ``message_send``, except an auto-send's (ADR 0008): a LinkedIn
+  prefill runs only when a person asks for it (P4-09), and the scheduler records a
+  ``message_send`` run only through an auto-send claim, with :data:`AUTO_SEND_GATE`;
 * a second run while one of the same account's runs is still ``running`` --
   the browser takes one client per account anyway (spec 9.9), and a second row
   that could only fail ``busy`` tells a person nothing;
@@ -112,9 +113,15 @@ RUNNABLE_KINDS: Final = frozenset(
 )
 
 MESSAGE_SEND_GATE: Final = object()
-"""The token :func:`create_run` needs for a ``message_send`` run. Only
+"""The token :func:`create_run` needs for a manual ``message_send`` run. Only
 :func:`netkeeper.services.linkedin_steps.start_message_send_run` passes it, after the
 claim's checks (P4-09), and tests that stand in for it."""
+
+AUTO_SEND_GATE: Final = object()
+"""The token :func:`create_run` needs for a **scheduled** ``message_send`` run: an
+auto-send (ADR 0008). Only :func:`netkeeper.services.linkedin_steps.start_auto_send_run`
+passes it, inside :func:`~netkeeper.services.linkedin_steps.claim_auto_send`, and tests
+that stand in for it."""
 
 #: The line an interrupted run's ``error`` carries.
 INTERRUPTED: Final = "interrupted: the netkeeper process running it stopped"
@@ -315,10 +322,12 @@ def create_run(
 ) -> SyncRun:
     """Record a new ``running`` run of ``kind`` for ``user``'s account, and return it.
 
-    A ``message_send`` run is recorded only with ``gate`` :data:`MESSAGE_SEND_GATE`,
-    which only :func:`netkeeper.services.linkedin_steps.start_message_send_run` passes,
-    inside a prefill claim (P4-09): never through ``POST /linkedin/runs``, the CLI's
-    run commands or the scheduler, and never scheduled.
+    A manual ``message_send`` run is recorded only with ``gate``
+    :data:`MESSAGE_SEND_GATE`, which only
+    :func:`netkeeper.services.linkedin_steps.start_message_send_run` passes, inside a
+    prefill claim (P4-09); a scheduled one only with :data:`AUTO_SEND_GATE`, inside an
+    auto-send claim (ADR 0008). Never through ``POST /linkedin/runs`` or the CLI's run
+    commands.
 
     Refuses (see the module docstring) a kind with no runner
     (:class:`RunError`), a second run while one is running
@@ -334,11 +343,19 @@ def create_run(
     """
     _require_writer(session)
     _require_aware(now)
-    if kind is SyncRunKind.MESSAGE_SEND and trigger is not SyncRunTrigger.MANUAL:
-        # Person-triggered only (P4-09): checked before anything else, so it holds once
-        # the kind has a runner as well (P4-03).
+    if (
+        kind is SyncRunKind.MESSAGE_SEND
+        and trigger is not SyncRunTrigger.MANUAL
+        and gate is not AUTO_SEND_GATE
+    ):
+        # Person-triggered (P4-09), unless an auto-send claim records it (ADR 0008):
+        # checked before anything else.
         raise RunError("a message_send run is only ever started by a person, never scheduled")
-    if kind is SyncRunKind.MESSAGE_SEND and gate is not MESSAGE_SEND_GATE:
+    if (
+        kind is SyncRunKind.MESSAGE_SEND
+        and trigger is SyncRunTrigger.MANUAL
+        and gate is not MESSAGE_SEND_GATE
+    ):
         raise RunError("a message_send run is started only by a LinkedIn prefill claim")
     if kind not in RUNNABLE_KINDS:
         raise RunError(f"no runner exists for {kind.value} runs yet")

@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, ClassVar
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 import pytest
 from messaging_pages import (
@@ -52,6 +52,7 @@ from netkeeper.linkedin.messaging import (
     COMPOSE_OPTIONS_PATH,
     MessageJobSpec,
     MessageOutcomeKind,
+    SendPermit,
     plan_typing,
 )
 from netkeeper.linkedin.page_messaging import PagePrefill
@@ -108,22 +109,54 @@ SCENARIOS = {
     "sidebar": Scenario(_member(312), layout="sidebar"),
     "minimized": Scenario(_member(313), layout="minimized"),
     "leftover": Scenario(_member(314), layout="leftover"),
+    # ADR 0008: auto-send, against this replica only.
+    "auto_existing": Scenario(_member(320)),
+    "auto_never_messaged": Scenario(_member(321), existing=False, enter_sends=False),
+    "auto_refused": Scenario(_member(322)),
+    # A bubble left from earlier on the page: auto-send refuses, and sends nothing.
+    "auto_leftover": Scenario(_member(323), second_composer=True),
 }
 BY_SLUG = {s.member.slug: s for s in SCENARIOS.values()}
 
 _SCRIPT = """
 const cfg = JSON.parse(document.getElementById('cfg').textContent);
 window.__events = [];
+// Each event is also told to the replica's server, so a tab the run closed can be read.
+const note = (e) => {
+  window.__events.push(e);
+  fetch('/__event/' + cfg.slug + '?e=' + encodeURIComponent(e));
+};
+// LinkedIn's client sends the message itself; the form never submits a page load.
+document.addEventListener('submit', (event) => event.preventDefault());
 document.addEventListener('click', async (event) => {
   const link = event.target.closest('a');
   const button = event.target.closest('button');
-  if (button && button.type === 'submit') { window.__events.push('SENT:click'); return; }
-  if (button) { window.__events.push('click:button:' + button.textContent.trim()); return; }
+  if (button && button.getAttribute('type') === 'submit') {
+    // As LinkedIn does: the message goes, and the composer empties.
+    const box = button.closest('form').querySelector('[contenteditable]');
+    note('SENT:click');
+    // The page's own send, answered by the replica's server as LinkedIn answers it.
+    const sentText = box.innerText.replace(/\\u00a0/g, ' ').replace(/\\n+$/, '');
+    fetch('/voyager/api/voyagerMessagingDashMessengerMessages?action=createMessage', {
+      method: 'POST',
+      body: JSON.stringify({message: {body: {text: sentText}, conversationUrn: cfg.conversation}}),
+    });
+    note('SENT:text:' + box.innerText.replace(/\\u00a0/g, ' ').replace(/\\n+$/, ''));
+    box.innerHTML = '<p><br></p>';
+    return;
+  }
+  if (button && button.textContent.trim() === 'Close your conversation with ' + cfg.name) {
+    note('closed');
+    const bubble = button.closest('[role="dialog"]');
+    if (bubble) bubble.remove();
+    return;
+  }
+  if (button) { note('click:button:' + button.textContent.trim()); return; }
   if (!link || !link.getAttribute('href').includes('/messaging/compose/')) return;
   event.preventDefault();
-  window.__events.push('click:' + link.getAttribute('href'));
+  note('click:' + link.getAttribute('href'));
   const card = link.closest('[componentkey]');
-  if (card) window.__events.push('card:' + card.getAttribute('componentkey'));
+  if (card) note('card:' + card.getAttribute('componentkey'));
   await fetch(cfg.compose_url);
   if (cfg.thread_url) await fetch(cfg.thread_url);
   const host = document.createElement('div');
@@ -134,11 +167,16 @@ document.addEventListener('click', async (event) => {
   box.addEventListener('keydown', (ev) => {
     const mods = (ev.shiftKey ? 'Shift+' : '') + (ev.metaKey ? 'Meta+' : '') +
       (ev.ctrlKey ? 'Control+' : '') + (ev.altKey ? 'Alt+' : '');
-    window.__events.push('key:' + mods + ev.key);
+    note('key:' + mods + ev.key);
     if (ev.key === 'Enter' && !ev.shiftKey && (cfg.enter_sends ? true : ev.metaKey)) {
-      window.__events.push('SENT:key');
+      note('SENT:key');
       ev.preventDefault();
     }
+  });
+  box.addEventListener('input', () => {
+    // As LinkedIn's never-messaged bubble does: Send enables once the composer holds text.
+    const send = box.closest('form').querySelector('button[type="submit"]');
+    if (send && box.innerText.trim()) send.disabled = false;
   });
   if (cfg.focus) setTimeout(() => box.focus(), cfg.focus_delay_ms);
 });
@@ -255,6 +293,9 @@ def _profile_html(scenario: Scenario) -> str:
         "focus": scenario.focus,
         "focus_delay_ms": scenario.focus_delay_ms,
         "enter_sends": scenario.enter_sends,
+        "slug": member.slug,
+        "name": (scenario.header_for or member).name,
+        "conversation": conversation_urn(9) if scenario.existing else None,
     }
     page = (
         _layout_html(scenario)
@@ -286,6 +327,13 @@ class _Replica(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def do_POST(self) -> None:
+        self.requests.append(self.path)
+        length = int(self.headers.get("Content-Length") or 0)
+        sent = json.loads(self.rfile.read(length) or b"{}").get("message", {})
+        value = {"body": sent.get("body", {}), "conversationUrn": sent.get("conversationUrn")}
+        self._send(200, json.dumps({"value": value}), "application/json")
 
     def do_GET(self) -> None:
         self.requests.append(self.path)
@@ -332,18 +380,25 @@ async def _fast(seconds: float) -> None:
     await asyncio.sleep(min(seconds, 0.02))
 
 
-async def _prefill(origin: str, scenario: Scenario) -> tuple[Any, dict[str, Any]]:
+async def _prefill(
+    origin: str, scenario: Scenario, *, permit: SendPermit | None = None
+) -> tuple[Any, dict[str, Any]]:
     spec = MessageJobSpec(
         recipient_urn=scenario.member.urn,
         recipient_public_id=scenario.member.slug,
         body=BODY,
-        mode="prefill",
+        mode="prefill" if permit is None else "auto_send",
         typing_seed=11,
     )
     provider = AttachBrowserProvider(CDP_URL)
     async with provider.run(f"smoke-prefill-{scenario.member.n}") as run:
         source = PagePrefill(run, origin=origin, sleep=_fast, compose_settle_s=0.5)
-        result = await source.prefill(spec, plan_typing(BODY, 11), cancelled=_no_cancel)
+        if permit is None:
+            result = await source.prefill(spec, plan_typing(BODY, 11), cancelled=_no_cancel)
+        else:
+            result = await source.prefill(
+                spec, plan_typing(BODY, 11), cancelled=_no_cancel, permit=permit
+            )
         # Read the tab before the run ends: a run that never clicked closes its tab.
         state = await _inspect(origin, scenario)
         state["attempted"] = source.message_click_attempted
@@ -525,3 +580,71 @@ async def test_the_old_first_visible_choice_fails_on_the_sticky_page(origin: str
         finally:
             await page.close()
             await browser.close()
+
+
+# --- ADR 0008: auto-send's one click on Send, on the replica only ---------------------------
+
+
+async def _holds() -> str | None:
+    return None
+
+
+async def _refuses() -> str | None:
+    return "outside LinkedIn's active hours"
+
+
+def _server_events(slug: str) -> list[str]:
+    """What the replica's page told its server, in order: it outlives a closed tab."""
+    prefix = f"/__event/{slug}?e="
+    return [
+        unquote(path[len(prefix) :]) for path in list(_Replica.requests) if path.startswith(prefix)
+    ]
+
+
+async def test_auto_send_clicks_send_once_then_closes_the_bubble_and_its_tab(origin: str) -> None:
+    assert origin.startswith("http://127.0.0.1:")  # never a real site
+    scenario = SCENARIOS["auto_existing"]
+    result, state = await _prefill(origin, scenario, permit=SendPermit(recheck=_holds))
+    await asyncio.sleep(0.5)  # the page's last event fetches
+    assert result.outcome.kind is MessageOutcomeKind.SEND_CLICKED, result
+    assert result.bubble_closed is True, result
+    assert not state["open"]  # D3: the run closed its own tab
+    events = _server_events(scenario.member.slug)
+    assert events.count("SENT:click") == 1, events
+    assert f"SENT:text:{BODY}" in events
+    assert events.count("closed") == 1 and events.index("closed") > events.index("SENT:click")
+    assert "SENT:key" not in events
+    assert not [e for e in events if e in ("key:Enter", "key:Meta+Enter", "key:Control+Enter")]
+    assert not [e for e in events if e.startswith("click:button")], events  # not Send options
+    assert events.index("SENT:click") > max(i for i, e in enumerate(events) if e.startswith("key:"))
+
+
+async def test_auto_send_in_a_new_conversation_sends_once_and_leaves_the_tab(origin: str) -> None:
+    scenario = SCENARIOS["auto_never_messaged"]
+    result, state = await _prefill(origin, scenario, permit=SendPermit(recheck=_holds))
+    assert result.outcome.kind is MessageOutcomeKind.SEND_CLICKED, (result, state.get("html"))
+    assert result.bubble_closed is False  # no conversation dialog: left for the person
+    events = state["events"]
+    assert events.count("SENT:click") == 1, events
+    assert f"SENT:text:{BODY}" in events
+    assert "SENT:key" not in events and "closed" not in events
+    assert state["open"]
+
+
+async def test_auto_send_refuses_a_page_with_a_leftover_bubble(origin: str) -> None:
+    result, state = await _prefill(
+        origin, SCENARIOS["auto_leftover"], permit=SendPermit(recheck=_holds)
+    )
+    assert result.outcome.kind is MessageOutcomeKind.NOT_TYPED, result
+    _no_send(state)
+    assert not [e for e in state["events"] if e.startswith("key:")]
+
+
+async def test_an_auto_send_whose_gate_refuses_types_but_never_clicks_send(origin: str) -> None:
+    result, state = await _prefill(
+        origin, SCENARIOS["auto_refused"], permit=SendPermit(recheck=_refuses)
+    )
+    assert result.outcome.kind is MessageOutcomeKind.PREFILLED, result
+    assert result.send_refusal == "outside LinkedIn's active hours"
+    _no_send(state)
+    assert state["text"].replace("\u00a0", " ").rstrip("\n") == BODY
