@@ -16,11 +16,16 @@ the command writes the rows, the backup and the file.
 
 from __future__ import annotations
 
+import os
 import re
+import stat
+import tempfile
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Final
 
 from netkeeper.config import Settings
 from netkeeper.models import JsonValue
@@ -28,6 +33,25 @@ from netkeeper.services import ui_settings
 
 _TABLE = re.compile(r"^\s*\[\s*([A-Za-z0-9_.\s-]+?)\s*\]\s*(#.*)?$")
 _KEY = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=")
+
+
+#: The keys whose file value above the hard maximum is stored at the maximum: lowering
+#: them is the safer direction (fewer LinkedIn actions, fewer emails, more weekend
+#: damping). For any other key a clamp would loosen something or change what it does
+#: (shorter spacing, a shorter guard, a slower poll, fewer backups), so such a value
+#: stays in the file and is reported, as a value below the minimum is.
+CLAMP_SAFELY: Final = frozenset(
+    {
+        "linkedin.budget.connection_pages_per_day",
+        "linkedin.budget.profile_visits_per_day",
+        "linkedin.budget.profile_visits_per_week",
+        "linkedin.budget.inbox_polls_per_day",
+        "linkedin.budget.li_prefills_per_day",
+        "linkedin.budget.li_messages_auto_per_day",
+        "campaigns.mailbox_daily_cap",
+        "linkedin.weekend_multiplier",
+    }
+)
 
 
 class AdoptError(ValueError):
@@ -61,7 +85,8 @@ def plan(text: str, settings: Settings) -> AdoptPlan:
             moved[spec.key] = ui_settings.to_json(ui_settings.parse(spec, value))
         except ValueError as exc:
             if (
-                spec.maximum is not None
+                spec.key in CLAMP_SAFELY
+                and spec.maximum is not None
                 and isinstance(value, int | float)
                 and not isinstance(value, bool)
                 and value > spec.maximum
@@ -147,3 +172,37 @@ def _drop(raw: dict[str, Any], key: str) -> None:
     for part in parents:
         node = node[part]
     del node[last]
+
+
+class FileChanged(AdoptError):
+    """The file changed after it was read; nothing was written to it."""
+
+
+def backup_path(path: Path, now: datetime) -> Path:
+    """Where the backup goes: beside ``path``, named to the microsecond. AdoptError when
+    that name is taken, so a backup is never overwritten."""
+    backup = path.with_name(f"{path.name}.{now:%Y%m%d-%H%M%S-%f}.bak")
+    if backup.exists():
+        raise AdoptError(f"{backup} already exists")
+    return backup
+
+
+def rewrite(path: Path, text: str, *, expected: str) -> None:
+    """Replace ``path``'s contents with ``text`` atomically: a temporary file in the same
+    directory, flushed and synced, with the original's mode, then ``os.replace``. The file
+    is read again first; :class:`FileChanged` if it is no longer ``expected``. On any
+    error the file is as it was."""
+    if path.read_text(encoding="utf-8") != expected:
+        raise FileChanged(f"{path} changed since it was read")
+    mode = stat.S_IMODE(path.stat().st_mode)
+    handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            out.write(text)
+            out.flush()
+            os.fsync(out.fileno())
+        Path(temporary).chmod(mode)
+        Path(temporary).replace(path)  # os.replace: atomic within one directory
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise

@@ -371,17 +371,18 @@ def config_adopt(ctx: typer.Context) -> None:
     """
     state = ctx.ensure_object(CliState)
     settings = _file_settings_or_exit(state)
-    path = settings.source_path
-    if path is None:
+    if settings.source_path is None:
         typer.echo("no config.toml is in use; there is nothing to adopt")
         return
+    path = settings.source_path.resolve()  # a symlinked config is rewritten where it lives
     if not _stdin_is_tty():
         typer.echo(
             "error: config adopt asks before it changes anything; run it in a terminal", err=True
         )
         raise typer.Exit(code=1)
+    original = path.read_text(encoding="utf-8")
     try:
-        adopt = config_adopt_service.plan(path.read_text(encoding="utf-8"), settings)
+        adopt = config_adopt_service.plan(original, settings)
     except config_adopt_service.AdoptError as exc:
         typer.echo(f"error: {exc}. Nothing was changed; move them by hand.", err=True)
         raise typer.Exit(code=1) from exc
@@ -400,6 +401,15 @@ def config_adopt(ctx: typer.Context) -> None:
     ):
         typer.echo("nothing changed")
         return
+    try:
+        if path.read_text(encoding="utf-8") != original:
+            raise config_adopt_service.FileChanged(f"{path} changed since it was read")
+        backup = config_adopt_service.backup_path(path, datetime.now(UTC))
+        shutil.copy2(path, backup)
+    except (OSError, config_adopt_service.AdoptError) as exc:
+        typer.echo(f"error: {exc}. config.toml was not changed; nothing was stored.", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"backed up {path} to {backup}")
     engine = make_engine(database_url())
     try:
         factory = make_session_factory(engine)
@@ -410,10 +420,21 @@ def config_adopt(ctx: typer.Context) -> None:
                 set_setting(session, user, ui_settings.KEY_PREFIX + key, value)
     finally:
         engine.dispose()
-    backup = path.with_name(f"{path.name}.{datetime.now(UTC):%Y%m%d-%H%M%S}.bak")
-    shutil.copy2(path, backup)
-    path.write_text(adopt.new_text, encoding="utf-8")
-    typer.echo(f"backed up {path} to {backup}")
+    try:
+        config_adopt_service.rewrite(path, adopt.new_text, expected=original)
+    except (OSError, config_adopt_service.AdoptError) as exc:
+        typer.echo(
+            f"error: {exc}. config.toml was not changed, so its values still win; the"
+            " Settings page has them too. Run config adopt again to finish.",
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+    except BaseException:
+        typer.echo(
+            f"error: interrupted while rewriting; if {path} looks wrong, restore it from {backup}",
+            err=True,
+        )
+        raise
     typer.echo(
         f"moved {len(adopt.moved)} setting(s) to the Settings page; removed them from {path}"
     )

@@ -5,8 +5,10 @@ Every file here is a scratch file under ``tmp_path``.
 
 from __future__ import annotations
 
+import stat
 import tomllib
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -143,3 +145,114 @@ def test_adopt_refuses_without_a_terminal(
     assert result.exit_code == 1 and "run it in a terminal" in result.output
     assert path.read_text(encoding="utf-8") == CONFIG
     assert _stored(local_db) == {}
+
+
+def test_only_budgets_the_cap_and_the_weekend_multiplier_are_clamped(tmp_path: Path) -> None:
+    """Lowering those is the safer direction; for the rest a clamp would loosen something
+    or change what it does, so the value stays in the file."""
+    text = """\
+[linkedin]
+weekend_multiplier = 1.5
+
+[campaigns]
+mailbox_daily_cap = 500
+send_spacing_floor_s = 5000
+send_spacing_median_s = 5000
+contacted_within_days_guard = 5000
+reply_poll_minutes = 2000
+
+[backup]
+keep = 500
+"""
+    adopt = config_adopt.plan(text, load_settings(_write(tmp_path, text)))
+    assert adopt.clamped == {
+        "linkedin.weekend_multiplier": (1.5, 1.0),
+        "campaigns.mailbox_daily_cap": (500, 400),
+    }
+    assert set(adopt.moved) == set(adopt.clamped)
+    assert set(adopt.kept) == {
+        "campaigns.send_spacing_floor_s",
+        "campaigns.send_spacing_median_s",
+        "campaigns.contacted_within_days_guard",
+        "campaigns.reply_poll_minutes",
+        "backup.keep",
+    }
+    assert tomllib.loads(adopt.new_text)["campaigns"]["reply_poll_minutes"] == 2000
+
+
+def test_whitespace_in_a_table_header_is_understood(tmp_path: Path) -> None:
+    text = "[ linkedin . budget ]  # budgets\nli_prefills_per_day = 10\n"
+    adopt = config_adopt.plan(text, load_settings(_write(tmp_path, text)))
+    assert adopt.moved == {"linkedin.budget.li_prefills_per_day": 10}
+    assert adopt.new_text == "[ linkedin . budget ]  # budgets\n"
+
+
+def test_the_backup_name_is_never_reused(tmp_path: Path) -> None:
+    path = _write(tmp_path)
+    now = datetime(2026, 10, 7, 12, 0, 0, 123456, tzinfo=UTC)
+    taken = config_adopt.backup_path(path, now)
+    assert taken.name == "config.toml.20261007-120000-123456.bak"
+    taken.write_text("x", encoding="utf-8")
+    with pytest.raises(config_adopt.AdoptError, match="already exists"):
+        config_adopt.backup_path(path, now)
+
+
+def test_rewrite_is_atomic_keeps_the_mode_and_refuses_a_changed_file(tmp_path: Path) -> None:
+    path = _write(tmp_path)
+    path.chmod(0o600)
+    with pytest.raises(config_adopt.FileChanged):
+        config_adopt.rewrite(path, "[web]\n", expected="something else")
+    assert path.read_text(encoding="utf-8") == CONFIG
+    config_adopt.rewrite(path, "[web]\n", expected=CONFIG)
+    assert path.read_text(encoding="utf-8") == "[web]\n"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_adopt_rewrites_a_symlinked_config_where_it_lives(
+    tmp_path: Path, local_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = _write(tmp_path)
+    link = tmp_path / "link.toml"
+    link.symlink_to(real)
+    monkeypatch.setattr(cli_module, "_stdin_is_tty", lambda: True)
+    result = CliRunner().invoke(cli, ["--config", str(link), "config", "adopt"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert link.is_symlink()
+    assert "li_prefills_per_day" not in real.read_text(encoding="utf-8")
+
+
+def test_adopt_stops_when_the_file_changes_after_the_prompt(
+    tmp_path: Path, local_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write(tmp_path)
+    monkeypatch.setattr(cli_module, "_stdin_is_tty", lambda: True)
+
+    def confirm_while_someone_edits(*args: object, **kwargs: object) -> bool:
+        path.write_text(CONFIG + "\n# edited\n", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr("netkeeper.cli.typer.confirm", confirm_while_someone_edits)
+    result = CliRunner().invoke(cli, ["--config", str(path), "config", "adopt"])
+    assert result.exit_code == 1
+    assert "config.toml was not changed" in result.output
+    assert path.read_text(encoding="utf-8").endswith("# edited\n")
+    assert _stored(local_db) == {}
+    assert list(tmp_path.glob("*.bak")) == []
+
+
+def test_a_failed_rewrite_says_the_file_was_not_changed(
+    tmp_path: Path, local_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write(tmp_path)
+    monkeypatch.setattr(cli_module, "_stdin_is_tty", lambda: True)
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(config_adopt, "rewrite", fail)
+    result = CliRunner().invoke(cli, ["--config", str(path), "config", "adopt"], input="y\n")
+    assert result.exit_code == 1
+    assert "disk full. config.toml was not changed" in result.output
+    assert "backed up" in result.output
+    assert path.read_text(encoding="utf-8") == CONFIG

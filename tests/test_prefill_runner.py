@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -695,7 +695,9 @@ def test_a_run_uses_the_settings_page_values(lane: Lane) -> None:
 async def test_each_run_kind_gets_the_settings_page_values_through_the_worker(
     lane: Lane, monkeypatch: pytest.MonkeyPatch, kind: SyncRunKind, job: str
 ) -> None:
-    """#343: execute() resolves the page's values once and hands every runner the same."""
+    """#343: execute() resolves the page's values once and hands every runner the same.
+    The clock is 03:00 (the lane is in UTC), outside the page's window: a run a person starts is
+    never refused by the worker's active-hours check, which is for scheduled runs."""
     seen: list[Any] = []
 
     async def runner(*args: Any, **kwargs: Any) -> None:
@@ -703,7 +705,8 @@ async def test_each_run_kind_gets_the_settings_page_values_through_the_worker(
 
     monkeypatch.setattr(f"netkeeper.worker.{job}", runner)
     provider: AttachBrowserProvider = fake_provider(MessagingSite(ZEPHYRINE))[0]
-    worker = BrowserWorker(provider, lane.factory, lane.settings.linkedin)
+    three_am = datetime(2026, 9, 23, 3, 0, tzinfo=UTC)
+    worker = BrowserWorker(provider, lane.factory, lane.settings.linkedin, clock=lambda: three_am)
 
     def record(session: Session, user: User) -> int:
         set_setting(session, user, "config.linkedin.budget.profile_visits_per_day", 33)
