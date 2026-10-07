@@ -17,8 +17,9 @@ checks and read budget as any other. Repeated presses before that tick are one p
 
 from __future__ import annotations
 
+import logging
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -26,7 +27,9 @@ from pydantic import BaseModel
 from netkeeper.models.base import utcnow
 from netkeeper.services import poll_status as service
 from netkeeper.services.campaign_sender import DRAFTS_POLL_EVERY, GmailSender
-from netkeeper.web.deps import CurrentUser, SessionDep, read_only, running_settings
+from netkeeper.web.deps import CurrentUser, SessionDep, effective_settings, read_only
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["poll-status"])
 
@@ -81,6 +84,16 @@ def _gmail_sender(request: Request) -> GmailSender | None:
     return sender if isinstance(sender, GmailSender) else None
 
 
+def _replies_every(gmail: GmailSender, user_id: int) -> timedelta | None:
+    """The user's own reply interval, or None (the status then reads their setting) when
+    it cannot be read right now."""
+    try:
+        return gmail.replies_every_of(user_id)
+    except Exception:
+        log.warning("the reply interval of user %d could not be read", user_id, exc_info=True)
+        return None
+
+
 def _serving(request: Request, user_id: int) -> service.Serving:
     """What this process runs, read from ``app.state``; None of it is started here."""
     engine = request.app.state.campaign_engine
@@ -89,7 +102,7 @@ def _serving(request: Request, user_id: int) -> service.Serving:
         scheduler=request.app.state.scheduler is not None,
         campaign_engine=engine is not None,
         replies_polled_at=None if gmail is None else gmail.replies_polled_at(user_id),
-        replies_every=None if gmail is None else gmail.replies_every,
+        replies_every=None if gmail is None else _replies_every(gmail, user_id),
         replies_due=frozenset() if gmail is None else gmail.replies_due(user_id),
         replies_not_ready={} if gmail is None else gmail.replies_not_ready(user_id),
         replies_retry_at={} if gmail is None else gmail.replies_retry_at(user_id),
@@ -102,7 +115,7 @@ def _serving(request: Request, user_id: int) -> service.Serving:
 @router.get("/poll-status", operation_id="get_poll_status")
 def get_poll_status(request: Request, user: CurrentUser, session: SessionDep) -> PollStatusOut:
     """Each check's last and next run. Read-only: it never triggers one."""
-    settings = running_settings(request, session, user)
+    settings = effective_settings(request, session, user)
     serving = _serving(request, user.id)
     now = utcnow()
     status = service.poll_status(session, user, now=now, settings=settings, serving=serving)

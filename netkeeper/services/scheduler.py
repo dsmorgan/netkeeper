@@ -1310,6 +1310,7 @@ async def poll_once(
     armed: ArmGate = DEFAULT_ARM_GATE,
     active_start: time = pacing.DEFAULT_ACTIVE_START,
     active_end: time = pacing.DEFAULT_ACTIVE_END,
+    active_hours: ActiveHoursProvider | None = None,
     rng: random.Random | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> list[FireResult]:
@@ -1325,10 +1326,26 @@ async def poll_once(
     past stay in the past when nudged two minutes, and both fire in the same
     call (see the module docstring, "the interleave gap"). Nothing is skipped;
     at most one kind per account is delayed by the gap.
+
+    ``active_hours``, when given, answers each user's own window at this heartbeat
+    (#464) in place of ``active_start``/``active_end``. When it raises, that user's
+    fires are skipped for this heartbeat and the failure is logged: the window is never
+    guessed, and never borrowed from another user.
     """
     fired: list[FireResult] = []
     for user, account_id in accounts:
         tz = user.timezone
+        user_start, user_end = active_start, active_end
+        if active_hours is not None:
+            try:
+                user_start, user_end = await off_loop(active_hours, user)
+            except Exception:
+                log.exception(
+                    "scheduler: could not read the active hours of user %d; skipping their"
+                    " fires this heartbeat",
+                    user.id,
+                )
+                continue
         due_now = await off_loop(_due_now, session_factory, user, account_id, schedules, now)
         # Spec 9.5's gap also follows a LinkedIn prefill (P4-03): a person starts those,
         # never this scheduler, so the gap is measured from the prefill run's end.
@@ -1355,8 +1372,8 @@ async def poll_once(
                 heat_settings=heat_settings,
                 armed=armed,
                 tz=tz,
-                active_start=active_start,
-                active_end=active_end,
+                active_start=user_start,
+                active_end=user_end,
                 rng=rng,
                 clock=clock,
             )
@@ -1544,6 +1561,11 @@ DEFAULT_HEARTBEAT_INTERVAL: Final = timedelta(minutes=1)
 
 AccountsProvider = Callable[[], Iterable[tuple[User, int]]]
 
+#: One user's active hours now (#464): read at each heartbeat, so a Settings-page change
+#: applies without a restart. Raising means "could not read them": the user's fires are
+#: skipped, never run with another user's hours or the default.
+ActiveHoursProvider = Callable[[User], tuple[time, time]]
+
 
 def build_scheduler(
     session_factory: sessionmaker[Session],
@@ -1554,6 +1576,7 @@ def build_scheduler(
     heartbeat_interval: timedelta = DEFAULT_HEARTBEAT_INTERVAL,
     active_start: time = pacing.DEFAULT_ACTIVE_START,
     active_end: time = pacing.DEFAULT_ACTIVE_END,
+    active_hours: ActiveHoursProvider | None = None,
     heat_settings: HeatGate = DEFAULT_HEAT_SETTINGS,
     armed: ArmGate = DEFAULT_ARM_GATE,
     rng: random.Random | None = None,
@@ -1584,6 +1607,10 @@ def build_scheduler(
     :data:`DEFAULT_ARM_GATE` the same way: a scheduler built with no word
     about arming fires nothing on an account nobody armed.
 
+    ``active_hours``, when given, is each user's own window (#464), read in the
+    establishing pass and at every heartbeat in place of ``active_start``/``active_end``.
+    A user whose window cannot be read is skipped (logged), not given another's.
+
     ``clock`` is read for every "now" -- the establishing pass and every
     heartbeat -- so a test can drive the real heartbeat across a due time.
     """
@@ -1593,6 +1620,17 @@ def build_scheduler(
     scheduler = AsyncIOScheduler()
 
     for user, account_id in accounts():
+        user_start, user_end = active_start, active_end
+        if active_hours is not None:
+            try:
+                user_start, user_end = active_hours(user)
+            except Exception:
+                log.exception(
+                    "scheduler: could not read the active hours of user %d; their schedule"
+                    " is not established, so nothing fires for them until serve restarts",
+                    user.id,
+                )
+                continue
         with session_scope(session_factory, write=True) as session:
             sync_account_schedule(
                 session,
@@ -1602,8 +1640,8 @@ def build_scheduler(
                 schedules=schedules,
                 rng=jitter,
                 tz=user.timezone,
-                active_start=active_start,
-                active_end=active_end,
+                active_start=user_start,
+                active_end=user_end,
             )
 
     async def _heartbeat() -> None:
@@ -1619,6 +1657,7 @@ def build_scheduler(
             armed=armed,
             active_start=active_start,
             active_end=active_end,
+            active_hours=active_hours,
             rng=jitter,
             clock=clock,
         )

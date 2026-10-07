@@ -495,6 +495,7 @@ async def test_the_monitor_survives_a_failing_poll(
         raise RuntimeError("boom")
 
     monkeypatch.setattr(service, "poll_mailboxes", boom)
+    _user(session_factory)  # a tick polls the users who are due: there must be one
     monitor = service.MailboxMonitor(session_factory, EventBus(), interval_s=0.01)
     monitor.start()
     for _ in range(200):

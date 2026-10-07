@@ -7,7 +7,6 @@ the scoping helper and the runtime query guard are :mod:`netkeeper.scoping`.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from dataclasses import replace
 from typing import Annotated, Any, Protocol
 
 from fastapi import Depends, HTTPException, Request
@@ -167,18 +166,6 @@ def effective_settings(request: Request, session: Session, user: User) -> Settin
     """The settings in force for ``user`` now: ``config.toml``, then the Settings page,
     then the defaults (#343). Resolved per request, so a change applies to the next one."""
     return ui_settings.resolve(session, user, file_settings(request))
-
-
-def running_settings(request: Request, session: Session, user: User) -> Settings:
-    """:func:`effective_settings`, except for what a running ``serve`` read once at
-    startup and still uses until it restarts: the reply poll interval. Posture and the
-    poll status judge whether a poll is late by the interval actually running (#343)."""
-    settings = effective_settings(request, session, user)
-    started: Settings | None = getattr(request.app.state, "started_settings", None)
-    if started is None:
-        return settings
-    minutes = started.campaigns.reply_poll_minutes
-    return replace(settings, campaigns=replace(settings.campaigns, reply_poll_minutes=minutes))
 
 
 def get_bus(request: Request) -> EventBus:

@@ -291,6 +291,7 @@ class GmailSender:
         clock: Callable[[], datetime] = utcnow,
         drafts_every: timedelta = DRAFTS_POLL_EVERY,
         replies_every: timedelta = replies.REPLY_POLL_EVERY,
+        replies_every_for: Callable[[int], timedelta] | None = None,
     ) -> None:
         if drafts_every < timedelta(0) or replies_every < timedelta(0):
             raise ValueError("a poll interval cannot be negative")
@@ -302,6 +303,9 @@ class GmailSender:
         self._drafts_every = drafts_every
         self._drafts_polled: dict[int, datetime] = {}
         self._replies_every = replies_every
+        # Per user (#464): read at each tick, so a Settings-page edit applies without a
+        # restart. None: every user polls every ``replies_every``.
+        self._replies_every_for = replies_every_for
         self._replies_polled: dict[int, datetime] = {}
         # Per user, the reply poll's per-mailbox state (#413). In memory, like the gate
         # above: a restart's first tick polls every mailbox anyway.
@@ -330,8 +334,15 @@ class GmailSender:
 
     @property
     def replies_every(self) -> timedelta:
-        """How often the reply poll runs, per user."""
+        """The reply poll interval a user gets when none is read per user."""
         return self._replies_every
+
+    def replies_every_of(self, user_id: int) -> timedelta:
+        """How often the reply poll runs for ``user_id``: their own Settings-page value
+        (#464). Raises when it cannot be read; callers fail closed."""
+        if self._replies_every_for is None:
+            return self._replies_every
+        return self._replies_every_for(user_id)
 
     def replies_polled_at(self, user_id: int) -> datetime | None:
         """When this process last started a reply poll of every armed mailbox of
@@ -436,7 +447,13 @@ class GmailSender:
                 None if user is None else get_scoped(session, user, Mailbox, firing.mailbox_id)
             )
             polled = None if mailbox is None else mailbox.replies_polled_at
-        limit = replies.STALE_AFTER_POLLS * self._replies_every
+        try:
+            limit = replies.STALE_AFTER_POLLS * self.replies_every_of(firing.user_id)
+        except Exception:
+            # Fail closed: without the user's interval, replies count as not read recently.
+            log.exception("reply poll interval of user %d unreadable", firing.user_id)
+            self._poll_soon(firing.user_id, firing.mailbox_id)
+            return "replies have not been polled recently; nothing was sent"
         if polled is not None and self._clock() - polled <= limit:
             return None
         self._poll_soon(firing.user_id, firing.mailbox_id)  # not the user's other mailboxes
@@ -724,6 +741,15 @@ class GmailSender:
         person's "Check now" (#409) brings a full poll forward to this tick, but leaves
         out a mailbox still in its backoff: that one stays due, and is read at its retry
         time as before. Either way the due set starts over from what the poll finds."""
+        try:
+            every = self.replies_every_of(user_id)
+        except Exception:
+            # Fail closed (#464): not this user's interval, nor another's. Nothing is polled
+            # for them this tick; their follow-ups hold on stale replies.
+            log.exception(
+                "reply poll interval of user %d unreadable; not polling this tick", user_id
+            )
+            return
         last = self._replies_polled.get(user_id)
         due = self._replies_due.get(user_id, set())
         only: frozenset[int] | None = None
@@ -732,7 +758,7 @@ class GmailSender:
         # A mailbox that is not ready goes back in the due set, not into the request.
         with self._requests_lock:
             requested = self._replies_requested.pop(user_id, None) is not None
-        if last is None or now - last >= self._replies_every:
+        if last is None or now - last >= every:
             self._replies_polled[user_id] = now
         elif requested:
             skip = frozenset(m for m in due if self._retry_at(user_id, m) > now)
@@ -753,7 +779,7 @@ class GmailSender:
         # A due mailbox still in its backoff was not polled: it stays due.
         waiting = set(skip) if only is None else due - only
         self._replies_due[user_id] = waiting | polled.retry
-        self._settle(user_id, polled, only=only, skip=skip, now=now)
+        self._settle(user_id, polled, only=only, skip=skip, now=now, every=every)
 
     def _retry_at(self, user_id: int, mailbox_id: int) -> datetime:
         backoff = self._replies_backoff.get((user_id, mailbox_id))
@@ -767,6 +793,7 @@ class GmailSender:
         only: frozenset[int] | None,
         skip: frozenset[int] = frozenset(),
         now: datetime,
+        every: timedelta,
     ) -> None:
         """Record how each polled mailbox ended (#413): a failed one backs off 1, 2, 4, ...
         minutes, never longer than the interval, and starts over once one reads; one not
@@ -775,7 +802,7 @@ class GmailSender:
             failures = self._replies_backoff.get((user_id, mailbox_id), (0, now))[0] + 1
             # The full poll each interval reads it anyway; the cap keeps the next due time
             # honest.
-            wait = min(REPLY_BACKOFF_FIRST * 2 ** min(failures - 1, 16), self._replies_every)
+            wait = min(REPLY_BACKOFF_FIRST * 2 ** min(failures - 1, 16), every)
             self._replies_backoff[(user_id, mailbox_id)] = (failures, now + wait)
         # Read, or not ready: a not-ready mailbox is tried at every tick instead, so it is
         # polled the minute after it is signed in again or unlocked.

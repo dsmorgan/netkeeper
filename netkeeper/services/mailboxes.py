@@ -45,7 +45,8 @@ import asyncio
 import contextlib
 import logging
 import threading
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Final
@@ -608,12 +609,16 @@ def poll_mailboxes(
     *,
     endpoints: gmail_oauth.GoogleEndpoints | None = None,
     clock: Callable[[], datetime] = utcnow,
+    user_ids: Collection[int] | None = None,
 ) -> list[CheckResult]:
-    """Check every ``ok`` mailbox of every local user. Blocking: run it off the event loop."""
+    """Check every ``ok`` mailbox of every local user, or of just ``user_ids``. Blocking:
+    run it off the event loop."""
     with session_scope(factory) as session:
         users = session.scalars(
             select(User).where(User.kind == UserKind.LOCAL).order_by(User.id)
         ).all()
+        if user_ids is not None:
+            users = [user for user in users if user.id in user_ids]
         due = [
             (user.id, mailbox.id)
             for user in users
@@ -629,11 +634,26 @@ def poll_mailboxes(
     return results
 
 
+IntervalFor = Callable[[int], float]
+"""One user's poll interval in seconds, read at each tick (#464). Raising means "could
+not read it": that user is not polled this tick."""
+
+#: The longest the monitor sleeps between looking at who is due, so a shorter interval a
+#: person just saved applies within a minute.
+MONITOR_TICK_S: Final = 60.0
+
+
 class MailboxMonitor:
     """The background poll ``netkeeper serve`` runs: :func:`poll_mailboxes` every interval.
 
     Each status change goes out on the bus as ``mailbox.status``, which the
     banner listens for. The first poll runs one interval after start.
+
+    The interval is per user (#464): ``interval_for`` answers it, and is read at every
+    tick (at most :data:`MONITOR_TICK_S` apart), so a Settings-page edit applies without
+    a restart. A user whose interval cannot be read is skipped and logged, never polled
+    on another user's interval. Without ``interval_for`` every user polls every
+    ``interval_s``.
     """
 
     def __init__(
@@ -643,17 +663,24 @@ class MailboxMonitor:
         *,
         interval_s: float,
         endpoints: gmail_oauth.GoogleEndpoints | None = None,
+        interval_for: IntervalFor | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if interval_s <= 0:
             raise ValueError("the mailbox poll interval must be positive")
         self._factory = factory
         self._bus = bus
         self._interval_s = interval_s
+        self._interval_for: IntervalFor = interval_for or (lambda _user_id: interval_s)
+        self._monotonic = monotonic
         self._endpoints = endpoints
         self._task: asyncio.Task[None] | None = None
+        self._started_at = monotonic()
+        self._polled: dict[int, float] = {}
 
     def start(self) -> None:
         if self._task is None:
+            self._started_at = self._monotonic()
             self._task = asyncio.get_running_loop().create_task(self._run(), name="mailbox-poll")
 
     async def stop(self) -> None:
@@ -665,8 +692,45 @@ class MailboxMonitor:
         self._task = None
 
     async def poll_once(self) -> list[CheckResult]:
-        """One poll, off the loop, then the events for whatever changed."""
-        results = await asyncio.to_thread(poll_mailboxes, self._factory, endpoints=self._endpoints)
+        """One poll of every local user's mailboxes, off the loop, then the events for
+        whatever changed."""
+        return await self._poll(None)
+
+    async def poll_due(self) -> list[CheckResult]:
+        """One tick: the users whose own interval has passed since their last poll."""
+        due = await asyncio.to_thread(self._due_users)
+        if not due:
+            return []
+        return await self._poll(due)
+
+    def _due_users(self) -> list[int]:
+        now = self._monotonic()
+        due: list[int] = []
+        with session_scope(self._factory) as session:
+            user_ids = list(
+                session.scalars(
+                    select(User.id).where(User.kind == UserKind.LOCAL).order_by(User.id)
+                )
+            )
+        for user_id in user_ids:
+            try:
+                interval = self._interval_for(user_id)
+            except Exception:
+                log.exception(
+                    "mailbox poll: could not read the interval of user %d; not polling them"
+                    " this tick",
+                    user_id,
+                )
+                continue
+            if now - self._polled.get(user_id, self._started_at) >= interval:
+                self._polled[user_id] = now
+                due.append(user_id)
+        return due
+
+    async def _poll(self, user_ids: Collection[int] | None) -> list[CheckResult]:
+        results = await asyncio.to_thread(
+            lambda: poll_mailboxes(self._factory, endpoints=self._endpoints, user_ids=user_ids)
+        )
         for result in results:
             if result.changed:
                 self._bus.publish(
@@ -675,9 +739,10 @@ class MailboxMonitor:
         return results
 
     async def _run(self) -> None:
+        tick = min(self._interval_s, MONITOR_TICK_S)
         while True:
-            await asyncio.sleep(self._interval_s)
+            await asyncio.sleep(tick)
             try:
-                await self.poll_once()
+                await self.poll_due()
             except Exception:
                 log.exception("mailbox poll failed; trying again next interval")

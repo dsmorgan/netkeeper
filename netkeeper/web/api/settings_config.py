@@ -19,7 +19,6 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from netkeeper.config import Settings
 from netkeeper.models import User
 from netkeeper.services import ui_settings
 from netkeeper.web.deps import CurrentUser, SessionDep, file_settings
@@ -77,19 +76,9 @@ class ConfigIn(BaseModel):
     weekly profile-visit limit)."""
 
 
-def _started(request: Request, user: User) -> Settings | None:
-    """What the running ``serve`` resolved for ``user`` at startup, or None."""
-    if getattr(request.app.state, "started_user_id", None) != user.id:
-        return None
-    started: Settings | None = getattr(request.app.state, "started_settings", None)
-    return started
-
-
 def _out(request: Request, session: SessionDep, user: User) -> ConfigOut:
     base = file_settings(request)
-    views = ui_settings.describe(
-        base, ui_settings.stored(session, user), started=_started(request, user)
-    )
+    views = ui_settings.describe(base, ui_settings.stored(session, user))
     return ConfigOut(
         config_path=None if base.source_path is None else str(base.source_path),
         fields=[

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import timedelta
+from datetime import time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,7 @@ from isolation.harness import acting_as
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.config import LinkedInSettings, Settings
+from netkeeper.config import Settings
 from netkeeper.db import make_session_factory, session_scope
 from netkeeper.models import User
 from netkeeper.scoping import install_scope_guard
@@ -126,10 +126,12 @@ async def test_a_key_config_toml_sets_is_locked(
     assert {b["action"]: b["day"]["limit"] for b in limits}["li_prefills"] == 10
 
 
-async def test_a_restart_only_value_says_a_restart_is_needed(client: httpx.AsyncClient) -> None:
+async def test_the_serve_read_values_apply_without_a_restart(client: httpx.AsyncClient) -> None:
+    """#464: serve reads the reply interval and the active hours per user, as it runs."""
     saved = await _put(client, {"campaigns.reply_poll_minutes": 3})
     field = _field(saved.json(), "campaigns.reply_poll_minutes")
-    assert (field["applies"], field["restart_pending"]) == ("restart", True)
+    assert (field["applies"], field["restart_pending"]) == ("now", False)
+    assert "no restart" in field["applies_note"]
 
 
 async def test_each_user_sees_and_changes_only_their_own(
@@ -160,10 +162,12 @@ class _Stopped:
 
 
 class _Monitor:
-    intervals: list[float] = []
+    instances: list[_Monitor] = []
 
     def __init__(self, *args: Any, interval_s: float, **kwargs: Any) -> None:
-        self.intervals.append(interval_s)
+        self.interval_s = interval_s
+        self.interval_for = kwargs["interval_for"]
+        self.instances.append(self)
 
     def start(self) -> None:
         return None
@@ -172,11 +176,12 @@ class _Monitor:
         return None
 
 
-async def test_serve_starts_its_scheduler_and_polls_from_the_settings_page(
+async def test_serve_starts_its_scheduler_and_polls_from_each_users_settings_page(
     app: FastAPI, bare_engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#343: the values serve reads once come from the local user's page values. ``app``
-    only prepares ``bare_engine`` (migrated); the app under test is built here."""
+    """#343, #464: the scheduler's hours, the monitor's interval and the reply interval
+    are each user's own page values, not the first local user's. ``app`` only prepares
+    ``bare_engine`` (migrated); the app under test is built here."""
     engine = bare_engine
     factory = make_session_factory(engine)
     install_scope_guard(factory)
@@ -184,25 +189,34 @@ async def test_serve_starts_its_scheduler_and_polls_from_the_settings_page(
         user = ensure_local_user(session, settings=Settings())
         set_setting(session, user, "config.linkedin.active_hours", ["07:15", "19:45"])
         set_setting(session, user, "config.campaigns.reply_poll_minutes", 3)
-    started: list[LinkedInSettings] = []
+        other = factories.make_user(session)
+        set_setting(session, other, "config.linkedin.active_hours", ["10:00", "16:00"])
+        set_setting(session, other, "config.campaigns.reply_poll_minutes", 30)
+        user_id, other_id = user.id, other.id
+    hours: list[Any] = []
 
-    wholes: list[Settings | None] = []
-
-    def scheduler(*args: Any, campaign_settings: Settings | None = None) -> _Stopped:
-        started.append(args[-1])
-        wholes.append(campaign_settings)
+    def scheduler(*args: Any, active_hours: Any = None, **kwargs: Any) -> _Stopped:
+        hours.append(active_hours)
         return _Stopped()
 
     monkeypatch.setattr("netkeeper.web.app.start_serve_scheduler", scheduler)
     monkeypatch.setattr("netkeeper.web.app.MailboxMonitor", _Monitor)
-    _Monitor.intervals = []
+    _Monitor.instances = []
     served = create_app(Settings(), engine=engine, extractor=ServeExtractor(executor=_no_executor))
     async with served.router.lifespan_context(served):
-        assert [s.active_hours for s in started] == [("07:15", "19:45")]
-        # The auto-send handler's settings (ADR 0008) come from the same startup reading.
-        assert [w.linkedin.active_hours for w in wholes if w is not None] == [("07:15", "19:45")]
-        assert _Monitor.intervals == [180]
-        assert served.state.campaign_engine.sender.replies_every == timedelta(minutes=3)
+        with session_scope(factory) as session:
+            users = {uid: session.get(User, uid) for uid in (user_id, other_id)}
+            for each in users.values():
+                assert each is not None
+                session.expunge(each)
+        (provider,) = hours
+        assert provider(users[user_id]) == (time(7, 15), time(19, 45))
+        assert provider(users[other_id]) == (time(10, 0), time(16, 0))
+        (monitor,) = _Monitor.instances
+        assert (monitor.interval_for(user_id), monitor.interval_for(other_id)) == (180, 1800)
+        sender = served.state.campaign_engine.sender
+        assert sender.replies_every_of(user_id) == timedelta(minutes=3)
+        assert sender.replies_every_of(other_id) == timedelta(minutes=30)
 
 
 def _no_executor(factory: Any, bus: Any) -> Any:

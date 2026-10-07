@@ -77,6 +77,7 @@ from netkeeper.services.scheduler import (
     AUTO_SEND_SPACING_MAX,
     AUTO_SEND_SPACING_MIN,
     SERVED_SCHEDULES,
+    ActiveHoursProvider,
     JobContext,
     JobHandler,
     JobKind,
@@ -362,6 +363,7 @@ def start_serve_scheduler(
     settings: LinkedInSettings,
     *,
     campaign_settings: Settings | None = None,
+    active_hours: ActiveHoursProvider | None = None,
 ) -> ServeScheduler:
     """Build the executor and the scheduler for every local user's account, and start it.
 
@@ -371,6 +373,10 @@ def start_serve_scheduler(
     :data:`~netkeeper.services.scheduler.SERVED_SCHEDULES` only (the inbox poll
     included since P4-01) with the configured heat gate and active hours, and auto-send
     (ADR 0008) only while ``campaign_settings`` turn ``[campaigns] linkedin_auto_send`` on.
+
+    ``active_hours`` is each user's own window, read at every heartbeat (#464; see
+    :func:`user_active_hours`); ``settings.active_hours`` is only the default for a caller
+    that passes none.
     """
     executor = extractor.executor(factory, bus)
     _quiet_the_heartbeat()
@@ -385,6 +391,7 @@ def start_serve_scheduler(
         schedules=schedules,
         active_start=start,
         active_end=end,
+        active_hours=active_hours,
         heat_settings=settings.heat,
         rng=extractor.rng,
         clock=extractor.clock,
@@ -399,6 +406,24 @@ def start_serve_scheduler(
         if warning is not None:
             log.warning("%s", warning)
     return ServeScheduler(executor=executor, scheduler=built)
+
+
+def user_active_hours(factory: sessionmaker[Session], base: Settings) -> ActiveHoursProvider:
+    """Each user's active hours as the scheduler reads them (#464): ``base`` (the file's
+    settings) with that user's Settings-page values, resolved at each call so an edit
+    applies at the next heartbeat. Raises for a user that is gone or a window that does
+    not parse; the scheduler then skips that user's fires."""
+
+    def hours(user: User) -> tuple[time, time]:
+        with session_scope(factory) as session:
+            fresh = session.get(User, user.id)
+            if fresh is None:
+                raise LookupError(f"no user {user.id}")
+            in_force = ui_settings.resolve(session, fresh, base)
+        start, end = (time.fromisoformat(value) for value in in_force.linkedin.active_hours)
+        return start, end
+
+    return hours
 
 
 def seed_served_schedule(
