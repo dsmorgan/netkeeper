@@ -208,7 +208,8 @@ class Verdict:
     ``override_cutoff``: a person's override of the recent-contact guard (#446) is
     what kept :attr:`Reason.CONTACTED_RECENTLY` out of ``reasons``, and this is the
     newest outbound contact it set aside (:attr:`ContactFacts.recent_contact_cutoff`).
-    Only :func:`check_enrollment` sets it, for the contacts it was asked to override.
+    Only :func:`check_enrollment` sets it, for the contacts it was asked to override,
+    and only on an eligible verdict.
 
     ``override_refused``: the person asked to override the recent-contact guard for
     this contact, and :func:`check_enrollment` refused, with why (#446): someone
@@ -926,13 +927,15 @@ def check_enrollment(
 
     ``override_recent_contact`` maps the contacts a person chose to enroll although
     someone contacted them recently (#446) to the last contact the person was shown
-    for each. For exactly those, contact dated at or before that shown time does not
-    count (:func:`not_contacted_recently`): it is the cutoff. A contact whose newest
-    outbound contact is now later than what was shown, or whose shown contact is
-    dated after ``now``, is refused (:attr:`Verdict.override_refused`) and stays
-    skipped. Every other guard runs as always, and so does the recent-contact guard
-    for every other contact. A verdict the override changed has
-    :attr:`Verdict.override_cutoff`.
+    for each. Only a contact the recent-contact guard alone skips is considered; one
+    another guard skips keeps that guard's reasons. A contact whose newest outbound
+    contact is dated after ``now``, or is later than what was shown, is refused
+    (:attr:`Verdict.override_refused`) and stays skipped. Otherwise the cutoff is
+    ``min(shown, newest)``, which is the newest contact itself: the shown time only
+    detects a stale view, and contact dated at or before the cutoff does not count
+    (:func:`not_contacted_recently`). Every other guard runs as always, and so does
+    the recent-contact guard for every other contact. A verdict the override changed
+    has :attr:`Verdict.override_cutoff`.
 
     Checked against the first step's channel, the one the enrollment will send
     first; each later step is checked again when it fires (:func:`check_step`).
@@ -960,23 +963,30 @@ def check_enrollment(
         found = facts.get(i)
         verdict = check_contact(found, i, first, policy, now=now)
         seen = chosen.get(i)
+        current = None if found is None else found.last_outbound_at
+        # Only a contact the recent-contact guard alone skips: one another guard skips
+        # keeps that guard's reasons, and is never overridden nor refused here.
         if (
             seen is None
             or found is None
-            or found.last_outbound_at is None
-            or Reason.CONTACTED_RECENTLY not in verdict.reasons
+            or current is None
+            or verdict.reasons != (Reason.CONTACTED_RECENTLY,)
         ):
             verdicts.append(verdict)
             continue
-        if found.last_outbound_at > seen:
-            verdict = replace(verdict, override_refused=OVERRIDE_STALE)
-        elif seen > now:
+        if current > now:
             verdict = replace(verdict, override_refused=OVERRIDE_FUTURE)
+        elif current > seen:
+            verdict = replace(verdict, override_refused=OVERRIDE_STALE)
         else:
+            # The shown time only detects a stale view. The cutoff is the contact as it
+            # is, never later, so a contact recorded later and dated after it re-arms.
+            cutoff = min(seen, current)
             again = check_contact(
-                replace(found, recent_contact_cutoff=seen), i, first, policy, now=now
+                replace(found, recent_contact_cutoff=cutoff), i, first, policy, now=now
             )
-            verdict = replace(again, override_cutoff=seen)
+            if again.eligible:
+                verdict = replace(again, override_cutoff=cutoff)
         verdicts.append(verdict)
     return verdicts
 

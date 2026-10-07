@@ -59,7 +59,9 @@ from netkeeper.linkedin.rehearse import rehearse as run_rehearsal
 from netkeeper.linkedin.rehearse import render as render_rehearsal
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import (
+    Campaign,
     Contact,
+    Enrollment,
     EnrollmentStatus,
     HistoryReplyKind,
     ImportResolution,
@@ -77,7 +79,7 @@ from netkeeper.models import (
     UserKind,
 )
 from netkeeper.paths import CONFIG_ENV, data_dir
-from netkeeper.scoping import install_scope_guard
+from netkeeper.scoping import install_scope_guard, scoped
 from netkeeper.services import (
     budgets,
     campaign_engine,
@@ -3039,33 +3041,27 @@ def campaigns_enroll(
                 raise typer.Exit(code=1)
             with session_scope(factory) as session, _campaign_errors():
                 user = _local_user_or_exit(session)
-                window = campaign_service.get_campaign(
-                    session, user, campaign_id
-                ).contacted_within_days_guard
-                last = campaign_guards.last_contact(session, user, chosen)
-            # The last contact shown here is the override's cutoff: contact dated after
-            # it, or recorded before you answer, refuses the override (#446).
-            for contact_id in chosen:
-                found = last.get(contact_id)
-                if found is None:
-                    typer.echo(
-                        f"contact {contact_id}: no outbound contact recorded; nothing to override"
-                    )
-                    continue
-                seen[contact_id] = found.at
-                typer.echo(
-                    f"contact {contact_id}: last contacted {found.at:%Y-%m-%d %H:%M} UTC"
-                    f" ({found.channel})"
-                )
+                campaign = campaign_service.get_campaign(session, user, campaign_id)
+                window = campaign.contacted_within_days_guard
+                lines, seen = _override_plan(session, user, campaign, chosen)
+            # The last contact shown here is what the override checks against: a contact
+            # recorded after it, before you answer, refuses the override (#446).
+            for line in lines:
+                typer.echo(line)
             if not seen:
-                typer.echo("error: none of these contacts has a contact to override", err=True)
+                typer.echo(
+                    "error: none of these contacts is skipped only for recent contact",
+                    err=True,
+                )
                 raise typer.Exit(code=1)
             unit = "day" if window == 1 else "days"
+            who = "1 contact" if len(seen) == 1 else f"{len(seen)} contacts"
+            them = "it" if len(seen) == 1 else "them"
             question = (
-                f"enroll {len(seen)} contacts anyway? Someone contacted them in the last"
-                f" {window} {unit}, as shown above. Only the recent-contact guard is set aside,"
-                " for these contacts alone and for contact dated up to what is shown; every"
-                " other guard still applies"
+                f"enroll {who} anyway? Someone contacted {them} in the last {window} {unit},"
+                " as shown above. Only the recent-contact guard is set aside, for"
+                f" {'this contact' if len(seen) == 1 else 'these contacts'} alone and for"
+                " contact dated up to what is shown; every other guard still applies"
             )
             if not typer.confirm(question):
                 typer.echo("cancelled: nobody was enrolled")
@@ -3092,11 +3088,60 @@ def campaigns_enroll(
     )
     if seen:
         typer.echo(
-            f"recent-contact guard overridden for {outcome.overridden} of {len(seen)} contacts"
+            f"recent-contact guard overridden for {outcome.overridden} of {len(seen)}"
+            f" {'contact' if len(seen) == 1 else 'contacts'}"
         )
         for contact_id, why in outcome.override_refused:
             typer.echo(f"contact {contact_id} not overridden: {why}")
     typer.echo(outcome.summary)
+
+
+def _override_plan(
+    session: Session, user: User, campaign: Campaign, chosen: Sequence[int]
+) -> tuple[list[str], dict[int, datetime]]:
+    """What `--override-recent-contact` would do for each contact named (#446): a line
+    each, and the last contact shown for the ones it would override, which only the
+    recent-contact guard skips."""
+    now = datetime.now(UTC)
+    verdicts = {
+        v.contact_id: v
+        for v in campaign_guards.check_enrollment(session, user, campaign, chosen, now=now)
+    }
+    last = campaign_guards.last_contact(session, user, chosen)
+    names = {
+        c.id: f"{c.preferred_name or c.first_name} {c.last_name}".strip()
+        for c in session.scalars(scoped(user, Contact).where(Contact.id.in_(chosen)))
+    }
+    present = set(
+        session.scalars(
+            scoped(user, Enrollment)
+            .with_only_columns(Enrollment.contact_id)
+            .where(Enrollment.campaign_id == campaign.id, Enrollment.contact_id.in_(chosen))
+        )
+    )
+    window = campaign.contacted_within_days_guard
+    lines: list[str] = []
+    seen: dict[int, datetime] = {}
+    for contact_id in chosen:
+        who = f"contact {contact_id} ({names.get(contact_id) or 'unnamed'})"
+        verdict = verdicts[contact_id]
+        found = last.get(contact_id)
+        if contact_id in present:
+            lines.append(f"{who}: already in this campaign; nothing to override")
+        elif verdict.eligible:
+            lines.append(f"{who}: not skipped; it is enrolled as usual")
+        elif verdict.reasons != (campaign_guards.Reason.CONTACTED_RECENTLY,):
+            why = "; ".join(
+                campaign_guards.reason_label(r, contacted_within_days=window)
+                for r in verdict.reasons
+            )
+            lines.append(f"{who}: skipped ({why}); only the recent-contact guard is overridable")
+        elif found is None or found.at > now:
+            lines.append(f"{who}: {campaign_guards.OVERRIDE_FUTURE}")
+        else:
+            seen[contact_id] = found.at
+            lines.append(f"{who}: last contacted {found.at:%Y-%m-%d %H:%M} UTC ({found.channel})")
+    return lines, seen
 
 
 def _stdin_is_tty() -> bool:
