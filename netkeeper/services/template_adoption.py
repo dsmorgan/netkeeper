@@ -51,8 +51,10 @@ adopted it and when (``campaign_steps.template_adopted_*``).
 **Parked enrollments.** An enrollment the step's template blocked waits with
 ``not_sent_error`` starting ``blocked:`` (#342), or ``too_long:`` for a LinkedIn
 prefill refused before any key as too long to type (#445), and no due time. Adoption
-clears the reason and makes it due at once, so the next tick, or the next prefill, tries the
-step again with every check, in the new version. A ``paused`` campaign still fires
+clears the reason and makes it due at once, so the next tick, or the next prefill,
+tries the step again with every check, in the new version. A released enrollment keeps
+its ``last_prefill_run_id``: only Try again reads it, and only for a ``not_typed:``
+reason, which adoption never releases. A ``paused`` campaign still fires
 nothing until it is resumed.
 
 Every function that writes needs a writer session (CLAUDE.md).
