@@ -6,7 +6,8 @@ was recorded last for the enrollment (``SET NULL`` when that run is deleted). A
 run clicked **Message** (a bubble may be open) or spent a ``li_prefills`` unit, and the
 **Try again** action needs both.
 
-An enrollment whose latest prefill ended ``not_typed`` loses its due time: before #445
+A live enrollment (``active`` or ``paused``) whose latest prefill ended ``not_typed``, its
+next step on LinkedIn and not claimed, loses its due time: before #445
 it came back on a timer, and now it waits for a person to click **Try again**, so its
 row says no next action, as the queue does. It has no run on file, so its retry asks
 you to confirm no bubble is open. Nothing else changes. A downgrade drops the column
@@ -43,10 +44,20 @@ def upgrade() -> None:
     with op.batch_alter_table(TABLE) as batch:
         batch.add_column(sa.Column(COLUMN, sa.Integer(), nullable=True))
         batch.create_foreign_key(RUN_FK, "sync_runs", [COLUMN], ["id"], ondelete="SET NULL")
+    # Only rows the Try again list would show: live, the next step on LinkedIn, and that
+    # step not claimed. An email step with a stale "not_typed" note keeps its due time.
     op.execute(
         sa.text(
             "UPDATE enrollments SET next_action_at = NULL"
             " WHERE not_sent_count > 0 AND not_sent_error LIKE :prefix"
+            " AND status IN ('active', 'paused')"
+            " AND EXISTS (SELECT 1 FROM campaign_steps s"
+            "  WHERE s.campaign_id = enrollments.campaign_id"
+            "  AND s.position = COALESCE(enrollments.current_step, 0) + 1"
+            "  AND s.channel = 'linkedin'"
+            "  AND NOT EXISTS (SELECT 1 FROM messages m"
+            "   WHERE m.enrollment_id = enrollments.id AND m.step_id = s.id"
+            "   AND m.direction = 'out'))"
         ).bindparams(prefix=NOT_TYPED_LIKE)
     )
 

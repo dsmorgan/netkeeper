@@ -1939,3 +1939,127 @@ def test_needs_try_again_and_its_sql_agree(
     )
     assert bool(listed) is needs
     assert (enrollment_id in _ready_ids(lane)) is not needs
+
+
+def _mark_typed_nothing(lane: Lane, enrollment_id: int) -> None:
+    """The state a not_typed outcome leaves, without a claim (one the guards would refuse)."""
+    _set(
+        lane,
+        Enrollment,
+        enrollment_id,
+        not_sent_count=1,
+        not_sent_error="not_typed: the Message control could not be clicked",
+        next_action_at=None,
+    )
+
+
+RETRY: Final[dict[str, Any]] = {"retry": True, "no_bubble_open": True}
+
+
+def test_a_retry_ends_on_a_reply(lane: Lane) -> None:
+    enrollment_id = lane.enroll()
+    _ended(lane, enrollment_id, MessageOutcomeKind.NOT_TYPED)
+
+    def reply(session: Session, user: User) -> None:
+        enrollment = get_scoped(session, user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        factories.make_message(
+            session,
+            enrollment,
+            direction=MessageDirection.IN,
+            status=MessageStatus.RECEIVED,
+            sent_at=NOW - timedelta(minutes=5),
+        )
+
+    lane.write(reply)
+    assert lane.claim(enrollment_id, **RETRY).reasons == (Skip.ENDED, Skip.REPLIED)
+    assert lane.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
+    assert _try_again(lane) == []
+
+
+def test_a_retry_of_a_do_not_contact_contact_ends_opted_out(lane: Lane) -> None:
+    enrollment_id = lane.enroll(contact={"do_not_contact": True})
+    _mark_typed_nothing(lane, enrollment_id)
+    assert lane.claim(enrollment_id, **RETRY).reasons[0] == Skip.ENDED
+    assert lane.enrollment(enrollment_id).status is EnrollmentStatus.OPTED_OUT
+    assert lane.messages(enrollment_id) == []
+
+
+def test_a_retry_of_a_contact_without_a_urn_is_excluded(lane: Lane) -> None:
+    enrollment_id = lane.enroll(contact={"li_urn": None})
+    _mark_typed_nothing(lane, enrollment_id)
+    claim = lane.claim(enrollment_id, **RETRY)
+    assert claim.reasons == (Skip.GUARD_EXCLUDED, Reason.NO_LINKEDIN.value)
+    assert lane.messages(enrollment_id) == []
+    # The guard's re-check time doesn't put it back in the ready list.
+    assert linkedin_steps.needs_try_again(lane.enrollment(enrollment_id))
+    assert _ready_ids(lane, NOW + timedelta(days=2)) == []
+
+
+def test_a_retry_keeps_the_cadence_of_step_two(session_factory: sessionmaker[Session]) -> None:
+    lane = make_lane(session_factory, channels=(EMAIL, LINKEDIN))
+    enrollment_id = lane.enroll(current_step=1)
+    _sent_step_one(lane, enrollment_id, at=NOW - timedelta(days=2))  # step 2 waits 7 days
+    _mark_typed_nothing(lane, enrollment_id)
+    assert lane.claim(enrollment_id, **RETRY).reasons == (Skip.NOT_DUE,)
+    assert lane.messages(enrollment_id) != [] and all(
+        m.direction is MessageDirection.OUT and m.status is MessageStatus.SENT
+        for m in lane.messages(enrollment_id)
+    )
+    due = lane.enrollment(enrollment_id).next_action_at
+    assert due is not None and due >= NOW + timedelta(days=4)
+    assert lane.claim(enrollment_id, now=due, **RETRY).claimed
+
+
+def test_a_second_retry_while_the_first_is_claimed_claims_nothing(lane: Lane) -> None:
+    enrollment_id = lane.enroll()
+    _ended(lane, enrollment_id, MessageOutcomeKind.NOT_TYPED)
+    first = lane.claim(enrollment_id, **RETRY)
+    assert first.claimed and first.message_id is not None
+    second = lane.claim(enrollment_id, **RETRY)
+    assert second.reasons == (Skip.STEP_ALREADY_SENT,)  # the step has its message: never twice
+    assert [m.id for m in lane.messages(enrollment_id)] == [first.message_id]
+    assert len([r for r in lane.runs() if r.kind is SyncRunKind.MESSAGE_SEND]) == 2
+
+
+@pytest.mark.parametrize("next_channel", [LINKEDIN, EMAIL])
+def test_a_not_typed_note_never_reaches_the_next_step(
+    session_factory: sessionmaker[Session], next_channel: TemplateChannel
+) -> None:
+    """not_typed, then Try again whose run dies with no outcome, then discard: step 2 is an
+    ordinary step (a plain Prefill, or an email the tick sends)."""
+    lane = make_lane(session_factory, channels=(LINKEDIN, next_channel))
+    _sent_hours(lane, any_time=True)
+    enrollment_id = lane.enroll()
+    _ended(lane, enrollment_id, MessageOutcomeKind.NOT_TYPED)
+    retry = lane.claim(enrollment_id, **RETRY)
+    assert retry.claimed and retry.message_id is not None
+    lane.finish_runs()  # the run ends without recording an outcome: interrupted
+    lane.write(lambda s, u: discard(s, u, retry.message_id or 0, settings=lane.settings, now=NOW))
+
+    enrollment = lane.enrollment(enrollment_id)
+    assert (enrollment.current_step, enrollment.not_sent_count) == (1, 0)
+    assert enrollment.not_sent_error is None
+    assert not linkedin_steps.needs_try_again(enrollment)
+    due = enrollment.next_action_at
+    assert due is not None
+    assert _try_again(lane, due) == []
+    lane.write(lambda s, u: record_poll(s, u, due - timedelta(seconds=30)))
+    if next_channel is LINKEDIN:
+        assert _ready_ids(lane, due) == [enrollment_id]
+        assert lane.claim(enrollment_id, now=due).claimed
+    else:
+        result = _tick(lane, due)
+        assert [f.enrollment_id for f, _ in result.fired] == [enrollment_id]
+
+
+def test_the_tick_and_the_dashboard_leave_out_a_step_waiting_for_try_again(lane: Lane) -> None:
+    waiting, fresh = lane.enroll(), lane.enroll()
+    _mark_typed_nothing(lane, waiting)
+    # A due time it got anyway (a guard's re-check, a cadence): still not "ready".
+    _set(lane, Enrollment, waiting, next_action_at=NOW - timedelta(minutes=5))
+    result = _tick(lane, NOW)
+    assert result.skipped().get(waiting) is None
+    assert result.skipped()[fresh] == (Skip.READY_TO_PREFILL,)
+    fires, total = lane.read(lambda s, u: engine.upcoming(s, u, limit=10, include_linkedin=True))
+    assert ([f.enrollment.id for f in fires], total) == ([fresh], 1)

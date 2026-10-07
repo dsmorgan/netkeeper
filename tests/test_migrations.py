@@ -19,7 +19,7 @@ import re
 import tokenize
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import pytest
 from alembic.autogenerate import compare_metadata
@@ -3061,30 +3061,41 @@ def _migration_0037() -> Any:
 
 
 def _seed_enrollments_that_tried(connection: Connection) -> None:
-    """Enrollment 1 typed nothing last time; 2 was too long; 3 waits on an email retry; 4
-    is a not_typed whose count was cleared. Each has a due time."""
-    _seed_a_sent_campaign(connection)
-    for id, error, count in (
-        (2, "too_long: the message is too long to type", 1),
-        (3, "rate limited", 2),
-        (4, "not_typed: the browser was busy", 0),
-    ):
+    """Campaign 1 has one LinkedIn step, campaign 2 one email step. Each enrollment has a
+    due time; only 1 and 6 wait for Try again (see :data:`_PARKED`)."""
+    _seed_users(connection, 1)
+    _insert_template(connection, id=1, channel="linkedin")
+    _insert_template(connection, id=2)
+    _insert_campaign(connection, id=1, status="active")
+    _insert_campaign(connection, id=2, status="active")
+    _insert_step(connection, id=1, campaign_id=1, template_id=1, channel="linkedin", mode="prefill")
+    _insert_step(connection, id=2, campaign_id=2, template_id=2)
+    not_typed = "not_typed: the Message control could not be clicked"
+    rows = (
+        # id, campaign, status, note, count
+        (1, 1, "active", not_typed, 1),
+        (2, 1, "active", "too_long: the message is too long to type", 1),
+        (3, 1, "active", "rate limited", 2),
+        (4, 1, "active", not_typed, 0),  # the count was cleared: no longer waiting
+        (5, 2, "active", not_typed, 1),  # an email step with a stale note
+        (6, 1, "paused", not_typed, 1),
+        (7, 1, "completed", not_typed, 1),
+        (8, 1, "active", not_typed, 1),  # its step has a message: claimed
+    )
+    for id, campaign_id, status, error, count in rows:
         _insert_contact(connection, id=id, user_id=1)
-        _insert_enrollment(connection, id=id, campaign_id=1, contact_id=id)
+        _insert_enrollment(connection, id=id, campaign_id=campaign_id, contact_id=id)
         connection.execute(
             text(
-                "UPDATE enrollments SET not_sent_error = :e, not_sent_count = :n,"
+                "UPDATE enrollments SET status = :s, not_sent_error = :e, not_sent_count = :n,"
                 " next_action_at = :t WHERE id = :id"
             ),
-            {"e": error, "n": count, "t": STAMP, "id": id},
+            {"s": status, "e": error, "n": count, "t": STAMP, "id": id},
         )
-    connection.execute(
-        text(
-            "UPDATE enrollments SET not_sent_error = :e, not_sent_count = 1,"
-            " next_action_at = :t WHERE id = 1"
-        ),
-        {"e": "not_typed: the Message control could not be clicked", "t": STAMP},
-    )
+    _insert_message(connection, id=1, enrollment_id=8, contact_id=8, step_id=1, status="scheduled")
+
+
+_PARKED: Final = {1, 6}
 
 
 def test_0037_adds_the_run_and_parks_what_typed_nothing(migration_engine: Engine) -> None:
@@ -3099,9 +3110,9 @@ def test_0037_adds_the_run_and_parks_what_typed_nothing(migration_engine: Engine
         due: dict[int, Any] = dict(
             connection.execute(text("SELECT id, next_action_at FROM enrollments ORDER BY id")).all()
         )
-        # Only the not_typed one still counted loses its due time: Try again claims it.
-        assert due[1] is None
-        assert all(due[id] is not None for id in (2, 3, 4))
+        # Only a live one whose LinkedIn step waits for Try again loses its due time.
+        assert {id for id, at in due.items() if at is None} == _PARKED
+        assert len(due) == 8
         assert (
             connection.execute(
                 text("SELECT last_prefill_run_id FROM enrollments WHERE id = 1")
@@ -3130,7 +3141,7 @@ def test_0037_adds_the_run_and_parks_what_typed_nothing(migration_engine: Engine
         connection.execute(text("DELETE FROM sync_runs WHERE id = 1"))
         kept = connection.execute(text("SELECT last_prefill_run_id FROM enrollments WHERE id = 1"))
         assert kept.scalar_one() is None  # SET NULL: the enrollment outlives the run
-        assert _count(connection, "enrollments") == 4
+        assert _count(connection, "enrollments") == 8
 
 
 def test_0037_downgrades_to_enrollments_without_the_run(migration_engine: Engine) -> None:
@@ -3142,5 +3153,5 @@ def test_0037_downgrades_to_enrollments_without_the_run(migration_engine: Engine
     columns = {c["name"] for c in inspect(migration_engine).get_columns("enrollments")}
     assert "last_prefill_run_id" not in columns
     with migration_engine.begin() as connection:
-        assert _count(connection, "enrollments") == 4
+        assert _count(connection, "enrollments") == 8
     migrations.upgrade(migration_engine, "0037")
