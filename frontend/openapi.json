@@ -1106,6 +1106,34 @@
         "title": "BulkSelection",
         "type": "object"
       },
+      "CampaignCapOut": {
+        "properties": {
+          "campaign_id": {
+            "title": "Campaign Id",
+            "type": "integer"
+          },
+          "daily_cap": {
+            "title": "Daily Cap",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sent_today": {
+            "title": "Sent Today",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "campaign_id",
+          "name",
+          "sent_today",
+          "daily_cap"
+        ],
+        "title": "CampaignCapOut",
+        "type": "object"
+      },
       "CampaignCreate": {
         "properties": {
           "daily_cap": {
@@ -7505,6 +7533,13 @@
             "title": "Email",
             "type": "string"
           },
+          "lower_campaign_caps": {
+            "items": {
+              "$ref": "#/components/schemas/CampaignCapOut"
+            },
+            "title": "Lower Campaign Caps",
+            "type": "array"
+          },
           "mailbox_id": {
             "title": "Mailbox Id",
             "type": "integer"
@@ -7518,7 +7553,8 @@
           "mailbox_id",
           "email",
           "sent_today",
-          "daily_cap"
+          "daily_cap",
+          "lower_campaign_caps"
         ],
         "title": "MailboxSendsOut",
         "type": "object"
@@ -9106,8 +9142,7 @@
             "type": "integer"
           },
           "status": {
-            "title": "Status",
-            "type": "string"
+            "$ref": "#/components/schemas/MessageStatus"
           },
           "step_position": {
             "anyOf": [

@@ -36,12 +36,13 @@ export const gmailActivityQuery = queryOptions({
 })
 
 /**
- * The posture rows that concern Gmail and campaign sending, by name. The rest of the
- * report is the LinkedIn extractor's, and stays on Settings, which shows every row.
+ * The posture rows that concern Gmail and campaign sending, by their stable `key`
+ * (`netkeeper/services/posture.py`). The rest of the report is the LinkedIn
+ * extractor's, and stays on Settings, which shows every row.
  */
-export const GMAIL_POSTURE_ROWS: readonly string[] = [
-  'reply poll',
-  'sending hours',
-  'next campaign send',
-  'campaign templates',
+export const GMAIL_POSTURE_KEYS: readonly string[] = [
+  'gmail_reply_poll',
+  'sending_hours',
+  'next_campaign_send',
+  'campaign_templates',
 ]

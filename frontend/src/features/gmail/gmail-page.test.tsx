@@ -73,10 +73,10 @@ function pollStatus(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function protection(name: string, overrides: Record<string, unknown> = {}) {
+function protection(name: string, key: string | null, overrides: Record<string, unknown> = {}) {
   return {
     name,
-    key: null,
+    key,
     status: 'on',
     value: `${name} value`,
     summary: `${name} summary`,
@@ -92,13 +92,13 @@ function posture() {
     timezone: 'America/Chicago',
     local_time: NOW,
     protections: [
-      protection('attach-only browser'),
-      protection('reply poll', { summary: 'every 10 min; 1 armed mailbox' }),
-      protection('sending hours', {
+      protection('attach-only browser', null),
+      protection('reply poll', 'gmail_reply_poll', { summary: 'every 10 min; 1 armed mailbox' }),
+      protection('sending hours', 'sending_hours', {
         status: 'unknown',
         warnings: ['Sending hours are not set.'],
       }),
-      protection('heat skip gate'),
+      protection('heat skip gate', null),
     ],
     warnings: [],
     notes: [],
@@ -170,6 +170,28 @@ describe('Gmail page', () => {
     expect(await screen.findByText('No email yet.')).toBeInTheDocument()
   })
 
+  it('hides a disconnected mailbox from the connection card', async () => {
+    renderPage({
+      mailboxes: status({
+        mailboxes: [
+          mailbox({ id: 1, email: 'old@example.com', status: 'disabled' }),
+          mailbox({ id: 2, email: 'live@example.com' }),
+        ],
+      }),
+    })
+
+    expect(await screen.findByText('live@example.com')).toBeInTheDocument()
+    expect(screen.queryByText('old@example.com')).not.toBeInTheDocument()
+  })
+
+  it('says nothing is connected when only a disconnected mailbox remains', async () => {
+    renderPage({
+      mailboxes: status({ mailboxes: [mailbox({ status: 'disabled' })] }),
+    })
+
+    expect(await screen.findByText(/No Gmail account is connected yet/)).toBeInTheDocument()
+  })
+
   it('shows the account, the client, and how it is armed', async () => {
     renderPage({
       mailboxes: status({
@@ -203,8 +225,22 @@ describe('Gmail page', () => {
       mailboxes: status({ mailboxes: [mailbox({ id: 3 })] }),
       activity: activity({
         mailboxes: [
-          { mailbox_id: 3, email: 'sender@example.com', sent_today: 80, daily_cap: 80 },
-          { mailbox_id: 4, email: 'other@example.com', sent_today: 10, daily_cap: 80 },
+          {
+            mailbox_id: 3,
+            email: 'sender@example.com',
+            sent_today: 80,
+            daily_cap: 80,
+            lower_campaign_caps: [],
+          },
+          {
+            mailbox_id: 4,
+            email: 'other@example.com',
+            sent_today: 10,
+            daily_cap: 80,
+            lower_campaign_caps: [
+              { campaign_id: 5, name: 'Small batch', sent_today: 2, daily_cap: 3 },
+            ],
+          },
         ],
       }),
     })
@@ -213,10 +249,11 @@ describe('Gmail page', () => {
     expect(meter).toHaveAttribute('aria-valuenow', '80')
     expect(await screen.findByText(/sender@example.com is at today’s cap/)).toBeInTheDocument()
     expect(screen.getAllByRole('note', { name: 'Daily cap' })).toHaveLength(1)
+    expect(screen.getByText(/Small batch has its own lower cap: 2 \/ 3 today/)).toBeInTheDocument()
   })
 
   it('warns before the cap is reached, and not when well under it', () => {
-    const base = { mailbox_id: 1, email: 'a@example.com', daily_cap: 10 }
+    const base = { mailbox_id: 1, email: 'a@example.com', daily_cap: 10, lower_campaign_caps: [] }
     expect(capWarning({ ...base, sent_today: 3 })).toBeNull()
     expect(capWarning({ ...base, sent_today: 8 })).toMatch(/close to today’s cap: 2 left/)
     expect(capWarning({ ...base, sent_today: 12 })).toMatch(/at today’s cap/)
@@ -303,6 +340,10 @@ describe('Gmail page', () => {
 
     const rows = await screen.findAllByRole('row')
     expect(rows).toHaveLength(3)
+    // The narrow-screen list carries the same rows (CSS shows one of the two).
+    expect(
+      within(screen.getByRole('list', { name: 'Recent email' })).getAllByRole('listitem'),
+    ).toHaveLength(2)
     expect(within(rows[1]!).getByText('Reply')).toBeInTheDocument()
     expect(within(rows[2]!).getByText('failed')).toBeInTheDocument()
     expect(within(rows[2]!).getByText('Gmail refused')).toBeInTheDocument()

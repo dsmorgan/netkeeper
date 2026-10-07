@@ -59,6 +59,18 @@ export function SendsCard() {
                     style={{ width: `${share}%` }}
                   />
                 </div>
+                {sends.lower_campaign_caps.length > 0 && (
+                  <ul
+                    className="space-y-0.5 text-xs text-muted-foreground"
+                    aria-label="Campaign caps"
+                  >
+                    {sends.lower_campaign_caps.map((cap) => (
+                      <li key={cap.campaign_id}>
+                        {cap.name} has its own lower cap: {cap.sent_today} / {cap.daily_cap} today.
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 {warning !== null && (
                   <p
                     role="note"

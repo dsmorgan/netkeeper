@@ -29,6 +29,7 @@ from netkeeper.campaigns import schedule
 from netkeeper.config import Settings
 from netkeeper.models import (
     Campaign,
+    CampaignStatus,
     CampaignStep,
     Contact,
     Enrollment,
@@ -36,11 +37,17 @@ from netkeeper.models import (
     MailboxStatus,
     Message,
     MessageDirection,
+    MessageStatus,
     TemplateChannel,
     User,
 )
 from netkeeper.scoping import scoped
-from netkeeper.services.campaign_engine import mailbox_count, slots_for
+from netkeeper.services.campaign_engine import (
+    campaign_cap,
+    campaign_count,
+    mailbox_count,
+    slots_for,
+)
 from netkeeper.services.mailboxes import MAILBOX_HARD_MAX_PER_DAY
 
 log = logging.getLogger(__name__)
@@ -49,18 +56,30 @@ RECENT_LIMIT = 20
 
 
 @dataclass(frozen=True, slots=True)
+class CampaignCap:
+    """An active campaign whose own daily cap is lower than its mailbox's (the tick
+    enforces both, so this is the one that stops it first)."""
+
+    campaign_id: int
+    name: str
+    sent_today: int
+    daily_cap: int
+
+
+@dataclass(frozen=True, slots=True)
 class MailboxSends:
     mailbox_id: int
     email: str
     sent_today: int
     daily_cap: int
+    lower_campaign_caps: tuple[CampaignCap, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class RecentMessage:
     id: int
     direction: MessageDirection
-    status: str
+    status: MessageStatus
     at: datetime
     campaign_id: int | None
     campaign_name: str | None
@@ -91,6 +110,39 @@ def _day(settings: Settings, user: User, now: datetime) -> tuple[datetime, datet
         return start, start + timedelta(days=1), "UTC"
 
 
+def _sends(
+    session: Session,
+    user: User,
+    box: Mailbox,
+    day_start: datetime,
+    day_end: datetime,
+    settings: Settings,
+) -> MailboxSends:
+    cap = max(0, min(box.daily_cap, MAILBOX_HARD_MAX_PER_DAY))
+    campaigns = session.scalars(
+        scoped(user, Campaign)
+        .where(Campaign.mailbox_id == box.id, Campaign.status == CampaignStatus.ACTIVE)
+        .order_by(Campaign.id)
+    ).all()
+    lower = tuple(
+        CampaignCap(
+            campaign_id=campaign.id,
+            name=campaign.name,
+            sent_today=campaign_count(session, user, campaign.id, day_start, day_end),
+            daily_cap=campaign_cap(settings, campaign),
+        )
+        for campaign in campaigns
+        if campaign_cap(settings, campaign) < cap
+    )
+    return MailboxSends(
+        mailbox_id=box.id,
+        email=box.email,
+        sent_today=mailbox_count(session, user, box.id, day_start, day_end),
+        daily_cap=cap,
+        lower_campaign_caps=lower,
+    )
+
+
 def _name(contact: Contact) -> str:
     first = contact.preferred_name or contact.first_name
     return " ".join(part for part in (first, contact.last_name) if part)
@@ -103,15 +155,7 @@ def gmail_activity(
     live = session.scalars(
         scoped(user, Mailbox).where(Mailbox.status != MailboxStatus.DISABLED).order_by(Mailbox.id)
     ).all()
-    sends = tuple(
-        MailboxSends(
-            mailbox_id=box.id,
-            email=box.email,
-            sent_today=mailbox_count(session, user, box.id, day_start, day_end),
-            daily_cap=max(0, min(box.daily_cap, MAILBOX_HARD_MAX_PER_DAY)),
-        )
-        for box in live
-    )
+    sends = tuple(_sends(session, user, box, day_start, day_end, settings) for box in live)
 
     when = func.coalesce(Message.sent_at, Message.scheduled_at, Message.created_at)
     rows = session.execute(
@@ -134,7 +178,7 @@ def gmail_activity(
         RecentMessage(
             id=message.id,
             direction=message.direction,
-            status=message.status.value,
+            status=message.status,
             at=at,
             campaign_id=campaign.id,
             campaign_name=campaign.name,
