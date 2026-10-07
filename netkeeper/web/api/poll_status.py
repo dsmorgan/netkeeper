@@ -26,7 +26,7 @@ from pydantic import BaseModel
 from netkeeper.models.base import utcnow
 from netkeeper.services import poll_status as service
 from netkeeper.services.campaign_sender import DRAFTS_POLL_EVERY, GmailSender
-from netkeeper.web.deps import CurrentUser, SessionDep, effective_settings, read_only
+from netkeeper.web.deps import CurrentUser, SessionDep, read_only, running_settings
 
 router = APIRouter(tags=["poll-status"])
 
@@ -102,7 +102,7 @@ def _serving(request: Request, user_id: int) -> service.Serving:
 @router.get("/poll-status", operation_id="get_poll_status")
 def get_poll_status(request: Request, user: CurrentUser, session: SessionDep) -> PollStatusOut:
     """Each check's last and next run. Read-only: it never triggers one."""
-    settings = effective_settings(request, session, user)
+    settings = running_settings(request, session, user)
     serving = _serving(request, user.id)
     now = utcnow()
     status = service.poll_status(session, user, now=now, settings=settings, serving=serving)

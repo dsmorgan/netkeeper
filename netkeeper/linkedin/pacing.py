@@ -467,6 +467,7 @@ def outside_window_message(
     *,
     start: time = DEFAULT_ACTIVE_START,
     end: time = DEFAULT_ACTIVE_END,
+    pinned_in: str | None = None,
 ) -> str:
     """The one sentence a run stopped or refused by active hours says (#213).
 
@@ -475,6 +476,8 @@ def outside_window_message(
     adjust." The log line, the run's note, a refused manual run,
     and the API's answer all use this, so a person reads one wording wherever
     they meet it. ``tz``'s name is printed as given (a :class:`ZoneInfo`'s key).
+    ``pinned_in`` is the config file that sets the hours, when one does: it wins over
+    Settings (#343), so the sentence names the file instead.
     """
     zone = ZoneInfo(tz) if isinstance(tz, str) else tz
     local_now = local_time_of(now_utc, zone)
@@ -483,8 +486,15 @@ def outside_window_message(
     when = {0: "today", 1: "tomorrow"}.get(days, f"on {opens:%A}")
     return (
         f"outside active hours ({start:%H:%M}-{end:%H:%M} {zone.key}); the next window"
-        f" opens at {opens:%H:%M} {when}. Change the active hours in Settings to adjust."
+        f" opens at {opens:%H:%M} {when}. {active_hours_advice(pinned_in)}"
     )
+
+
+def active_hours_advice(pinned_in: str | None) -> str:
+    """Where to change the active hours: the config file that sets them, or Settings."""
+    if pinned_in is not None:
+        return f"Change `[linkedin] active_hours` in {pinned_in} to adjust."
+    return "Change the active hours in Settings to adjust."
 
 
 # --- warm-up ---------------------------------------------------------------

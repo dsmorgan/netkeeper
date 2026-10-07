@@ -565,6 +565,14 @@ class BrowserWorker:
                     "first_inbox_poll",
                     "no inbox poll has completed yet: run `netkeeper linkedin inbox` by hand first",
                 )
+            if facts.trigger is SyncRunTrigger.SCHEDULED:
+                # #343: the scheduler's timetable was built from the active hours serve
+                # started with; a window narrowed on the Settings page since applies
+                # here at once. Runs a person starts are checked where they start.
+                try:
+                    runs.refuse_if_outside_active_hours(settings.linkedin, now=self._clock())
+                except (runs.OutsideActiveHours, runs.RunError) as exc:
+                    return "inactive", str(exc)
             try:
                 runs.refuse_if_flagged_or_hot(
                     session, user, facts.account_id, now=self._clock(), settings=settings.linkedin

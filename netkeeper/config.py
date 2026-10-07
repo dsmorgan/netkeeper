@@ -119,6 +119,9 @@ class LinkedInSettings:
     budget: BudgetSettings = field(default_factory=BudgetSettings)
     pacing: PacingSettings = field(default_factory=PacingSettings)
     heat: HeatSettings = field(default_factory=HeatSettings)
+    # The config file that sets ``active_hours``, when one does (#343): it wins over the
+    # Settings page, so "where to change them" names it. None: change them in Settings.
+    active_hours_pinned_in: str | None = field(default=None, compare=False, metadata=_SKIP)
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,9 +172,12 @@ class Settings:
     # The dotted keys whose value came from the Settings page (#343): see
     # ``netkeeper.services.ui_settings.resolve``. Empty until resolved.
     ui_keys: frozenset[str] = field(default=frozenset(), compare=False, metadata=_SKIP)
-    # The settings before the Settings page's values were laid over them, so resolving
-    # again starts from the file, not from a value since reset (#343). None: unresolved.
-    unresolved: Settings | None = field(default=None, compare=False, repr=False, metadata=_SKIP)
+    # For each key in ``ui_keys``, the value it had before the Settings page's value was
+    # laid over it, so resolving again restores those keys alone and never keeps a value
+    # since reset, whatever else a ``replace`` changed in between (#343).
+    ui_originals: tuple[tuple[str, Any], ...] = field(
+        default=(), compare=False, repr=False, metadata=_SKIP
+    )
 
 
 def load_settings(explicit: Path | None = None) -> Settings:
@@ -202,9 +208,12 @@ def _load_file(path: Path) -> Settings:
     raw, legacy_me = _drop_me(raw, source=path)
     settings = _from_table(Settings, raw, prefix="", source=path)
     log.debug("loaded settings from %s", path)
-    return replace(
-        settings, source_path=path, legacy_me=legacy_me, file_keys=frozenset(_leaf_keys(raw))
-    )
+    file_keys = frozenset(_leaf_keys(raw))
+    if "linkedin.active_hours" in file_keys:
+        settings = replace(
+            settings, linkedin=replace(settings.linkedin, active_hours_pinned_in=str(path))
+        )
+    return replace(settings, source_path=path, legacy_me=legacy_me, file_keys=file_keys)
 
 
 def _leaf_keys(raw: Mapping[str, object], prefix: str = "") -> list[str]:

@@ -683,6 +683,44 @@ def test_a_run_uses_the_settings_page_values(lane: Lane) -> None:
     assert worker._resolved(lane.user_id).linkedin.budget.li_prefills_per_day == 7
 
 
+@pytest.mark.parametrize(
+    ("kind", "job"),
+    [
+        (SyncRunKind.ENRICH, "enrich_contacts"),
+        (SyncRunKind.INBOX, "poll_inbox"),
+        (SyncRunKind.CONNECTIONS_FULL, "sync_connections"),
+        (SyncRunKind.CONNECTIONS_INCREMENTAL, "sync_connections"),
+    ],
+)
+async def test_each_run_kind_gets_the_settings_page_values_through_the_worker(
+    lane: Lane, monkeypatch: pytest.MonkeyPatch, kind: SyncRunKind, job: str
+) -> None:
+    """#343: execute() resolves the page's values once and hands every runner the same."""
+    seen: list[Any] = []
+
+    async def runner(*args: Any, **kwargs: Any) -> None:
+        seen.append(kwargs)
+
+    monkeypatch.setattr(f"netkeeper.worker.{job}", runner)
+    provider: AttachBrowserProvider = fake_provider(MessagingSite(ZEPHYRINE))[0]
+    worker = BrowserWorker(provider, lane.factory, lane.settings.linkedin)
+
+    def record(session: Session, user: User) -> int:
+        set_setting(session, user, "config.linkedin.budget.profile_visits_per_day", 33)
+        set_setting(session, user, "config.linkedin.active_hours", ["07:00", "20:00"])
+        set_setting(session, user, "config.campaigns.mailbox_daily_cap", 12)
+        return runs.create_run(session, user, kind, trigger=SyncRunTrigger.MANUAL, now=NOW).id
+
+    run_id = lane.write(record)
+    await worker.execute(run_id, lane.user_id)
+    [kwargs] = seen
+    linkedin = kwargs["settings"]
+    assert linkedin.budget.profile_visits_per_day == 33
+    assert linkedin.active_hours == ("07:00", "20:00")
+    if kind is SyncRunKind.INBOX:
+        assert kwargs["campaign_settings"].campaigns.mailbox_daily_cap == 12
+
+
 class RecordingSource:
     """A source that must never be reached."""
 

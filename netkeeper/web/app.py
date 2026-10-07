@@ -199,7 +199,9 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     tasks = TaskRunner(bus)
     app.state.settings = settings
     # The local user's settings in force at startup (#343): what the scheduler, the
-    # mailbox poll and the reply interval run with until serve restarts.
+    # mailbox poll and the reply interval run with until serve restarts. These are the
+    # first local user's values, used for every user: right for one user.
+    # TODO(#464): per-user values for the timetable, the monitor and the reply interval.
     app.state.started_settings = started
     app.state.started_user_id = local_user_id
     app.state.engine = engine

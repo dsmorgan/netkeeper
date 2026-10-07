@@ -1,0 +1,149 @@
+"""``netkeeper config adopt``: move what ``config.toml`` sets onto the Settings page (#343).
+
+A one-time helper. For each key the file sets that the Settings page can change, the
+value is checked the way the page checks it: one above its hard maximum is stored at
+the maximum (and reported); one the page cannot hold otherwise (below its minimum, the
+wrong type, a window that is not a window) stays in the file, and is reported. Keys the
+page never changes (``campaigns.linkedin_auto_send``, ``web.*``, pacing, ...) stay too.
+
+The file is edited line by line, so its comments and layout survive: each moved key's
+line (and the continuation lines of a value that spans several) is removed, and nothing
+else. The edit is checked by parsing the result: it must be the original minus exactly
+the moved keys. When it is not (a key written as a dotted key or an inline table, for
+example), :class:`AdoptError` says so and nothing is changed. Pure: text in, a plan out;
+the command writes the rows, the backup and the file.
+"""
+
+from __future__ import annotations
+
+import re
+import tomllib
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any
+
+from netkeeper.config import Settings
+from netkeeper.models import JsonValue
+from netkeeper.services import ui_settings
+
+_TABLE = re.compile(r"^\s*\[\s*([A-Za-z0-9_.\s-]+?)\s*\]\s*(#.*)?$")
+_KEY = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=")
+
+
+class AdoptError(ValueError):
+    """The file cannot be edited safely; nothing was changed."""
+
+
+@dataclass(frozen=True, slots=True)
+class AdoptPlan:
+    moved: dict[str, JsonValue] = field(default_factory=dict)
+    """Keys to store as Settings-page values, with the value to store."""
+    clamped: dict[str, tuple[Any, JsonValue]] = field(default_factory=dict)
+    """Keys whose file value was above the hard maximum: (the file's, the stored)."""
+    kept: dict[str, str] = field(default_factory=dict)
+    """Editable keys left in the file, and why."""
+    new_text: str = ""
+    """The file without the moved keys."""
+
+
+def plan(text: str, settings: Settings) -> AdoptPlan:
+    """What adopting ``text`` (the file ``settings`` was loaded from) would do."""
+    raw = tomllib.loads(text)
+    file_keys = settings.file_keys or frozenset()
+    moved: dict[str, JsonValue] = {}
+    clamped: dict[str, tuple[Any, JsonValue]] = {}
+    kept: dict[str, str] = {}
+    for spec in ui_settings.FIELDS:
+        if spec.key not in file_keys or not spec.editable:
+            continue
+        value = _lookup(raw, spec.key)
+        try:
+            moved[spec.key] = ui_settings.to_json(ui_settings.parse(spec, value))
+        except ValueError as exc:
+            if (
+                spec.maximum is not None
+                and isinstance(value, int | float)
+                and not isinstance(value, bool)
+                and value > spec.maximum
+            ):
+                top: JsonValue = spec.maximum if spec.kind == "float" else int(spec.maximum)
+                moved[spec.key] = top
+                clamped[spec.key] = (value, top)
+            else:
+                kept[spec.key] = str(exc)
+    new_text = remove_keys(text, set(moved))
+    return AdoptPlan(moved=moved, clamped=clamped, kept=kept, new_text=new_text)
+
+
+def remove_keys(text: str, keys: set[str]) -> str:
+    """``text`` without the lines that set ``keys``; AdoptError unless that is exactly what
+    parsing the result shows."""
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    table = ""
+    skipping = 0  # open brackets of a removed multi-line value
+    for line in lines:
+        if skipping:
+            skipping += _depth(line)
+            continue
+        header = _TABLE.match(line)
+        if header and not line.lstrip().startswith("[["):
+            table = re.sub(r"\s+", "", header.group(1))
+            out.append(line)
+            continue
+        key = _KEY.match(line)
+        if key is not None:
+            dotted = f"{table}.{key.group(1)}" if table else key.group(1)
+            if dotted in keys:
+                skipping = max(_depth(line.split("=", 1)[1]), 0)
+                continue
+        out.append(line)
+    new_text = "".join(out)
+    expected = tomllib.loads(text)
+    for moved in keys:
+        _drop(expected, moved)
+    try:
+        actual = tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise AdoptError(f"the edited file would not parse: {exc}") from exc
+    if actual != expected:
+        raise AdoptError(
+            "these keys are written in a way this command cannot remove line by line"
+            " (a dotted key or an inline table): " + ", ".join(sorted(keys))
+        )
+    return new_text
+
+
+def _depth(text: str) -> int:
+    """Open minus closed brackets outside strings and comments."""
+    depth = 0
+    quote: str | None = None
+    for char in text:
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in "\"'":
+            quote = char
+        elif char == "#":
+            break
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+    return depth
+
+
+def _lookup(raw: Mapping[str, Any], key: str) -> Any:
+    node: Any = raw
+    for part in key.split("."):
+        node = node[part]
+    return node
+
+
+def _drop(raw: dict[str, Any], key: str) -> None:
+    *parents, last = key.split(".")
+    node = raw
+    for part in parents:
+        node = node[part]
+    del node[last]
