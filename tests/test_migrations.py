@@ -9,6 +9,11 @@ the PostgreSQL params locally, start a throwaway server and point the variable a
         -e POSTGRES_DB=netkeeper_test -p 5432:5432 postgres:16
     NETKEEPER_TEST_DATABASE_URL=postgresql+psycopg://netkeeper:netkeeper@localhost/netkeeper_test \
         make test
+
+With ``pytest -n``, each xdist worker gets its own database, named after the one in
+the URL plus the worker id (``netkeeper_test_gw0``), so workers do not collide. The
+login in the URL needs the CREATEDB privilege then; the databases are dropped at the
+end of the session.
 """
 
 import importlib.util
@@ -25,7 +30,8 @@ import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Connection, Engine, MetaData, ScalarResult, inspect, text
+from sqlalchemy import Connection, Engine, MetaData, ScalarResult, create_engine, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 
 from netkeeper import migrations
@@ -65,6 +71,31 @@ def _drop_everything(engine: Engine) -> None:
     reflected.drop_all(engine)
 
 
+@pytest.fixture(scope="session")
+def pg_url(worker_id: str) -> Iterator[str]:
+    """The PostgreSQL URL this worker owns.
+
+    A single process (worker id ``master``) uses the database in the URL as is. Under
+    xdist each worker creates ``<database>_<worker id>`` and drops it at the end.
+    """
+    base = os.environ.get(PG_ENV, "")
+    if not base or worker_id == "master":
+        yield base
+        return
+    url = make_url(base)
+    name = f"{url.database}_{worker_id}"
+    admin = create_engine(url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as connection:
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+            connection.execute(text(f'CREATE DATABASE "{name}"'))
+        yield url.set(database=name).render_as_string(hide_password=False)
+        with admin.connect() as connection:
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+    finally:
+        admin.dispose()
+
+
 @pytest.fixture(params=BACKENDS)
 def migration_engine(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Engine]:
     """An empty database on the requested backend."""
@@ -72,7 +103,7 @@ def migration_engine(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator
     if backend == "sqlite":
         engine = make_engine(database_url(tmp_path))
     else:
-        engine = make_engine(os.environ[PG_ENV])
+        engine = make_engine(request.getfixturevalue("pg_url"))
         _drop_everything(engine)
     try:
         yield engine
