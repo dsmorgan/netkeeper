@@ -1030,6 +1030,69 @@ async def test_the_inbox_breaker_does_not_skip_any_other_kind(
     assert result is not None and result.fired is True
 
 
+# --- the inbox owner breaker: scheduled inbox fires only (#443) ------------------------
+
+
+def _owner_mismatches(session_factory: sessionmaker[Session], owner: User, polls: int) -> None:
+    with session_scope(session_factory, write=True) as session:
+        for _ in range(polls):
+            route_breaker.record_inbox_owner(
+                session, owner, ACCOUNT, owner_mismatch=True, completed=False, now=NOW
+            )
+
+
+async def test_a_tripped_inbox_owner_breaker_skips_an_inbox_fire(
+    session_factory: sessionmaker[Session],
+) -> None:
+    result, calls = await _fire_after(
+        session_factory,
+        scheduler.JobKind.INBOX,
+        lambda owner: _owner_mismatches(session_factory, owner, 2),
+    )
+    assert calls == 0
+    assert result is not None and result.fired is False
+    assert result.skipped_reason == "inbox_owner_mismatch"
+    assert result.next_due is not None
+    assert result.next_due > NOW + DEFAULT_SCHEDULES[scheduler.JobKind.INBOX].interval
+
+
+async def test_one_owner_mismatch_does_not_skip_an_inbox_fire(
+    session_factory: sessionmaker[Session],
+) -> None:
+    result, calls = await _fire_after(
+        session_factory,
+        scheduler.JobKind.INBOX,
+        lambda owner: _owner_mismatches(session_factory, owner, 1),
+    )
+    assert calls == 1
+    assert result is not None and result.fired is True
+
+
+async def test_a_corrupt_inbox_owner_row_skips_an_inbox_fire(
+    session_factory: sessionmaker[Session],
+) -> None:
+    def corrupt(owner: User) -> None:
+        with session_scope(session_factory, write=True) as session:
+            set_setting(
+                session, owner, f"linkedin.inbox_owner_mismatch_breaker.{ACCOUNT}", "not an object"
+            )
+
+    result, calls = await _fire_after(session_factory, scheduler.JobKind.INBOX, corrupt)
+    assert calls == 0
+    assert result is not None and result.skipped_reason == "inbox_owner_mismatch"
+
+
+@pytest.mark.parametrize("kind", [*_CONNECTIONS, scheduler.JobKind.ENRICH])
+async def test_the_inbox_owner_breaker_does_not_skip_any_other_kind(
+    session_factory: sessionmaker[Session], kind: scheduler.JobKind
+) -> None:
+    result, calls = await _fire_after(
+        session_factory, kind, lambda owner: _owner_mismatches(session_factory, owner, 2)
+    )
+    assert calls == 1
+    assert result is not None and result.fired is True
+
+
 @pytest.mark.parametrize("trip", ["route_changed", "answer_lost", "contact_info"])
 async def test_no_other_breaker_skips_an_inbox_fire(
     session_factory: sessionmaker[Session], trip: str

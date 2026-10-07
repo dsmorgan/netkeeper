@@ -246,6 +246,7 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "answer-lost limit",
         "Contact info breaker",
         "Inbox breaker",
+        "Inbox owner breaker",
         "network aging",
         "linkedin reply poll",
     ]
@@ -2301,3 +2302,67 @@ def test_a_linkedin_message_budget_above_20_a_day_is_a_note_and_the_report_stays
     assert _notes_for(calm, f"budget {action}") == ()
     assert risky.ok is True
     assert risky.warnings == ()
+
+
+# --- #443: the inbox owner breaker ---------------------------------------------------------
+
+
+def _owner_mismatches(writer: Session, user: User, polls: int) -> None:
+    for _ in range(polls):
+        route_breaker.record_inbox_owner(
+            writer, user, ACCOUNT, owner_mismatch=True, completed=False, now=NOW
+        )
+
+
+def test_a_clear_inbox_owner_breaker_shows_no_warning(writer: Session, user: User) -> None:
+    row = _row(_report(writer, user), "Inbox owner breaker")
+    assert row.status is Status.ON and row.warnings == ()
+    assert row.value.startswith("clear:")
+
+
+def test_one_owner_mismatch_shows_its_count_and_no_warning(writer: Session, user: User) -> None:
+    _owner_mismatches(writer, user, 1)
+    row = _row(_report(writer, user), "Inbox owner breaker")
+    assert row.status is Status.ON and row.warnings == ()
+    assert (
+        row.value
+        == "1 of 2 inbox polls in a row showed another mailbox (since 2026-09-23 18:00 UTC)"
+    )
+
+
+def test_a_tripped_inbox_owner_breaker_names_the_recorded_owner_fix(
+    writer: Session, user: User
+) -> None:
+    _owner_mismatches(writer, user, 2)
+    report = _report(writer, user)
+    row = _row(report, "Inbox owner breaker")
+    assert row.value.startswith("tripped: 2 inbox polls in a row showed another mailbox")
+    (warning,) = row.warnings
+    assert "Scheduled inbox polls are skipped" in warning
+    assert "a poll you run by hand is not" in warning
+    assert "netkeeper linkedin inbox-forget-owner" in warning
+    assert "releases the breaker" in warning and "reset-breaker" in warning
+    assert not report.ok
+    # It is its own streak: the unreadable-page breaker stays clear.
+    assert _row(report, "Inbox breaker").warnings == ()
+
+
+def test_a_tripped_inbox_owner_breaker_names_the_self_contact_when_its_urn_is_set(
+    writer: Session, user: User
+) -> None:
+    from netkeeper.crm.self_contact import ensure_self_contact
+
+    ensure_self_contact(writer, user).li_urn = "urn:li:fsd_profile:INVENTED"
+    _owner_mismatches(writer, user, 2)
+    (warning,) = _row(_report(writer, user), "Inbox owner breaker").warnings
+    assert "self contact's LinkedIn profile" in warning
+    assert "`netkeeper linkedin inbox-forget-owner` does not help" in warning
+
+
+def test_a_corrupt_inbox_owner_row_warns_unknown(writer: Session, user: User) -> None:
+    set_setting(writer, user, f"linkedin.inbox_owner_mismatch_breaker.{ACCOUNT}", "not an object")
+    report = _report(writer, user)
+    row = _row(report, "Inbox owner breaker")
+    assert row.status is Status.UNKNOWN
+    assert row.warnings and "Scheduled inbox polls are skipped" in row.warnings[0]
+    assert not report.ok

@@ -855,3 +855,54 @@ def test_a_tripped_inbox_breaker_after_a_fresh_poll_has_no_hold_text(world: Worl
     assert reason.startswith("The LinkedIn inbox poll is stopped after two polls found")
     assert "netkeeper linkedin inbox" in reason
     assert "LinkedIn steps" not in reason and "held" not in reason
+
+
+def _trip_owner(session: Session, user: User, account_id: int) -> None:
+    for _ in range(2):
+        route_breaker.record_inbox_owner(
+            session, user, account_id, owner_mismatch=True, completed=False, now=NOW
+        )
+
+
+def test_a_tripped_inbox_owner_breaker_blocks_the_inbox_poll_and_names_the_fix(
+    world: World,
+) -> None:
+    """#443: with no self contact URN the recorded owner is the cause, so the popover
+    names `inbox-forget-owner`; the other kinds are untouched."""
+    kinds = (JobKind.INBOX, JobKind.ENRICH)
+    for session, user in world.write():
+        _trip_owner(session, user, _arm_linkedin(session, user, kinds=kinds))
+
+    checks = world.read()
+
+    inbox = checks["linkedin_inbox"]
+    assert inbox.state is S.BLOCKED and inbox.next_at is None
+    reason = inbox.reason or ""
+    assert "showed another mailbox" in reason
+    assert "netkeeper linkedin inbox-forget-owner" in reason
+    assert checks["linkedin_enrich"].state in (S.SCHEDULED, S.DUE)
+
+
+def test_the_inbox_owner_popover_names_the_self_contact_when_its_urn_is_set(
+    world: World,
+) -> None:
+    from netkeeper.crm.self_contact import ensure_self_contact
+
+    for session, user in world.write():
+        _trip_owner(session, user, _arm_linkedin(session, user, kinds=(JobKind.INBOX,)))
+        ensure_self_contact(session, user).li_urn = "urn:li:fsd_profile:INVENTED"
+
+    reason = world.read()["linkedin_inbox"].reason or ""
+
+    assert "self contact" in reason and "its `li_urn`" in reason
+    assert "does not help" in reason
+
+
+def test_one_owner_mismatch_leaves_the_inbox_poll_scheduled(world: World) -> None:
+    for session, user in world.write():
+        account_id = _arm_linkedin(session, user, kinds=(JobKind.INBOX,))
+        route_breaker.record_inbox_owner(
+            session, user, account_id, owner_mismatch=True, completed=False, now=NOW
+        )
+
+    assert "showed another mailbox" not in (world.read()["linkedin_inbox"].reason or "")

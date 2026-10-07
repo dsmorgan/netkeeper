@@ -77,6 +77,7 @@ from netkeeper.campaigns.templates import (
     removed_field_campaigns,
 )
 from netkeeper.config import HeatSettings, LinkedInSettings, PacingSettings, Settings
+from netkeeper.crm import inbox_apply
 from netkeeper.crm.inbox_apply import short_first_poll
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin import heat as heat_math
@@ -550,6 +551,7 @@ def posture(
         _answer_lost_limit(session, user, account_id),
         _contact_info_breaker(session, user, account_id),
         _inbox_breaker(session, user, account_id, now=now),
+        _inbox_owner_breaker(session, user, account_id, now=now),
         _network_aging(session, user),
     ]
     protections.append(_linkedin_reply_poll(session, user, now=now))
@@ -1682,7 +1684,7 @@ def _linkedin_reply_poll(session: Session, user: User, *, now: datetime) -> Prot
         if newest is not None and newest.status is not SyncRunStatus.COMPLETED:
             why = f"; the newest poll ended {newest.stop_reason or newest.status.value}"
             if newest.stop_reason == "owner_mismatch":
-                why += " (if you changed accounts, run `netkeeper linkedin inbox-forget-owner`)"
+                why += f" ({inbox_apply.owner_mismatch_fix(session, user)})"
         reason = inbox_hold.why_stale(session, user, now=now)
         effect = (
             "LinkedIn prefills, and every step, email included, for a contact you are"
@@ -1992,6 +1994,68 @@ def _inbox_breaker(session: Session, user: User, account_id: int, *, now: dateti
             f" changed or could not be read{since}. Scheduled inbox polls are skipped,"
             f" and connections syncs are unaffected.{waits} To check whether the page"
             f" reads again, {release}",
+        ),
+    )
+
+
+def _inbox_owner_breaker(
+    session: Session, user: User, account_id: int, *, now: datetime
+) -> Protection:
+    """The inbox owner breaker's count (#443): consecutive LinkedIn inbox polls that ended
+    ``owner_mismatch``. Its own streak, kept apart from :func:`_inbox_breaker` because the
+    fix differs: a poll that completes releases it, by hand, and the warning names the
+    right correction (:func:`inbox_apply.owner_mismatch_fix`)."""
+    current = route_breaker.inbox_owner_state(session, user, account_id)
+    name = "Inbox owner breaker"
+    since = f" (since {current.since:%Y-%m-%d %H:%M UTC})" if current.since is not None else ""
+    fix = inbox_apply.owner_mismatch_fix(session, user)
+    held = inbox_hold.linkedin_in_use(session, user) and inbox_hold.stale(session, user, now=now)
+    waits = (
+        " LinkedIn prefills and steps for contacts you are watching are held until a poll"
+        " completes (the inbox hold, shown on the linkedin reply poll row)."
+        if held
+        else ""
+    )
+    release = (
+        "a poll that completes releases the breaker, or clear it directly with"
+        " `netkeeper linkedin schedule reset-breaker`"
+    )
+    if not current.readable:
+        return Protection(
+            name=name,
+            status=Status.UNKNOWN,
+            value="stored state unreadable; treated as tripped",
+            warnings=(
+                "the inbox owner breaker's stored state is corrupt and could not be read."
+                " Scheduled inbox polls are skipped until it is next written (fail closed)."
+                f"{waits} To check and repair it, run `netkeeper linkedin inbox` by hand:"
+                f" {release}",
+            ),
+        )
+    if current.count == 0:
+        return Protection(
+            name=name,
+            status=Status.ON,
+            value="clear: no consecutive inbox polls showed another mailbox than this account's",
+        )
+    if not current.tripped:
+        return Protection(
+            name=name,
+            status=Status.ON,
+            value=(
+                f"{current.count} of {route_breaker.INBOX_OWNER_THRESHOLD} inbox polls in a"
+                f" row showed another mailbox{since}"
+            ),
+        )
+    return Protection(
+        name=name,
+        status=Status.ON,
+        value=f"tripped: {current.count} inbox polls in a row showed another mailbox{since}",
+        warnings=(
+            f"{current.count} LinkedIn inbox polls in a row showed another mailbox than this"
+            f" account's{since}. Scheduled inbox polls are skipped; a poll you run by hand"
+            f" is not, and connections syncs are unaffected.{waits} To fix it: {fix}."
+            f" Then {release}",
         ),
     )
 

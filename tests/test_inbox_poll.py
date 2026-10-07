@@ -1206,3 +1206,34 @@ async def test_a_lost_browser_leaves_the_inbox_streak_alone(
     with pytest.raises(BrowserUnavailable):
         await _poll(session_factory, user_id, BrowserUnavailable("the tab went away"))
     assert _inbox_breaker(session_factory, user_id).count == 1
+
+
+# --- #443: the inbox owner breaker at the runner -------------------------------------------
+
+
+def _owner_breaker(factory: sessionmaker[Session], user_id: int) -> route_breaker.BreakerState:
+    with session_scope(factory, write=True) as session:
+        user = _user(session, user_id)
+        return route_breaker.inbox_owner_state(session, user, ensure_account(session, user).id)
+
+
+async def test_owner_mismatch_polls_trip_the_owner_breaker_at_two_and_a_completed_poll_clears_it(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    assert await _poll(session_factory, user_id, replace(delta(), owner_urn=OWNER_A)) == READ
+    other = replace(delta(), owner_urn=OWNER_B)
+    assert await _poll(session_factory, user_id, other) == "owner_mismatch"
+    assert _owner_breaker(session_factory, user_id).count == 1
+    assert not _owner_breaker(session_factory, user_id).tripped
+    # An unrelated ending leaves the count where it was.
+    assert await _poll(session_factory, user_id, delta(complete=False)) == INCOMPLETE
+    assert _owner_breaker(session_factory, user_id).count == 1
+    assert await _poll(session_factory, user_id, other) == "owner_mismatch"
+    assert _owner_breaker(session_factory, user_id).tripped
+    # The poll itself still runs (a manual poll is never gated), and one that completes
+    # releases the breaker.
+    assert await _poll(session_factory, user_id, replace(delta(), owner_urn=OWNER_A)) == READ
+    state = _owner_breaker(session_factory, user_id)
+    assert (state.count, state.tripped) == (0, False)
+    # An owner mismatch never moves the inbox breaker.
+    assert _inbox_breaker(session_factory, user_id).count == 0

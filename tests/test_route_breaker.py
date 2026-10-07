@@ -800,3 +800,113 @@ def test_a_corrupt_inbox_row_reads_as_tripped_and_heals(
     assert (updated.readable, updated.count, updated.tripped) == (True, 2, True)
     _inbox_completed(writer, user)
     assert not route_breaker.inbox_tripped(writer, user, ACCOUNT)
+
+
+# --- #443: the inbox owner breaker, a fifth streak ---------------------------------------
+
+
+def _owner_key(account_id: int) -> str:
+    return f"linkedin.inbox_owner_mismatch_breaker.{account_id}"
+
+
+def _owner_mismatch(
+    writer: Session, user: User, account_id: int = ACCOUNT, now: datetime = NOW
+) -> route_breaker.BreakerState:
+    return route_breaker.record_inbox_owner(
+        writer, user, account_id, owner_mismatch=True, completed=False, now=now
+    )
+
+
+def _owner_completed(writer: Session, user: User, account_id: int = ACCOUNT) -> None:
+    route_breaker.record_inbox_owner(
+        writer, user, account_id, owner_mismatch=False, completed=True, now=NOW
+    )
+
+
+def test_the_inbox_owner_threshold_is_two() -> None:
+    assert route_breaker.INBOX_OWNER_THRESHOLD == 2
+
+
+def test_two_owner_mismatches_trip_it_and_one_does_not(writer: Session, user: User) -> None:
+    assert not route_breaker.inbox_owner_tripped(writer, user, ACCOUNT)
+    _owner_mismatch(writer, user)
+    assert not route_breaker.inbox_owner_tripped(writer, user, ACCOUNT)
+    _owner_mismatch(writer, user, now=NOW + timedelta(hours=3))
+    state = route_breaker.inbox_owner_state(writer, user, ACCOUNT)
+    assert (state.count, state.since, state.tripped) == (2, NOW, True)
+
+
+def test_a_completed_poll_releases_the_owner_breaker_and_other_endings_keep_it(
+    writer: Session, user: User
+) -> None:
+    _owner_mismatch(writer, user)
+    _owner_mismatch(writer, user)
+    kept = route_breaker.record_inbox_owner(
+        writer, user, ACCOUNT, owner_mismatch=False, completed=False, now=NOW
+    )
+    assert kept.tripped
+    _owner_completed(writer, user)
+    state = route_breaker.inbox_owner_state(writer, user, ACCOUNT)
+    assert (state.count, state.since, state.tripped) == (0, None, False)
+
+
+def test_a_poll_cannot_both_mismatch_and_complete(writer: Session, user: User) -> None:
+    with pytest.raises(ValueError):
+        route_breaker.record_inbox_owner(
+            writer, user, ACCOUNT, owner_mismatch=True, completed=True, now=NOW
+        )
+
+
+def test_the_owner_breaker_needs_a_writer(
+    session_factory: sessionmaker[Session], user: User
+) -> None:
+    with session_scope(session_factory) as reader, pytest.raises(RuntimeError, match="writer"):
+        route_breaker.record_inbox_owner(
+            reader, user, ACCOUNT, owner_mismatch=True, completed=False, now=NOW
+        )
+
+
+def test_a_corrupt_owner_row_reads_tripped_and_stays_tripped_on_another_mismatch(
+    writer: Session, user: User
+) -> None:
+    set_setting(writer, user, _owner_key(ACCOUNT), "not an object")
+    assert route_breaker.inbox_owner_tripped(writer, user, ACCOUNT)
+    assert not route_breaker.inbox_owner_state(writer, user, ACCOUNT).readable
+    _owner_mismatch(writer, user)
+    assert route_breaker.inbox_owner_state(writer, user, ACCOUNT).count == 2
+    assert route_breaker.inbox_owner_tripped(writer, user, ACCOUNT)
+
+
+def test_the_owner_breaker_and_the_inbox_breaker_never_feed_each_other(
+    writer: Session, user: User
+) -> None:
+    for _ in range(route_breaker.INBOX_OWNER_THRESHOLD):
+        _owner_mismatch(writer, user)
+    assert not route_breaker.inbox_tripped(writer, user, ACCOUNT)
+    assert not route_breaker.tripped(writer, user, ACCOUNT)
+    for _ in range(route_breaker.INBOX_THRESHOLD):
+        _inbox_changed(writer, user)
+    _inbox_completed(writer, user)
+    assert route_breaker.inbox_owner_tripped(writer, user, ACCOUNT)
+    _owner_completed(writer, user)
+    for _ in range(route_breaker.INBOX_THRESHOLD):
+        _inbox_changed(writer, user)
+    assert not route_breaker.inbox_owner_tripped(writer, user, ACCOUNT)
+
+
+def test_reset_clears_the_owner_breaker_too(writer: Session, user: User) -> None:
+    _owner_mismatch(writer, user)
+    _owner_mismatch(writer, user)
+    route_breaker.reset(writer, user, ACCOUNT)
+    assert not route_breaker.inbox_owner_tripped(writer, user, ACCOUNT)
+    assert route_breaker.inbox_owner_state(writer, user, ACCOUNT).count == 0
+
+
+def test_the_owner_breaker_is_scoped_by_account_and_user(writer: Session) -> None:
+    ada = factories.make_user(writer)
+    bob = factories.make_user(writer)
+    _owner_mismatch(writer, ada, 1)
+    _owner_mismatch(writer, ada, 1)
+    assert route_breaker.inbox_owner_tripped(writer, ada, 1)
+    assert not route_breaker.inbox_owner_tripped(writer, ada, 2)
+    assert not route_breaker.inbox_owner_tripped(writer, bob, 1)

@@ -56,6 +56,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from netkeeper.config import Settings
+from netkeeper.crm import inbox_apply
 from netkeeper.models import (
     Campaign,
     Enrollment,
@@ -605,5 +606,12 @@ def _inbox_breaker(session: Session, user: User, account_id: int) -> tuple[Check
             "The LinkedIn inbox poll is stopped after two polls found the messaging page"
             " changed; run `netkeeper linkedin inbox` by hand to release it. See Posture on"
             " the Settings page",
+        )
+    if route_breaker.inbox_owner_tripped(session, user, account_id):
+        return (
+            CheckState.BLOCKED,
+            "The LinkedIn inbox poll is stopped after two polls showed another mailbox than"
+            f" this account's; {inbox_apply.owner_mismatch_fix(session, user)}. See Posture"
+            " on the Settings page",
         )
     return None

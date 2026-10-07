@@ -91,10 +91,20 @@ feed each other. The streak clears when an inbox poll ends ``completed``
 (:func:`record_inbox`), whatever its trigger, so a manual ``netkeeper linkedin
 inbox`` that completes releases it; :func:`reset` clears it with the others. Every
 other ending leaves the count where it was: ``owner_mismatch`` (the page read fine
-and showed another mailbox, which has its own fix, ``inbox-forget-owner``),
+and showed another mailbox, which has its own streak, the inbox owner breaker below),
 ``inbox_incomplete``, a budget refusal, a cancel, a checkpoint, a throttle, a
 log-out, or an exception. While it is tripped, #417's hold keeps LinkedIn steps
 waiting once the inbox goes stale, because no scheduled poll refreshes it.
+
+**The inbox owner breaker** (#443) is a fifth, separate streak for the one ending the
+inbox breaker leaves out: :data:`INBOX_OWNER_THRESHOLD` consecutive inbox polls ending
+``owner_mismatch`` (the page read fine and showed another mailbox than this account's)
+trip it, and scheduled inbox fires are then skipped as ``"inbox_owner_mismatch"``: each
+one would load the messaging page again and write nothing. The streak clears when an inbox
+poll ends ``completed`` (:func:`record_inbox_owner`), whatever its trigger, so a manual
+poll never waits on it and one that completes releases it; :func:`reset` clears it too.
+Every other ending leaves the count where it was. It never feeds the inbox breaker and the
+inbox breaker never feeds it.
 
 Persisted like :mod:`netkeeper.services.heat`: a ``settings_kv`` row keyed by
 account id, read and written through a session and a ``User`` -- the
@@ -157,6 +167,15 @@ _INBOX_KEY_PREFIX: Final = "linkedin.inbox_route_changed_breaker"
 #: having changed. A higher bar would only buy more page loads against a changed page.
 INBOX_THRESHOLD: Final = 2
 
+_INBOX_OWNER_KEY_PREFIX: Final = "linkedin.inbox_owner_mismatch_breaker"
+
+#: Consecutive inbox polls ending ``owner_mismatch`` that trip the inbox owner breaker
+#: (#443). Pinned literally. The same bar as the inbox breaker's: one mismatch can be a
+#: tab on the wrong account that a retry would not repeat; two in a row, a whole interval
+#: apart, is a recorded owner (or self contact URN) that does not match the signed-in
+#: account, which only a person can fix.
+INBOX_OWNER_THRESHOLD: Final = 2
+
 
 @dataclass(frozen=True, slots=True)
 class BreakerState:
@@ -179,7 +198,8 @@ class BreakerState:
     #: The count that trips this streak: :data:`THRESHOLD` for the route-changed
     #: breaker, :data:`ANSWER_LOST_THRESHOLD` for the answer-lost limit,
     #: :data:`CONTACT_INFO_THRESHOLD` for the Contact info breaker,
-    #: :data:`INBOX_THRESHOLD` for the inbox breaker.
+    #: :data:`INBOX_THRESHOLD` for the inbox breaker, :data:`INBOX_OWNER_THRESHOLD` for the
+    #: inbox owner breaker.
     threshold: int = THRESHOLD
 
     @property
@@ -407,12 +427,60 @@ def record_inbox(
     return updated
 
 
+def inbox_owner_state(session: Session, user: User, account_id: int) -> BreakerState:
+    """The inbox owner breaker's streak (#443): how many consecutive inbox polls have
+    ended ``owner_mismatch``, and when the streak started. Read-only."""
+    return _load_streak(session, user, account_id, _INBOX_OWNER)
+
+
+def inbox_owner_tripped(session: Session, user: User, account_id: int) -> bool:
+    """Whether the inbox owner breaker is tripped: the streak is at or above
+    :data:`INBOX_OWNER_THRESHOLD`, or unreadable (fail closed). Read-only. The scheduler
+    and the worker ask it before a scheduled inbox poll; a manual poll never does."""
+    return inbox_owner_state(session, user, account_id).tripped
+
+
+def record_inbox_owner(
+    session: Session,
+    user: User,
+    account_id: int,
+    *,
+    owner_mismatch: bool,
+    completed: bool,
+    now: datetime,
+) -> BreakerState:
+    """Record one inbox poll's outcome on the inbox owner breaker (#443). Needs a writer
+    session.
+
+    ``owner_mismatch`` (the poll ended ``owner_mismatch``) extends the streak by one.
+    ``completed`` (the poll ended ``completed``) clears it, whatever the trigger. Neither
+    leaves the count where it was, and a corrupt row stays as it is (still read as
+    tripped).
+    """
+    _require_writer(session, "route_breaker.record_inbox_owner")
+    if owner_mismatch and completed:
+        raise ValueError("a poll cannot both end owner_mismatch and complete")
+    current = _load_streak(session, user, account_id, _INBOX_OWNER)
+    if completed:
+        updated = BreakerState(count=0, since=None, threshold=INBOX_OWNER_THRESHOLD)
+    elif owner_mismatch:
+        # Fail closed as record() does: a corrupt row stays tripped, not count=1.
+        count = current.count + 1 if current.readable else INBOX_OWNER_THRESHOLD
+        updated = BreakerState(
+            count=count, since=current.since or now, threshold=INBOX_OWNER_THRESHOLD
+        )
+    else:
+        return current
+    _store_streak(session, user, account_id, _INBOX_OWNER, updated)
+    return updated
+
+
 def reset(session: Session, user: User, account_id: int) -> BreakerState:
     """Clear the breaker directly (``netkeeper linkedin schedule reset-breaker``),
-    and every answer-lost streak with it (#199), the Contact info breaker (#424), and the
-    inbox breaker (#437): one command clears whatever skips scheduled LinkedIn runs after
-    failed runs. Needs a writer session. Idempotent. Returns the route-changed breaker's
-    cleared state."""
+    and every answer-lost streak with it (#199), the Contact info breaker (#424), the
+    inbox breaker (#437), and the inbox owner breaker (#443): one command clears whatever
+    skips scheduled LinkedIn runs after failed runs. Needs a writer session. Idempotent.
+    Returns the route-changed breaker's cleared state."""
     _require_writer(session, "route_breaker.reset")
     cleared = BreakerState(count=0, since=None)
     _store(session, user, account_id, cleared)
@@ -438,6 +506,13 @@ def reset(session: Session, user: User, account_id: int) -> BreakerState:
         _INBOX,
         BreakerState(count=0, since=None, threshold=INBOX_THRESHOLD),
     )
+    _store_streak(
+        session,
+        user,
+        account_id,
+        _INBOX_OWNER,
+        BreakerState(count=0, since=None, threshold=INBOX_OWNER_THRESHOLD),
+    )
     return cleared
 
 
@@ -460,6 +535,7 @@ _CONTACT_INFO: Final = _Streak(
     _CONTACT_INFO_KEY_PREFIX, CONTACT_INFO_THRESHOLD, "Contact info breaker"
 )
 _INBOX: Final = _Streak(_INBOX_KEY_PREFIX, INBOX_THRESHOLD, "inbox breaker")
+_INBOX_OWNER: Final = _Streak(_INBOX_OWNER_KEY_PREFIX, INBOX_OWNER_THRESHOLD, "inbox owner breaker")
 
 
 def _streak(lost_kind: SyncRunKind | None) -> _Streak:
