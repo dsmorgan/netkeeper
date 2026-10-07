@@ -1,6 +1,7 @@
 [
   "a Message control opens something other than this contact's compose",
   "a key call failed",
+  "a message bubble is already open in Chrome, minimized ones included; close it, then try again",
   "a new-message compose option names a conversation",
   "a reply compose option names no conversation",
   "after typing: {}",

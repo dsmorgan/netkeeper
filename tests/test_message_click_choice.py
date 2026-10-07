@@ -12,6 +12,7 @@ invented ``data-box`` boxes stand in for the page's layout.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 
@@ -27,9 +28,12 @@ from messaging_pages import (
 )
 from test_prefill_page import assert_no_keys, prefill
 
+from netkeeper.linkedin import browser as browser_module
 from netkeeper.linkedin.browser import (
+    GEOMETRY_TIMEOUT_S,
     HIT_TOLERANCE_PX,
     MESSAGE_MAX_CANDIDATES,
+    MESSAGE_MAX_LINKS,
     MESSAGE_NOT_ON_SCREEN,
     MESSAGE_TOP_CARD,
     ClickFailure,
@@ -58,6 +62,8 @@ def geometry(*hits: Mapping[str, float] | None) -> ClickGeometry:
 def test_the_choice_constants_are_pinned() -> None:
     assert MESSAGE_TOP_CARD == "xpath=following::a"
     assert MESSAGE_MAX_CANDIDATES == 8
+    assert MESSAGE_MAX_LINKS == 32
+    assert GEOMETRY_TIMEOUT_S == 3.0
     assert HIT_TOLERANCE_PX == 1.0
     assert MESSAGE_NOT_ON_SCREEN == (
         "no Message control is on screen with nothing over it; close or move what covers it"
@@ -275,9 +281,13 @@ async def test_a_sticky_copy_first_in_the_page_and_off_screen_is_never_clicked()
         "message_click_target": "top_card",
         "message_click_failure": None,
     }
-    # The geometry session sent its three reads, and detached.
+    # The geometry session sent its reads, and detached.
     [session] = site.geometry_sessions
     assert session.detached
+    # The top card is one candidate, not two: it's found again among the visible links
+    # and passed over, so only the two controls on screen are hit-tested.
+    hits = [m for m, _ in session.sent if m == "DOM.getNodeForLocation"]
+    assert len(hits) == 2
     assert {method for method, _ in session.sent} == {
         "Page.getLayoutMetrics",
         "DOM.getDocument",
@@ -358,6 +368,20 @@ async def test_a_geometry_read_that_fails_clicks_the_top_card_unchecked() -> Non
     assert all(s.detached for s in site.geometry_sessions)
 
 
+async def test_a_geometry_read_that_hangs_times_out_and_clicks_unchecked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(browser_module, "GEOMETRY_TIMEOUT_S", 0.05)
+    site = _site(_profile(sticky="0,-64,1280,64"))
+    site.geometry_hangs = True
+    async with asyncio.timeout(5):  # without the read's own timeout, this would hang
+        ran = await prefill(site)
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert _clicked_key(site) == "top-card"
+    assert ran.run.message_click_diagnostics["message_click_target"] == "unchecked"
+    assert all(s.detached for s in site.geometry_sessions)
+
+
 async def test_without_one_h1_there_is_no_top_card_and_the_first_clear_control_wins() -> None:
     profile = _profile(sticky="0,0,1280,64").replace(f"<h1>{ZEPHYRINE.name}</h1>", "")
     site = _site(profile)
@@ -394,10 +418,10 @@ async def test_a_click_that_raises_records_its_category_and_logs_no_page_text(
     assert "secret-overlay" not in caplog.text and "Call log" not in caplog.text
 
 
-async def test_minimized_bubbles_from_earlier_prefills_refuse_under_decision_3() -> None:
+async def test_minimized_bubbles_from_earlier_prefills_refuse_before_the_click() -> None:
     """Three minimized bubbles, as on the CP8 page: each a ``Messaging`` dialog whose
-    composer is hidden but still on the page. The click is fine; decision 3 then
-    refuses before any key, in words that say a minimized bubble counts."""
+    composer is hidden but still on the page. Decision 3, read before the click,
+    refuses with no click, in words that say a minimized bubble counts."""
     minimized = "".join(
         existing_bubble_html(THADDEUS).replace(
             'role="dialog"',
@@ -411,11 +435,12 @@ async def test_minimized_bubbles_from_earlier_prefills_refuse_under_decision_3()
     site.bubble = Bubble(ZEPHYRINE)
     ran = await prefill(site)
     assert_no_keys(ran)
-    assert _clicked_key(site) == "top-card"
+    assert site.tab.clicks == [] and not ran.run.message_click_attempted
     assert ran.result.outcome.reason == (
-        "another message composer is on the page, in an open or minimized bubble;"
-        " close the other bubbles"
+        "a message bubble is already open in Chrome, minimized ones included;"
+        " close it, then try again"
     )
+    assert site.geometry_sessions == []  # nothing read past the refusal
 
 
 def test_the_click_point_is_the_middle_of_the_first_quad_with_area_on_screen() -> None:
