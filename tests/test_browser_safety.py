@@ -1894,41 +1894,84 @@ def _methods(tree: ast.Module, cls: str) -> dict[str, ast.AsyncFunctionDef | ast
     return {n.name: n for n in found.body if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef)}
 
 
+@dataclass(frozen=True)
+class _Scope:
+    """Where a walked function lives: its class's methods (``self.<name>``), its module's
+    functions (a bare call), and, for ``PagePrefill``, ``BrowserRun``'s (``self._run.<name>``)."""
+
+    methods: dict[str, ast.AsyncFunctionDef | ast.FunctionDef]
+    functions: dict[str, ast.AsyncFunctionDef | ast.FunctionDef]
+    run: _Scope | None = None
+
+
+def _scope(tree: ast.Module, cls: str, run: _Scope | None = None) -> _Scope:
+    functions = {
+        n.name: n for n in tree.body if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef)
+    }
+    return _Scope(_methods(tree, cls), functions, run)
+
+
+def _browser_run_scope() -> _Scope:
+    return _scope(parse(read_source(LINKEDIN / "browser.py")), "BrowserRun")
+
+
 def _reached_banned(
     tree: ast.Module,
     cls: str,
     roots: list[ast.AST],
     banned: frozenset[str] = AFTER_CLICK_BANNED,
+    *,
+    run: _Scope | None = None,
 ) -> list[str]:
     """Every banned name reached from ``roots``, following ``self.<method>`` into the
-    class's own methods and a bare call into the module's own functions, transitively."""
-    methods = _methods(tree, cls)
-    functions = {
-        n.name: n for n in tree.body if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef)
-    }
+    class's own methods, a bare call into the module's own functions, and, when ``run``
+    is given, ``self._run.<method>`` into ``BrowserRun``'s, transitively. A banned name
+    as an attribute, called or only held, or as a string literal, is a finding."""
     found: list[str] = []
-    seen: set[str] = set()
-    queue = list(roots)
+    seen: set[tuple[int, str]] = set()
+    queue: list[tuple[ast.AST, _Scope]] = [(root, _scope(tree, cls, run)) for root in roots]
+
+    def follow(scope: _Scope | None, table: str, name: str) -> None:
+        if scope is None:
+            return
+        target = getattr(scope, table).get(name)
+        if target is not None and (id(target), name) not in seen:
+            seen.add((id(target), name))
+            queue.append((target, scope))
+
     while queue:
-        root = queue.pop()
+        root, scope = queue.pop()
         for node in walk(root):
-            name = None
             if isinstance(node, ast.Attribute):
                 name = node.attr
                 if name in banned:
                     found.append(f"{name} (line {node.lineno})")
-                is_self = isinstance(node.value, ast.Name) and node.value.id == "self"
-                if is_self and name in methods and name not in seen:
-                    seen.add(name)
-                    queue.append(methods[name])
+                owner = node.value
+                if isinstance(owner, ast.Name) and owner.id == "self":
+                    follow(scope, "methods", name)
+                elif (
+                    isinstance(owner, ast.Attribute)
+                    and owner.attr == "_run"
+                    and isinstance(owner.value, ast.Name)
+                    and owner.value.id == "self"
+                ):
+                    follow(scope.run, "methods", name)
             elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                name = node.func.id
-                if name in functions and name not in seen:
-                    seen.add(name)
-                    queue.append(functions[name])
+                follow(scope, "functions", node.func.id)
             elif isinstance(node, ast.Constant) and node.value in banned:
                 found.append(f"{node.value!r} (line {node.lineno})")
     return found
+
+
+def _held_not_called(function: ast.AST, banned: frozenset[str] = AFTER_CLICK_BANNED) -> list[str]:
+    """Every banned attribute in ``function`` that isn't the callee of a call: one held in
+    a local (``nav = self._run.goto``) could be called after the click under another name."""
+    callees = {id(n.func) for n in walk(function) if isinstance(n, ast.Call)}
+    return [
+        f"{n.attr} (line {n.lineno})"
+        for n in walk(function)
+        if isinstance(n, ast.Attribute) and n.attr in banned and id(n) not in callees
+    ]
 
 
 def _after_click_in_prefill(source: str) -> list[ast.AST]:
@@ -1955,8 +1998,16 @@ def test_nothing_navigates_after_the_message_click_or_in_hand_over() -> None:
     reaches, navigates nothing. ``_ensure_page`` refuses at run time too; this pins it
     in the source."""
     messaging = read_source(LINKEDIN / "page_messaging.py")
-    reached = _reached_banned(parse(messaging), "PagePrefill", _after_click_in_prefill(messaging))
+    reached = _reached_banned(
+        parse(messaging),
+        "PagePrefill",
+        _after_click_in_prefill(messaging),
+        run=_browser_run_scope(),
+    )
     assert not reached, f"PagePrefill.prefill navigates after the click: {reached}"
+    prefill = _methods(parse(messaging), "PagePrefill")["prefill"]
+    held = _held_not_called(prefill)
+    assert not held, f"PagePrefill.prefill holds a navigation without calling it: {held}"
     browser = read_source(LINKEDIN / "browser.py")
     tree = parse(browser)
     hand_over = _methods(tree, "BrowserRun")["hand_over"]
@@ -1971,11 +2022,36 @@ def test_nothing_navigates_after_the_message_click_or_in_hand_over() -> None:
         ("prefill_helper", "await self._run.ensure_page()"),
         ("hand_over", "await self.goto('https://www.linkedin.com/feed/')"),
         ("hand_over_helper", "await page.reload()"),
+        ("type_into_composer", "await self.goto('https://www.linkedin.com/feed/')"),
+        ("alias", "nav = self._run.goto"),
     ],
 )
 def test_the_navigation_pin_catches_each_mutation(where: str, line: str) -> None:
     """The mutations #456 names, and one level of indirection for each, fail the pin."""
-    if where.startswith("prefill"):
+    if where == "alias":
+        # Held before the click, called after it under another name.
+        source = read_source(LINKEDIN / "page_messaging.py")
+        anchor = "        await self._run.bring_tab_forward()\n"
+        later = "            if not click.clicked:\n"
+        assert anchor in source and later in source
+        mutated = source.replace(anchor, f"        {line}\n{anchor}", 1).replace(
+            later, f"            await nav(self._origin)\n{later}", 1
+        )
+        prefill = _methods(ast.parse(mutated), "PagePrefill")["prefill"]
+        reached = _held_not_called(prefill)
+    elif where == "type_into_composer":
+        source = read_source(LINKEDIN / "page_messaging.py")
+        browser = read_source(LINKEDIN / "browser.py")
+        anchor = "        page = self._page\n"
+        body = browser[browser.index("    async def type_into_composer(") :]
+        assert anchor in body
+        cut = browser.index("    async def type_into_composer(") + body.index(anchor)
+        mutated_browser = f"{browser[:cut]}        {line}\n{browser[cut:]}"
+        run = _scope(ast.parse(mutated_browser), "BrowserRun")
+        reached = _reached_banned(
+            parse(source), "PagePrefill", _after_click_in_prefill(source), run=run
+        )
+    elif where.startswith("prefill"):
         source = read_source(LINKEDIN / "page_messaging.py")
         if where == "prefill":
             anchor = "            if not click.clicked:\n"

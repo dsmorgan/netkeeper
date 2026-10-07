@@ -202,6 +202,12 @@ const BEFORE_CLICK: readonly Rule[] = [
     bubble: 'closed',
   },
   {
+    match:
+      'a message bubble is already open in Chrome, minimized ones included; close it, then try again',
+    text: "A message bubble was already open in Chrome, perhaps minimized, so netkeeper didn't click Message. Close it, then try again. Closing a bubble deletes any draft in it.",
+    bubble: 'closed',
+  },
+  {
     match: 'no Message control is on screen with nothing over it; close or move what covers it',
     text: "No Message button on the profile was on screen with nothing covering it, so netkeeper didn't click. Close or minimize what covers it, such as a message bubble, and try again.",
     bubble: 'closed',

@@ -589,20 +589,58 @@ async def test_zero_or_two_h1s_skip_the_name_check_and_the_card_decides(h1s: int
 
 
 @pytest.mark.parametrize("hidden", [False, True])
-async def test_another_composer_on_the_page_refuses(hidden: bool) -> None:
+async def test_a_bubble_already_on_the_page_refuses_before_the_click(hidden: bool) -> None:
+    """#444: decision 3 is read before the click too, hidden bubbles counted, so a
+    leftover bubble costs no click and opens no second bubble."""
     other = existing_bubble_html(THADDEUS)
     if hidden:
         other = f'<div style="display:none">{other}</div>'
     ran = await prefill(MessagingSite(ZEPHYRINE, before=other))
     assert_no_keys(ran)
+    assert ran.result.outcome.reason == browser_module.BUBBLE_ALREADY_OPEN
+    assert ran.tab.clicks == [] and not ran.run.message_click_attempted
+    assert len(ran.tab.composers()) == 1  # no second bubble
+
+
+async def test_a_minimized_dialog_alone_refuses_before_the_click() -> None:
+    dialog = '<div role="dialog" aria-label="Messaging" hidden><p>minimized</p></div>'
+    ran = await prefill(MessagingSite(ZEPHYRINE, before=dialog))
+    assert_no_keys(ran)
+    assert ran.result.outcome.reason == browser_module.BUBBLE_ALREADY_OPEN
+    assert ran.tab.clicks == [] and not ran.run.message_click_attempted
+
+
+def test_the_bubble_already_open_words_are_pinned() -> None:
+    assert browser_module.BUBBLE_ALREADY_OPEN == (
+        "a message bubble is already open in Chrome, minimized ones included;"
+        " close it, then try again"
+    )
+
+
+@pytest.mark.parametrize("hidden", [False, True])
+async def test_another_composer_arriving_with_the_click_refuses(hidden: bool) -> None:
+    other = existing_bubble_html(THADDEUS)
+    if hidden:
+        other = f'<div style="display:none">{other}</div>'
+    bubble = Bubble(ZEPHYRINE, html=other + existing_bubble_html(ZEPHYRINE))
+    ran = await prefill(MessagingSite(ZEPHYRINE, bubble=bubble))
+    assert_no_keys(ran)
+    assert len(ran.tab.clicks) == 1
     assert "another message composer is on the page" in ran.result.outcome.reason
 
 
-async def test_two_messaging_dialogs_refuse_even_without_a_second_composer() -> None:
+async def test_two_messaging_dialogs_after_the_click_refuse_without_a_second_composer() -> None:
     dialog = '<div role="dialog" aria-label="Messaging" hidden><p>minimized</p></div>'
-    for bubble in (Bubble(ZEPHYRINE), Bubble(ZEPHYRINE, None, dialog_root=True)):
-        ran = await prefill(MessagingSite(ZEPHYRINE, bubble=bubble, before=dialog))
+    rooted = (
+        f'<div role="dialog" aria-label="Messaging">{never_messaged_bubble_html([ZEPHYRINE])}</div>'
+    )
+    for bubble in (
+        Bubble(ZEPHYRINE, html=dialog + existing_bubble_html(ZEPHYRINE)),
+        Bubble(ZEPHYRINE, None, html=dialog + rooted),
+    ):
+        ran = await prefill(MessagingSite(ZEPHYRINE, bubble=bubble))
         assert_no_keys(ran)
+        assert len(ran.tab.clicks) == 1
         assert "another message bubble is on the page" in ran.result.outcome.reason
 
 

@@ -607,6 +607,13 @@ def classify_click_failure(exc: BaseException) -> ClickFailure:
 MESSAGE_TOP_CARD: Final = "xpath=following::a"
 #: How many visible Message controls the click looks at. The capture rendered three.
 MESSAGE_MAX_CANDIDATES: Final = 8
+#: How many links with a verified compose ``href`` the geometry read describes. Hidden
+#: copies count here (the read can't tell them apart before it asks), so the cap sits far
+#: above the three the capture rendered; every one already names the contact (decision 4).
+MESSAGE_MAX_LINKS: Final = 32
+#: How long the whole geometry read may take, in seconds. A renderer that hangs makes the
+#: read fail, and the click chooses without geometry.
+GEOMETRY_TIMEOUT_S: Final = 3.0
 #: How far a hit element's box may stick out of the control's box and still count as
 #: the control's own (a rounding of sub-pixel layout), in CSS pixels.
 HIT_TOLERANCE_PX: Final = 1.0
@@ -658,6 +665,10 @@ def _clear(box: Mapping[str, float], hit: Mapping[str, float] | None) -> bool:
     return hit is not None and _inside(hit, box) and _inside(box, hit)
 
 
+#: The refusal, before the click, when a message bubble is already on the page (#444).
+BUBBLE_ALREADY_OPEN: Final = (
+    "a message bubble is already open in Chrome, minimized ones included; close it, then try again"
+)
 #: The refusal when no control is on screen and clear, and none can be scrolled to.
 MESSAGE_NOT_ON_SCREEN: Final = (
     "no Message control is on screen with nothing over it; close or move what covers it"
@@ -1776,6 +1787,18 @@ class BrowserRun:
         if not _on_path(page.url, profile_path):
             return MessageClick(False, False, "the tab left the profile before the click")
         tab = cast(_MessagingPage, page)
+        # Decision 3 before the click (#444): a bubble already on the page, minimized ones
+        # included, would make the check after the click refuse anyway, at the cost of a
+        # click and a second bubble. The same queries, hidden elements counted.
+        try:
+            leftover = await self._bubble_already_open(tab)
+        except Exception as exc:
+            if self._lost(page):
+                raise BrowserUnavailable("lost the tab while looking for open bubbles") from exc
+            return MessageClick(False, False, "the Message control could not be read")
+        if leftover:
+            log.info("prefill: a message bubble was already on the page; nothing was clicked")
+            return MessageClick(False, False, BUBBLE_ALREADY_OPEN)
         controls = tab.get_by_role(
             MESSAGE_CONTROL_ROLE, name=MESSAGE_CONTROL_NAME, exact=True, include_hidden=True
         )
@@ -1847,6 +1870,17 @@ class BrowserRun:
         self._message_click_landed = True
         return MessageClick(True, True, target=chosen)
 
+    async def _bubble_already_open(self, tab: _MessagingPage) -> bool:
+        """Whether any message composer or ``Messaging`` dialog is on the page, hidden ones
+        counted: decision 3's own queries, read before the click (#444)."""
+        composers = tab.get_by_role(
+            COMPOSER_ROLE, name=COMPOSER_NAME, exact=True, include_hidden=True
+        )
+        if await composers.count():
+            return True
+        dialogs = tab.get_by_role(BUBBLE_ROLE, name=BUBBLE_NAME, exact=True, include_hidden=True)
+        return await dialogs.count() > 0
+
     async def _read_click_geometry(
         self,
         page: PageLike,
@@ -1883,51 +1917,52 @@ class BrowserRun:
             log.info("prefill: the page's geometry could not be read (%s)", type(exc).__name__)
             return None
         try:
-            metrics = await session.send("Page.getLayoutMetrics")
-            layout = metrics["cssLayoutViewport"]
-            viewport = (float(layout["clientWidth"]), float(layout["clientHeight"]))
-            document = await session.send("DOM.getDocument", {"depth": 0})
-            root = document["root"]["nodeId"]
-            links: list[_Link] = []
-            for href in hrefs:
-                found = await session.send(
-                    "DOM.querySelectorAll",
-                    {"nodeId": root, "selector": f"a[href={_css_string(href)}]"},
-                )
-                for node_id in found["nodeIds"][:MESSAGE_MAX_CANDIDATES]:
-                    described = await session.send(
-                        "DOM.describeNode", {"nodeId": node_id, "depth": -1}
+            async with asyncio.timeout(GEOMETRY_TIMEOUT_S):
+                metrics = await session.send("Page.getLayoutMetrics")
+                layout = metrics["cssLayoutViewport"]
+                viewport = (float(layout["clientWidth"]), float(layout["clientHeight"]))
+                document = await session.send("DOM.getDocument", {"depth": 0})
+                root = document["root"]["nodeId"]
+                links: list[_Link] = []
+                for href in hrefs:
+                    found = await session.send(
+                        "DOM.querySelectorAll",
+                        {"nodeId": root, "selector": f"a[href={_css_string(href)}]"},
                     )
-                    try:
-                        model = await session.send("DOM.getBoxModel", {"nodeId": node_id})
-                        quads = await session.send("DOM.getContentQuads", {"nodeId": node_id})
-                    except Exception as exc:
-                        # A hidden copy has no box, and nothing can hit it.
-                        log.debug("prefill: a Message link has no box (%s)", type(exc).__name__)
-                        continue
-                    links.append(
-                        _Link(
-                            _quad_box(model["model"]["border"]),
-                            _click_point(quads["quads"], viewport),
-                            frozenset(_backend_ids(described["node"])),
+                    for node_id in found["nodeIds"][:MESSAGE_MAX_LINKS]:
+                        described = await session.send(
+                            "DOM.describeNode", {"nodeId": node_id, "depth": -1}
                         )
+                        try:
+                            model = await session.send("DOM.getBoxModel", {"nodeId": node_id})
+                            quads = await session.send("DOM.getContentQuads", {"nodeId": node_id})
+                        except Exception as exc:
+                            # A hidden copy has no box, and nothing can hit it.
+                            log.debug("prefill: a Message link has no box (%s)", type(exc).__name__)
+                            continue
+                        links.append(
+                            _Link(
+                                _quad_box(model["model"]["border"]),
+                                _click_point(quads["quads"], viewport),
+                                frozenset(_backend_ids(described["node"])),
+                            )
+                        )
+                hits: list[Mapping[str, float] | None] = []
+                for box in boxes:
+                    link = next((k for k in links if box is not None and _clear(box, k.box)), None)
+                    if box is None or link is None or link.point is None:
+                        hits.append(None)
+                        continue
+                    if not _on_screen(box, viewport):
+                        hits.append(None)
+                        continue
+                    x, y = link.point
+                    hit = await session.send(
+                        "DOM.getNodeForLocation",
+                        {"x": round(x), "y": round(y), "ignorePointerEventsNone": True},
                     )
-            hits: list[Mapping[str, float] | None] = []
-            for box in boxes:
-                link = next((k for k in links if box is not None and _clear(box, k.box)), None)
-                if box is None or link is None or link.point is None:
-                    hits.append(None)
-                    continue
-                if not _on_screen(box, viewport):
-                    hits.append(None)
-                    continue
-                x, y = link.point
-                hit = await session.send(
-                    "DOM.getNodeForLocation",
-                    {"x": round(x), "y": round(y), "ignorePointerEventsNone": True},
-                )
-                hits.append(link.box if hit["backendNodeId"] in link.owned else None)
-            return ClickGeometry(viewport, tuple(hits))
+                    hits.append(link.box if hit["backendNodeId"] in link.owned else None)
+                return ClickGeometry(viewport, tuple(hits))
         except Exception as exc:
             log.info("prefill: the page's geometry could not be read (%s)", type(exc).__name__)
             return None

@@ -928,6 +928,7 @@ describe('every recorded phrase has words (S1 drift guard)', () => {
       'the Message control could not be read',
       'no Message control is visible',
       'no Message control is on screen with nothing over it; close or move what covers it',
+      'a message bubble is already open in Chrome, minimized ones included; close it, then try again',
     ]) {
       expect(prefillReason(phrase).bubble).toBe('closed')
     }
@@ -1006,6 +1007,7 @@ describe('prefill refusal reasons in plain words', () => {
     'recipient_name_mismatch',
     'recipient_name_unreadable',
     'no message composer is on the page',
+    'a message bubble is already open in Chrome, minimized ones included; close it, then try again',
     'another message composer is on the page, in an open or minimized bubble; close the other bubbles',
     'another message bubble is on the page, open or minimized; close the others',
     'no Message control is on screen with nothing over it; close or move what covers it',

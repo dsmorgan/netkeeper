@@ -21,6 +21,7 @@ Nothing here came from a capture, and nothing here makes a request.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping
@@ -218,6 +219,8 @@ class GeometrySession:
         error = self.tab.site.geometry_error
         if error is not None:
             raise error
+        if self.tab.site.geometry_hangs:
+            await asyncio.sleep(3600)  # a renderer that never answers
         params = dict(params or {})
         order = self._all()
         if method == "Page.getLayoutMetrics":
@@ -786,6 +789,7 @@ class MessagingSite(FakeContext):
         #: session can't be opened, as a fake without CDP, so the click is unchecked.
         self.viewport: tuple[float, float] | None = None
         self.geometry_error: BaseException | None = None
+        self.geometry_hangs = False
         self.geometry_sessions: list[GeometrySession] = []
 
     async def new_cdp_session(self, page: Any) -> GeometrySession:

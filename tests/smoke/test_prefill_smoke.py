@@ -107,6 +107,7 @@ SCENARIOS = {
     "covered": Scenario(_member(311), layout="covered"),
     "sidebar": Scenario(_member(312), layout="sidebar"),
     "minimized": Scenario(_member(313), layout="minimized"),
+    "leftover": Scenario(_member(314), layout="leftover"),
 }
 BY_SLUG = {s.member.slug: s for s in SCENARIOS.values()}
 
@@ -188,7 +189,7 @@ def _layout_html(scenario: Scenario) -> str:
     extra = ""
     if scenario.layout == "sticky":
         sticky = (
-            '<header style="position:fixed;top:0;left:0;right:0;height:64px;'
+            '<header style="position:fixed;top:0;left:0;right:0;height:64px;overflow:hidden;'
             'transform:translateY(-100%);background:#fff;z-index:30">'
             f"{_keyed(member, 'sticky')}</header>"
         )
@@ -209,8 +210,16 @@ def _layout_html(scenario: Scenario) -> str:
         )
     elif scenario.layout == "minimized":
         extra = _minimized_bubbles()
+    elif scenario.layout == "leftover":
+        # An open bubble left from an earlier prefill, for someone else.
+        extra = (
+            '<div style="position:fixed;bottom:0;right:300px;width:330px;z-index:20">'
+            f"{existing_bubble_html(_member(385))}</div>"
+        )
     return (
-        "<style>html,body{margin:0;height:100%;overflow:hidden}</style>"
+        # An icon's size, as LinkedIn's CSS gives it; an unsized svg is 300 by 150.
+        "<style>html,body{margin:0;height:100%;overflow:hidden}svg{width:16px;height:16px}"
+        "</style>"
         f"{sticky}<main><h1 style='position:absolute;left:40px;top:120px;margin:0'>"
         f"{escape(member.name)}</h1>{top}{highlights}"
         f"<a href='/in/{member.slug}/' style='position:absolute;left:40px;top:560px'>"
@@ -335,7 +344,10 @@ async def _prefill(origin: str, scenario: Scenario) -> tuple[Any, dict[str, Any]
     async with provider.run(f"smoke-prefill-{scenario.member.n}") as run:
         source = PagePrefill(run, origin=origin, sleep=_fast, compose_settle_s=0.5)
         result = await source.prefill(spec, plan_typing(BODY, 11), cancelled=_no_cancel)
-    return result, await _inspect(origin, scenario)
+        # Read the tab before the run ends: a run that never clicked closes its tab.
+        state = await _inspect(origin, scenario)
+        state["attempted"] = source.message_click_attempted
+    return result, state
 
 
 async def _inspect(origin: str, scenario: Scenario) -> dict[str, Any]:
@@ -358,7 +370,7 @@ async def _inspect(origin: str, scenario: Scenario) -> dict[str, Any]:
                   const boxes = document.querySelectorAll('[contenteditable]');
                   const box = boxes[boxes.length - 1];
                   return {events: window.__events, text: box ? box.innerText : null,
-                          html: box ? box.innerHTML : null};
+                          html: box ? box.innerHTML : null, composers: boxes.length};
                 }"""
             )
             state["open"] = True
@@ -417,13 +429,15 @@ REFUSALS = {
     "draft": "not empty",
     "other_recipient": "for someone else",
     "two_composers": "another message composer is on the page",
-    # #444: minimized bubbles keep their composers, hidden, so decision 3 refuses them.
-    "minimized": "another message composer is on the page, in an open or minimized bubble",
+    # #444: minimized bubbles keep their composers, hidden; decision 3, read before the
+    # click, refuses them and a leftover open bubble with no click.
+    "minimized": "a message bubble is already open in Chrome, minimized ones included",
+    "leftover": "a message bubble is already open in Chrome, minimized ones included",
 }
 
 
 @pytest.mark.parametrize(
-    "name", ["decoy_link", "draft", "other_recipient", "two_composers", "minimized"]
+    "name", ["decoy_link", "draft", "other_recipient", "two_composers", "minimized", "leftover"]
 )
 async def test_a_refused_prefill_types_nothing(origin: str, name: str) -> None:
     result, state = await _prefill(origin, SCENARIOS[name])
@@ -433,10 +447,12 @@ async def test_a_refused_prefill_types_nothing(origin: str, name: str) -> None:
     _no_send(state)
     if name == "decoy_link":
         assert not [e for e in state["events"] if e.startswith("click:")]
-    if name == "minimized":
-        # The minimized bubbles cover nothing the click needs: it lands on the top card,
-        # and decision 3 refuses only afterwards, before any key.
-        assert [e for e in state["events"] if e.startswith("card:")] == ["card:top-card"]
+    if name in ("minimized", "leftover"):
+        # No click, so no second bubble: only the leftover composers are on the page.
+        assert state["open"] and not state["attempted"]
+        assert not [e for e in state["events"] if e.startswith("click:")], state["events"]
+        assert state["composers"] == (3 if name == "minimized" else 1)
+        assert not result.outcome.reason.startswith("the Message control")
 
 
 #: Test-only pages for Playwright's own click errors. The click here is the test's, on
@@ -479,6 +495,33 @@ async def test_playwrights_own_click_errors_classify_to_their_category(
             with pytest.raises(Exception) as raised:
                 await link.click(timeout=1_500)
             assert classify_click_failure(raised.value) is category
+        finally:
+            await page.close()
+            await browser.close()
+
+
+async def test_the_old_first_visible_choice_fails_on_the_sticky_page(origin: str) -> None:
+    """#444's root cause on the replica's own sticky page: the first visible Message link
+    in document order (the rule before #444) is the sticky copy, wholly above the
+    viewport, and Playwright's click on it fails as outside the viewport. The prefill
+    test above clicks the top card on the same page."""
+    from playwright.async_api import async_playwright
+
+    member = SCENARIOS["sticky"].member
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.connect_over_cdp(CDP_URL)
+        page = await browser.contexts[0].new_page()
+        try:
+            await page.goto(f"{origin}/in/{member.slug}/")
+            links = page.get_by_role("link", name="Message", exact=True, include_hidden=True)
+            first = links.filter(visible=True).first
+            card = first.locator("xpath=ancestor::*[@componentkey][1]")
+            assert await card.get_attribute("componentkey") == "sticky"
+            box = await first.bounding_box()
+            assert box is not None and box["y"] + box["height"] <= 0, box
+            with pytest.raises(Exception) as raised:
+                await first.click(timeout=1_500)
+            assert classify_click_failure(raised.value) is ClickFailure.OUTSIDE_VIEWPORT
         finally:
             await page.close()
             await browser.close()
