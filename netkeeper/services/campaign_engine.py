@@ -449,6 +449,8 @@ class EnrollResult:
     already: tuple[int, ...]
     verdicts: tuple[Verdict, ...]
     overridden: tuple[int, ...] = ()
+    override_refused: tuple[tuple[int, str], ...] = ()
+    """``(contact_id, why)`` for each override :func:`check_enrollment` refused (#446)."""
     """The contacts enrolled only because a person overrode the recent-contact guard (#446)."""
 
 
@@ -466,7 +468,7 @@ def enroll(
     contact_ids: Collection[int],
     *,
     now: datetime,
-    override_recent_contact: Collection[int] = (),
+    override_recent_contact: Mapping[int, datetime] | None = None,
 ) -> EnrollResult:
     """Enroll each of ``contact_ids`` the guards pass (spec 11.9) as ``pending``.
 
@@ -528,7 +530,12 @@ def enroll(
         len(verdicts) - len(enrolled),
         len(present),
     )
-    return EnrollResult(tuple(enrolled), tuple(sorted(present)), tuple(verdicts), tuple(overridden))
+    refused = tuple(
+        (v.contact_id, v.override_refused) for v in verdicts if v.override_refused is not None
+    )
+    return EnrollResult(
+        tuple(enrolled), tuple(sorted(present)), tuple(verdicts), tuple(overridden), refused
+    )
 
 
 LINKEDIN_ENRICH_PRIORITY: Final = 1

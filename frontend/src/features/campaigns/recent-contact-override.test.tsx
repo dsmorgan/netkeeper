@@ -40,6 +40,17 @@ const SKIPPED: SkippedContact[] = [
     last_contacted_channel: 'email',
   },
   {
+    // Only the recent-contact guard, but dated in the future: not overridable, and why.
+    contact_id: 505,
+    name: 'Perpetua Dunmore',
+    reasons: ['contacted in the last 30 days'],
+    reason_codes: ['contacted_recently'],
+    overridable: false,
+    last_contacted_at: '2030-07-01T15:00:00Z',
+    last_contacted_channel: 'call',
+    override_note: "its last contact is dated in the future, so it can't be overridden",
+  },
+  {
     contact_id: 504,
     name: 'Ambrose Pellow',
     reasons: ['no LinkedIn member id yet (a connections sync adds it)'],
@@ -106,6 +117,12 @@ describe('overriding the recent-contact guard (#446)', () => {
     expect(list.getByText(/by LinkedIn/)).toBeVisible()
     expect(list.queryByText('Cressida Holloway')).toBeNull()
     expect(list.queryByText('Ambrose Pellow')).toBeNull()
+    expect(list.queryByRole('checkbox', { name: /Perpetua Dunmore/ })).toBeNull()
+    expect(
+      within(list.getByRole('list', { name: 'Not overridable' })).getByRole('listitem'),
+    ).toHaveTextContent(
+      "Perpetua Dunmore: its last contact is dated in the future, so it can't be overridden",
+    )
     expect(list.getByText(/1 more contact was contacted recently, but another guard/)).toBeVisible()
     expect(list.getByRole('button', { name: 'Enroll anyway' })).toBeDisabled()
   })
@@ -123,13 +140,18 @@ describe('overriding the recent-contact guard (#446)', () => {
     })
     expect(dialog).toHaveTextContent('Someone contacted this contact in the last 30 days')
     expect(dialog).toHaveTextContent('Every other guard still applies')
+    expect(dialog).toHaveTextContent(
+      'Any contact with them dated after the last contact shown above counts as recent again.',
+    )
     expect(calls.some((c) => c.method === 'POST')).toBe(false)
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Enroll anyway' }))
 
     await waitFor(() =>
       expect(calls.find((c) => c.path === '/api/v1/campaigns/5/enroll')?.body).toEqual({
-        override_recent_contact: [501],
+        override_recent_contact: [
+          { contact_id: 501, seen_last_contacted_at: '2030-06-10T15:00:00Z' },
+        ],
         confirm: true,
       }),
     )
@@ -152,7 +174,10 @@ describe('overriding the recent-contact guard (#446)', () => {
 
     await waitFor(() =>
       expect(calls.find((c) => c.path === '/api/v1/campaigns/5/enroll')?.body).toEqual({
-        override_recent_contact: [501, 502],
+        override_recent_contact: [
+          { contact_id: 501, seen_last_contacted_at: '2030-06-10T15:00:00Z' },
+          { contact_id: 502, seen_last_contacted_at: '2030-06-10T15:00:00Z' },
+        ],
         confirm: true,
       }),
     )
@@ -182,6 +207,33 @@ describe('overriding the recent-contact guard (#446)', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Enroll anyway' }))
 
     expect(await within(dialog).findByText(/not in campaign 5/)).toBeVisible()
+  })
+})
+
+describe('a refused override (#446)', () => {
+  it('names each contact someone contacted again since you looked', async () => {
+    setup([], () =>
+      jsonResponse({
+        ...OVERRIDDEN,
+        enrolled: 0,
+        overridden: 0,
+        override_refused: [
+          { contact_id: 502, reason: 'contacted again since you looked; review again' },
+        ],
+      }),
+    )
+    const list = within(await openList())
+
+    fireEvent.click(list.getByRole('checkbox', { name: /Barnaby Thistlewood/ }))
+    fireEvent.click(list.getByRole('button', { name: 'Enroll anyway (1)' }))
+    const dialog = await screen.findByRole('alertdialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Enroll anyway' }))
+
+    const refused = await screen.findByRole('list', { name: 'Not overridden' })
+    expect(refused).toHaveTextContent(
+      'Barnaby Thistlewood: contacted again since you looked; review again',
+    )
+    expect(screen.queryByText(/The recent-contact guard was overridden/)).toBeNull()
   })
 })
 

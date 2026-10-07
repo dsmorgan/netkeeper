@@ -111,6 +111,21 @@ class CampaignCreate(BaseModel):
     daily_cap: Annotated[int, Field(ge=0, le=service.MAX_DAILY_CAP)] | None = None
 
 
+class OverrideIn(BaseModel):
+    """One contact to enroll although it was contacted recently (#446)."""
+
+    contact_id: int
+    seen_last_contacted_at: AwareDatetime
+    """The ``last_contacted_at`` you were shown for it (``GET .../review/guards``). The
+    override sets aside contact dated at or before it. If the contact's last contact is
+    now newer, the override is refused for it."""
+
+
+class OverrideRefusedOut(BaseModel):
+    contact_id: int
+    reason: str
+
+
 class EnrollIn(BaseModel):
     """``list_id`` or ``filter`` replaces the audience source first (a ``draft`` only),
     removing the pending enrollments the new source does not hold; its contacts, and
@@ -119,8 +134,8 @@ class EnrollIn(BaseModel):
     list_id: int | None = None
     filter: FilterTree | None = None
     contact_ids: Annotated[list[int], Field(max_length=10_000)] = Field(default_factory=list)
-    override_recent_contact: Annotated[list[int], Field(max_length=service.OVERRIDE_MAX)] = Field(
-        default_factory=list
+    override_recent_contact: Annotated[list[OverrideIn], Field(max_length=service.OVERRIDE_MAX)] = (
+        Field(default_factory=list)
     )
     """Contacts to enroll although someone contacted them within the campaign's
     recent-contact window (#446). Each must be in the audience. Only the recent-contact
@@ -145,6 +160,9 @@ class EnrollOut(BaseModel):
     that never becomes an enrollment, such as yourself, is named here."""
     overridden: int = 0
     """Contacts enrolled only because of ``override_recent_contact`` (#446)."""
+    override_refused: list[OverrideRefusedOut] = Field(default_factory=list)
+    """Contacts of ``override_recent_contact`` refused and still skipped, with why: someone
+    contacted them again since you looked, so review them again."""
 
 
 class CampaignSummaryOut(BaseModel):
@@ -584,7 +602,7 @@ def enroll(campaign_id: int, body: EnrollIn, session: SessionDep, user: CurrentU
             list_id=body.list_id,
             filter=body.filter,
             contact_ids=body.contact_ids,
-            override_recent_contact=body.override_recent_contact,
+            override_recent_contact=_seen(body.override_recent_contact),
             confirm=body.confirm,
         )
     return EnrollOut(
@@ -597,7 +615,21 @@ def enroll(campaign_id: int, body: EnrollIn, session: SessionDep, user: CurrentU
         summary=outcome.summary,
         excluded_summary=outcome.excluded_summary,
         overridden=outcome.overridden,
+        override_refused=[
+            OverrideRefusedOut(contact_id=contact_id, reason=reason)
+            for contact_id, reason in outcome.override_refused
+        ],
     )
+
+
+def _seen(overrides: list[OverrideIn]) -> dict[int, datetime]:
+    """Each contact's last contact as shown; a contact named twice is refused."""
+    seen: dict[int, datetime] = {}
+    for item in overrides:
+        if item.contact_id in seen:
+            raise HTTPException(status_code=422, detail=f"contact {item.contact_id} is named twice")
+        seen[item.contact_id] = item.seen_last_contacted_at
+    return seen
 
 
 @router.post(

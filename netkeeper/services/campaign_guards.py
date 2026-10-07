@@ -209,11 +209,17 @@ class Verdict:
     what kept :attr:`Reason.CONTACTED_RECENTLY` out of ``reasons``, and this is the
     newest outbound contact it set aside (:attr:`ContactFacts.recent_contact_cutoff`).
     Only :func:`check_enrollment` sets it, for the contacts it was asked to override.
+
+    ``override_refused``: the person asked to override the recent-contact guard for
+    this contact, and :func:`check_enrollment` refused, with why (#446): someone
+    contacted it again since the person looked, or its last contact is dated in the
+    future. The verdict keeps :attr:`Reason.CONTACTED_RECENTLY`.
     """
 
     contact_id: int
     reasons: tuple[Reason, ...]
     override_cutoff: datetime | None = None
+    override_refused: str | None = None
 
     @property
     def overridden(self) -> bool:
@@ -914,16 +920,19 @@ def check_enrollment(
     contact_ids: Collection[int],
     *,
     now: datetime,
-    override_recent_contact: Collection[int] = (),
+    override_recent_contact: Mapping[int, datetime] | None = None,
 ) -> list[Verdict]:
     """The verdict for enrolling each of ``contact_ids`` in ``campaign``, in id order.
 
-    ``override_recent_contact`` names the contacts a person chose to enroll although
-    someone contacted them recently (#446). For exactly those, the newest outbound
-    contact the guard sees now, and anything dated at or before it, does not count
-    (:func:`not_contacted_recently`); contact dated in the future is never set aside.
-    Every other guard runs as always, and so does the recent-contact guard for every
-    other contact. A verdict the override changed has :attr:`Verdict.override_cutoff`.
+    ``override_recent_contact`` maps the contacts a person chose to enroll although
+    someone contacted them recently (#446) to the last contact the person was shown
+    for each. For exactly those, contact dated at or before that shown time does not
+    count (:func:`not_contacted_recently`): it is the cutoff. A contact whose newest
+    outbound contact is now later than what was shown, or whose shown contact is
+    dated after ``now``, is refused (:attr:`Verdict.override_refused`) and stays
+    skipped. Every other guard runs as always, and so does the recent-contact guard
+    for every other contact. A verdict the override changed has
+    :attr:`Verdict.override_cutoff`.
 
     Checked against the first step's channel, the one the enrollment will send
     first; each later step is checked again when it fires (:func:`check_step`).
@@ -945,25 +954,38 @@ def check_enrollment(
         return [Verdict(i, (Reason.UNKNOWN_CHANNEL,)) for i in ids]
     facts = load_facts(session, user, ids, campaign_id=campaign.id)
     policy = GuardPolicy(contacted_within_days=window)
-    chosen = frozenset(override_recent_contact)
+    chosen = override_recent_contact or {}
     verdicts: list[Verdict] = []
     for i in ids:
-        verdict = check_contact(facts.get(i), i, first, policy, now=now)
         found = facts.get(i)
-        cutoff = None if found is None else found.last_outbound_at
+        verdict = check_contact(found, i, first, policy, now=now)
+        seen = chosen.get(i)
         if (
-            i in chosen
-            and found is not None
-            and cutoff is not None
-            and cutoff <= now
-            and Reason.CONTACTED_RECENTLY in verdict.reasons
+            seen is None
+            or found is None
+            or found.last_outbound_at is None
+            or Reason.CONTACTED_RECENTLY not in verdict.reasons
         ):
+            verdicts.append(verdict)
+            continue
+        if found.last_outbound_at > seen:
+            verdict = replace(verdict, override_refused=OVERRIDE_STALE)
+        elif seen > now:
+            verdict = replace(verdict, override_refused=OVERRIDE_FUTURE)
+        else:
             again = check_contact(
-                replace(found, recent_contact_cutoff=cutoff), i, first, policy, now=now
+                replace(found, recent_contact_cutoff=seen), i, first, policy, now=now
             )
-            verdict = replace(again, override_cutoff=cutoff)
+            verdict = replace(again, override_cutoff=seen)
         verdicts.append(verdict)
     return verdicts
+
+
+OVERRIDE_STALE: Final = "contacted again since you looked; review again"
+"""Why an override is refused when the contact's last contact is newer than the one shown."""
+
+OVERRIDE_FUTURE: Final = "its last contact is dated in the future, so it can't be overridden"
+"""Why an override is refused, or not offered, for a last contact dated after now."""
 
 
 def check_audience(

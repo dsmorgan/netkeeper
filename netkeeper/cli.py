@@ -81,6 +81,7 @@ from netkeeper.scoping import install_scope_guard
 from netkeeper.services import (
     budgets,
     campaign_engine,
+    campaign_guards,
     campaign_results,
     campaign_review,
     enrich_plan,
@@ -3027,6 +3028,7 @@ def campaigns_enroll(
             err=True,
         )
         raise typer.Exit(code=1)
+    seen: dict[int, datetime] = {}
     with _campaign_db() as factory:
         if chosen:
             if list_name is not None or audience is not None:
@@ -3040,11 +3042,30 @@ def campaigns_enroll(
                 window = campaign_service.get_campaign(
                     session, user, campaign_id
                 ).contacted_within_days_guard
+                last = campaign_guards.last_contact(session, user, chosen)
+            # The last contact shown here is the override's cutoff: contact dated after
+            # it, or recorded before you answer, refuses the override (#446).
+            for contact_id in chosen:
+                found = last.get(contact_id)
+                if found is None:
+                    typer.echo(
+                        f"contact {contact_id}: no outbound contact recorded; nothing to override"
+                    )
+                    continue
+                seen[contact_id] = found.at
+                typer.echo(
+                    f"contact {contact_id}: last contacted {found.at:%Y-%m-%d %H:%M} UTC"
+                    f" ({found.channel})"
+                )
+            if not seen:
+                typer.echo("error: none of these contacts has a contact to override", err=True)
+                raise typer.Exit(code=1)
             unit = "day" if window == 1 else "days"
             question = (
-                f"enroll {len(chosen)} contacts anyway? Someone contacted them in the last"
-                f" {window} {unit}. Only the recent-contact guard is set aside, for these"
-                " contacts alone; every other guard still applies"
+                f"enroll {len(seen)} contacts anyway? Someone contacted them in the last"
+                f" {window} {unit}, as shown above. Only the recent-contact guard is set aside,"
+                " for these contacts alone and for contact dated up to what is shown; every"
+                " other guard still applies"
             )
             if not typer.confirm(question):
                 typer.echo("cancelled: nobody was enrolled")
@@ -3061,18 +3082,20 @@ def campaigns_enroll(
                     list_id=list_id,
                     filter=audience,
                     contact_ids=contact or (),
-                    override_recent_contact=chosen,
-                    confirm=bool(chosen),
+                    override_recent_contact=seen,
+                    confirm=bool(seen),
                 )
     removed = f", {outcome.removed} removed" if outcome.removed else ""
     typer.echo(
         f"campaign {campaign_id}: {outcome.enrolled} enrolled, {outcome.already} already in,"
         f" {outcome.excluded} excluded{removed}; {outcome.pending} pending"
     )
-    if chosen:
+    if seen:
         typer.echo(
-            f"recent-contact guard overridden for {outcome.overridden} of {len(chosen)} contacts"
+            f"recent-contact guard overridden for {outcome.overridden} of {len(seen)} contacts"
         )
+        for contact_id, why in outcome.override_refused:
+            typer.echo(f"contact {contact_id} not overridden: {why}")
     typer.echo(outcome.summary)
 
 
