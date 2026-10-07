@@ -607,7 +607,15 @@ def _inbox_breaker(session: Session, user: User, account_id: int) -> tuple[Check
             " changed; run `netkeeper linkedin inbox` by hand to release it. See Posture on"
             " the Settings page",
         )
-    if route_breaker.inbox_owner_tripped(session, user, account_id):
+    owner = route_breaker.inbox_owner_state(session, user, account_id)
+    if not owner.readable:
+        return (
+            CheckState.BLOCKED,
+            "The LinkedIn inbox poll is stopped: the owner breaker's record can't be read, so"
+            " scheduled polls stay off. Run `netkeeper linkedin inbox` by hand to repair it."
+            " See Posture on the Settings page",
+        )
+    if owner.tripped:
         return (
             CheckState.BLOCKED,
             "The LinkedIn inbox poll is stopped after two polls showed another mailbox than"

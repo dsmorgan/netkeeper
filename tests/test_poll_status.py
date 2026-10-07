@@ -879,7 +879,8 @@ def test_a_tripped_inbox_owner_breaker_blocks_the_inbox_poll_and_names_the_fix(
     assert inbox.state is S.BLOCKED and inbox.next_at is None
     reason = inbox.reason or ""
     assert "showed another mailbox" in reason
-    assert "netkeeper linkedin inbox-forget-owner" in reason
+    assert "sign back in to yours" in reason
+    assert "otherwise run `netkeeper linkedin inbox-forget-owner`" in reason
     assert checks["linkedin_enrich"].state in (S.SCHEDULED, S.DUE)
 
 
@@ -894,8 +895,9 @@ def test_the_inbox_owner_popover_names_the_self_contact_when_its_urn_is_set(
 
     reason = world.read()["linkedin_inbox"].reason or ""
 
-    assert "self contact" in reason and "its `li_urn`" in reason
-    assert "does not help" in reason
+    assert "sign back in to yours" in reason
+    assert "your own contact's LinkedIn ID does not match" in reason
+    assert "inbox-forget-owner" not in reason
 
 
 def test_one_owner_mismatch_leaves_the_inbox_poll_scheduled(world: World) -> None:
@@ -906,3 +908,18 @@ def test_one_owner_mismatch_leaves_the_inbox_poll_scheduled(world: World) -> Non
         )
 
     assert "showed another mailbox" not in (world.read()["linkedin_inbox"].reason or "")
+
+
+def test_a_corrupt_inbox_owner_row_blocks_the_inbox_poll_and_says_so(world: World) -> None:
+    from netkeeper.services.settings_kv import set_setting
+
+    for session, user in world.write():
+        account_id = _arm_linkedin(session, user, kinds=(JobKind.INBOX,))
+        set_setting(session, user, f"linkedin.inbox_owner_mismatch_breaker.{account_id}", "junk")
+
+    inbox = world.read()["linkedin_inbox"]
+
+    assert inbox.state is S.BLOCKED
+    assert "owner breaker's record can't be read, so scheduled polls stay off" in (
+        inbox.reason or ""
+    )

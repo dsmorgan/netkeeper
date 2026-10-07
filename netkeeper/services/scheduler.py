@@ -108,7 +108,9 @@ For enrichment it asks the Contact info breaker (#424): once three enrichment
 runs in a row have ended ``answer_lost`` (the Contact info caps, #405), a due
 enrichment fire is skipped as ``"contact_info_breaker"``. For the inbox poll it asks
 the inbox breaker (#437): once two inbox polls in a row have ended ``route_changed``,
-a due fire is skipped as ``"inbox_route_changed_breaker"``. A
+a due fire is skipped as ``"inbox_route_changed_breaker"``. It also asks the inbox owner
+breaker (#443): once two inbox polls in a row have ended ``owner_mismatch``, a due fire is
+skipped as ``"inbox_owner_breaker"``. A
 handler that could not reach the browser answers
 :attr:`JobOutcome.RETRY_LATER`, and :func:`park_retry` parks one retry 20 to 50
 minutes out (spec 9.9).
@@ -1163,7 +1165,7 @@ async def poll_and_fire(
             ):
                 # Two inbox polls in a row ended owner_mismatch (#443): the mailbox is not
                 # this account's, and each poll would load the page and write nothing.
-                skipped_reason = "inbox_owner_mismatch"
+                skipped_reason = "inbox_owner_breaker"
             next_due = record_fired(
                 session,
                 user,

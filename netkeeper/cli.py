@@ -1263,10 +1263,11 @@ def linkedin_inbox_forget_owner(
     """Forget which LinkedIn mailbox the inbox poll recorded, after you changed accounts.
 
     A poll that shows another mailbox than the one it recorded stops as `owner_mismatch`
-    and writes nothing. If you moved netkeeper to a different LinkedIn account on
-    purpose, run this, then run `netkeeper linkedin inbox` by hand: that poll records the
-    new mailbox. It touches no browser and visits nothing. (A self contact with its own
-    LinkedIn URN is compared first; edit that instead if it is the one that changed.)
+    and writes nothing. If Chrome is signed in to another account, sign back in to yours
+    first. If you moved netkeeper to a different LinkedIn account on purpose, run this,
+    then run `netkeeper linkedin inbox` by hand: that poll records the new mailbox. It
+    touches no browser and visits nothing. (If your own contact has a LinkedIn ID, that
+    is compared first and this command does not change it.)
     """
     state = ctx.ensure_object(CliState)
     _load_settings_or_exit(state)

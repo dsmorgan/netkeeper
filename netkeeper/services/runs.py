@@ -674,13 +674,14 @@ STOP_REASON_TEXT: Final[Mapping[str, str]] = {
     "answer_lost_breaker": "refused: the answer-lost limit is tripped",
     "contact_info_breaker": "refused: the Contact info breaker is tripped",
     "inbox_route_changed_breaker": "refused: the inbox breaker is tripped",
-    "inbox_owner_mismatch": "refused: the inbox owner breaker is tripped",
+    "inbox_owner_breaker": "refused: the inbox owner breaker is tripped",
     "no_runner": "refused: no runner for this kind",
     "no_source": "refused: the LinkedIn inbox poll has no page source yet",
     "owner_mismatch": (
-        "the page showed another LinkedIn mailbox than this account's; if you changed"
-        " accounts, run `netkeeper linkedin inbox-forget-owner`; if your self contact has"
-        " a LinkedIn profile that names another account, correct that instead"
+        "the page showed another LinkedIn mailbox than this account's; if Chrome is signed"
+        " in to another LinkedIn account, sign back in to yours; otherwise run"
+        " `netkeeper linkedin inbox-forget-owner` (or, if your own contact has a LinkedIn"
+        " ID, it does not match this mailbox and netkeeper cannot edit it yet)"
     ),
     "first_inbox_poll": "refused: the first LinkedIn inbox poll is run by hand",
     "browser_busy": "the browser was busy with another run",

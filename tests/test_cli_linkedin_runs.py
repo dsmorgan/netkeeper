@@ -836,7 +836,9 @@ def test_schedule_status_shows_the_inbox_owner_breaker_and_its_fix(
         "inbox owner breaker: tripped, 2 of 2 owner_mismatch inbox runs in a row;"
         " scheduled inbox runs are skipped (`netkeeper linkedin schedule reset-breaker`)"
     ) in tripped
-    assert "to fix the mailbox mismatch: if you changed LinkedIn accounts" in tripped
+    assert (
+        "to fix the mailbox mismatch: if Chrome is signed in to another LinkedIn account" in tripped
+    )
     assert "netkeeper linkedin inbox-forget-owner" in tripped
     # The unreadable-page breaker is a different line and stays clear.
     assert "inbox breaker: 0 of 2 unreadable inbox runs in a row" in tripped

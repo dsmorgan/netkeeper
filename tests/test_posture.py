@@ -2340,7 +2340,8 @@ def test_a_tripped_inbox_owner_breaker_names_the_recorded_owner_fix(
     (warning,) = row.warnings
     assert "Scheduled inbox polls are skipped" in warning
     assert "a poll you run by hand is not" in warning
-    assert "netkeeper linkedin inbox-forget-owner" in warning
+    assert "sign back in to yours" in warning
+    assert "otherwise run `netkeeper linkedin inbox-forget-owner`" in warning
     assert "releases the breaker" in warning and "reset-breaker" in warning
     assert not report.ok
     # It is its own streak: the unreadable-page breaker stays clear.
@@ -2355,8 +2356,9 @@ def test_a_tripped_inbox_owner_breaker_names_the_self_contact_when_its_urn_is_se
     ensure_self_contact(writer, user).li_urn = "urn:li:fsd_profile:INVENTED"
     _owner_mismatches(writer, user, 2)
     (warning,) = _row(_report(writer, user), "Inbox owner breaker").warnings
-    assert "self contact's LinkedIn profile" in warning
-    assert "`netkeeper linkedin inbox-forget-owner` does not help" in warning
+    assert "sign back in to yours" in warning
+    assert "your own contact's LinkedIn ID does not match" in warning
+    assert "inbox-forget-owner" not in warning
 
 
 def test_a_corrupt_inbox_owner_row_warns_unknown(writer: Session, user: User) -> None:

@@ -780,5 +780,27 @@ def test_posture_names_how_the_newest_poll_ended_with_the_hold_text(
     assert row is not None
     (note,) = row.notes
     assert "the newest poll ended owner_mismatch" in note
-    assert "run `netkeeper linkedin inbox-forget-owner`" in note
+    assert "sign back in to yours" in note
+    assert "otherwise run `netkeeper linkedin inbox-forget-owner`" in note
     assert "wait until a poll completes" in note  # the hold, in the same note
+
+
+def test_posture_hold_note_names_the_contact_id_case_when_the_self_contact_has_one(
+    session_factory: sessionmaker[Session],
+) -> None:
+    from netkeeper.crm.self_contact import ensure_self_contact
+
+    world = _linkedin_world(session_factory)
+    _poll(world, NOW - timedelta(hours=9))
+    _poll(world, NOW - timedelta(hours=1), status=SyncRunStatus.ABORTED, reason="owner_mismatch")
+    from netkeeper.db import session_scope
+
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, world.user.id)
+        assert user is not None
+        ensure_self_contact(session, user).li_urn = "urn:li:fsd_profile:INVENTED"
+    row = _row(world)
+    assert row is not None
+    (note,) = row.notes
+    assert "your own contact's LinkedIn ID does not match" in note
+    assert "inbox-forget-owner" not in note

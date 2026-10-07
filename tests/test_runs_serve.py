@@ -1291,13 +1291,13 @@ async def test_the_worker_refuses_only_a_scheduled_inbox_run_for_the_owner_break
         assert owner is not None
         stored = runs.get_run(session, owner, run_id)
         if not refused:
-            assert stored.stop_reason != "inbox_owner_mismatch"
+            assert stored.stop_reason != "inbox_owner_breaker"
             assert connector.attaches == 1
             return
         assert connector.attaches == 0
         assert (stored.status, stored.stop_reason) == (
             SyncRunStatus.FAILED,
-            "inbox_owner_mismatch",
+            "inbox_owner_breaker",
         )
         assert stored.error == "the inbox owner breaker is tripped for this account"
 
