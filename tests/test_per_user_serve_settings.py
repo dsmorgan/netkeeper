@@ -326,3 +326,157 @@ def test_an_unreadable_reply_interval_polls_nothing_for_that_user(
             sender._poll_replies(session_factory, user_id, NOW)
     assert polled == [first]
     assert f"interval of user {second}" in caplog.text
+
+
+# --- reply poll guards that read the interval ---------------------------------------
+
+
+def _mailbox_polled(
+    factory: sessionmaker[Session], user_id: int, ago: timedelta, clock_now: datetime
+) -> int:
+    from netkeeper.models import Mailbox
+
+    with session_scope(factory, write=True) as session:
+        mailbox = Mailbox(
+            user_id=user_id,
+            email=f"m{user_id}@example.test",
+            keychain_ref=f"gmail-{user_id}",
+            daily_cap=50,
+            replies_polled_at=clock_now - ago,
+        )
+        session.add(mailbox)
+        session.flush()
+        return mailbox.id
+
+
+def _follow_up(user_id: int, mailbox_id: int) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        user_id=user_id, mailbox_id=mailbox_id, step_position=2, same_thread=False, thread_id=None
+    )
+
+
+def _clocked_sender(factory: sessionmaker[Session], per_user: Any) -> GmailSender:
+    def no_gmail(user_id: int, mailbox_id: int) -> Any:
+        raise AssertionError("no Gmail in this test")
+
+    return GmailSender(factory, opener=no_gmail, replies_every_for=per_user, clock=lambda: NOW)
+
+
+def _minutes_of(first: int, second: int) -> Any:
+    return lambda uid: timedelta(minutes=3 if uid == first else 30)
+
+
+def test_the_stale_replies_hold_uses_each_users_own_interval(
+    session_factory: sessionmaker[Session],
+) -> None:
+    first, second = _two_users(session_factory)  # 3 and 30 minutes
+    polled_ten_minutes_ago = timedelta(minutes=10)
+    box_first = _mailbox_polled(session_factory, first, polled_ten_minutes_ago, NOW)
+    box_second = _mailbox_polled(session_factory, second, polled_ten_minutes_ago, NOW)
+    sender = _clocked_sender(session_factory, _minutes_of(first, second))
+    # Held for the 3-minute user (STALE_AFTER_POLLS x 3 minutes is under 10), allowed for
+    # the 30-minute one.
+    assert sender._replies_stale(_follow_up(first, box_first)) is not None
+    assert sender._replies_stale(_follow_up(second, box_second)) is None
+
+
+def test_an_unreadable_interval_holds_the_follow_up_and_marks_the_mailbox_due(
+    session_factory: sessionmaker[Session],
+) -> None:
+    first, _ = _two_users(session_factory)
+    box = _mailbox_polled(session_factory, first, timedelta(seconds=1), NOW)  # fresh poll
+
+    def unreadable(user_id: int) -> timedelta:
+        raise RuntimeError("boom")
+
+    sender = _clocked_sender(session_factory, unreadable)
+    assert sender._replies_stale(_follow_up(first, box)) is not None
+    assert sender.replies_due(first) == frozenset({box})
+
+
+def test_the_failure_backoff_cap_follows_each_users_interval(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second = _two_users(session_factory)  # 3 and 30 minutes
+    sender = _clocked_sender(session_factory, _minutes_of(first, second))
+
+    def failing(factory: Any, user_id: int, **kwargs: Any) -> Any:
+        return campaign_replies.RepliesPolled(failed=frozenset({7}))
+
+    monkeypatch.setattr(campaign_replies, "poll_replies", failing)
+    for user_id in (first, second):
+        # Each failed poll backs off 1, 2, 4, ... minutes, never past the user's interval.
+        for tick in range(8):
+            sender._replies_polled.pop(user_id, None)  # the interval has passed
+            sender._poll_replies(session_factory, user_id, NOW + timedelta(hours=tick))
+    last = NOW + timedelta(hours=7)
+    assert sender._retry_at(first, 7) == last + timedelta(minutes=3)
+    assert sender._retry_at(second, 7) == last + timedelta(minutes=30)
+
+
+# --- a schedule that could not be established at startup ----------------------------
+
+
+async def test_an_unreadable_window_at_startup_fires_nothing_until_the_schedule_is_established(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The stored due times are from an earlier serve and have had no catch-up. Unreadable
+    hours at boot must not let them fire at the first heartbeat; once the hours read, the
+    schedule is established with its catch-up jitter, and still nothing fires."""
+    from random import Random
+
+    from netkeeper.services.linkedin_accounts import ensure_account
+
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        account = ensure_account(session, user).id
+        session.expunge(user)
+    accounts = [(user, account)]
+    kinds = scheduler.JobKind
+    hours = [lambda u: (time(8, 30), time(21, 30))]
+    clock = [NOW]
+    fired: list[Any] = []
+
+    async def handler(ctx: Any) -> None:
+        fired.append(ctx.kind)
+
+    def build() -> Any:
+        return scheduler.build_scheduler(
+            session_factory,
+            lambda: accounts,
+            registry={kind: handler for kind in kinds},
+            armed=scheduler.ARMING_NOT_REQUIRED,
+            active_hours=lambda u: hours[0](u),
+            rng=Random(1),
+            clock=lambda: clock[0],
+        )
+
+    def dues() -> dict[Any, datetime | None]:
+        with session_scope(session_factory) as session:
+            owner = session.get(User, user.id)
+            assert owner is not None
+            return {k: scheduler.stored_due(session, owner, account, k) for k in kinds}
+
+    build()  # the earlier serve established the schedule
+    before = {k: d for k, d in dues().items() if d is not None}
+    assert before
+    first_due = min(before.values())
+    clock[0] = first_due + timedelta(minutes=1)  # just past a due time, within its interval
+
+    def unreadable(_: User) -> tuple[time, time]:
+        raise RuntimeError("database is locked")
+
+    hours[0] = unreadable
+    heartbeat = build().get_job(scheduler.HEARTBEAT_JOB_ID).func  # the restart
+    await heartbeat()
+    assert fired == []
+    assert {k: d for k, d in dues().items() if d is not None} == before
+
+    hours[0] = lambda u: (time(8, 30), time(21, 30))
+    await heartbeat()  # the hours read now: established, with catch-up, so nothing is due
+    assert fired == []
+    after = {k: d for k, d in dues().items() if d is not None}
+    assert after != before
+    assert all(d > clock[0] for d in after.values())

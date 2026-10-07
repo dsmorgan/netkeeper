@@ -23,7 +23,7 @@ import logging
 import pkgutil
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
-from datetime import timedelta
+from datetime import time, timedelta
 from types import ModuleType
 
 from fastapi import APIRouter, FastAPI
@@ -56,12 +56,14 @@ from netkeeper.services.campaign_sender import GmailSender
 from netkeeper.services.events import EventBus
 from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.mailboxes import MailboxMonitor, PendingAuthorizations, open_gmail
+from netkeeper.services.read_failures import ReadFailures
 from netkeeper.services.runs import fail_interrupted_runs
 from netkeeper.services.scheduled_runs import (
     ServeExtractor,
     start_serve_scheduler,
     user_active_hours,
 )
+from netkeeper.services.scheduler import ActiveHoursProvider
 from netkeeper.services.tasks import TaskRunner
 from netkeeper.services.users import ensure_local_user
 from netkeeper.web import api as api_package
@@ -122,9 +124,15 @@ def create_app(
             tasks = _start(app, active, resolved)
             teardown.push_async_callback(tasks.cancel_all)
             app.state.gmail_endpoints = gmail
-            # Everything a user's page can change resolves per user, at each request, tick,
-            # heartbeat and run (#343, #464); this reading is only for startup log lines.
+            # `started` is the first local user's settings in force. It is still passed to
+            # start_serve_scheduler, as `settings` (heat, which is file-only, and the
+            # default hours) and as `campaign_settings` (the base the auto-send handler
+            # resolves each user's own page values over, per claim, after unresolving it),
+            # and it feeds startup log lines. The timetable's hours, the monitor's
+            # interval and the reply interval are not read from it: each is read per user,
+            # from `resolved` plus that user's page values (#464).
             started: Settings = app.state.started_settings
+            failures: ReadFailures = app.state.read_failures
             if extractor is not None:
                 serving = start_serve_scheduler(
                     extractor,
@@ -133,7 +141,9 @@ def create_app(
                     tasks,
                     started.linkedin,
                     campaign_settings=started,
-                    active_hours=user_active_hours(app.state.session_factory, resolved),
+                    active_hours=_watched_hours(
+                        user_active_hours(app.state.session_factory, resolved), failures
+                    ),
                 )
                 teardown.callback(serving.stop)
                 app.state.executor = serving.executor
@@ -143,7 +153,7 @@ def create_app(
                     app.state.bus,
                     interval_s=_poll_minutes(resolved) * 60,
                     endpoints=gmail,
-                    interval_for=_per_user_poll_s(app.state.session_factory, resolved),
+                    interval_for=_per_user_poll_s(app.state.session_factory, resolved, failures),
                 )
                 teardown.push_async_callback(monitor.stop)
                 monitor.start()
@@ -151,7 +161,7 @@ def create_app(
                 sender = (
                     campaign_sender
                     if campaign_sender is not None
-                    else _gmail_sender(app.state.session_factory, gmail, resolved)
+                    else _gmail_sender(app.state.session_factory, gmail, resolved, failures)
                 )
                 campaigns = CampaignEngine(app.state.session_factory, resolved, sender)
                 teardown.push_async_callback(campaigns.stop)
@@ -207,6 +217,7 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     # The scheduler, the mailbox poll and the reply poll read each user's own values
     # as they run (#464).
     app.state.started_settings = started
+    app.state.read_failures = ReadFailures()
     app.state.engine = engine
     app.state.session_factory = factory
     app.state.bus = bus
@@ -242,7 +253,10 @@ def _log_settings_page_risks(file: Settings, started: Settings) -> None:
 
 
 def _gmail_sender(
-    factory: sessionmaker[Session], endpoints: GoogleEndpoints | None, settings: Settings
+    factory: sessionmaker[Session],
+    endpoints: GoogleEndpoints | None,
+    settings: Settings,
+    failures: ReadFailures,
 ) -> GmailSender:
     """``serve``'s campaign sender: Gmail, on armed mailboxes only (#277), polling for
     replies every ``[campaigns] reply_poll_minutes`` (P3-08)."""
@@ -253,23 +267,42 @@ def _gmail_sender(
         ),
         replies_every=timedelta(minutes=_poll_minutes(settings)),
         replies_every_for=lambda user_id: timedelta(
-            minutes=_user_poll_minutes(factory, settings, user_id)
+            minutes=_user_poll_minutes(factory, settings, user_id, failures, "Gmail reply interval")
         ),
     )
 
 
-def _user_poll_minutes(factory: sessionmaker[Session], file: Settings, user_id: int) -> int:
+def _user_poll_minutes(
+    factory: sessionmaker[Session],
+    file: Settings,
+    user_id: int,
+    failures: ReadFailures,
+    what: str,
+) -> int:
     """``user_id``'s own reply poll minutes (#464): the file's, else their Settings-page
-    value, else the default. Raises for a user that is gone, so a caller fails closed."""
-    with session_scope(factory) as session:
+    value, else the default. Raises for a user that is gone, so a caller fails closed; the
+    failure is kept for the posture report."""
+    with failures.watching(user_id, what), session_scope(factory) as session:
         user = session.get(User, user_id)
         if user is None:
             raise LookupError(f"no user {user_id}")
         return _poll_minutes(ui_settings.resolve(session, user, file))
 
 
-def _per_user_poll_s(factory: sessionmaker[Session], file: Settings) -> Callable[[int], float]:
-    return lambda user_id: _user_poll_minutes(factory, file, user_id) * 60.0
+def _per_user_poll_s(
+    factory: sessionmaker[Session], file: Settings, failures: ReadFailures
+) -> Callable[[int], float]:
+    return lambda user_id: (
+        _user_poll_minutes(factory, file, user_id, failures, "mailbox check interval") * 60.0
+    )
+
+
+def _watched_hours(hours: ActiveHoursProvider, failures: ReadFailures) -> ActiveHoursProvider:
+    def watched(user: User) -> tuple[time, time]:
+        with failures.watching(user.id, "active hours"):
+            return hours(user)
+
+    return watched
 
 
 def _poll_minutes(settings: Settings) -> int:
