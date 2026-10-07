@@ -835,6 +835,33 @@ async def test_after_the_click_the_run_never_opens_navigates_scrolls_or_observes
     assert not site.tab.is_closed()  # the provider's exit closed nothing
 
 
+@pytest.mark.parametrize("landed", [True, False])
+async def test_any_navigation_after_the_click_or_the_hand_over_raises_and_leaves_the_tab(
+    landed: bool,
+) -> None:
+    """#456: once the click was attempted, landed or not, and again after the hand-over,
+    every way to navigate or reopen raises, and the tab stays on the profile, open."""
+    site = MessagingSite(ZEPHYRINE)
+    if not landed:
+        site.click_error = RuntimeError("the click failed")
+    provider, _ = fake_provider(site)
+    profile = f"https://www.linkedin.com/in/{ZEPHYRINE.slug}/"
+    async with provider.run() as run:
+        await run.goto(profile)
+        click = await run.click_message(f"/in/{ZEPHYRINE.slug}/", ZEPHYRINE.profile_id, pause_s=0)
+        assert click.attempted and click.clicked is landed
+        for attempt in range(2):
+            with pytest.raises(BrowserUnavailable):
+                await run.goto("https://www.linkedin.com/feed/")
+            with pytest.raises(BrowserUnavailable):
+                await run.ensure_page()
+            if attempt == 0:
+                await run.hand_over()
+    assert site.navigations == [profile] and site.tab.goto_after_click == []
+    assert site.tab.url == profile and not site.tab.is_closed()
+    assert site.new_page_calls == 1
+
+
 async def test_the_tab_comes_to_the_front_once() -> None:
     site = MessagingSite(ZEPHYRINE)
     provider, _ = fake_provider(site)

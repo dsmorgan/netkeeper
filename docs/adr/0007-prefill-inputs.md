@@ -286,6 +286,7 @@ Static pins:
 - `bring_to_front` is called at one site, inside the prefill's start, before `click_message`; a runtime pin checks that it's called once per run.
 - `netkeeper/linkedin/page_messaging.py` in `BROWSER_MODULES` and `BROWSER_CALLERS`.
 - `hand_over` reachable only from `page_messaging.py`.
+- From the `click_message` call on, `PagePrefill.prefill` and the methods it calls reach no `goto`, `reload`, `go_back`, `go_forward`, `new_page`, `ensure_page`, reopen, `scroll`, or `observe`; neither does `BrowserRun.hand_over` or anything it calls (#456).
 
 Runtime pins, against a fake page:
 
@@ -323,6 +324,7 @@ Runtime pins, against a fake page:
 - A `not_typed` refusal after the click hands the tab over and leaves the bubble open.
 - A Message click that raises hands the tab over.
 - After `hand_over()`, the provider's exit leaves the page open.
+- After an attempted click, landed or not, and after `hand_over()`, `goto` and `ensure_page` raise, and the tab stays on the profile (#456).
 
 P4-03's loopback replica (`tests/smoke/test_prefill_smoke.py`) copies the capture's layout:
 
