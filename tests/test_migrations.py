@@ -72,17 +72,23 @@ def _drop_everything(engine: Engine) -> None:
 
 
 @pytest.fixture(scope="session")
-def pg_url(worker_id: str) -> Iterator[str]:
+def pg_url() -> Iterator[str]:
     """The PostgreSQL URL this worker owns.
 
-    A single process (worker id ``master``) uses the database in the URL as is. Under
+    A single process (no ``PYTEST_XDIST_WORKER``) uses the database in the URL as is. Under
     xdist each worker creates ``<database>_<worker id>`` and drops it at the end.
     """
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
     base = os.environ.get(PG_ENV, "")
     if not base or worker_id == "master":
         yield base
         return
     url = make_url(base)
+    if not url.database or not re.fullmatch(r"\w+", url.database):
+        raise RuntimeError(
+            f"{PG_ENV} must name a database made of letters, digits and underscores "
+            f"to run under xdist; got {url.database!r}"
+        )
     name = f"{url.database}_{worker_id}"
     admin = create_engine(url, isolation_level="AUTOCOMMIT")
     try:
