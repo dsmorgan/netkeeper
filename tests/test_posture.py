@@ -1410,7 +1410,7 @@ def test_the_defaults_this_report_calls_clean_are_appendix_c_s() -> None:
     assert DEFAULTS.linkedin.budget.connection_pages_per_day == 150
     assert DEFAULTS.linkedin.budget.inbox_polls_per_day == 8
     assert DEFAULTS.linkedin.budget.li_messages_auto_per_day == 15
-    assert DEFAULTS.linkedin.budget.li_prefills_per_day == 10
+    assert DEFAULTS.linkedin.budget.li_prefills_per_day == 15
     assert DEFAULTS.linkedin.heat.per_block == 1.0
     assert DEFAULTS.linkedin.heat.half_life_hours == 6
     assert DEFAULTS.linkedin.heat.skip_threshold == 2.5
@@ -2285,3 +2285,19 @@ def test_a_corrupt_inbox_row_warns_unknown(writer: Session, user: User) -> None:
     assert row.value == "stored state unreadable; treated as tripped"
     assert row.warnings and "Scheduled inbox polls are skipped" in row.warnings[0]
     assert not report.ok
+
+
+@pytest.mark.parametrize("action", ["li_prefills", "li_messages_auto"])
+def test_a_linkedin_message_budget_above_20_a_day_is_a_note_and_the_report_stays_clear(
+    writer: Session, action: str
+) -> None:
+    """#447: above 20 a day the budget row carries a note; ``ok`` stays true."""
+    user = _make_user(writer)
+    risky = _report(writer, user, settings=_budget(**{f"{action}_per_day": 21}))
+    calm = _report(writer, user, settings=_budget(**{f"{action}_per_day": 20}))
+
+    (note,) = _notes_for(risky, f"budget {action}")
+    assert note.startswith(f"{action} is set to 21 a day, above 20 a day")
+    assert _notes_for(calm, f"budget {action}") == ()
+    assert risky.ok is True
+    assert risky.warnings == ()

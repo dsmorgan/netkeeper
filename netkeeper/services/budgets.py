@@ -87,10 +87,10 @@ HARD_MAX_PER_DAY: Final[dict[ActionClass, int]] = {
     ActionClass.CONNECTION_PAGES: 400,
     ActionClass.PROFILE_VISITS: 250,
     ActionClass.INBOX_POLLS: 24,
-    ActionClass.LI_MESSAGES_AUTO: 30,
+    ActionClass.LI_MESSAGES_AUTO: 50,
     # A campaign's LinkedIn step typed into the composer for a person to send (P4-09).
     # Each one also spends a profile visit (P4-03 consumes both).
-    ActionClass.LI_PREFILLS: 20,
+    ActionClass.LI_PREFILLS: 50,
 }
 
 #: The weekly profile-visit limit, when config does not set one, is this many
@@ -106,6 +106,10 @@ HARD_MAX_PER_WEEK: Final[dict[ActionClass, int]] = {
 #: workflow's guidance. A daily limit above it is allowed, up to the hard max,
 #: and warned about wherever the budget is shown (#318).
 PROFILE_VISITS_DESIGN_LEVEL: Final = 100
+
+#: The LinkedIn message budgets (`li_prefills`, `li_messages_auto`) warn above this
+#: many a day, up to their hard max of 50 (#447). Each budget is judged on its own.
+LI_MESSAGE_WARN_ABOVE: Final = 20
 
 _DAY_DEFAULT: Final[dict[ActionClass, Callable[[BudgetSettings], int]]] = {
     ActionClass.CONNECTION_PAGES: lambda s: s.connection_pages_per_day,
@@ -199,6 +203,27 @@ def profile_visit_risk_warning(settings: BudgetSettings) -> str | None:
         " netkeeper was designed around. More visits a day make it more likely that LinkedIn"
         " restricts your account or asks you to verify it. Heat still slows runs down after"
         " LinkedIn throttles a visit."
+    )
+
+
+def li_message_risk_warning(action: ActionClass, settings: BudgetSettings) -> str | None:
+    """The warning for a daily LinkedIn message budget above 20, or None (#447).
+
+    Covers ``li_prefills`` and ``li_messages_auto``, each on its own: the limit in
+    force (configured, clamped to the hard max) above :data:`LI_MESSAGE_WARN_ABOVE`
+    is the user's call. Nothing refuses it; posture lists it as a note and
+    ``serve`` logs it at startup.
+    """
+    if action not in (ActionClass.LI_PREFILLS, ActionClass.LI_MESSAGES_AUTO):
+        return None
+    day = min(_DAY_DEFAULT[action](settings), HARD_MAX_PER_DAY[action])
+    if day <= LI_MESSAGE_WARN_ABOVE:
+        return None
+    return (
+        f"{action.value} is set to {day} a day, above {LI_MESSAGE_WARN_ABOVE} a day."
+        " More LinkedIn messages a day make it more likely that LinkedIn"
+        " restricts your account or asks you to verify it. Heat still shrinks the budget"
+        " after LinkedIn throttles you."
     )
 
 

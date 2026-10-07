@@ -576,7 +576,7 @@ Phase 4 has two prerequisites before any prefill code: a live capture of LinkedI
 
 - **Who prefills:** you do. Due LinkedIn steps wait in a "ready to prefill" queue, and you click **Prefill** while you watch Chrome. Nothing prefills on a schedule.
 - **Opening the composer:** navigate to the contact's profile and click **Message**.
-- **Budget:** a new action class `li_prefills`, 10 a day with a hard maximum of 20. Each prefill also spends one `profile_visits` unit.
+- **Budget:** a new action class `li_prefills`, 10 a day with a hard maximum of 20 (*as amended 2026-10-07, #447: 15 a day, hard maximum 50, and a warning above 20; `li_messages_auto` gets the same*). Each prefill also spends one `profile_visits` unit.
 - **Inbox poll:** every 3 hours within active hours while any live enrollment has a contact with a URN, plus on demand. It records `li_in` and `li_out` interactions for every one-to-one conversation with a known contact, with a snippet of at most 200 characters that is never logged.
 - **Replies and sends:** a LinkedIn reply is an inbound one-to-one message from the contact after the enrollment's first sent outbound on any channel. The email unsubscribe phrases apply, plus "stop messaging". Your first outbound message in the conversation after the prefill confirms the send, whatever its text.
 - **Stale and discard:** a prefill goes `stale` after 3 days; netkeeper never closes the tab it handed over, and a stale message seen sent later becomes `sent`. Discarding counts the step as fired.
