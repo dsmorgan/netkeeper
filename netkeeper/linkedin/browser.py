@@ -181,11 +181,11 @@ class _TapContext(Protocol):
 #: The Network buffers the body tap's own session asks Chrome for (#200): one answer
 #: up to the observation's body limit, and a few of them at once. Chrome needs a
 #: buffer to stream from; it is the tap's session's own, not the one Playwright reads.
+TAP_RESOURCE_BUFFER_BYTES: Final = 8 * 1024 * 1024
+TAP_TOTAL_BUFFER_BYTES: Final = 32 * 1024 * 1024
 #: The longest the dwell at the end of :meth:`BrowserRun.scroll` is waited out in one
 #: sleep when the caller supplies ``cancelled``: it polls between slices (#177).
 SCROLL_CANCEL_SLICE_S: Final = 1.0
-TAP_RESOURCE_BUFFER_BYTES: Final = 8 * 1024 * 1024
-TAP_TOTAL_BUFFER_BYTES: Final = 32 * 1024 * 1024
 
 
 class _ObservablePage(PageLike, ListenablePage, Protocol):

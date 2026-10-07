@@ -278,7 +278,9 @@ class PageProfiles:
         if self._stopped is not None:
             return True
         self._stopped = await self._scroll(plan, cancelled=cancelled)
-        return not self._scroll_cancelled
+        # A wall the tab landed on wins over a cancel: read_profile reports it, so the
+        # run records the wall's outcome and its heat and flag (ADR 0002).
+        return self._stopped is not None or not self._scroll_cancelled
 
     async def read_profile(self, public_id: str) -> Answer[ProfileDetails]:
         if self._stopped is None:
@@ -328,11 +330,11 @@ class PageProfiles:
             # The job hands back the profile this visit read; anything else is a bug.
             raise ValueError("the profile is not the one this visit is on")
         blocked = await self._scroll(back, cancelled=cancelled)
-        if self._scroll_cancelled:
-            raise ScrollCancelled
-        if blocked is not None:
+        if blocked is not None:  # a wall wins over a cancel (ADR 0002)
             self._stopped = blocked
             return _as(blocked)
+        if self._scroll_cancelled:
+            raise ScrollCancelled
         self._clicked = True
         if self._sleep is None:
             click = await self._run.click_contact_info(self._path, pause_s=pause_s)
