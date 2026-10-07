@@ -3721,7 +3721,10 @@ def _adoption_lines(p: template_adoption.AdoptionPreview) -> list[str]:
         for m in p.open_messages
     )
     if p.blocked_total:
-        lines.append(f"blocked in v{p.newest.version}, never sent ({p.blocked_total}):")
+        counted = (
+            f"{p.blocked_total} of the first rendered" if p.blocked_capped else p.blocked_total
+        )
+        lines.append(f"blocked in v{p.newest.version}, never sent ({counted}):")
         lines.extend(
             f"  - enrollment {m.enrollment_id}: {m.contact_name or 'unnamed contact'}: {m.blocked}"
             for m in p.blocked
@@ -3748,11 +3751,15 @@ def campaigns_adopt_template(
     """Have an active or paused campaign's step use the newest version of its template.
 
     GET /campaigns/{id}/steps/{step_id}/adoption, then POST .../adopt. It prints the
-    change, the new version's lint, the enrollments that get it, the messages that keep
-    their text, and a sample message, then asks you to confirm; there is no flag to skip
-    the question, because confirming approves the step in the new version. Every message
-    that exists, sent or in flight, keeps the text it was rendered with. Refused while
-    the new version has a lint error.
+    change, the new version's lint errors and warnings, the enrollments that get it, the
+    messages that keep their text, the messages blocked in the new version, and a sample
+    message, then asks you to confirm. There is no flag to skip the question, because
+    confirming approves the step in the new version.
+
+    Every message that exists, sent or in flight, keeps the text it was rendered with.
+    Enrollments the old version parked (a `blocked:` or `too_long:` reason) are due again.
+    Refused for a campaign that is not active or paused, a version with a lint error, on
+    another channel, or that uses {{ personal_line }}.
     """
     with _campaign_db() as factory:
         # Read, then ask, then write: a writer held across the prompt would lock out serve.

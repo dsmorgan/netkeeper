@@ -738,3 +738,103 @@ def test_a_due_enrollment_keeps_its_due_time(writer: Session) -> None:
 
     assert _adopt(writer, user, campaign).released == 0
     assert _changed(before, _row(_fresh(writer, user, Enrollment, waiting.id))) == {}
+
+
+@pytest.mark.parametrize("mode", [StepMode.PREFILL, StepMode.AUTO_SEND])
+def test_a_prefill_refused_as_too_long_is_released(writer: Session, mode: StepMode) -> None:
+    """A ``too_long`` refusal is decided before the lock, the budget and any navigation, so
+    no bubble is open: the shorter version makes it due again, and the claim lints it."""
+    user = factories.make_user(writer)
+    campaign = _campaign(writer, user, channels=(LINKEDIN,), mode=mode)
+    too_long = _enroll(
+        writer,
+        campaign,
+        next_action_at=None,
+        not_sent_error="too_long: the message takes too long to type",
+        not_sent_count=1,
+        not_sent_since=NOW - timedelta(hours=1),
+    )
+    not_typed = _enroll(
+        writer, campaign, next_action_at=None, not_sent_error="not_typed: x", not_sent_count=1
+    )
+    _new_version(writer, user, campaign.steps[0], "Hi {{ first_name }}, shorter now")
+    before = _row(_fresh(writer, user, Enrollment, not_typed.id))
+
+    shown = service.preview(writer, user, campaign.id, campaign.steps[0].id, now=NOW)
+    assert shown.released == 1
+    assert _adopt(writer, user, campaign).released == 1
+
+    row = _fresh(writer, user, Enrollment, too_long.id)
+    assert (row.next_action_at, row.not_sent_error, row.not_sent_count, row.not_sent_since) == (
+        NOW,
+        None,
+        0,
+        None,
+    )
+    # A prefill that typed nothing waits for Try again (#445), never for a new version.
+    assert _changed(before, _row(_fresh(writer, user, Enrollment, not_typed.id))) == {}
+
+
+def test_adopt_renders_nothing_and_shares_the_previews_fingerprint(
+    writer: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under the write lock, adopt needs only the refusal and the fingerprint: the
+    fingerprint is the same with and without the renders, and adopt renders nothing."""
+    user = factories.make_user(writer)
+    campaign = _campaign(writer, user)
+    step = campaign.steps[0]
+    _enroll(writer, campaign, next_action_at=NOW)
+    _new_version(writer, user, step, "Hello {{ first_name }}")
+    rendered = service.preview(writer, user, campaign.id, step.id, now=NOW)
+    bare = service.preview(writer, user, campaign.id, step.id, now=NOW, render=False)
+    assert rendered.samples and not bare.samples
+    assert rendered.fingerprint == bare.fingerprint
+
+    def no_render(*_: object, **__: object) -> object:
+        raise AssertionError("adopt rendered the messages")
+
+    monkeypatch.setattr(campaign_review, "_render_messages", no_render)
+    result = service.adopt(
+        writer, user, campaign.id, step.id, fingerprint_seen=rendered.fingerprint, now=NOW
+    )
+    assert result.to_version == 2
+
+
+def test_a_campaign_status_change_since_the_preview_is_stale(writer: Session) -> None:
+    user = factories.make_user(writer)
+    campaign = _campaign(writer, user)
+    step = campaign.steps[0]
+    _new_version(writer, user, step, "Hello {{ first_name }}")
+    shown = service.preview(writer, user, campaign.id, step.id, now=NOW)
+    campaign_service.pause(writer, user, campaign.id)
+    with pytest.raises(AdoptionStale):
+        service.adopt(
+            writer, user, campaign.id, step.id, fingerprint_seen=shown.fingerprint, now=NOW
+        )
+    assert _fresh(writer, user, CampaignStep, step.id).template_adopted_at is None
+
+
+def test_an_enrollment_already_past_the_step_is_not_affected(writer: Session) -> None:
+    """``current_step`` at or past the step, even with no message of it: never reached."""
+    user = factories.make_user(writer)
+    campaign = _campaign(writer, user, channels=(EMAIL, EMAIL))
+    past = _enroll(
+        writer, campaign, current_step=1, next_action_at=None, not_sent_error=REMOVED_FIELD_BLOCK
+    )
+    _new_version(writer, user, campaign.steps[0], "Hello {{ first_name }}")
+    shown = service.preview(writer, user, campaign.id, campaign.steps[0].id, now=NOW)
+    assert (shown.affected_total, shown.released) == (0, 0)
+    assert past.id not in {e.enrollment_id for e in shown.affected}
+
+
+def test_adopt_needs_a_writer_session(session_factory: sessionmaker[Session]) -> None:
+    with session_scope(session_factory, write=True) as s:
+        user = factories.make_user(s)
+        campaign = _campaign(s, user)
+        _new_version(s, user, campaign.steps[0], "Hello {{ first_name }}")
+        ids = (user.id, campaign.id, campaign.steps[0].id)
+    with session_scope(session_factory) as s:
+        user = _user(s, ids[0])
+        shown = service.preview(s, user, ids[1], ids[2], now=NOW)
+        with pytest.raises(RuntimeError, match="writer session"):
+            service.adopt(s, user, ids[1], ids[2], fingerprint_seen=shown.fingerprint, now=NOW)

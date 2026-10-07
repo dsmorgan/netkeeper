@@ -49,8 +49,9 @@ adopted it and when (``campaign_steps.template_adopted_*``).
   one by one in the review (#339), which an active campaign has left.
 
 **Parked enrollments.** An enrollment the step's template blocked waits with
-``not_sent_error`` starting ``blocked:`` and no due time (#342). Adoption clears the
-reason and makes it due at once, so the next tick, or the next prefill, tries the
+``not_sent_error`` starting ``blocked:`` (#342), or ``too_long:`` for a LinkedIn
+prefill refused before any key as too long to type (#445), and no due time. Adoption
+clears the reason and makes it due at once, so the next tick, or the next prefill, tries the
 step again with every check, in the new version. A ``paused`` campaign still fires
 nothing until it is resumed.
 
@@ -109,8 +110,11 @@ OPEN_STATUSES: Final[frozenset[MessageStatus]] = frozenset(
 )
 """A message still in flight: claimed, a Gmail draft, or typed into LinkedIn's composer."""
 
-PARKED_PREFIX: Final = "blocked:"
-"""How ``not_sent_error`` starts for an enrollment its step's template blocked (#342)."""
+PARKED_PREFIXES: Final = ("blocked:", "too_long:")
+"""How ``not_sent_error`` starts for an enrollment its step's template parked: blocked by
+a lint or render error (#342), or a LinkedIn prefill refused as too long to type before
+any key (#445). A ``too_long`` refusal is decided before the activity lock, the budget and
+any navigation, so no message bubble is open, and the claim lints the new text again."""
 
 LIST_MAX: Final = 100
 """The most enrollments, or open messages, a preview names; the totals count them all."""
@@ -174,7 +178,8 @@ class AdoptionPreview:
     affected: tuple[EnrollmentRef, ...]
     """The first :data:`LIST_MAX` of them."""
     released: int
-    """Of those, enrollments the template parked (``blocked:``), due again on adopting."""
+    """Of those, enrollments the template parked (``blocked:`` or ``too_long:``), due again
+    on adopting."""
     kept: dict[MessageStatus, int]
     """The step's outbound messages by status. Each keeps the text it has."""
     open_messages: tuple[OpenMessage, ...]
@@ -187,6 +192,9 @@ class AdoptionPreview:
     to type, or a guard): never sent, whatever the adoption."""
     blocked: tuple[campaign_review.MessagePreview, ...]
     """The first :data:`LIST_MAX` of them, each with why."""
+    blocked_capped: bool
+    """Whether more enrollments are affected than the preview renders (:data:`RENDER_MAX`),
+    so ``blocked_total`` counts only the first of them."""
     fingerprint: str
     """What :func:`adopt` checks the confirm against."""
 
@@ -294,12 +302,12 @@ def _affected(session: Session, user: User, step: CampaignStep) -> list[Enrollme
 
 
 def _parked(enrollment: Enrollment, step: CampaignStep) -> bool:
-    """Waiting on ``step``'s template: parked with a ``blocked:`` reason (#342)."""
+    """Waiting on ``step``'s template: parked with a :data:`PARKED_PREFIXES` reason."""
     return (
         enrollment.status is EnrollmentStatus.ACTIVE
         and (enrollment.current_step or 0) + 1 == step.position
         and enrollment.next_action_at is None
-        and (enrollment.not_sent_error or "").startswith(PARKED_PREFIX)
+        and (enrollment.not_sent_error or "").startswith(PARKED_PREFIXES)
     )
 
 
@@ -334,9 +342,20 @@ def _refusal(
 
 
 def preview(
-    session: Session, user: User, campaign_id: int, step_id: int, *, now: datetime
+    session: Session,
+    user: User,
+    campaign_id: int,
+    step_id: int,
+    *,
+    now: datetime,
+    render: bool = True,
 ) -> AdoptionPreview:
-    """What adopting the newest version would change, and whether it is allowed. Reads only."""
+    """What adopting the newest version would change, and whether it is allowed. Reads only.
+
+    ``render=False`` skips rendering the messages (no samples, nothing blocked): what
+    :func:`adopt` uses under the write lock, since it needs only the refusal and the
+    fingerprint, and neither depends on a render.
+    """
     campaign = _campaign(session, user, campaign_id)
     step = _step(session, user, campaign_id, step_id)
     current = get_scoped(session, user, Template, step.template_id)
@@ -371,7 +390,7 @@ def preview(
     open_contacts = campaign_review._contacts(session, user, [m.contact_id for m in open_rows])
     refusal = _refusal(campaign, step, current, newest, errors)
     rendered: list[campaign_review.MessagePreview] = []
-    if newest.id != current.id and newest.channel is step.channel and not errors:
+    if render and newest.id != current.id and newest.channel is step.channel and not errors:
         # As the review renders them (spec 11.8): the engine's render, and the guards that
         # decide at a fire. A blocked one is never sent; the claim checks it again.
         rendered = campaign_review._render_messages(
@@ -421,6 +440,7 @@ def preview(
         samples=tuple(m for m in rendered if m.blocked is None)[:SAMPLE_MAX],
         blocked_total=len(blocked),
         blocked=tuple(blocked[:LIST_MAX]),
+        blocked_capped=bool(rendered) and len(affected) > RENDER_MAX,
         fingerprint=_fingerprint(campaign, step, current, newest),
     )
 
@@ -442,7 +462,7 @@ def adopt(
     record, and the parked enrollments it releases. Never a message: see the module.
     """
     _require_writer(session, "adopt")
-    shown = preview(session, user, campaign_id, step_id, now=now)
+    shown = preview(session, user, campaign_id, step_id, now=now, render=False)
     if shown.refusal is not None:
         raise CampaignConflict(shown.refusal)
     if fingerprint_seen != shown.fingerprint:

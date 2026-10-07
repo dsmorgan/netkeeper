@@ -49,6 +49,7 @@ function adoption(overrides: Partial<Adoption> = {}): Adoption {
     samples: [message({ body: 'Hello Ada' })],
     blocked_total: 0,
     blocked: [],
+    blocked_capped: false,
     fingerprint: 'adopt-fp',
     ...overrides,
   }
@@ -112,7 +113,11 @@ describe('template adoption', () => {
     )
     expect(within(dialog).getByText(/2 enrollments get the new version, including 1/)).toBeVisible()
     expect(within(dialog).getByText('Grace Hopper')).toBeVisible()
-    expect(within(dialog).getByText(/4 existing messages keep the text/)).toBeVisible()
+    expect(
+      within(dialog).getByText(
+        /4 existing messages keep the text .* including 1 still in progress/,
+      ),
+    ).toBeVisible()
     expect(within(dialog).getByText('Hello Ada')).toBeVisible()
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Use this version' }))
@@ -148,8 +153,46 @@ describe('template adoption', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Use v2 for step 1' }))
     const dialog = await screen.findByRole('alertdialog', { name: 'Use v2 for step 1?' })
     expect(await within(dialog).findByText(/fix the template first/)).toBeVisible()
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Use this version' }))
+    const confirm = within(dialog).getByRole('button', { name: 'Use this version' })
+    expect(confirm).toBeDisabled()
+    fireEvent.click(confirm)
     expect(calls.filter((c) => c.method === 'POST')).toEqual([])
+  })
+
+  it('shows the preview again when the adoption is refused as stale', async () => {
+    const calls: Call[] = []
+    let shown = 0
+    const state = {
+      campaign: withNewer('active'),
+      review: review({ status: 'active', missing: [] }),
+    }
+    mockFetch(
+      campaignBackend(
+        state,
+        {
+          'GET /api/v1/campaigns/5/steps/101/adoption': () => {
+            shown += 1
+            return jsonResponse(
+              shown === 1
+                ? adoption()
+                : adoption({ newest: { ...adoption().newest, version: 3 }, fingerprint: 'fp-3' }),
+            )
+          },
+          'POST /api/v1/campaigns/5/steps/101/adopt': () =>
+            jsonResponse({ detail: 'step 1 or its template changed since it was shown' }, 409),
+        },
+        calls,
+      ),
+    )
+    await renderApp('/campaigns/5')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Use v2 for step 1' }))
+    let dialog = await screen.findByRole('alertdialog', { name: 'Use v2 for step 1?' })
+    await within(dialog).findByLabelText('Changes')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Use this version' }))
+    dialog = await screen.findByRole('alertdialog', { name: 'Use v3 for step 1?' })
+    expect(within(dialog).getByText(/changed since it was shown/)).toBeVisible()
+    expect(shown).toBe(2)
   })
 
   it('offers nothing on a completed campaign', async () => {

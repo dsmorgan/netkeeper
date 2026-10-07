@@ -635,6 +635,8 @@ function AutoSendStepState() {
 }
 
 const LISTED = 10
+/** A message still in flight: claimed, a Gmail draft, or typed into LinkedIn's composer. */
+const IN_PROGRESS = ['scheduled', 'drafted', 'prefilled'] as const
 
 /**
  * The confirm for adopting the newest version of a step's template (#397). It shows the
@@ -662,10 +664,16 @@ function AdoptDialog({
       void queryClient.invalidateQueries({ queryKey: campaignKeys.all })
       onClose()
     },
+    onError: (error) => {
+      // Refused or stale: something changed since the preview. Show it as it is now.
+      if (error instanceof CampaignApiError && error.status === 409) void preview.refetch()
+    },
   })
   const p = preview.data
   const refusal = p?.refusal ?? null
   const kept = p === undefined ? 0 : Object.values(p.kept).reduce((a, n) => a + (n ?? 0), 0)
+  const inProgress =
+    p === undefined ? 0 : IN_PROGRESS.reduce((a, status) => a + (p.kept[status] ?? 0), 0)
   return (
     <ConfirmDialog
       open
@@ -679,6 +687,7 @@ function AdoptDialog({
       }
       confirmLabel="Use this version"
       confirmVariant="default"
+      confirmDisabled={p === undefined || refusal !== null || preview.isFetching}
       onConfirm={() => {
         if (p === undefined || refusal !== null) return Promise.resolve()
         return adopt.mutateAsync()
@@ -737,13 +746,17 @@ function AdoptDialog({
           <p>
             {kept === 0
               ? 'The step has no messages yet.'
-              : `The step's ${kept} existing ${kept === 1 ? 'message keeps' : 'messages keep'} the text ${kept === 1 ? 'it was' : 'they were'} written with, including ${p.open_messages.length} still in progress.`}{' '}
+              : `The step's ${kept} existing ${kept === 1 ? 'message keeps' : 'messages keep'} the text ${kept === 1 ? 'it was' : 'they were'} written with, including ${inProgress} still in progress.`}{' '}
             A message already sent, drafted, prefilled or being sent never changes.
           </p>
           {p.blocked_total > 0 && (
             <>
               <p className="text-foreground">
-                Blocked in the new version, never sent ({p.blocked_total}):
+                Blocked in the new version, never sent (
+                {p.blocked_capped
+                  ? `${p.blocked_total} among the first enrollments checked`
+                  : p.blocked_total}
+                ):
               </p>
               <ul aria-label="Blocked in the new version" className="list-disc pl-5">
                 {p.blocked.slice(0, LISTED).map((m) => (

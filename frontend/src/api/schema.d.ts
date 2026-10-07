@@ -3359,6 +3359,8 @@ export interface components {
             affected_total: number;
             /** Blocked */
             blocked: components["schemas"]["MessagePreviewOut"][];
+            /** Blocked Capped */
+            blocked_capped: boolean;
             /** Blocked Total */
             blocked_total: number;
             /** Campaign Id */
