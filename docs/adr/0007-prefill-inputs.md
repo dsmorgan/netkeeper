@@ -1,6 +1,6 @@
 # 0007. The prefill's inputs: one Message click, typing into one verified composer, never Enter
 
-Date: 2026-10-03, updated 2026-10-05 with the P4-06 messaging capture (#374), accepted 2026-10-06
+Date: 2026-10-03, updated 2026-10-05 with the P4-06 messaging capture (#374), accepted 2026-10-06, amended 2026-10-06 for #444 (which Message control is clicked)
 
 ## Status
 
@@ -102,10 +102,38 @@ Before the click, the run reads the profile page's `h1`, if there's exactly one,
   - its `profileUrn`, URL-decoded, is the contact's `urn:li:fsd_profile:<id>`, and its `recipient` is the same bare `<id>`.
 
   Zero links, or any link that names another profile, repeats a parameter, or holds no such `href`, means no click. The capture rendered three identical links, so a rule of "exactly one control" would refuse every profile. This rule accepts any number of links, but only when they all lead to the same compose for the same person.
-- It clicks exactly one of them: the first visible one in document order, through a locator that matches the role, the name, **and** the contact's `href`, never a bare position such as `nth(i)` on the role locator. If none is visible, it refuses.
-- It clicks once, at the control's own box, with a person's press length. Playwright scrolls the control into view first if it needs to; that's part of the click, not a separate input. A click that fails isn't tried again.
+- It clicks exactly one of them, through a locator that matches the role, the name, **and** the contact's `href`, never a bare position such as `nth(i)` on the role locator. Which one is set by [Choosing the control](#choosing-the-control) (#444). If none is visible, it refuses.
+- It clicks once, at the control's own box, with a person's press length. Playwright scrolls the control into view first if it needs to; that's part of the click, not a separate input. A click that fails isn't tried again. Its log line and the run's counts record a fixed category for the failure (`intercepted`, `outside_viewport`, `not_visible`, `not_stable`, `detached`, `timeout`, or `other`), read from Playwright's actionability log, never the exception's text.
 
 This binds the click to the contact by URN, not by where the control sits or how many there are. The draft's earlier rules (look only inside the top card; refuse more than one control) are replaced: the capture showed no landmark for the top card, and three controls on every profile.
+
+#### Choosing the control
+
+*Amended 2026-10-06 for #444.* CP8's first prefill worked, and the click raised on every one after it. On an isolated Chrome, Playwright's click raises the same way, after its 10-second wait, when the control it's given is one Playwright calls visible but can't click:
+
+- a fixed copy, such as a sticky header that slides in on scroll, that sits outside the viewport (`element is outside of the viewport`);
+- a control with something over its click point, such as a message bubble or the Messaging bar (`intercepts pointer events`);
+- a control that keeps moving (`element is not stable`).
+
+"The first visible one in document order" gives Playwright such a control whenever one comes first. So the click chooses among the visible links that passed the rule above, in this order:
+
+1. **The top card's control**, when it's wholly inside the viewport and nothing is over its center. The top card's control is the first Message link after the profile's one `h1`, in document order (`xpath=following::a` from that `h1`, narrowed to the href-bound locator). With zero `h1` elements, or two or more, there is no top card.
+2. **Any other control** that is wholly inside the viewport with nothing over its center, in document order.
+3. **The top card's control, when it isn't wholly inside the viewport**: Playwright scrolls it into view as part of the click. A top card that is on screen but covered is never chosen this way.
+4. Otherwise the click refuses, with no click: "no Message control is on screen with nothing over it". The run ends `not_typed` before any input, and no bubble opens.
+
+"Nothing over its center" is a hit test at the point Playwright's click would press: the middle of the control's first content quad, clipped to the viewport, with an area over 0.99 square pixels (Playwright's own rule; a link that holds a tall icon has more than one quad, and its box's center can lie in none of them). The element the page would hit there must be the control's link or an element inside it, matched by DOM node, not by size, because an icon may overflow its link's box. Another copy of the link over this one counts as covering it, as Playwright's check would. The hit test and the viewport come from the page's own geometry, read over a DevTools session on the run's tab, with no script in the page:
+
+- `Page.getLayoutMetrics`, for the layout viewport's size, which Playwright doesn't know for a tab it attached to;
+- `DOM.getDocument` (depth 0), `DOM.querySelectorAll` for the links with each verified compose `href`, and `DOM.describeNode` for each one's subtree: which nodes belong to which link;
+- `DOM.getBoxModel` and `DOM.getContentQuads` for each link: its box, matched to Playwright's box for the control, and its click point;
+- `DOM.getNodeForLocation` at that point, with `ignorePointerEventsNone`, which answers as `document.elementFromPoint` does.
+
+The session is opened in `BrowserRun._read_click_geometry`, sends only those seven read-only methods, and detaches before the click. They change nothing the page can see, run no script, and dispatch no event. A session that can't open, or a read that fails, chooses without geometry: the top card's control, else the first visible one, as before #444. Playwright's own actionability checks still run at the click and refuse a covered or off-screen control, so the hit test only chooses; it never makes a click land where Playwright's checks wouldn't.
+
+`click(trial=True)` was rejected for the hit test: it moves the mouse over the control (a hover the page sees) and scrolls, which are inputs this ADR doesn't authorize.
+
+The run's counts record which control was chosen (`message_click_target`: `top_card`, `on_screen`, `top_card_off_screen`, or `unchecked`) and, for a click that raised, `message_click_failure`.
 
 The click opens a bubble on the profile page, and the tab doesn't navigate. Any change of the tab's URL after the click stops the run.
 
@@ -119,7 +147,7 @@ Once `click_message` returns, the run never calls `ensure_page`, `goto`, `new_pa
 
 **The composer wait.** The bubble and the compose option arrive a moment after the click. So before the first key, `type_into_composer` polls the full set of read-only checks below (the compose option seen, one composer, empty, the recipient, and focus) until they all pass in one pass, for at most `COMPOSER_WAIT_S` (5 seconds, a module constant pinned to its literal). The wait is read-only: it gives no input. A pass counts only when every check passes in it, including that the tab's URL is unchanged and that exactly one compose option was seen, with no later one; checks that passed in different passes don't add up. If no pass has succeeded by then, the prefill ends `not_typed`. The focus check is part of every authorizing pass. The wait first polls until one pass holds every check except focus; then, if the composer doesn't already hold focus, `_focus_seam` runs once, and never again; then the wait polls the full pass, focus included, for the rest of `COMPOSER_WAIT_S`. So the focus call still comes only after the recipient, emptiness and single-composer checks have passed, and before the full pass that authorizes the first key.
 
-- **Exactly one composer is on the page.** The composer is found by role and name: role `textbox`, name `Write a message…` (with U+2026, the ellipsis character), exact, never by a CSS class or the `msg-form-…` id. It must sit in the bubble the recipient checks verified (see the next subsection). Any other composer on the page, such as a minimized bubble left from an earlier prefill or opened by the person, means more than one, and the prefill refuses with a reason that asks the person to close the other message bubbles. netkeeper never closes a bubble: closing one deletes its draft, and it's an input this ADR doesn't authorize.
+- **Exactly one composer is on the page.** The composer is found by role and name: role `textbox`, name `Write a message…` (with U+2026, the ellipsis character), exact, never by a CSS class or the `msg-form-…` id. It must sit in the bubble the recipient checks verified (see the next subsection). Any other composer on the page, such as a minimized bubble left from an earlier prefill or opened by the person, means more than one, and the prefill refuses with a reason that says another composer is on the page, in an open or minimized bubble, and asks the person to close the other bubbles. netkeeper never closes a bubble: closing one deletes its draft, and it's an input this ADR doesn't authorize.
 - **The composer is empty.** It reads as empty under [the text rule](#reading-the-composers-text). The capture shows that a minimized bubble keeps its draft across pages, so the Message click can restore a bubble that already holds a draft for this contact. The prefill refuses, and the person clears the draft.
 - **The composer's recipient is this contact.** See the next subsection.
 - **The verified composer holds focus.** Focus is read through Playwright's own selector engine (a `:focus` match on the composer's locator), never through `evaluate` or other script of netkeeper's in the page. If the composer doesn't hold focus after the one focus call [below](#focusing-the-composer), the prefill types nothing.
@@ -237,6 +265,13 @@ After a failure mid-type, the tab still holds what was typed:
 
 P4-03 (#382) changes `tests/test_browser_safety.py` in the same pull request as the code these pins guard, not in this one.
 
+#444 adds, in the same pull request as its code:
+
+- `ALLOWED_CONTEXT_MUTATIONS` allows `new_cdp_session` in `BrowserRun._read_click_geometry`, and `CDP_SENDERS` lets that function send exactly `Page.getLayoutMetrics` (no params), `DOM.getDocument` (`depth`), `DOM.querySelectorAll` (`nodeId`, `selector`), `DOM.describeNode` (`nodeId`, `depth`), `DOM.getBoxModel` and `DOM.getContentQuads` (`nodeId`), and `DOM.getNodeForLocation` (`x`, `y`, `ignorePointerEventsNone`); neither CDP site may send the other's methods.
+- The click's candidates are drawn only from the href-bound locator (`visible.nth(index)`, and `top.first` from `bound.and_(after_heading)`).
+- `MESSAGE_TOP_CARD`, `MESSAGE_MAX_CANDIDATES`, `HIT_TOLERANCE_PX`, the refusal's words, and the failure and target categories are pinned to literals.
+- Runtime: a sticky copy off screen is passed over for the top card; a covered top card gives way to a clear copy; everything covered refuses with no click; an overlay with `pointer-events: none` doesn't cover; a geometry read that fails clicks the top card, unchecked; a click that raises records its category and logs no page text. The smoke replica reproduces the sticky, covered, sidebar, and minimized-bubble pages, and reads each category from Playwright's own error.
+
 Static pins:
 
 - `ALLOWED_INPUTS` entries for exactly three methods: `click` in `BrowserRun.click_message`; and `keyboard` (read once, into a local), `type`, `insert_text`, and `press` in `BrowserRun.type_into_composer`. Also `focus` in `BrowserRun._focus_seam`, and a static pin that `_focus_seam` has exactly one call site, in `type_into_composer`.
@@ -322,7 +357,7 @@ The maintainer accepted these on 2026-10-06:
 1. **Where the tab comes to the front.** Once, at the run's start, before the Message click; `hand_over()` changes no focus. That adjusts the "brought to the front" wording of 2026-10-03.
 2. **The claim lapse.** 60 seconds after `Message.scheduled_at`.
 3. **Other open bubbles.** The prefill refuses a page that shows any composer besides the one the click opened, hidden ones included, so the person closes earlier bubbles, including the last prefill's, before the next prefill.
-4. **The Message click rule.** Every link named Message must name the contact's URN and bare id, and the click goes through the first visible one, through a locator bound to that `href`. It replaces the draft's "exactly one, in the top card" rule.
+4. **The Message click rule.** Every link named Message must name the contact's URN and bare id, and the click goes through the first visible one, through a locator bound to that `href`. It replaces the draft's "exactly one, in the top card" rule. (Amended for #444: which visible one is set by [Choosing the control](#choosing-the-control). The rule that every link names the contact is unchanged.)
 5. **Focusing the composer.** One `Locator.focus()`, in `_focus_seam`, after every check (option B), as [described above](#focusing-the-composer).
 
 The typing indicator, a decision in the draft, was settled on 2026-10-05: accepted, with a possible toggle later (#430).

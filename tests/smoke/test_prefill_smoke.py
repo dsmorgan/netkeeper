@@ -47,7 +47,7 @@ from messaging_pages import (
     never_messaged_bubble_html,
 )
 
-from netkeeper.linkedin.browser import AttachBrowserProvider
+from netkeeper.linkedin.browser import AttachBrowserProvider, ClickFailure, classify_click_failure
 from netkeeper.linkedin.messaging import (
     COMPOSE_OPTIONS_PATH,
     MessageJobSpec,
@@ -81,6 +81,12 @@ class Scenario:
     decoy_link: Member | None = None
     header_for: Member | None = None
     second_composer: bool = False
+    #: #444's layouts. ``sticky``: a fixed header copy of the contact's Message link,
+    #: first in the document and slid above the viewport. ``covered``: the top card's
+    #: control sits under a fixed bar; a Highlights copy below it is clear. ``sidebar``:
+    #: "More profiles for you" with other people's Message buttons. ``minimized``: three
+    #: minimized bubbles from earlier conversations and the Messaging bar.
+    layout: str = ""
 
 
 def _member(n: int) -> Member:
@@ -97,6 +103,10 @@ SCENARIOS = {
     "never_focused": Scenario(_member(307), focus=False),
     "late_focus": Scenario(_member(308), focus_delay_ms=800),
     "pronouns": Scenario(_member(309), existing=False, pronouns=True),
+    "sticky": Scenario(_member(310), layout="sticky"),
+    "covered": Scenario(_member(311), layout="covered"),
+    "sidebar": Scenario(_member(312), layout="sidebar"),
+    "minimized": Scenario(_member(313), layout="minimized"),
 }
 BY_SLUG = {s.member.slug: s for s in SCENARIOS.values()}
 
@@ -111,6 +121,8 @@ document.addEventListener('click', async (event) => {
   if (!link || !link.getAttribute('href').includes('/messaging/compose/')) return;
   event.preventDefault();
   window.__events.push('click:' + link.getAttribute('href'));
+  const card = link.closest('[componentkey]');
+  if (card) window.__events.push('card:' + card.getAttribute('componentkey'));
   await fetch(cfg.compose_url);
   if (cfg.thread_url) await fetch(cfg.thread_url);
   const host = document.createElement('div');
@@ -133,6 +145,77 @@ document.addEventListener('click', async (event) => {
 
 
 _PRONOUNS = ' <span aria-hidden="true">(They/Them)</span>'
+
+
+def _keyed(member: Member, key: str, style: str = "") -> str:
+    control = message_control_html(member, absolute=False)
+    return f'<div componentkey="{key}" style="{style}">{control}</div>'
+
+
+def _minimized_bubbles() -> str:
+    """Three minimized bubbles for other people, as the CP8 page showed them: each a
+    ``Messaging`` dialog whose body (and composer) is hidden, not removed, so its draft
+    survives; and the Messaging bar. Fixed along the bottom right."""
+    bubbles = "".join(
+        f'<div style="position:fixed;bottom:0;right:{300 + 220 * i}px;width:210px;height:48px;'
+        f'background:#ddd;z-index:20">'
+        + existing_bubble_html(_member(380 + i)).replace(
+            'role="dialog"',
+            'role="dialog" data-msg-overlay-conversation-bubble-is-minimized="true"'
+            ' style="height:48px;overflow:hidden"',
+            1,
+        )
+        + "</div>"
+        for i in range(3)
+    )
+    bar = (
+        '<aside style="position:fixed;bottom:0;right:0;width:288px;height:48px;'
+        'background:#eee;z-index:20"><h2>Messaging</h2></aside>'
+    )
+    return bubbles + bar
+
+
+def _layout_html(scenario: Scenario) -> str:
+    """#444's profile layouts, in fixed pixels on a page that doesn't scroll, so the
+    prefill's brief scroll leaves every box where it is."""
+    member = scenario.member
+    top = _keyed(member, "top-card", "position:absolute;left:40px;top:220px")
+    highlights = (
+        '<section style="position:absolute;left:40px;top:420px"><h2>Highlights</h2>'
+        f"{_keyed(member, 'highlights')}</section>"
+    )
+    sticky = ""
+    extra = ""
+    if scenario.layout == "sticky":
+        sticky = (
+            '<header style="position:fixed;top:0;left:0;right:0;height:64px;'
+            'transform:translateY(-100%);background:#fff;z-index:30">'
+            f"{_keyed(member, 'sticky')}</header>"
+        )
+    elif scenario.layout == "covered":
+        extra = (
+            '<aside style="position:fixed;left:0;top:180px;width:600px;height:120px;'
+            'background:#eee;z-index:20"><h2>Messaging</h2></aside>'
+        )
+    elif scenario.layout == "sidebar":
+        people = "".join(
+            f'<li><a href="/in/{_member(390 + i).slug}/">{escape(_member(390 + i).name)}</a>'
+            '<button type="button"><span>Message</span></button></li>'
+            for i in range(3)
+        )
+        extra = (
+            '<aside style="position:absolute;left:700px;top:220px"><h2>More profiles for you'
+            f"</h2><ul>{people}</ul></aside>"
+        )
+    elif scenario.layout == "minimized":
+        extra = _minimized_bubbles()
+    return (
+        "<style>html,body{margin:0;height:100%;overflow:hidden}</style>"
+        f"{sticky}<main><h1 style='position:absolute;left:40px;top:120px;margin:0'>"
+        f"{escape(member.name)}</h1>{top}{highlights}"
+        f"<a href='/in/{member.slug}/' style='position:absolute;left:40px;top:560px'>"
+        f"{escape(member.name)}</a></main>{extra}"
+    )
 
 
 def _profile_html(scenario: Scenario) -> str:
@@ -164,11 +247,18 @@ def _profile_html(scenario: Scenario) -> str:
         "focus_delay_ms": scenario.focus_delay_ms,
         "enter_sends": scenario.enter_sends,
     }
+    page = (
+        _layout_html(scenario)
+        if scenario.layout
+        else (
+            f"<main><h1>{escape(member.name)}{_PRONOUNS if scenario.pronouns else ''}</h1>"
+            '<button type="button"><span>Message</span></button>'  # a button decoy
+            f"{links}<a href='/in/{member.slug}/'>{escape(member.name)}</a></main>{decoy}"
+        )
+    )
     return (
         "<!doctype html><html><head><meta charset='utf-8'><title>replica</title></head><body>"
-        f"<main><h1>{escape(member.name)}{_PRONOUNS if scenario.pronouns else ''}</h1>"
-        '<button type="button"><span>Message</span></button>'  # a button decoy: never clicked
-        f"{links}<a href='/in/{member.slug}/'>{escape(member.name)}</a></main>{decoy}"
+        f"{page}"
         f"<script type='application/json' id='cfg'>{json.dumps(cfg).replace('</', '<\\/')}</script>"
         f"<script>{_SCRIPT}</script></body></html>"
     )
@@ -286,7 +376,17 @@ def _no_send(state: dict[str, Any]) -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["existing", "never_messaged", "late_focus", "pronouns", "never_focused"]
+    "name",
+    [
+        "existing",
+        "never_messaged",
+        "late_focus",
+        "pronouns",
+        "never_focused",
+        "sticky",
+        "covered",
+        "sidebar",
+    ],
 )
 async def test_the_body_is_typed_into_a_real_composer_and_never_sent(
     origin: str, name: str
@@ -305,17 +405,26 @@ async def test_the_body_is_typed_into_a_real_composer_and_never_sent(
     assert result.outcome.conversation_urn == expected_urn
     clicks = [e for e in state["events"] if e.startswith("click:")]
     assert clicks == [f"click:{compose_href(SCENARIOS[name].member)}"]
+    # #444: which control took the click, on the layouts that have a choice.
+    expected_card = {"sticky": "top-card", "covered": "highlights", "sidebar": "top-card"}
+    if name in expected_card:
+        cards = [e for e in state["events"] if e.startswith("card:")]
+        assert cards == [f"card:{expected_card[name]}"], state["events"]
 
 
 REFUSALS = {
     "decoy_link": "something other than this contact's compose",
     "draft": "not empty",
     "other_recipient": "for someone else",
-    "two_composers": "more than one message composer",
+    "two_composers": "another message composer is on the page",
+    # #444: minimized bubbles keep their composers, hidden, so decision 3 refuses them.
+    "minimized": "another message composer is on the page, in an open or minimized bubble",
 }
 
 
-@pytest.mark.parametrize("name", ["decoy_link", "draft", "other_recipient", "two_composers"])
+@pytest.mark.parametrize(
+    "name", ["decoy_link", "draft", "other_recipient", "two_composers", "minimized"]
+)
 async def test_a_refused_prefill_types_nothing(origin: str, name: str) -> None:
     result, state = await _prefill(origin, SCENARIOS[name])
     assert result.outcome.kind is MessageOutcomeKind.NOT_TYPED, result
@@ -324,3 +433,52 @@ async def test_a_refused_prefill_types_nothing(origin: str, name: str) -> None:
     _no_send(state)
     if name == "decoy_link":
         assert not [e for e in state["events"] if e.startswith("click:")]
+    if name == "minimized":
+        # The minimized bubbles cover nothing the click needs: it lands on the top card,
+        # and decision 3 refuses only afterwards, before any key.
+        assert [e for e in state["events"] if e.startswith("card:")] == ["card:top-card"]
+
+
+#: Test-only pages for Playwright's own click errors. The click here is the test's, on
+#: its own page in the isolated Chrome, never the package's.
+_ERROR_PAGES = {
+    ClickFailure.OUTSIDE_VIEWPORT: (
+        '<header style="position:fixed;top:0;left:0;right:0;height:60px;'
+        'transform:translateY(-100%)"><a href="/m">Message</a></header>'
+    ),
+    ClickFailure.INTERCEPTED: (
+        '<a href="/m" style="position:fixed;left:20px;top:20px">Message</a>'
+        '<div style="position:fixed;left:0;top:0;width:300px;height:100px;background:#eee">'
+        "</div>"
+    ),
+    ClickFailure.NOT_STABLE: (
+        "<style>@keyframes s{from{transform:translateX(0)}to{transform:translateX(400px)}}"
+        '</style><a href="/m" style="position:fixed;top:20px;animation:s 1s linear infinite">'
+        "Message</a>"
+    ),
+}
+
+
+@pytest.mark.parametrize("category", list(_ERROR_PAGES))
+async def test_playwrights_own_click_errors_classify_to_their_category(
+    category: ClickFailure,
+) -> None:
+    """#444's root cause, reproduced: a fixed copy slid off screen, a control under
+    another element, and one that keeps moving each make Playwright's click time out,
+    and :func:`classify_click_failure` reads each one's category from the real error."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.connect_over_cdp(CDP_URL)
+        page = await browser.contexts[0].new_page()
+        try:
+            await page.set_content(f"<body style='margin:0'>{_ERROR_PAGES[category]}</body>")
+            link = page.get_by_role("link", name="Message", exact=True)
+            # Playwright calls each of these visible: it is the click that fails.
+            assert await link.filter(visible=True).count() == 1
+            with pytest.raises(Exception) as raised:
+                await link.click(timeout=1_500)
+            assert classify_click_failure(raised.value) is category
+        finally:
+            await page.close()
+            await browser.close()

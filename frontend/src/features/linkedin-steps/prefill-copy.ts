@@ -27,7 +27,7 @@ export const FIRST_POLL_NOTE = `netkeeper has not read your LinkedIn inbox yet, 
 
 /** Close the bubble a refusal that followed the Message click can leave open. */
 export const CLOSE_BUBBLE =
-  'netkeeper opened a message bubble in Chrome and left it open. It is empty. Close it before you prefill again, because netkeeper refuses a page with more than one message bubble.'
+  'netkeeper opened a message bubble in Chrome and left it open. It is empty. Close it before you prefill again, because netkeeper refuses a page with another message bubble, even a minimized one.'
 export const MAYBE_CLOSE_BUBBLE =
   'If a message bubble is open in Chrome, close it before you prefill again. netkeeper never closes it for you.'
 
@@ -201,6 +201,11 @@ const BEFORE_CLICK: readonly Rule[] = [
     text: "The profile's Message button isn't visible, so netkeeper didn't click it.",
     bubble: 'closed',
   },
+  {
+    match: 'no Message control is on screen with nothing over it; close or move what covers it',
+    text: "No Message button on the profile was on screen with nothing covering it, so netkeeper didn't click. Close or minimize what covers it, such as a message bubble, and try again.",
+    bubble: 'closed',
+  },
   { match: 'the run was refused', text: 'netkeeper refused to start the run.', bubble: 'closed' },
   { match: 'the browser was busy', text: 'Chrome was busy with another run.', bubble: 'closed' },
   {
@@ -263,8 +268,13 @@ const AFTER_CLICK: readonly Rule[] = [
     bubble: 'open',
   },
   {
-    match: /more than one message (composer|bubble)|there is more than one/,
-    text: 'More than one message bubble is open in Chrome.',
+    match: /another message (composer|bubble) is on the page/,
+    text: 'Another message bubble is on the page in Chrome, open or minimized. Close it before you prefill again. Closing a bubble deletes any draft in it.',
+    bubble: 'open',
+  },
+  {
+    match: 'no message composer is on the page',
+    text: 'The message bubble opened without a place to type.',
     bubble: 'open',
   },
   {

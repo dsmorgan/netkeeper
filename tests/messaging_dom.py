@@ -177,6 +177,100 @@ def hidden(element: Element) -> bool:
     return False
 
 
+def box_of(element: Element) -> dict[str, float] | None:
+    """An element's box, from its invented ``data-box="x,y,width,height"`` (#444)."""
+    raw = element.attrs.get("data-box")
+    if raw is None or hidden(element):
+        return None
+    x, y, width, height = (float(v) for v in raw.split(","))
+    return {"x": x, "y": y, "width": width, "height": height}
+
+
+class GeometrySession:
+    """A CDP session for :meth:`BrowserRun._read_click_geometry`: its read-only methods,
+    over the fake DOM. Node ids are positions in document order (from 1), for
+    ``nodeId`` and ``backendNodeId`` alike. Boxes are the invented ``data-box`` ones.
+    The hit at a point is the last element in document order whose box holds it (a
+    fixed overlay comes after what it covers), as ``elementFromPoint`` answers;
+    ``data-pointer-events="none"`` is skipped. A point outside the viewport, or one over
+    no box, raises, as Chrome does."""
+
+    def __init__(self, tab: MessagingTab, viewport: tuple[float, float]) -> None:
+        self.tab = tab
+        self.viewport = viewport
+        self.sent: list[tuple[str, dict[str, Any]]] = []
+        self.detached = False
+
+    def _all(self) -> list[Element]:
+        return list(self.tab.document.elements())
+
+    def _describe(self, element: Element, order: list[Element]) -> dict[str, Any]:
+        children = [c for c in element.children if isinstance(c, Element)]
+        return {
+            "nodeId": order.index(element) + 1,
+            "backendNodeId": order.index(element) + 1,
+            "nodeName": element.tag.upper(),
+            "children": [self._describe(c, order) for c in children],
+        }
+
+    async def send(self, method: str, params: Mapping[str, Any] | None = None) -> Any:
+        self.sent.append((method, dict(params or {})))
+        error = self.tab.site.geometry_error
+        if error is not None:
+            raise error
+        params = dict(params or {})
+        order = self._all()
+        if method == "Page.getLayoutMetrics":
+            width, height = self.viewport
+            return {"cssLayoutViewport": {"clientWidth": width, "clientHeight": height}}
+        if method == "DOM.getDocument":
+            assert params == {"depth": 0}
+            return {"root": {"nodeId": 0}}
+        if method == "DOM.querySelectorAll":
+            assert params["nodeId"] == 0
+            found = select(params["selector"], self.tab.document, self.tab)
+            return {"nodeIds": [order.index(e) + 1 for e in found]}
+        if method == "DOM.describeNode":
+            assert params["depth"] == -1
+            return {"node": self._describe(order[params["nodeId"] - 1], order)}
+        if method == "DOM.getBoxModel":
+            box = box_of(order[params["nodeId"] - 1])
+            if box is None:
+                raise RuntimeError("Could not compute box model.")
+            x, y, w, h = box["x"], box["y"], box["width"], box["height"]
+            return {"model": {"border": [x, y, x + w, y, x + w, y + h, x, y + h]}}
+        if method == "DOM.getContentQuads":
+            box = box_of(order[params["nodeId"] - 1])
+            if box is None:
+                raise RuntimeError("Could not compute content quads.")
+            x, y, w, h = box["x"], box["y"], box["width"], box["height"]
+            return {"quads": [[x, y, x + w, y, x + w, y + h, x, y + h]]}
+        if method == "DOM.getNodeForLocation":
+            assert params.get("ignorePointerEventsNone") is True
+            x, y = params["x"], params["y"]
+            width, height = self.viewport
+            if not (0 <= x < width and 0 <= y < height):
+                raise RuntimeError("No node found at given location")
+            hit = None
+            for element in order:
+                box = box_of(element)
+                if box is None or element.attrs.get("data-pointer-events") == "none":
+                    continue
+                inside_x = box["x"] <= x < box["x"] + box["width"]
+                if inside_x and box["y"] <= y < box["y"] + box["height"]:
+                    hit = element
+            if hit is None:
+                raise RuntimeError("No node found at given location")
+            return {"backendNodeId": order.index(hit) + 1, "frameId": "main"}
+        raise AssertionError(f"the geometry session never sends {method}")
+
+    def on(self, event: str, handler: Callable[[Any], None]) -> None:
+        raise AssertionError("the geometry session never listens")
+
+    async def detach(self) -> None:
+        self.detached = True
+
+
 # --- a tiny selector engine --------------------------------------------------------------
 
 
@@ -312,6 +406,17 @@ class FakeLocator:
                 return _unique(out)
 
             return self._then(up, f".locator({selector})")
+        if selector == "xpath=following::a":
+            # Every <a> after the element in document order, outside it (#444's top card).
+            def following(found: list[Element]) -> list[Element]:
+                order = list(self._page.document.elements())
+                out: list[Element] = []
+                for element in found:
+                    after = order[order.index(element) + 1 :]
+                    out.extend(e for e in after if e.tag == "a" and not element.contains(e))
+                return _unique(out)
+
+            return self._then(following, f".locator({selector})")
         assert not selector.startswith("xpath="), f"the fake can't read {selector!r}"
 
         def under(found: list[Element]) -> list[Element]:
@@ -384,7 +489,9 @@ class FakeLocator:
         return self._one().text_content()
 
     async def bounding_box(self, *, timeout: float | None = None) -> Mapping[str, float] | None:  # noqa: ASYNC109
-        return None
+        """The element's ``data-box`` (``x,y,width,height``), or ``None`` without one."""
+        self._page.read_log.append(f"bounding_box{self.desc}")
+        return box_of(self._one())
 
     async def click(self, *, delay: float | None = None, timeout: float | None = None) -> None:  # noqa: ASYNC109
         await self._page.clicked(self._one())
@@ -675,6 +782,18 @@ class MessagingSite(FakeContext):
         self.after_key: dict[int, Callable[[MessagingTab], None]] = {}
         self.stray_keys: list[str] = []
         self.navigations: list[str] = []
+        #: The layout viewport the geometry session reports (#444); ``None`` means the
+        #: session can't be opened, as a fake without CDP, so the click is unchecked.
+        self.viewport: tuple[float, float] | None = None
+        self.geometry_error: BaseException | None = None
+        self.geometry_sessions: list[GeometrySession] = []
+
+    async def new_cdp_session(self, page: Any) -> GeometrySession:
+        if self.viewport is None:
+            raise RuntimeError("this fake has no CDP")
+        session = GeometrySession(page, self.viewport)
+        self.geometry_sessions.append(session)
+        return session
 
     async def new_page(self) -> PageLike:
         self.new_page_calls += 1
