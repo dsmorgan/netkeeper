@@ -128,7 +128,7 @@ function AutoSendHold() {
         disabled={resume.isPending}
         onClick={() => resume.mutate()}
       >
-        I closed the bubbles, resume auto-send
+        I fixed it in Chrome, resume auto-send
       </Button>
       {resume.isError && <ErrorNote label="Auto-send did not resume." error={resume.error} />}
     </Callout>

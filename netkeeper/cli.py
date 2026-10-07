@@ -1285,7 +1285,8 @@ def linkedin_auto_send_resume() -> None:
         typer.echo(f"auto-send is held since {hold.since:%Y-%m-%d %H:%M UTC}: {hold.reason}")
         typer.echo(AUTO_SEND_HOLD_CLEAR)
         if not typer.confirm(
-            "Have you closed every LinkedIn message bubble in the netkeeper Chrome window?",
+            "Have you fixed it in the netkeeper Chrome window (every LinkedIn message bubble"
+            " closed, nothing covering a profile's Message button)?",
             default=False,
         ):
             typer.echo("cancelled: auto-send stays held")

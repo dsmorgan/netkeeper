@@ -374,6 +374,7 @@ def record_quietly(
     click_diagnostics: Mapping[str, str | None] | None = None,
     tab_closed: bool = False,
     opened: bool | None = None,
+    pre_click_hold: PreClickHold | None = None,
 ) -> None:
     """:func:`record` on the way out of a refusal or a cancel: a failed write is logged,
     and an auto-send's hold is still written (:func:`hold_quietly`)."""
@@ -391,19 +392,25 @@ def record_quietly(
             click_diagnostics=click_diagnostics,
             tab_closed=tab_closed,
             opened=opened,
+            pre_click_hold=pre_click_hold,
         )
     except Exception:
         log.exception("could not record how prefill run %d ended", run_id)
-        if click_attempted and not tab_closed:
-            hold_quietly(factory, user_id, run_id, now=now)
+        if (click_attempted and not tab_closed) or pre_click_hold is not None:
+            hold_quietly(factory, user_id, run_id, now=now, pre_click_hold=pre_click_hold)
 
 
 def hold_quietly(
-    factory: sessionmaker[Session], user_id: int, run_id: int, *, now: datetime
+    factory: sessionmaker[Session],
+    user_id: int,
+    run_id: int,
+    *,
+    now: datetime,
+    pre_click_hold: PreClickHold | None = None,
 ) -> None:
     """Hold auto-send, in a transaction of its own, when the outcome could not be recorded
-    after an auto-send's Message click (#458 review, SF3). A manual run holds nothing. A
-    failed write is logged."""
+    after an auto-send's Message click or one of #444's pre-click refusals (#458 review,
+    SF3). A manual run holds nothing. A failed write is logged."""
     try:
         with session_scope(factory, write=True) as session:
             user = _load_user(session, user_id)
@@ -413,7 +420,11 @@ def hold_quietly(
                     session,
                     user,
                     run.linkedin_account_id,
-                    reason=AUTO_SEND_HOLD_BUBBLE,
+                    reason=(
+                        AUTO_SEND_HOLD_COVERED
+                        if pre_click_hold is PreClickHold.COVERED
+                        else AUTO_SEND_HOLD_BUBBLE
+                    ),
                     now=now,
                     run_id=run_id,
                 )
@@ -782,6 +793,7 @@ async def run_prefill(
             clicked=source.message_clicked,
             tab_closed=tab_closed,
             click_diagnostics=source.message_click_diagnostics,
+            pre_click_hold=result.pre_click_hold,
         )
         raise
     except Exception:
@@ -809,8 +821,15 @@ async def run_prefill(
             click_diagnostics=source.message_click_diagnostics,
         )
     except Exception:
-        if source.message_click_attempted and not tab_closed:
-            await off_loop(hold_quietly, factory, user_id, run_id, now=clock())
+        if (source.message_click_attempted and not tab_closed) or result.pre_click_hold is not None:
+            await off_loop(
+                hold_quietly,
+                factory,
+                user_id,
+                run_id,
+                now=clock(),
+                pre_click_hold=result.pre_click_hold,
+            )
         raise
 
 

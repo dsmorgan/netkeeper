@@ -2185,6 +2185,9 @@ async def test_a_pre_click_bubble_refusal_holds_auto_send(
     assert a.message() is None and lane.enrollment(a.enrollment_id).not_sent_count == 1
     hold = _hold_of(lane)
     assert hold is not None and hold.reason == reason and hold.run_id == a.run_id
+    # Nothing was typed, so the li_messages_auto unit came back; the visit didn't.
+    assert a.spent(ActionClass.LI_MESSAGES_AUTO) == 0
+    assert a.spent(ActionClass.PROFILE_VISITS) == 1
 
 
 async def test_a_bubble_check_that_cannot_read_the_page_holds_auto_send(
@@ -2213,6 +2216,7 @@ async def test_a_covered_message_control_holds_auto_send(
     assert a.site.tab.clicks == []
     hold = _hold_of(lane)
     assert hold is not None and hold.reason == linkedin_steps.AUTO_SEND_HOLD_COVERED
+    assert a.spent(ActionClass.LI_MESSAGES_AUTO) == 0
 
 
 async def test_a_pre_click_refusal_on_a_manual_prefill_holds_nothing(lane: Lane) -> None:
@@ -2240,3 +2244,58 @@ async def test_another_pre_click_refusal_holds_nothing(lane: Lane) -> None:
     a = Auto(lane, MessagingSite(ZEPHYRINE, profile_html="<main><h1>No controls</h1></main>"))
     await a.execute()
     assert _hold_of(lane) is None
+
+
+async def test_a_pre_click_hold_is_written_when_the_final_record_fails(
+    lane: Lane, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(message_send, "record_prefill_outcome", broken)
+    a = Auto(lane, MessagingSite(ZEPHYRINE, before=existing_bubble_html(ZEPHYRINE)))
+    await a.execute()
+    hold = _hold_of(lane)
+    assert hold is not None and hold.reason == linkedin_steps.AUTO_SEND_HOLD_BUBBLE
+
+
+def test_record_quietly_writes_a_pre_click_hold_when_recording_fails(
+    lane: Lane, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from netkeeper.linkedin.messaging import MessageOutcome, PreClickHold
+
+    run_id = _claimed_run(lane)
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(message_send, "record", broken)
+    message_send.record_quietly(
+        lane.factory,
+        lane.user_id,
+        run_id,
+        MessageOutcome(MessageOutcomeKind.NOT_TYPED, "covered", None, 0),
+        settings=AUTO,
+        now=NOW,
+        click_attempted=False,
+        clicked=False,
+        pre_click_hold=PreClickHold.COVERED,
+    )
+    hold = _hold_of(lane)
+    assert hold is not None and hold.reason == linkedin_steps.AUTO_SEND_HOLD_COVERED
+
+
+async def test_a_cancel_during_the_refund_still_records_the_pre_click_hold(
+    lane: Lane, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    def cancelled(*args: Any, **kwargs: Any) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(message_send, "_release_auto_send", cancelled)
+    a = Auto(lane, MessagingSite(ZEPHYRINE, before=existing_bubble_html(ZEPHYRINE)))
+    with pytest.raises(asyncio.CancelledError):
+        await a.execute()
+    hold = _hold_of(lane)
+    assert hold is not None and hold.reason == linkedin_steps.AUTO_SEND_HOLD_BUBBLE
