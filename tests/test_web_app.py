@@ -26,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 API_PATHS = {
     "/api/v1/health",
     "/api/v1/gmail-setup",
+    "/api/v1/gmail/activity",
     "/api/v1/me",
     "/api/v1/me/positions",
     "/api/v1/me/positions/{position_id}",
@@ -308,6 +309,7 @@ def test_known_api_modules_are_discovered() -> None:
         "do_not_send",
         "events",
         "exports",
+        "gmail",
         "gmail_setup",
         "health",
         "imports",

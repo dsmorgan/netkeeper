@@ -1489,6 +1489,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/gmail/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Gmail Activity
+         * @description Today's sends against the cap, and recent email. Read-only: it never calls Gmail.
+         */
+        get: operations["get_gmail_activity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/health": {
         parameters: {
             query?: never;
@@ -4744,6 +4764,25 @@ export interface components {
             include_archived: boolean;
             where?: components["schemas"]["FilterNode-Output"] | null;
         };
+        /** GmailActivityOut */
+        GmailActivityOut: {
+            /**
+             * Day End
+             * Format: date-time
+             */
+            day_end: string;
+            /**
+             * Day Start
+             * Format: date-time
+             */
+            day_start: string;
+            /** Mailboxes */
+            mailboxes: components["schemas"]["MailboxSendsOut"][];
+            /** Recent */
+            recent: components["schemas"]["RecentMessageOut"][];
+            /** Timezone */
+            timezone: string;
+        };
         /**
          * GmailSetupIn
          * @description The whole of the wizard's progress; a ``PUT`` replaces what was stored.
@@ -5658,6 +5697,17 @@ export interface components {
          * @enum {string}
          */
         MailboxProvider: "gmail";
+        /** MailboxSendsOut */
+        MailboxSendsOut: {
+            /** Daily Cap */
+            daily_cap: number;
+            /** Email */
+            email: string;
+            /** Mailbox Id */
+            mailbox_id: number;
+            /** Sent Today */
+            sent_today: number;
+        };
         /**
          * MailboxStatus
          * @description A mailbox's health (spec 8.5, 11.5).
@@ -5788,6 +5838,11 @@ export interface components {
             /** Fingerprint */
             fingerprint: string;
         };
+        /**
+         * MessageDirection
+         * @enum {string}
+         */
+        MessageDirection: "out" | "in";
         /**
          * MessagePreviewOut
          * @description One message of a step, rendered for a pending enrollment. ``blocked`` says why
@@ -6316,6 +6371,31 @@ export interface components {
             items: components["schemas"]["ReadyOut"][];
             /** Total */
             total: number;
+        };
+        /** RecentMessageOut */
+        RecentMessageOut: {
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /** Campaign Id */
+            campaign_id: number | null;
+            /** Campaign Name */
+            campaign_name: string | null;
+            /** Contact Id */
+            contact_id: number;
+            /** Contact Name */
+            contact_name: string;
+            direction: components["schemas"]["MessageDirection"];
+            /** Error */
+            error: string | null;
+            /** Id */
+            id: number;
+            /** Status */
+            status: string;
+            /** Step Position */
+            step_position: number | null;
         };
         /**
          * RefusedOut
@@ -11123,6 +11203,26 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    get_gmail_activity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GmailActivityOut"];
+                };
             };
         };
     };

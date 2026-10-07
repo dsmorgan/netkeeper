@@ -1017,6 +1017,7 @@ Cost controls: a per-day call cap, batch size limits, and a token estimate shown
 | `/imports`, `/exports` | Mapping, review, presets |
 | `/imports/runs`, `/imports/runs/:id` | Import history, paged newest first; one run's counts (every file's, for an archive), its rows, finishing a draft, and rollback (P1-13, #132) |
 | `/linkedin` | Runs, live progress, budget and heat, pins, preflight, browser launch instructions |
+| `/gmail` | The connection (OAuth client, account, arming, how to reconnect), today's sends against the daily cap, the reply poll, the posture rows that concern Gmail, and recent email (#449). Read-only apart from Re-authorize and Check now, and it never calls Gmail: `GET /gmail/activity` is a database read |
 | `/templates` | Editor with lint and live preview against a chosen contact |
 | `/campaigns`, `/campaigns/:id` | Builder, review gate, progress per step, replies, waiting-for-you prefill list |
 | `/inbox` | Detected replies across campaigns, with mark-handled and add-note |

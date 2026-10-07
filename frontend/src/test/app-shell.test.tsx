@@ -11,6 +11,7 @@ const EXPECTED_HREFS = [
   '/imports',
   '/exports',
   '/linkedin',
+  '/gmail',
   '/templates',
   '/campaigns',
   '/inbox',
@@ -18,13 +19,13 @@ const EXPECTED_HREFS = [
 ]
 
 describe('app shell', () => {
-  it('renders the eleven navigation links from spec 14.3, in order', async () => {
+  it('renders the twelve navigation links from spec 14.3, in order', async () => {
     await renderApp('/')
 
     const nav = screen.getByRole('navigation', { name: 'Primary' })
     const links = within(nav).getAllByRole('link')
 
-    expect(links).toHaveLength(11)
+    expect(links).toHaveLength(12)
     expect(links.map((link) => link.getAttribute('href'))).toEqual(EXPECTED_HREFS)
   })
 

@@ -4947,6 +4947,47 @@
           }
         }
       },
+      "GmailActivityOut": {
+        "properties": {
+          "day_end": {
+            "format": "date-time",
+            "title": "Day End",
+            "type": "string"
+          },
+          "day_start": {
+            "format": "date-time",
+            "title": "Day Start",
+            "type": "string"
+          },
+          "mailboxes": {
+            "items": {
+              "$ref": "#/components/schemas/MailboxSendsOut"
+            },
+            "title": "Mailboxes",
+            "type": "array"
+          },
+          "recent": {
+            "items": {
+              "$ref": "#/components/schemas/RecentMessageOut"
+            },
+            "title": "Recent",
+            "type": "array"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          }
+        },
+        "required": [
+          "day_start",
+          "day_end",
+          "timezone",
+          "mailboxes",
+          "recent"
+        ],
+        "title": "GmailActivityOut",
+        "type": "object"
+      },
       "GmailSetupIn": {
         "description": "The whole of the wizard's progress; a ``PUT`` replaces what was stored.",
         "properties": {
@@ -7454,6 +7495,34 @@
         "title": "MailboxProvider",
         "type": "string"
       },
+      "MailboxSendsOut": {
+        "properties": {
+          "daily_cap": {
+            "title": "Daily Cap",
+            "type": "integer"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "mailbox_id": {
+            "title": "Mailbox Id",
+            "type": "integer"
+          },
+          "sent_today": {
+            "title": "Sent Today",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "email",
+          "sent_today",
+          "daily_cap"
+        ],
+        "title": "MailboxSendsOut",
+        "type": "object"
+      },
       "MailboxStatus": {
         "description": "A mailbox's health (spec 8.5, 11.5).",
         "enum": [
@@ -7743,6 +7812,14 @@
         ],
         "title": "MessageApprovalIn",
         "type": "object"
+      },
+      "MessageDirection": {
+        "enum": [
+          "out",
+          "in"
+        ],
+        "title": "MessageDirection",
+        "type": "string"
       },
       "MessagePreviewOut": {
         "description": "One message of a step, rendered for a pending enrollment. ``blocked`` says why\nit cannot be sent, or is null. ``approved``: an approval covers it.",
@@ -8971,6 +9048,92 @@
           "total"
         ],
         "title": "ReadyPage",
+        "type": "object"
+      },
+      "RecentMessageOut": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "campaign_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campaign Id"
+          },
+          "campaign_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campaign Name"
+          },
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "contact_name": {
+            "title": "Contact Name",
+            "type": "string"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/MessageDirection"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "step_position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step Position"
+          }
+        },
+        "required": [
+          "id",
+          "direction",
+          "status",
+          "at",
+          "campaign_id",
+          "campaign_name",
+          "step_position",
+          "contact_id",
+          "contact_name",
+          "error"
+        ],
+        "title": "RecentMessageOut",
         "type": "object"
       },
       "RefusedOut": {
@@ -17127,6 +17290,28 @@
         "summary": "Put Gmail Setup",
         "tags": [
           "gmail-setup"
+        ]
+      }
+    },
+    "/api/v1/gmail/activity": {
+      "get": {
+        "description": "Today's sends against the cap, and recent email. Read-only: it never calls Gmail.",
+        "operationId": "get_gmail_activity",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GmailActivityOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Gmail Activity",
+        "tags": [
+          "gmail"
         ]
       }
     },
