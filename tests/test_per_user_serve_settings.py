@@ -113,7 +113,8 @@ async def test_the_heartbeat_gives_each_user_their_own_window_and_skips_an_unrea
     def flaky(user: User) -> tuple[time, time]:
         if user.id == third:
             raise RuntimeError("database is locked")
-        return real(user)
+        result: tuple[time, time] = real(user)
+        return result
 
     users = [(_user(session_factory, uid), 1) for uid in (first, second, third)]
     with caplog.at_level(logging.ERROR):
@@ -480,3 +481,110 @@ async def test_an_unreadable_window_at_startup_fires_nothing_until_the_schedule_
     after = {k: d for k, d in dues().items() if d is not None}
     assert after != before
     assert all(d > clock[0] for d in after.values())
+
+
+class _Restart:
+    """Users with a schedule an earlier serve established, then a restart just past a due
+    time, with a provider the test controls."""
+
+    def __init__(self, factory: sessionmaker[Session], count: int) -> None:
+        from random import Random
+
+        from netkeeper.services.linkedin_accounts import ensure_account
+
+        self.factory = factory
+        self.accounts: list[tuple[User, int]] = []
+        for _ in range(count):
+            with session_scope(factory, write=True) as session:
+                user = factories.make_user(session)
+                account = ensure_account(session, user).id
+                session.expunge(user)
+            self.accounts.append((user, account))
+        self.clock = NOW
+        self.fired: list[Any] = []
+        self.rng = Random(1)
+        self.provider: Any = lambda u: (time(8, 30), time(21, 30))
+        self._build()  # the earlier serve
+        self.before = self.dues()
+        first_due = min(d for per in self.before.values() for d in per.values() if d is not None)
+        self.clock = first_due + timedelta(minutes=1)
+
+    async def _handler(self, ctx: Any) -> None:
+        self.fired.append((ctx.user_id, ctx.kind))
+
+    def _build(self) -> Any:
+        return scheduler.build_scheduler(
+            self.factory,
+            lambda: self.accounts,
+            registry={kind: self._handler for kind in scheduler.JobKind},
+            armed=scheduler.ARMING_NOT_REQUIRED,
+            active_hours=lambda u: self.provider(u),
+            rng=self.rng,
+            clock=lambda: self.clock,
+        )
+
+    def restart(self) -> Any:
+        return self._build().get_job(scheduler.HEARTBEAT_JOB_ID).func
+
+    def dues(self) -> dict[int, dict[Any, datetime | None]]:
+        out: dict[int, dict[Any, datetime | None]] = {}
+        with session_scope(self.factory) as session:
+            for user, account in self.accounts:
+                owner = session.get(User, user.id)
+                assert owner is not None
+                out[user.id] = {
+                    k: scheduler.stored_due(session, owner, account, k) for k in scheduler.JobKind
+                }
+        return out
+
+
+async def test_the_guard_holds_when_only_the_retry_read_fails(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The heartbeat's own read of the hours succeeds, but the schedule is still
+    unestablished: the retry's read failed. Without the guard, poll_once would fire the
+    stale due times."""
+    run = _Restart(session_factory, 1)
+    fail_next = [True]
+    real = run.provider
+
+    def first_call_fails(user: User) -> tuple[time, time]:
+        if fail_next[0]:
+            fail_next[0] = False
+            raise RuntimeError("database is locked")
+        window: tuple[time, time] = real(user)
+        return window
+
+    run.provider = first_call_fails
+    heartbeat = run.restart()  # the startup read consumes the first failure
+    fail_next[0] = True  # the heartbeat's first read (the retry) fails; its second works
+    await heartbeat()
+    assert run.fired == []
+    assert run.dues() == run.before
+
+
+async def test_a_failing_retry_skips_only_that_user(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = _Restart(session_factory, 2)
+    bad, good = run.accounts[0][0].id, run.accounts[1][0].id
+    real_sync = scheduler.sync_account_schedule
+    readable = run.provider
+    run.provider = lambda u: (_ for _ in ()).throw(RuntimeError("locked"))
+    heartbeat = run.restart()  # both unestablished
+    run.provider = readable
+
+    established: list[int] = []
+
+    def sync(session: Session, user: User, *args: Any, **kwargs: Any) -> Any:
+        if user.id == bad:
+            raise RuntimeError("write failed")
+        established.append(user.id)
+        return real_sync(session, user, *args, **kwargs)
+
+    monkeypatch.setattr(scheduler, "sync_account_schedule", sync)
+    await heartbeat()  # must not raise, and must establish the other user
+    after = run.dues()
+    assert established == [good]
+    assert after[bad] == run.before[bad]
+    assert not any(fired_user == bad for fired_user, _ in run.fired)

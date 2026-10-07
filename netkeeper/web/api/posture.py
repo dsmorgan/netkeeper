@@ -30,10 +30,10 @@ from netkeeper.web.schemas import PostureOut, ProtectionOut
 router = APIRouter(tags=["posture"])
 
 
-def _unreadable(request: Request, user_id: int) -> list[str]:
+def _unreadable(request: Request, user_id: int) -> dict[str, str]:
     """What the running ``serve`` could not read of this user's settings (#464)."""
     failures: ReadFailures | None = getattr(request.app.state, "read_failures", None)
-    return [] if failures is None else failures.describe(user_id)
+    return {} if failures is None else failures.describe(user_id)
 
 
 @router.get("/posture", operation_id="get_posture")
@@ -43,7 +43,7 @@ def get_posture(request: Request, user: CurrentUser, session: SessionDep) -> Pos
     report = posture_service.posture(
         session, user, account_id, now=utcnow(), settings=settings, probe=None
     )
-    unreadable = _unreadable(request, user.id)
+    report = posture_service.with_read_failures(report, _unreadable(request, user.id))
     return PostureOut(
         checked_at=report.checked_at,
         timezone=report.timezone,
@@ -60,9 +60,9 @@ def get_posture(request: Request, user: CurrentUser, session: SessionDep) -> Pos
             )
             for protection in report.protections
         ],
-        warnings=[*report.warnings, *unreadable],
+        warnings=list(report.warnings),
         notes=list(report.notes),
         gaps=list(report.gaps),
-        ok=report.ok and not unreadable,
+        ok=report.ok,
         verdict=posture_service.verdict(report),
     )

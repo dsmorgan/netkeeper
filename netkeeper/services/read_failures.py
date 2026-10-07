@@ -36,12 +36,13 @@ class ReadFailures:
                 if not failing:
                     del self._failing[user_id]
 
-    def describe(self, user_id: int) -> list[str]:
-        """One sentence per read of ``user_id`` that is failing, or none."""
+    def describe(self, user_id: int) -> dict[str, str]:
+        """What is failing for ``user_id``: each read, with one plain sentence. Empty when
+        every read of theirs works."""
         with self._lock:
             failing = dict(self._failing.get(user_id, {}))
-        return [
-            f"netkeeper serve cannot read your {what} setting ({error}), so it skips that"
-            " for you until it can"
+        return {
+            what: f"netkeeper serve cannot read your {what} setting ({error}), so it skips"
+            " that for you until it can"
             for what, error in sorted(failing.items())
-        ]
+        }
