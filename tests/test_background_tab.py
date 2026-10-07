@@ -12,6 +12,7 @@ methods each site may send.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from typing import Any
@@ -34,6 +35,8 @@ class CdpPage(FakePage):
         super().__init__(context)
         self.target_id = target_id
         self.fronted = 0
+        #: How many ``Target.getTargetInfo`` reads fail before one answers.
+        self.unreadable = 0
 
     async def bring_to_front(self) -> None:
         self.fronted += 1
@@ -50,6 +53,9 @@ class PageSession:
     async def send(self, method: str, params: Mapping[str, Any] | None = None) -> Any:
         self._log.append(("page", method))
         assert method == "Target.getTargetInfo" and not params
+        if self._page.unreadable > 0:
+            self._page.unreadable -= 1
+            raise RuntimeError("Target not attached yet")
         return {"targetInfo": {"targetId": self._page.target_id, "type": "page"}}
 
     def on(self, event: str, handler: Any) -> None:
@@ -105,7 +111,9 @@ class BrowserSession:
             context.ids += 1
             target_id = f"CREATED-{context.ids}"
             if not owner.never_reports:
-                context.pages.append(CdpPage(context, target_id))
+                tab = CdpPage(context, target_id)
+                tab.unreadable = owner.unreadable_reads
+                context.pages.append(tab)
             return {"targetId": target_id}
         if method == "Target.closeTarget":
             return {"success": True}
@@ -129,6 +137,7 @@ class CdpBrowser(FakeBrowser):
         never_reports: bool = False,
         create_error: Exception | None = None,
         create_disconnects: bool = True,
+        unreadable_reads: int = 0,
     ) -> None:
         self.cdp_context = context if context is not None else CdpContext()
         super().__init__([self.cdp_context])
@@ -136,6 +145,7 @@ class CdpBrowser(FakeBrowser):
         self.never_reports = never_reports
         self.create_error = create_error
         self.create_disconnects = create_disconnects
+        self.unreadable_reads = unreadable_reads
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.sessions: list[BrowserSession] = []
 
@@ -248,6 +258,97 @@ async def test_a_tab_chrome_never_reports_is_closed_and_the_run_opens_one_in_fro
     assert chrome.calls[1][1] == {"targetId": "CREATED-1"}
     assert context.new_page_calls == 1
     assert "opening it in front" in caplog.text
+    assert all(session.detached for session in chrome.sessions)
+    assert run.opened_in_front, "the run's notes say Chrome may have taken focus"
+
+
+async def test_a_background_tab_stays_unflagged() -> None:
+    chrome = CdpBrowser()
+    async with provider_for(chrome).run() as run:
+        await run.goto(LOCAL_PAGE)
+    assert not run.opened_in_front
+
+
+async def test_a_tab_whose_target_id_isnt_readable_yet_is_asked_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new tab Playwright hasn't finished attaching to is read again on the next pass,
+    not skipped for the rest of the wait."""
+    monkeypatch.setattr(browser, "BACKGROUND_TAB_POLL_S", 0.0)
+    chrome = CdpBrowser(unreadable_reads=2)
+    context = chrome.cdp_context
+    async with provider_for(chrome).run() as run:
+        page = await run.goto(LOCAL_PAGE)
+        assert isinstance(page, CdpPage) and page.target_id == "CREATED-1"
+    assert context.new_page_calls == 0
+    assert [m for m, _ in chrome.calls] == ["Target.createTarget"]
+    assert len(context.page_sessions) == 3
+    assert not run.opened_in_front
+
+
+async def test_a_fronted_runs_reopened_tab_opens_in_front() -> None:
+    """ADR 0007: once a prefill or an auto-send has brought its tab forward, a tab it
+    reopens opens in front (``new_page()``, as before #195), so the Message click, the
+    typing, and the Send never happen in a tab behind the one you see."""
+    chrome = CdpBrowser()
+    context = chrome.cdp_context
+    async with provider_for(chrome).run() as run:
+        first = await run.ensure_page()
+        await run.bring_tab_forward()
+        assert isinstance(first, CdpPage) and first.fronted == 1
+        first.user_closed_it()
+        second = await run.ensure_page()
+        assert second is not first
+        assert context.new_page_calls == 1, "the reopen opened in front"
+        assert [m for m, _ in chrome.calls] == ["Target.createTarget"]
+    assert not run.opened_in_front, "a fronted run's reopen in front is by design"
+
+
+async def test_a_fronted_run_is_never_flagged_as_opened_in_front() -> None:
+    """A prefill on a browser without a background tab: it takes focus by design, so
+    its notes (read by the auto-send views) get nothing added."""
+    context = FakeContext()
+    async with provider_for(FakeBrowser([context])).run() as run:
+        page = await run.ensure_page()
+        page.bring_to_front = _noop  # type: ignore[attr-defined]
+        await run.bring_tab_forward()
+    assert context.new_page_calls == 1
+    assert not run.opened_in_front
+
+
+async def _noop() -> None:
+    return None
+
+
+async def test_a_cancel_between_create_and_match_closes_the_created_tab() -> None:
+    """A cancel while the run waits for its new tab closes that tab, by its own target
+    id and no other, and the cancel still propagates."""
+    chrome = CdpBrowser(never_reports=True, user_tab_first=True)
+    context = chrome.cdp_context
+    created = asyncio.Event()
+
+    async def open_it() -> None:
+        async with provider_for(chrome).run() as run:
+            await run.ensure_page()
+
+    task = asyncio.create_task(open_it())
+    for _ in range(200):
+        if chrome.calls:
+            created.set()
+            break
+        await asyncio.sleep(0.005)
+    assert created.is_set()
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert chrome.calls == [
+        ("Target.createTarget", {"url": "about:blank", "background": True}),
+        ("Target.closeTarget", {"targetId": "CREATED-2"}),
+    ]
+    assert context.new_page_calls == 0
+    [user_tab] = context.pages
+    assert user_tab.close_calls == 0 and not user_tab.is_closed()
     assert all(session.detached for session in chrome.sessions)
 
 

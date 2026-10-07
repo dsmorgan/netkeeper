@@ -283,9 +283,12 @@ class BrowserWorker:
         outcome = runs.RunOutcome.DONE
         # Whether run_prefill was reached: before it, nothing was opened (#458 review).
         runner_started = False
+        # #195: the run, for its note when its tab had to open in front.
+        opened: BrowserRun | None = None
         try:
             # wait=False, the default: a prefill never waits for the lock (ADR 0007).
             async with self.provider.run(activity_lock.account_key(facts.account_id)) as browser:
+                opened = browser
                 if prepared is not None:
                     runner_started = True
                     await message_send.run_prefill(
@@ -341,6 +344,8 @@ class BrowserWorker:
             await off_loop(
                 self._finish, run_id, user_id, SyncRunStatus.FAILED, "error", runs.describe(exc)
             )
+        if opened is not None and opened.opened_in_front:
+            await off_loop(self._note_quietly, run_id, user_id, runs.OPENED_IN_FRONT_NOTE)
         status = await off_loop(self._status, run_id, user_id)
         self._publish("run.finished", run_id, user_id, {"status": status})
         return outcome
@@ -589,6 +594,16 @@ class BrowserWorker:
             self._finish(run_id, user_id, status, reason, error)
         except Exception:
             log.exception("could not record how run %d ended", run_id)
+
+    def _note_quietly(self, run_id: int, user_id: int, note: str) -> None:
+        """Add a note to the run's line; a failed write is logged, never raised (#195)."""
+        try:
+            with session_scope(self._factory, write=True) as session:
+                user = session.get(User, user_id)
+                if user is not None:
+                    runs.add_note(session, user, run_id, note)
+        except Exception:
+            log.exception("could not add a note to run %d", run_id)
 
     def _status(self, run_id: int, user_id: int) -> str:
         with session_scope(self._factory) as session:

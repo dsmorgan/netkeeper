@@ -122,8 +122,9 @@ ALLOWED_CONTEXT_MUTATIONS = frozenset(
         (LINKEDIN / "browser.py", "BrowserRun._open_body_tap", "new_cdp_session"),
         (LINKEDIN / "browser.py", "BrowserRun._read_click_geometry", "new_cdp_session"),
         # #195: the run's tab opens in the background. A browser-level session creates
-        # it (and closes it, by its own target id, when it can't be identified), and a
-        # page-level session reads each new tab's target id to tell it apart.
+        # it (and `_close_unclaimed_tab` closes it on that session, by its own target id,
+        # when it can't be identified), and a page-level session reads the target id of
+        # each tab that appears while it waits, the person's included.
         (LINKEDIN / "browser.py", "BrowserRun._open_tab", "new_browser_cdp_session"),
         (LINKEDIN / "browser.py", "BrowserRun._target_id", "new_cdp_session"),
     }
@@ -178,7 +179,8 @@ ALLOWED_CDP_METHODS = {**READ_ONLY_CDP_METHODS, **TAB_CDP_METHODS}
 CDP_SENDERS = {
     (LINKEDIN / "browser.py", "BrowserRun._open_body_tap"): 2,
     (LINKEDIN / "browser.py", "BrowserRun._read_click_geometry"): 7,
-    (LINKEDIN / "browser.py", "BrowserRun._open_tab"): 2,
+    (LINKEDIN / "browser.py", "BrowserRun._open_tab"): 1,
+    (LINKEDIN / "browser.py", "BrowserRun._close_unclaimed_tab"): 1,
     (LINKEDIN / "browser.py", "BrowserRun._target_id"): 1,
 }
 #: Which of those methods each function may send: neither borrows the other's.
@@ -197,9 +199,8 @@ CDP_SENDER_METHODS = {
             "DOM.getNodeForLocation",
         }
     ),
-    (LINKEDIN / "browser.py", "BrowserRun._open_tab"): frozenset(
-        {"Target.createTarget", "Target.closeTarget"}
-    ),
+    (LINKEDIN / "browser.py", "BrowserRun._open_tab"): frozenset({"Target.createTarget"}),
+    (LINKEDIN / "browser.py", "BrowserRun._close_unclaimed_tab"): frozenset({"Target.closeTarget"}),
     (LINKEDIN / "browser.py", "BrowserRun._target_id"): frozenset({"Target.getTargetInfo"}),
 }
 #: The only observations that open the body tap, each once (ADR 0006's amendment):
