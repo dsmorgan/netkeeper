@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -99,6 +100,7 @@ from netkeeper.services import (
     ui_settings,
 )
 from netkeeper.services import campaigns as campaign_service
+from netkeeper.services import config_adopt as config_adopt_service
 from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services import sending_hours as sending_hours_service
 from netkeeper.services.backup import (
@@ -137,6 +139,7 @@ from netkeeper.services.posture import SessionProbe, describe_active_hours, post
 from netkeeper.services.posture import render as render_posture
 from netkeeper.services.posture import render_summary as render_posture_summary
 from netkeeper.services.scheduled_runs import seed_served_schedule
+from netkeeper.services.settings_kv import set_setting
 from netkeeper.services.simulate_campaign import DEFAULT_SCHEDULE_DAYS
 from netkeeper.services.simulate_run import DEFAULT_DAYS as DEFAULT_SIMULATION_DAYS
 from netkeeper.services.simulate_run import DEFAULT_SEED as DEFAULT_SIMULATION_SEED
@@ -353,6 +356,68 @@ def config_show(ctx: typer.Context) -> None:
     typer.echo(_with_derived_week(render_toml(settings), settings), nl=False)
     typer.echo()
     typer.echo(render_toml(paths, table="paths"), nl=False)
+
+
+@config_app.command("adopt")
+def config_adopt(ctx: typer.Context) -> None:
+    """Move what config.toml sets onto the Settings page, once (#343).
+
+    For each key the file sets that the Settings page can change, store it as the
+    page's value (one above its hard maximum is stored at the maximum, and said so),
+    copy config.toml to a timestamped backup beside it, then remove exactly those keys
+    from the file. Comments and every other key stay, linkedin_auto_send included. A
+    value the page cannot hold stays in the file. Asks before changing anything, and
+    runs only in a terminal.
+    """
+    state = ctx.ensure_object(CliState)
+    settings = _file_settings_or_exit(state)
+    path = settings.source_path
+    if path is None:
+        typer.echo("no config.toml is in use; there is nothing to adopt")
+        return
+    if not _stdin_is_tty():
+        typer.echo(
+            "error: config adopt asks before it changes anything; run it in a terminal", err=True
+        )
+        raise typer.Exit(code=1)
+    try:
+        adopt = config_adopt_service.plan(path.read_text(encoding="utf-8"), settings)
+    except config_adopt_service.AdoptError as exc:
+        typer.echo(f"error: {exc}. Nothing was changed; move them by hand.", err=True)
+        raise typer.Exit(code=1) from exc
+    for key, why in adopt.kept.items():
+        typer.echo(f"stays in {path}: {key} ({why})")
+    if not adopt.moved:
+        typer.echo(f"{path} sets nothing the Settings page can hold; nothing to move")
+        return
+    for key, value in adopt.moved.items():
+        note = ""
+        if key in adopt.clamped:
+            note = f" (the file has {adopt.clamped[key][0]}, above the hard maximum)"
+        typer.echo(f"to move: {key} = {json.dumps(value)}{note}")
+    if not typer.confirm(
+        f"Store these on the Settings page, back up {path.name}, and remove them from it?"
+    ):
+        typer.echo("nothing changed")
+        return
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            for key, value in adopt.moved.items():
+                set_setting(session, user, ui_settings.KEY_PREFIX + key, value)
+    finally:
+        engine.dispose()
+    backup = path.with_name(f"{path.name}.{datetime.now(UTC):%Y%m%d-%H%M%S}.bak")
+    shutil.copy2(path, backup)
+    path.write_text(adopt.new_text, encoding="utf-8")
+    typer.echo(f"backed up {path} to {backup}")
+    typer.echo(
+        f"moved {len(adopt.moved)} setting(s) to the Settings page; removed them from {path}"
+    )
+    typer.echo("restart netkeeper serve if it is running, so it reads the file again")
 
 
 def _with_derived_week(rendered: str, settings: Settings) -> str:

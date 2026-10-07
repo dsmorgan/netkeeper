@@ -290,7 +290,11 @@ class _Gate:
         start, end = self.window
         if not pacing.is_active_at(now, self.settings.timezone, start=start, end=end):
             self.inactive_message = pacing.outside_window_message(
-                now, self.settings.timezone, start=start, end=end
+                now,
+                self.settings.timezone,
+                start=start,
+                end=end,
+                pinned_in=self.settings.active_hours_pinned_in,
             )
             log.info("enrichment: stopped before visit %d: %s", number, self.inactive_message)
             return StopReason.INACTIVE

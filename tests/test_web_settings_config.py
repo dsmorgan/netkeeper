@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -11,11 +12,18 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from isolation.harness import acting_as
+from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.db import session_scope
+from netkeeper.config import LinkedInSettings, Settings
+from netkeeper.db import make_session_factory, session_scope
 from netkeeper.models import User
+from netkeeper.scoping import install_scope_guard
 from netkeeper.services import ui_settings
+from netkeeper.services.scheduled_runs import ServeExtractor
+from netkeeper.services.settings_kv import set_setting
+from netkeeper.services.users import ensure_local_user
+from netkeeper.web.app import create_app
 
 CSRF = {"X-Netkeeper-Client": "1"}
 URL = "/api/v1/settings/config"
@@ -139,3 +147,58 @@ async def test_each_user_sees_and_changes_only_their_own(
         other = session.get(User, other_id)
         assert other is not None
         assert ui_settings.stored(session, other) == {PREFILLS: 40}
+
+
+class _Stopped:
+    """What the recorded scheduler hands back: nothing to stop."""
+
+    executor = None
+    scheduler = None
+
+    def stop(self) -> None:
+        return None
+
+
+class _Monitor:
+    intervals: list[float] = []
+
+    def __init__(self, *args: Any, interval_s: float, **kwargs: Any) -> None:
+        self.intervals.append(interval_s)
+
+    def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+
+async def test_serve_starts_its_scheduler_and_polls_from_the_settings_page(
+    app: FastAPI, bare_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#343: the values serve reads once come from the local user's page values. ``app``
+    only prepares ``bare_engine`` (migrated); the app under test is built here."""
+    engine = bare_engine
+    factory = make_session_factory(engine)
+    install_scope_guard(factory)
+    with session_scope(factory, write=True) as session:
+        user = ensure_local_user(session, settings=Settings())
+        set_setting(session, user, "config.linkedin.active_hours", ["07:15", "19:45"])
+        set_setting(session, user, "config.campaigns.reply_poll_minutes", 3)
+    started: list[LinkedInSettings] = []
+
+    def scheduler(*args: Any) -> _Stopped:
+        started.append(args[-1])
+        return _Stopped()
+
+    monkeypatch.setattr("netkeeper.web.app.start_serve_scheduler", scheduler)
+    monkeypatch.setattr("netkeeper.web.app.MailboxMonitor", _Monitor)
+    _Monitor.intervals = []
+    served = create_app(Settings(), engine=engine, extractor=ServeExtractor(executor=_no_executor))
+    async with served.router.lifespan_context(served):
+        assert [s.active_hours for s in started] == [("07:15", "19:45")]
+        assert _Monitor.intervals == [180]
+        assert served.state.campaign_engine.sender.replies_every == timedelta(minutes=3)
+
+
+def _no_executor(factory: Any, bus: Any) -> Any:
+    raise AssertionError("the recorded scheduler never builds an executor")

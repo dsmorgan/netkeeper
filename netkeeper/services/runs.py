@@ -673,7 +673,13 @@ def refuse_if_outside_active_hours(settings: LinkedInSettings, *, now: datetime)
         ) from exc
     if not pacing.is_active_at(now, settings.timezone, start=start, end=end):
         raise OutsideActiveHours(
-            pacing.outside_window_message(now, settings.timezone, start=start, end=end)
+            pacing.outside_window_message(
+                now,
+                settings.timezone,
+                start=start,
+                end=end,
+                pinned_in=settings.active_hours_pinned_in,
+            )
         )
 
 

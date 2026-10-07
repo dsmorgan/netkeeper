@@ -74,6 +74,14 @@ Applies = Literal["now", "restart"]
 Group = Literal["linkedin_budgets", "linkedin_hours", "campaigns", "llm", "backup"]
 Source = Literal["default", "ui", "file"]
 
+SPACING_FLOOR_MIN_S: Final = 90
+"""The shortest gap between campaign emails the page accepts: spec 11.4's floor. A file
+value may go lower; the page never does, and the typical gap may not be below the floor."""
+
+GUARD_WARN_BELOW_DAYS: Final = 30
+"""A recent-contact guard shorter than this many days is allowed on the page, with a
+warning: Appendix B's default is 30. The page refuses 0, which turns the guard off."""
+
 MAX_HOLIDAYS: Final = 366
 """The most holidays the page stores: a year of them, every day."""
 
@@ -197,8 +205,10 @@ FIELDS: Final[tuple[FieldSpec, ...]] = (
         kind="window",
         applies="restart",
         applies_note=(
-            "Runs you start, and each visit of an enrichment run, check the new hours at"
-            " once. Scheduled runs keep the old timetable until you restart netkeeper serve."
+            "Applies from the next run: each run checks the hours as it starts, and an"
+            " enrichment run keeps the window it started with. A scheduled run outside"
+            " narrowed hours is refused at once; after widening, scheduled runs keep the"
+            " old timetable until you restart netkeeper serve."
         ),
     ),
     FieldSpec(
@@ -230,11 +240,11 @@ FIELDS: Final[tuple[FieldSpec, ...]] = (
         key="campaigns.send_spacing_median_s",
         group="campaigns",
         label="Typical gap between emails (seconds)",
-        help="Gaps vary around this so sends never go out as a burst.",
+        help=("Gaps vary around this so sends never go out as a burst. At least the shortest gap."),
         kind="int",
         applies="now",
         applies_note="Applies from the next campaign tick, within a minute.",
-        minimum=1,
+        minimum=SPACING_FLOOR_MIN_S,
         maximum=3600,
     ),
     FieldSpec(
@@ -245,18 +255,21 @@ FIELDS: Final[tuple[FieldSpec, ...]] = (
         kind="int",
         applies="now",
         applies_note="Applies from the next campaign tick, within a minute.",
-        minimum=1,
+        minimum=SPACING_FLOOR_MIN_S,
         maximum=3600,
     ),
     FieldSpec(
         key="campaigns.contacted_within_days_guard",
         group="campaigns",
         label="Skip people contacted within (days)",
-        help="A campaign leaves out anyone you contacted this recently.",
+        help=(
+            "A campaign leaves out anyone you contacted this recently. At least 1 here;"
+            " below 30 earns a warning."
+        ),
         kind="int",
         applies="now",
         applies_note="New campaigns copy it. A campaign that already exists keeps its own.",
-        minimum=0,
+        minimum=1,
         maximum=3650,
     ),
     FieldSpec(
@@ -398,13 +411,14 @@ def resolve(session: Session, user: User, base: Settings) -> Settings:
 def apply(base: Settings, values: Mapping[str, JsonValue]) -> Settings:
     """``base`` with ``values`` (``stored``'s shape) laid over it. Pure.
 
-    Settings already resolved are resolved again from what they were resolved from, so
-    a value since reset never lingers.
+    Settings already resolved are first put back for the keys the page set (and only
+    those), so a value since reset never lingers, and anything else a caller changed
+    with ``replace`` since is kept.
     """
-    if base.unresolved is not None:
-        base = base.unresolved
+    base = unresolve(base)
     result = base
     used: set[str] = set()
+    originals: list[tuple[str, Any]] = []
     for spec in FIELDS:
         if spec.key not in values or not spec.editable or file_sets(base, spec.key):
             continue
@@ -413,9 +427,19 @@ def apply(base: Settings, values: Mapping[str, JsonValue]) -> Settings:
         except ValueError as exc:
             log.warning("ignoring the stored setting %s: %s", spec.key, exc)
             continue
+        originals.append((spec.key, value_at(base, spec.key)))
         result = _with_value(result, spec.key, value)
         used.add(spec.key)
-    return replace(result, ui_keys=frozenset(used), unresolved=base)
+    return replace(result, ui_keys=frozenset(used), ui_originals=tuple(originals))
+
+
+def unresolve(settings: Settings) -> Settings:
+    """``settings`` without the Settings page's values: each key the page set goes back
+    to what it was before. Unresolved settings come back as they are."""
+    result = settings
+    for key, original in settings.ui_originals:
+        result = _with_value(result, key, original)
+    return replace(result, ui_keys=frozenset(), ui_originals=())
 
 
 def file_sets(settings: Settings, key: str) -> bool:
@@ -554,6 +578,8 @@ def write(session: Session, user: User, base: Settings, changes: Mapping[str, Js
             parsed[key] = to_json(parse(spec, raw))
         except ValueError as exc:
             problems[key] = str(exc)
+    if not problems:
+        problems.update(_cross_field(base, {**stored(session, user), **parsed}, parsed))
     if problems:
         raise SettingsRefused(problems)
     for key, value in parsed.items():
@@ -562,6 +588,27 @@ def write(session: Session, user: User, base: Settings, changes: Mapping[str, Js
         else:
             set_setting(session, user, KEY_PREFIX + key, value)
         log.info("setting %s changed on the Settings page for user %d", key, user.id)
+
+
+def _cross_field(
+    base: Settings, values: Mapping[str, JsonValue], changed: Mapping[str, JsonValue]
+) -> dict[str, str]:
+    """Rules between fields, judged on the values that would be in force after a write,
+    and only when the write touches one of them: a file value never blocks another key."""
+    spacing = {"campaigns.send_spacing_median_s", "campaigns.send_spacing_floor_s"}
+    if not spacing & set(changed):
+        return {}
+    after = apply(base, {k: v for k, v in values.items() if v is not None})
+    median = after.campaigns.send_spacing_median_s
+    floor = after.campaigns.send_spacing_floor_s
+    if median < floor:
+        key = (
+            "campaigns.send_spacing_median_s"
+            if "campaigns.send_spacing_median_s" in changed
+            else "campaigns.send_spacing_floor_s"
+        )
+        return {key: f"the typical gap ({median} s) must be at least the shortest ({floor} s)"}
+    return {}
 
 
 # --- describing -------------------------------------------------------------------
@@ -579,8 +626,7 @@ def describe(
     ``started`` the settings the running ``serve`` resolved at startup (None outside
     ``serve``): a restart-only field whose value differs from it is ``restart_pending``.
     """
-    if base.unresolved is not None:
-        base = base.unresolved
+    base = unresolve(base)
     effective = apply(base, values)
     defaults = Settings()
     views: list[FieldView] = []
@@ -673,6 +719,19 @@ def checks(key: str, settings: Settings) -> tuple[tuple[str, ...], tuple[str, ..
         if value_at(settings, key) <= 0:
             warnings.append(
                 f"{key} is not a positive number of seconds, so campaign sends are held."
+            )
+    elif key == "campaigns.contacted_within_days_guard":
+        days = settings.campaigns.contacted_within_days_guard
+        if days < 1:
+            warnings.append(
+                "contacted_within_days_guard is 0, so a campaign no longer leaves out people"
+                " you just contacted."
+            )
+        elif days < GUARD_WARN_BELOW_DAYS:
+            warnings.append(
+                f"Campaigns leave out people you contacted in the last {days} days, below the"
+                f" {GUARD_WARN_BELOW_DAYS} netkeeper defaults to: someone you just wrote to"
+                " may hear from you again soon."
             )
     elif key == "campaigns.reply_poll_minutes":
         if settings.campaigns.reply_poll_minutes < 1:

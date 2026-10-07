@@ -61,6 +61,24 @@ def test_the_hard_maximums_are_pinned() -> None:
         assert ui_settings.BY_KEY[key].maximum == maximum, key
 
 
+def test_the_page_minimums_are_pinned() -> None:
+    """Spec 11.4's 90-second floor for both spacing values; a guard of at least a day."""
+    minimums = {
+        key: ui_settings.BY_KEY[key].minimum
+        for key in (
+            "campaigns.send_spacing_floor_s",
+            "campaigns.send_spacing_median_s",
+            "campaigns.contacted_within_days_guard",
+        )
+    }
+    assert minimums == {
+        "campaigns.send_spacing_floor_s": 90,
+        "campaigns.send_spacing_median_s": 90,
+        "campaigns.contacted_within_days_guard": 1,
+    }
+    assert ui_settings.GUARD_WARN_BELOW_DAYS == 30
+
+
 @pytest.mark.parametrize(("key", "maximum"), HARD_MAXIMUMS.items())
 def test_a_value_at_the_hard_max_is_kept_and_one_above_it_refused(key: str, maximum: float) -> None:
     spec = ui_settings.BY_KEY[key]
@@ -261,3 +279,68 @@ def test_a_restart_only_value_says_when_serve_still_has_another() -> None:
     assert _view(views, "campaigns.reply_poll_minutes").restart_pending is True
     assert _view(views, PREFILLS).restart_pending is False  # applies now
     assert _view(views, WINDOW).restart_pending is False  # unchanged
+
+
+# --- review follow-ups ------------------------------------------------------------
+
+
+def test_resolving_again_keeps_what_a_replace_changed_since() -> None:
+    """The trap: settings resolved, then changed with ``replace`` (a worker swapping in
+    its LinkedIn section), then resolved again must keep that change."""
+    once = ui_settings.apply(Settings(), {PREFILLS: 30})
+    changed = replace(once, linkedin=replace(once.linkedin, weekend_multiplier=0.25))
+    again = ui_settings.apply(changed, {})
+    assert again.linkedin.weekend_multiplier == 0.25
+    assert again.linkedin.budget.li_prefills_per_day == 15  # the reset still holds
+    assert ui_settings.unresolve(once) == Settings()
+
+
+@pytest.mark.parametrize(
+    ("changes", "refused"),
+    [
+        ({"campaigns.send_spacing_floor_s": 89}, "campaigns.send_spacing_floor_s"),
+        ({"campaigns.send_spacing_median_s": 89}, "campaigns.send_spacing_median_s"),
+        ({"campaigns.send_spacing_floor_s": 300}, "campaigns.send_spacing_floor_s"),
+        (
+            {"campaigns.send_spacing_floor_s": 120, "campaigns.send_spacing_median_s": 100},
+            "campaigns.send_spacing_median_s",
+        ),
+        ({"campaigns.contacted_within_days_guard": 0}, "campaigns.contacted_within_days_guard"),
+    ],
+)
+def test_the_page_is_stricter_than_the_file_on_spacing_and_the_guard(
+    session: Session, user: User, changes: dict[str, Any], refused: str
+) -> None:
+    with pytest.raises(ui_settings.SettingsRefused) as error:
+        ui_settings.write(session, user, Settings(), changes)
+    assert set(error.value.problems) == {refused}
+
+
+def test_the_lowest_spacing_and_guard_the_page_takes(session: Session, user: User) -> None:
+    ui_settings.write(
+        session,
+        user,
+        Settings(),
+        {
+            "campaigns.send_spacing_floor_s": 90,
+            "campaigns.send_spacing_median_s": 90,
+            "campaigns.contacted_within_days_guard": 1,
+        },
+    )
+    views = ui_settings.describe(Settings(), ui_settings.stored(session, user))
+    guard = _view(views, "campaigns.contacted_within_days_guard")
+    assert guard.value == 1 and "last 1 days, below the 30" in guard.warnings[0]
+
+
+@pytest.mark.parametrize(("days", "warned"), [(29, True), (30, False)])
+def test_a_guard_below_30_days_warns(days: int, warned: bool) -> None:
+    key = "campaigns.contacted_within_days_guard"
+    assert bool(_view(ui_settings.describe(Settings(), {key: days}), key).warnings) is warned
+
+
+def test_a_file_spacing_below_the_page_minimum_never_blocks_another_write(
+    session: Session, user: User
+) -> None:
+    base = _pinned(campaigns__send_spacing_median_s=30, campaigns__send_spacing_floor_s=20)
+    ui_settings.write(session, user, base, {"campaigns.mailbox_daily_cap": 10})
+    assert ui_settings.stored(session, user) == {"campaigns.mailbox_daily_cap": 10}

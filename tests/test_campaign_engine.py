@@ -416,6 +416,33 @@ def test_a_campaign_with_no_cap_of_its_own_uses_the_configs(
     )
 
 
+def test_a_cap_set_on_the_settings_page_holds_from_the_next_tick(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#343: the tick reads the page's values for each user, each tick."""
+    world = make_world(session_factory)
+    ids = [world.enroll_new() for _ in range(2)]
+    world.write(lambda s: set_setting(s, world.user, "config.campaigns.mailbox_daily_cap", 1))
+    world.tick()
+    assert reasons_of(world.tick(NOW + timedelta(hours=1)), ids[1]) == (Skip.CAMPAIGN_AT_CAP,)
+
+
+def test_spacing_set_on_the_settings_page_holds(world: World) -> None:
+    """#343: a 30-minute floor from the page; the next send waits for it."""
+    ids = [world.enroll_new() for _ in range(2)]
+
+    def slow(session: Session) -> None:
+        for key in ("send_spacing_floor_s", "send_spacing_median_s"):
+            set_setting(session, world.user, f"config.campaigns.{key}", 1800)
+
+    world.write(slow)
+    world.tick()
+    later = world.tick(NOW + timedelta(minutes=29))
+    assert later.fired == [] and reasons_of(later, ids[1]) == (Skip.SPACING,)
+    assert later.next_wake is not None and later.next_wake >= NOW + timedelta(minutes=30)
+    assert world.tick(later.next_wake).fired != []
+
+
 def test_the_mailbox_cap_counts_every_campaign_on_it(world: World) -> None:
     """Spec 11.4: per mailbox across all campaigns."""
     world.write(

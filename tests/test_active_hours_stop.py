@@ -32,7 +32,7 @@ from typer.testing import CliRunner
 from netkeeper import migrations
 from netkeeper.cli import _stopped_by
 from netkeeper.cli import app as cli
-from netkeeper.config import Settings
+from netkeeper.config import Settings, load_settings
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.linkedin.enrich import StopReason
 from netkeeper.linkedin.pacing import outside_window_message
@@ -40,6 +40,7 @@ from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger
 from netkeeper.scoping import install_scope_guard
 from netkeeper.services import enrich_plan, runs
 from netkeeper.services.posture import active_hours_source, describe_active_hours
+from netkeeper.services.runs import OutsideActiveHours
 from netkeeper.services.users import ensure_local_user
 
 #: Every CLI command here runs with a provider that fails the test if a run reaches it
@@ -183,7 +184,8 @@ def test_the_cli_refuses_a_manual_run_outside_the_window_and_records_nothing(
 
     assert result.exit_code == 1
     assert "outside active hours" in result.output
-    assert "Change the active hours in Settings" in result.output
+    # The config file sets the window, and it wins over Settings, so it is named (#343).
+    assert "Change `[linkedin] active_hours` in" in result.output
     with session_scope(cli_db) as session:
         user = ensure_local_user(session, settings=Settings())
         assert runs.list_runs(session, user)[1] == 0
@@ -332,3 +334,22 @@ def test_posture_shows_where_the_window_was_set(
 
     assert "09:00-17:00" in result.output
     assert "mut-cleanup-posture.toml" in result.output
+
+
+def test_the_message_names_the_file_when_the_file_sets_the_hours(tmp_path: Path) -> None:
+    """#343: the file wins over Settings, so the sentence says where the hours really are."""
+    path = tmp_path / "config.toml"
+    path.write_text('[linkedin]\nactive_hours = ["08:30", "21:30"]\n', encoding="utf-8")
+    pinned = load_settings(path).linkedin
+    assert pinned.active_hours_pinned_in == str(path)
+    with pytest.raises(OutsideActiveHours) as refused:
+        runs.refuse_if_outside_active_hours(pinned, now=THREE_AM)
+    assert str(refused.value).endswith(f"Change `[linkedin] active_hours` in {path} to adjust.")
+    unpinned = load_settings(_write_empty(tmp_path)).linkedin
+    assert unpinned.active_hours_pinned_in is None
+
+
+def _write_empty(tmp_path: Path) -> Path:
+    path = tmp_path / "other.toml"
+    path.write_text("[web]\nport = 8001\n", encoding="utf-8")
+    return path

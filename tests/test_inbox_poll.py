@@ -616,9 +616,19 @@ def _complete_a_manual_poll(factory: sessionmaker[Session], user_id: int, at: da
         )
 
 
+#: Active hours that hold START (06:00 UTC is 02:00 in New York): a scheduled run the
+#: worker accepts must fall inside the window (#343).
+NIGHT_OWL = ("01:00", "12:00")
+
+
+def _night_owl(settings: Settings) -> Settings:
+    return replace(settings, linkedin=replace(settings.linkedin, active_hours=NIGHT_OWL))
+
+
 async def test_once_a_poll_has_completed_a_scheduled_fire_runs(
     bare_engine: Engine, settings: Settings
 ) -> None:
+    settings = _night_owl(settings)
     provider, connector = fake_provider()
     clock = Clock(START)
     async with serving(
@@ -1263,3 +1273,36 @@ async def test_other_endings_leave_the_owner_streak_where_it_was(
     assert _owner_breaker(session_factory, user_id).count == 1
     assert await _poll(session_factory, user_id, delta(complete=False)) == INCOMPLETE
     assert _owner_breaker(session_factory, user_id).count == 1
+
+
+async def test_the_worker_refuses_a_scheduled_run_outside_a_window_narrowed_in_settings(
+    bare_engine: Engine, settings: Settings
+) -> None:
+    """#343: serve's timetable keeps the hours it started with; a window narrowed on the
+    Settings page since is enforced by the worker at once, before any attach."""
+    settings = _night_owl(settings)
+    provider, connector = fake_provider()
+    clock = Clock(START)
+    async with serving(
+        bare_engine, settings, worker_extractor(provider, settings, clock=clock)
+    ) as app:
+        factory = app.state.session_factory
+        with session_scope(factory, write=True) as session:
+            user = _local(session)
+            account = ensure_account(session, user).id
+            arm_scheduled_runs(session, user, now=START)
+            ada = factories.make_contact(session, user, li_urn=ADA)
+            factories.make_enrollment(session, factories.make_campaign(session, user), ada)
+            set_setting(session, user, "config.linkedin.active_hours", ["09:00", "17:00"])
+            user_id = user.id
+        _complete_a_manual_poll(factory, user_id, START)
+        registry = serve_registry(factory, app.state.executor, app.state.tasks, clock=clock)
+        assert await registry[JobKind.INBOX](_job(user_id, account)) is None
+        await app.state.tasks.join()
+    scheduled = [
+        r
+        for r in _rows(bare_engine)
+        if r.kind is SyncRunKind.INBOX and r.trigger is SyncRunTrigger.SCHEDULED
+    ]
+    assert [(r.status, r.stop_reason) for r in scheduled] == [(SyncRunStatus.FAILED, "inactive")]
+    assert connector.attaches == 0
