@@ -354,7 +354,11 @@ def _not_sent_reason(notes: str | None) -> str | None:
     if notes is None or not notes.startswith(service.NOT_SENT_NOTE):
         return None
     reason = notes.removeprefix(service.NOT_SENT_NOTE)
-    for later in (service.SEND_UNCONFIRMED_NOTE, service.BUBBLE_LEFT_OPEN_NOTE):
+    for later in (
+        service.SEND_UNCONFIRMED_NOTE,
+        service.BUBBLE_LEFT_OPEN_NOTE,
+        runs.OPENED_IN_FRONT_NOTE,
+    ):
         reason = reason.split(f" {later}")[0]
     return reason
 

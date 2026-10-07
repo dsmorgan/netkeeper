@@ -397,3 +397,12 @@ async def test_the_second_lost_browser_while_opening_ends_the_run() -> None:
 def test_the_background_tab_wait_is_pinned() -> None:
     assert browser.BACKGROUND_TAB_WAIT_S == 5.0
     assert browser.BACKGROUND_TAB_POLL_S == 0.05
+
+
+async def test_a_fallback_that_cannot_open_a_tab_either_is_not_flagged() -> None:
+    """``opened_in_front`` is set only once the fallback ``new_page()`` opened a tab."""
+    context = FakeContext(new_page_error=RuntimeError("no tab"))
+    async with provider_for(FakeBrowser([context])).run() as run:
+        with pytest.raises(RuntimeError, match="no tab"):
+            await run._open_tab()
+        assert not run.opened_in_front

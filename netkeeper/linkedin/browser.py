@@ -2880,8 +2880,9 @@ class BrowserRun:
         finally:
             if session is not None:
                 await _detach_quietly(session.detach)
+        page = await context.new_page()
         self._opened_in_front = True
-        return await context.new_page()
+        return page
 
     @staticmethod
     async def _close_unclaimed_tab(session: _CdpSessionLike, target_id: str) -> None:
