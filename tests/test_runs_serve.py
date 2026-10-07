@@ -992,6 +992,48 @@ async def test_a_run_whose_tab_opened_in_front_says_so_in_its_notes(
         assert run.stop_reason == "checkpoint", "the note doesn't change how the run ended"
 
 
+async def test_a_note_that_cannot_be_written_changes_nothing_else(
+    session_factory: Any, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#195: the note is best effort. A failed write is logged; the run keeps how it
+    ended, ``execute`` returns, and ``run.finished`` is still published."""
+    from run_fakes import CheckpointContext
+
+    from netkeeper.worker import BrowserWorker
+
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(runs, "add_note", broken)
+
+    class Bus:
+        def __init__(self) -> None:
+            self.kinds: list[str] = []
+
+        def publish(self, event: Any) -> None:
+            self.kinds.append(event.type)
+
+    bus = Bus()
+    provider, _ = fake_provider(CheckpointContext())  # no browser-level CDP session
+    run_id, user_id = _manual_run(session_factory, SyncRunKind.CONNECTIONS_FULL)
+
+    outcome = await BrowserWorker(
+        provider,
+        session_factory,
+        settings.linkedin,
+        bus=bus,  # type: ignore[arg-type]
+    ).execute(run_id, user_id)
+
+    assert outcome is runs.RunOutcome.DONE
+    assert bus.kinds[-1] == "run.finished"
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        run = runs.get_run(session, user, run_id)
+        assert (run.status, run.stop_reason) == (SyncRunStatus.ABORTED, "checkpoint")
+        assert run.notes is None or runs.OPENED_IN_FRONT_NOTE not in run.notes
+
+
 def test_a_note_goes_after_the_runs_own_notes(session_factory: Any) -> None:
     """Appended, so a reader that matches the start of an auto-send's notes reads the
     same words; the line keeps its length cap."""

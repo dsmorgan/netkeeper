@@ -1922,6 +1922,51 @@ def test_bring_to_front_is_called_once_at_the_prefills_start() -> None:
     assert len(clicks) == 1 and callers[0][2] < clicks[0]
 
 
+def test_the_unclaimed_tab_close_is_only_for_the_tab_the_run_created() -> None:
+    """#195: ``_close_unclaimed_tab`` is reached only from ``BrowserRun._open_tab``, and
+    every call passes ``target_id``, which ``_open_tab`` assigns only from the answer to
+    its own ``Target.createTarget``. So the one ``Target.closeTarget`` in the package
+    closes the tab the run just created and no other."""
+    reaches = [
+        (path, item.function)
+        for path in python_files(PACKAGE)
+        for item, _ in name_reaches(read_source(path), "_close_unclaimed_tab", path)
+    ]
+    assert reaches == [(LINKEDIN / "browser.py", "BrowserRun._open_tab")] * 2
+    tree = parse(read_source(LINKEDIN / "browser.py"))
+    [opener] = [
+        node
+        for node in walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_open_tab"
+    ]
+    calls = [
+        node
+        for node in walk(opener)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_close_unclaimed_tab"
+    ]
+    assert len(calls) == 2
+    assert all(ast.unparse(call.args[1]) == "target_id" and not call.keywords for call in calls)
+    assigned = [
+        ast.unparse(node.value) if node.value is not None else ""
+        for node in walk(opener)
+        if isinstance(node, ast.Assign | ast.AnnAssign)
+        and any(
+            isinstance(t, ast.Name) and t.id == "target_id"
+            for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        )
+    ]
+    assert assigned == ["None", "str(created['targetId'])"]
+    creates = [
+        ast.unparse(node.value)
+        for node in walk(opener)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "created" for t in node.targets)
+    ]
+    assert len(creates) == 1 and "'Target.createTarget'" in creates[0]
+
+
 def test_hand_over_is_reached_only_from_the_prefill() -> None:
     """ADR 0007: ``hand_over`` is reached only from ``page_messaging.py``."""
     reaches = [

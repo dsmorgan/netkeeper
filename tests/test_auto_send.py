@@ -2299,3 +2299,13 @@ async def test_a_cancel_during_the_refund_still_records_the_pre_click_hold(
         await a.execute()
     hold = _hold_of(lane)
     assert hold is not None and hold.reason == linkedin_steps.AUTO_SEND_HOLD_BUBBLE
+
+
+def test_the_opened_in_front_note_is_not_part_of_the_not_sent_reason() -> None:
+    """#195: a run's note that its tab opened in front never reads as part of why an
+    auto-send wasn't sent."""
+    from netkeeper.services import runs
+    from netkeeper.web.api.linkedin_steps import _not_sent_reason
+
+    notes = f"not sent: the schedule is paused {runs.OPENED_IN_FRONT_NOTE}"
+    assert _not_sent_reason(notes) == "the schedule is paused"
