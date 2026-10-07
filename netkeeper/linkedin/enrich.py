@@ -527,6 +527,10 @@ class Answer[T]:
     cause: UnreadableCause | None = None
 
 
+class ScrollCancelled(Exception):
+    """A cancel (spec 9.9) cut a scroll short before the click it led up to (#177)."""
+
+
 class ProfileSource(Protocol):
     """Where profile visits happen: :class:`~netkeeper.linkedin.page_profiles.PageProfiles`."""
 
@@ -554,10 +558,18 @@ class ProfileSource(Protocol):
         ...
 
     async def read_contact_info(
-        self, profile: ProfileDetails, *, back: ScrollPlan, pause_s: float
+        self,
+        profile: ProfileDetails,
+        *,
+        back: ScrollPlan,
+        pause_s: float,
+        cancelled: Callable[[], Awaitable[bool]] | None = None,
     ) -> Answer[ContactInfo]:
         """Replay ``back`` (to the top), wait ``pause_s``, click **Contact info** once,
-        and read the overlay's answer. Never clicks twice, never retries."""
+        and read the overlay's answer. Never clicks twice, never retries.
+
+        Raises :class:`ScrollCancelled`, before any click, when ``cancelled`` said
+        yes during the replay (#177)."""
         ...
 
 
@@ -773,7 +785,13 @@ async def run_enrichment(
                     back = scroll_back_to_top(rng, depth_after(step.scroll))
                     pauses[-1] = pause
                     clicks += 1
-                    info = await source.read_contact_info(details.value, back=back, pause_s=pause)
+                    try:
+                        info = await source.read_contact_info(
+                            details.value, back=back, pause_s=pause, cancelled=cancelled
+                        )
+                    except ScrollCancelled:
+                        log.info("enrichment: cancelled during the scroll back to the top")
+                        return await stop(StopReason.CANCELLED)
                     if _contact_info_lost(info):
                         # #405: the overlay answered and Chrome kept no body. Not the
                         # route: the profile is saved without it (below), and nothing

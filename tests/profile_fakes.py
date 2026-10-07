@@ -26,7 +26,7 @@ from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
 from netkeeper.linkedin.classify import Outcome
-from netkeeper.linkedin.enrich import Answer, UnreadableCause, masked
+from netkeeper.linkedin.enrich import Answer, ScrollCancelled, UnreadableCause, masked
 from netkeeper.linkedin.pacing import ScrollPlan
 from netkeeper.linkedin.voyager import (
     ContactInfo,
@@ -298,9 +298,16 @@ class FakeBrowser:
         return Answer(Outcome.OK, f"{ORIGIN}/in/_/", details)
 
     async def read_contact_info(
-        self, profile: ProfileDetails, *, back: ScrollPlan, pause_s: float
+        self,
+        profile: ProfileDetails,
+        *,
+        back: ScrollPlan,
+        pause_s: float,
+        cancelled: Callable[[], Awaitable[bool]] | None = None,
     ) -> Answer[ContactInfo]:
         self._record("back", back)
+        if cancelled is not None and await cancelled():
+            raise ScrollCancelled
         await self.sleep(pause_s)
         self._record("click", self._slug)
         call = self.fetches

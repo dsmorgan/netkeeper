@@ -102,7 +102,13 @@ from netkeeper.linkedin.browser import (
     is_navigation_timeout,
 )
 from netkeeper.linkedin.classify import Outcome, classify
-from netkeeper.linkedin.enrich import LINKEDIN_ORIGIN, Answer, UnreadableCause, masked
+from netkeeper.linkedin.enrich import (
+    LINKEDIN_ORIGIN,
+    Answer,
+    ScrollCancelled,
+    UnreadableCause,
+    masked,
+)
 from netkeeper.linkedin.flagship import (
     CONTACT_DETAILS_SCREEN_ID,
     NAVIGATION_PATH,
@@ -307,7 +313,12 @@ class PageProfiles:
         return Answer(Outcome.OK, self._url, details, from_copy=from_copy)
 
     async def read_contact_info(
-        self, profile: ProfileDetails, *, back: ScrollPlan, pause_s: float
+        self,
+        profile: ProfileDetails,
+        *,
+        back: ScrollPlan,
+        pause_s: float,
+        cancelled: Callable[[], Awaitable[bool]] | None = None,
     ) -> Answer[ContactInfo]:
         if self._stopped is not None:
             return _as(self._stopped)
@@ -316,7 +327,9 @@ class PageProfiles:
         if not same_slug(profile.public_id, self._slug):
             # The job hands back the profile this visit read; anything else is a bug.
             raise ValueError("the profile is not the one this visit is on")
-        blocked = await self._scroll(back)
+        blocked = await self._scroll(back, cancelled=cancelled)
+        if self._scroll_cancelled:
+            raise ScrollCancelled
         if blocked is not None:
             self._stopped = blocked
             return _as(blocked)
