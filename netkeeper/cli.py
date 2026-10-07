@@ -2993,33 +2993,93 @@ def campaigns_enroll(
     contact: Annotated[
         list[int] | None, typer.Option("--contact", help="Also enroll this contact ID.")
     ] = None,
+    override_recent_contact: Annotated[
+        str | None,
+        typer.Option(
+            "--override-recent-contact",
+            help=(
+                "Enroll these contact IDs (comma-separated) although they were contacted"
+                " recently. Sets aside the recent-contact guard for them only, after a prompt."
+            ),
+            show_default=False,
+        ),
+    ] = None,
 ) -> None:
     """Enroll the audience as pending, through the guards (POST /campaigns/{id}/enroll).
 
     Only a draft or reviewing campaign takes anyone. `--list` or `--filter` replaces
     the audience first, on a draft only: pending enrollments the new source does not
     hold are removed.
+
+    `--override-recent-contact` enrolls the contacts you name although someone
+    contacted them within the campaign's recent-contact window. Every other guard
+    still applies to them. It asks first, and cannot be combined with `--list` or
+    `--filter`. `netkeeper campaigns guards` lists the contacts you can name.
     """
     audience = _audience_filter_or_exit(filter_json)
-    with _campaign_db() as factory, session_scope(factory, write=True) as session:
-        user = _local_user_or_exit(session)
-        list_id = _list_id_or_exit(session, user, list_name)
-        with _campaign_errors():
-            outcome = campaign_service.enroll(
-                session,
-                user,
-                campaign_id,
-                now=datetime.now(UTC),
-                list_id=list_id,
-                filter=audience,
-                contact_ids=contact or (),
+    chosen = _id_list_or_exit(override_recent_contact, "--override-recent-contact")
+    with _campaign_db() as factory:
+        if chosen:
+            if list_name is not None or audience is not None:
+                typer.echo(
+                    "error: override the recent-contact guard without --list or --filter",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            with session_scope(factory) as session, _campaign_errors():
+                user = _local_user_or_exit(session)
+                window = campaign_service.get_campaign(
+                    session, user, campaign_id
+                ).contacted_within_days_guard
+            unit = "day" if window == 1 else "days"
+            question = (
+                f"enroll {len(chosen)} contacts anyway? Someone contacted them in the last"
+                f" {window} {unit}. Only the recent-contact guard is set aside, for these"
+                " contacts alone; every other guard still applies"
             )
+            if not typer.confirm(question):
+                typer.echo("cancelled: nobody was enrolled")
+                raise typer.Exit(code=1)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            list_id = _list_id_or_exit(session, user, list_name)
+            with _campaign_errors():
+                outcome = campaign_service.enroll(
+                    session,
+                    user,
+                    campaign_id,
+                    now=datetime.now(UTC),
+                    list_id=list_id,
+                    filter=audience,
+                    contact_ids=contact or (),
+                    override_recent_contact=chosen,
+                    confirm=bool(chosen),
+                )
     removed = f", {outcome.removed} removed" if outcome.removed else ""
     typer.echo(
         f"campaign {campaign_id}: {outcome.enrolled} enrolled, {outcome.already} already in,"
         f" {outcome.excluded} excluded{removed}; {outcome.pending} pending"
     )
+    if chosen:
+        typer.echo(
+            f"recent-contact guard overridden for {outcome.overridden} of {len(chosen)} contacts"
+        )
     typer.echo(outcome.summary)
+
+
+def _id_list_or_exit(value: str | None, flag: str) -> list[int]:
+    """Comma-separated contact IDs, or `error: ...` and exit 1."""
+    if value is None:
+        return []
+    try:
+        ids = [int(part) for part in value.split(",") if part.strip()]
+    except ValueError:
+        typer.echo(f"error: {flag} takes contact IDs separated by commas", err=True)
+        raise typer.Exit(code=1) from None
+    if not ids:
+        typer.echo(f"error: {flag} needs at least one contact ID", err=True)
+        raise typer.Exit(code=1)
+    return sorted(set(ids))
 
 
 def _message_lines(m: campaign_review.MessagePreview) -> list[str]:
@@ -3355,11 +3415,28 @@ def campaigns_guards(
     if report.skipped:
         typer.echo(
             _format_table(
-                ("CONTACT", "NAME", "SKIPPED BECAUSE"),
-                [(str(c.contact_id), c.name or "-", "; ".join(c.reasons)) for c in report.skipped],
+                ("CONTACT", "NAME", "SKIPPED BECAUSE", "LAST CONTACTED", "OVERRIDABLE"),
+                [
+                    (
+                        str(c.contact_id),
+                        c.name or "-",
+                        "; ".join(c.reasons),
+                        "-"
+                        if c.last_contacted_at is None
+                        else f"{c.last_contacted_at:%Y-%m-%d %H:%M} UTC"
+                        f" ({c.last_contacted_channel})",
+                        "yes" if c.overridable else "-",
+                    )
+                    for c in report.skipped
+                ],
             ),
             nl=False,
         )
+        if any(c.overridable for c in report.skipped):
+            typer.echo(
+                "enroll an overridable contact anyway with"
+                f" `netkeeper campaigns enroll {campaign_id} --override-recent-contact ID,...`"
+            )
     if report.skipped_total > len(report.skipped):
         typer.echo(
             f"showing the first {len(report.skipped)} of {report.skipped_total} skipped contacts"

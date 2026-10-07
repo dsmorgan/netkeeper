@@ -3165,3 +3165,49 @@ def test_0037_downgrades_to_enrollments_without_the_run(migration_engine: Engine
     with migration_engine.begin() as connection:
         assert _count(connection, "enrollments") == 8
     migrations.upgrade(migration_engine, "0037")
+
+
+# --- the recent-contact override (0037, #446) ----------------------------------------------
+
+
+def test_0037_adds_the_override_columns_and_keeps_every_enrollment_unset(
+    migration_engine: Engine,
+) -> None:
+    migrations.upgrade(migration_engine, "0036")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+    migrations.upgrade(migration_engine, "0037")
+    columns = {c["name"] for c in inspect(migration_engine).get_columns("enrollments")}
+    assert {"recent_contact_override_at", "recent_contact_override_by"} <= columns
+    with migration_engine.begin() as connection:
+        row = connection.execute(
+            text(
+                "SELECT recent_contact_override_at, recent_contact_override_by"
+                " FROM enrollments WHERE id = 1"
+            )
+        ).one()
+        assert tuple(row) == (None, None)
+        connection.execute(
+            text(
+                "UPDATE enrollments SET recent_contact_override_at = :t,"
+                " recent_contact_override_by = 1 WHERE id = 1"
+            ),
+            {"t": STAMP},
+        )
+
+
+def test_0037_downgrades_to_enrollments_without_an_override(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0037")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+        connection.execute(
+            text("UPDATE enrollments SET recent_contact_override_at = :t WHERE id = 1"),
+            {"t": STAMP},
+        )
+    migrations.downgrade(migration_engine, "0036")
+    columns = {c["name"] for c in inspect(migration_engine).get_columns("enrollments")}
+    assert columns.isdisjoint({"recent_contact_override_at", "recent_contact_override_by"})
+    with migration_engine.begin() as connection:
+        assert _count(connection, "enrollments") == 1
+        assert _count(connection, "messages") == 1
+    migrations.upgrade(migration_engine, "0037")

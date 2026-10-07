@@ -295,7 +295,7 @@ describe('campaign detail', () => {
     expect(outcome).toBeVisible()
     expect(screen.getByText(/2 enrolled, 0 already in, 1 skipped/)).toBeVisible()
     const post = calls.find((call) => call.path === '/api/v1/campaigns/5/enroll')
-    expect(post?.body).toEqual({})
+    expect(post?.body).toEqual({ confirm: false })
   })
 
   it('warns that a new source replaces the audience, and sends it', async () => {
@@ -328,7 +328,7 @@ describe('campaign detail', () => {
 
     expect(await screen.findByText(/2 removed by the new source/)).toBeVisible()
     const post = calls.find((call) => call.path === '/api/v1/campaigns/5/enroll')
-    expect(post?.body).toEqual({ list_id: 22 })
+    expect(post?.body).toEqual({ list_id: 22, confirm: false })
   })
 
   it('shows progress per step, the enrollments, and pauses an active campaign', async () => {

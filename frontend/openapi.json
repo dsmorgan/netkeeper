@@ -3826,6 +3826,11 @@
       "EnrollIn": {
         "description": "``list_id`` or ``filter`` replaces the audience source first (a ``draft`` only),\nremoving the pending enrollments the new source does not hold; its contacts, and\nany ``contact_ids``, are then enrolled through the guards.",
         "properties": {
+          "confirm": {
+            "default": false,
+            "title": "Confirm",
+            "type": "boolean"
+          },
           "contact_ids": {
             "items": {
               "type": "integer"
@@ -3854,6 +3859,14 @@
               }
             ],
             "title": "List Id"
+          },
+          "override_recent_contact": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 500,
+            "title": "Override Recent Contact",
+            "type": "array"
           }
         },
         "title": "EnrollIn",
@@ -3880,6 +3893,11 @@
           "excluded_summary": {
             "title": "Excluded Summary",
             "type": "string"
+          },
+          "overridden": {
+            "default": 0,
+            "title": "Overridden",
+            "type": "integer"
           },
           "pending": {
             "title": "Pending",
@@ -3996,6 +4014,29 @@
               }
             ],
             "title": "Not Sent Error"
+          },
+          "recent_contact_override_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recent Contact Override At"
+          },
+          "recent_contact_override_by": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recent Contact Override By"
           },
           "replied_at": {
             "anyOf": [
@@ -10576,9 +10617,44 @@
             "title": "Contact Id",
             "type": "integer"
           },
+          "last_contacted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Contacted At"
+          },
+          "last_contacted_channel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Contacted Channel"
+          },
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "overridable": {
+            "default": false,
+            "title": "Overridable",
+            "type": "boolean"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
           },
           "reasons": {
             "items": {
@@ -14299,7 +14375,7 @@
     },
     "/api/v1/campaigns/{campaign_id}/enroll": {
       "post": {
-        "description": "Enroll the audience as ``pending``, through the guards (spec 11.9).",
+        "description": "Enroll the audience as ``pending``, through the guards (spec 11.9).\n\n``override_recent_contact`` with ``confirm`` enrolls those contacts although they\nwere contacted recently (#446); every other guard still applies to them.",
         "operationId": "enroll_campaign",
         "parameters": [
           {

@@ -3,6 +3,7 @@ import type {
   DaySends,
   EnrollmentStatus,
   Missing,
+  SkippedContact,
   StepCondition,
   StepMode,
 } from './api'
@@ -196,4 +197,22 @@ export function bucketSends(
     if (bucket !== undefined) bucket.sent += d.sent
   })
   return { days: size, buckets }
+}
+
+const CHANNEL_LABELS: Record<string, string> = {
+  email: 'email',
+  linkedin: 'LinkedIn',
+  call: 'a call',
+  meeting: 'a meeting',
+}
+
+/**
+ * When and how someone last contacted a skipped contact (#446): "Sep 30, 2026, 9:15 AM by
+ * email"; just the time when the channel is not known.
+ */
+export function lastContactText(contact: SkippedContact): string {
+  const when = formatWhen(contact.last_contacted_at)
+  const channel = contact.last_contacted_channel
+  if (channel === null || channel === undefined) return when
+  return `${when} by ${CHANNEL_LABELS[channel] ?? channel}`
 }

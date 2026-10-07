@@ -28,6 +28,7 @@ from netkeeper import migrations
 from netkeeper.campaigns import templates as template_service
 from netkeeper.cli import app as cli
 from netkeeper.crm import lists as list_service
+from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.models import (
     Campaign,
@@ -36,6 +37,7 @@ from netkeeper.models import (
     Contact,
     Enrollment,
     EnrollmentStatus,
+    InteractionKind,
     ListKind,
     Mailbox,
     Message,
@@ -445,9 +447,18 @@ def test_guards_lists_each_skipped_contact_with_every_reason(world: World) -> No
     output = _ok("campaigns", "guards", str(campaign_id))
 
     assert output.splitlines()[0] == "guards: 3 will start, 1 skipped (1 do-not-contact)"
-    assert output.splitlines()[1].split() == ["CONTACT", "NAME", "SKIPPED", "BECAUSE"]
+    assert output.splitlines()[1].split() == [
+        "CONTACT",
+        "NAME",
+        "SKIPPED",
+        "BECAUSE",
+        "LAST",
+        "CONTACTED",
+        "OVERRIDABLE",
+    ]
     [row] = output.splitlines()[2:]
-    assert row.startswith(str(world.contacts[3])) and row.endswith("do-not-contact")
+    assert row.startswith(str(world.contacts[3]))
+    assert row.split()[-3:] == ["do-not-contact", "-", "-"]  # not overridable
     assert "note:" not in output  # nobody the old tool emailed
     assert "showing the first" not in output
 
@@ -464,6 +475,69 @@ def test_guards_lists_each_skipped_contact_with_every_reason(world: World) -> No
     missing = _run("campaigns", "guards", "999")
     assert missing.exit_code == 1
     assert "error: no campaign 999" in missing.output
+
+
+def test_enroll_overrides_the_recent_contact_guard_after_asking(world: World) -> None:
+    """#446: an explicit flag, a prompt that names the count and the window, and the
+    other guards still apply."""
+    with session_scope(world.factory, write=True) as session:
+        user = _local(session)
+        for contact_id in (world.contacts[0], world.contacts[3]):  # [3] is do-not-contact
+            add_interaction(
+                session,
+                user,
+                contact_id,
+                InteractionKind.EMAIL_OUT,
+                datetime.now(UTC) - timedelta(days=2),
+            )
+    campaign_id = _create(world)
+    _ok("campaigns", "enroll", str(campaign_id))
+    guards = _ok("campaigns", "guards", str(campaign_id))
+    [row] = [line for line in guards.splitlines() if line.startswith(str(world.contacts[0]))]
+    assert row.split()[-2:] == ["(email)", "yes"]
+    assert "--override-recent-contact ID,..." in guards
+
+    named = f"{world.contacts[0]},{world.contacts[3]}"
+    declined = _run(
+        "campaigns", "enroll", str(campaign_id), "--override-recent-contact", named, input="n\n"
+    )
+    assert declined.exit_code == 1
+    assert "enroll 2 contacts anyway? Someone contacted them in the last 30 days" in (
+        declined.output
+    )
+    assert "cancelled: nobody was enrolled" in declined.output
+
+    accepted = _run(
+        "campaigns", "enroll", str(campaign_id), "--override-recent-contact", named, input="y\n"
+    )
+    assert accepted.exit_code == 0, accepted.output
+    assert "1 enrolled" in accepted.output
+    assert "recent-contact guard overridden for 1 of 2 contacts" in accepted.output
+    with session_scope(world.factory) as session:
+        user = _local(session)
+        rows = {
+            e.contact_id: e
+            for e in session.scalars(
+                scoped(user, Enrollment).where(Enrollment.campaign_id == campaign_id)
+            )
+        }
+    assert rows[world.contacts[0]].recent_contact_override_by == user.id
+    assert world.contacts[3] not in rows  # do-not-contact: never overridden
+
+    for bad in ("x", ","):
+        refused = _run("campaigns", "enroll", str(campaign_id), "--override-recent-contact", bad)
+        assert refused.exit_code == 1 and "--override-recent-contact" in refused.output
+    mixed = _run(
+        "campaigns",
+        "enroll",
+        str(campaign_id),
+        "--list",
+        world.list_name,
+        "--override-recent-contact",
+        str(world.contacts[0]),
+    )
+    assert mixed.exit_code == 1
+    assert "without --list or --filter" in mixed.output
 
 
 # --- pause and resume ---------------------------------------------------------------
