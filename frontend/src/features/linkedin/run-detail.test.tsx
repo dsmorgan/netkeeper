@@ -84,7 +84,7 @@ describe('RunDetail', () => {
             stop_reason: 'inactive',
             stop_reason_text: 'outside active hours',
             notes:
-              'stopped outside active hours (08:30-21:30 America/New_York); the next window opens at 08:30 tomorrow. Change `[linkedin] active_hours` in config.toml to adjust.',
+              'stopped outside active hours (08:30-21:30 America/New_York); the next window opens at 08:30 tomorrow. Change the active hours in Settings to adjust.',
           }),
         ),
     })

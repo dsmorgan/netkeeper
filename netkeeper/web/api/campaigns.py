@@ -59,7 +59,7 @@ from netkeeper.services import campaign_results, linkedin_steps
 from netkeeper.services import campaigns as service
 from netkeeper.services.campaign_engine import hours_for
 from netkeeper.web.api.campaign_review import MissingOut
-from netkeeper.web.deps import CurrentUser, SessionDep
+from netkeeper.web.deps import CurrentUser, SessionDep, effective_settings
 
 router = APIRouter(tags=["campaigns"])
 
@@ -399,9 +399,8 @@ Search = Annotated[
 ]
 
 
-def _settings(request: Request) -> Settings:
-    settings: Settings = request.app.state.settings
-    return settings
+def _settings(request: Request, session: Session, user: User) -> Settings:
+    return effective_settings(request, session, user)
 
 
 def _summary_out(row: service.CampaignSummary) -> CampaignSummaryOut:
@@ -518,7 +517,7 @@ def create_campaign(
                 )
                 for s in body.steps
             ],
-            settings=_settings(request),
+            settings=_settings(request, session, user),
             mailbox_id=body.mailbox_id,
             list_id=body.list_id,
             filter=body.filter,
@@ -694,7 +693,7 @@ def start_options(
         service.get_campaign(session, user, campaign_id)
         options = service.start_options(
             user,
-            settings=_settings(request),
+            settings=_settings(request, session, user),
             now=utcnow(),
             at=at,
             hours=hours_for(session, user),
@@ -724,7 +723,7 @@ def set_start(
             session,
             user,
             campaign_id,
-            settings=_settings(request),
+            settings=_settings(request, session, user),
             now=utcnow(),
             starts_at=body.starts_at,
         )
@@ -752,7 +751,7 @@ def set_step_schedule(
             user,
             campaign_id,
             step_id,
-            settings=_settings(request),
+            settings=_settings(request, session, user),
             delay_days=body.delay_days,
             send_time=body.send_time,
         )

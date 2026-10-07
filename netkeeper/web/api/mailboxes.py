@@ -35,14 +35,13 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns import gmail_oauth
-from netkeeper.config import Settings
 from netkeeper.db import session_scope
 from netkeeper.models import Mailbox, MailboxStatus, User
 from netkeeper.models.base import utcnow
 from netkeeper.services import keychain
 from netkeeper.services import mailboxes as service
 from netkeeper.services.events import Event, EventBus
-from netkeeper.web.deps import AuthProvider, CurrentUser, SessionDep, read_only
+from netkeeper.web.deps import AuthProvider, CurrentUser, SessionDep, effective_settings, read_only
 from netkeeper.web.schemas import (
     MailboxArmIn,
     MailboxOut,
@@ -199,10 +198,10 @@ def oauth_callback(
     except keychain.KeychainUnavailable as exc:
         log.warning("gmail authorization failed: %s", exc)
         return _back("error", "keychain")
-    settings: Settings = request.app.state.settings
     try:
         with session_scope(factory, write=True) as session:
             user = auth.current_user(request, session)
+            settings = effective_settings(request, session, user)
             mailbox = service.connect(
                 session,
                 user,

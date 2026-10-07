@@ -2789,6 +2789,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/settings/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Config Settings
+         * @description Every setting the Settings page shows, where its value comes from, and its warnings.
+         */
+        get: operations["get_config_settings"];
+        /**
+         * Set Config Settings
+         * @description Store new values, all or none. Each applies as its ``applies_note`` says.
+         */
+        put: operations["set_config_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/settings/self-contact": {
         parameters: {
             query?: never;
@@ -4071,6 +4095,77 @@ export interface components {
          * @enum {string}
          */
         CheckState: "scheduled" | "due" | "idle" | "paused" | "outside_hours" | "blocked" | "off" | "not_running" | "not_wired";
+        /** ConfigFieldOut */
+        ConfigFieldOut: {
+            /**
+             * Applies
+             * @enum {string}
+             */
+            applies: "now" | "restart";
+            /** Applies Note */
+            applies_note: string;
+            /** Default */
+            default: unknown;
+            /** Editable */
+            editable: boolean;
+            /** File Value */
+            file_value: unknown;
+            /**
+             * Group
+             * @enum {string}
+             */
+            group: "linkedin_budgets" | "linkedin_hours" | "campaigns" | "llm" | "backup";
+            /** Help */
+            help: string;
+            /** Key */
+            key: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "int" | "optional_int" | "float" | "bool" | "window" | "dates";
+            /** Label */
+            label: string;
+            /** Locked Reason */
+            locked_reason: string | null;
+            /** Maximum */
+            maximum: number | null;
+            /** Minimum */
+            minimum: number | null;
+            /** Notes */
+            notes: string[];
+            /** Restart Pending */
+            restart_pending: boolean;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "default" | "ui" | "file";
+            /** Stored Unreadable */
+            stored_unreadable: boolean;
+            /** Ui Value */
+            ui_value: unknown;
+            /** Value */
+            value: unknown;
+            /** Warn Above */
+            warn_above: number | null;
+            /** Warnings */
+            warnings: string[];
+        };
+        /** ConfigIn */
+        ConfigIn: {
+            /** Values */
+            values: {
+                [key: string]: unknown;
+            };
+        };
+        /** ConfigOut */
+        ConfigOut: {
+            /** Config Path */
+            config_path: string | null;
+            /** Fields */
+            fields: components["schemas"]["ConfigFieldOut"][];
+        };
         /**
          * ConfirmationRejected
          * @description The body of a bulk action whose confirmation token does not hold up.
@@ -13927,6 +14022,57 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["PostureOut"];
                 };
+            };
+        };
+    };
+    get_config_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigOut"];
+                };
+            };
+        };
+    };
+    set_config_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfigIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigOut"];
+                };
+            };
+            /** @description A value refused: nothing was stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

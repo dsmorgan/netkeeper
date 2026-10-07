@@ -162,6 +162,16 @@ class Settings:
     source_path: Path | None = field(default=None, metadata=_SKIP)
     # A deprecated [me] section's values, when the file had one (see LegacyMe).
     legacy_me: LegacyMe | None = field(default=None, metadata=_SKIP)
+    # The dotted keys the config file set ("linkedin.budget.li_prefills_per_day"), so
+    # a value the file sets can win over the Settings page (#343). None when these
+    # settings did not come from a file the loader read (the defaults, or a test's).
+    file_keys: frozenset[str] | None = field(default=None, compare=False, metadata=_SKIP)
+    # The dotted keys whose value came from the Settings page (#343): see
+    # ``netkeeper.services.ui_settings.resolve``. Empty until resolved.
+    ui_keys: frozenset[str] = field(default=frozenset(), compare=False, metadata=_SKIP)
+    # The settings before the Settings page's values were laid over them, so resolving
+    # again starts from the file, not from a value since reset (#343). None: unresolved.
+    unresolved: Settings | None = field(default=None, compare=False, repr=False, metadata=_SKIP)
 
 
 def load_settings(explicit: Path | None = None) -> Settings:
@@ -192,7 +202,21 @@ def _load_file(path: Path) -> Settings:
     raw, legacy_me = _drop_me(raw, source=path)
     settings = _from_table(Settings, raw, prefix="", source=path)
     log.debug("loaded settings from %s", path)
-    return replace(settings, source_path=path, legacy_me=legacy_me)
+    return replace(
+        settings, source_path=path, legacy_me=legacy_me, file_keys=frozenset(_leaf_keys(raw))
+    )
+
+
+def _leaf_keys(raw: Mapping[str, object], prefix: str = "") -> list[str]:
+    """Every dotted key ``raw`` gives a value, tables descended into (#343)."""
+    keys: list[str] = []
+    for name, value in raw.items():
+        key = _join(prefix, name)
+        if isinstance(value, Mapping):
+            keys.extend(_leaf_keys(value, key))
+        else:
+            keys.append(key)
+    return keys
 
 
 def _drop_me(raw: dict[str, Any], *, source: Path) -> tuple[dict[str, Any], LegacyMe | None]:

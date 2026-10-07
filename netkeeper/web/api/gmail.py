@@ -13,11 +13,10 @@ from datetime import datetime
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
-from netkeeper.config import Settings
 from netkeeper.models import MessageDirection, MessageStatus
 from netkeeper.models.base import utcnow
 from netkeeper.services import gmail_activity as service
-from netkeeper.web.deps import CurrentUser, SessionDep
+from netkeeper.web.deps import CurrentUser, SessionDep, effective_settings
 
 router = APIRouter(prefix="/gmail", tags=["gmail"])
 
@@ -71,7 +70,7 @@ def get_gmail_activity(
     request: Request, user: CurrentUser, session: SessionDep
 ) -> GmailActivityOut:
     """Today's sends against the cap, and recent email. Read-only: it never calls Gmail."""
-    settings: Settings = request.app.state.settings
+    settings = effective_settings(request, session, user)
     activity = service.gmail_activity(session, user, now=utcnow(), settings=settings)
     return GmailActivityOut(
         day_start=activity.day_start,

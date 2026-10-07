@@ -61,7 +61,7 @@ from netkeeper.db import off_loop, session_scope
 from netkeeper.models import SyncRun, SyncRunKind, SyncRunTrigger, User, UserKind
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import scoped
-from netkeeper.services import runs
+from netkeeper.services import runs, ui_settings
 from netkeeper.services.events import EventBus
 from netkeeper.services.linkedin_accounts import (
     find_account,
@@ -278,7 +278,9 @@ def _auto_send_handler(
             now = clock()
             if auto_send_spacing_left(session, user, now) > timedelta(0):
                 return "the spacing since the last auto-send has not passed"
-            claimed = claim_auto_send(session, user, now=now, settings=settings)
+            # The Settings page's values (#343), read at each claim like every other reader.
+            in_force = ui_settings.resolve(session, user, settings)
+            claimed = claim_auto_send(session, user, now=now, settings=in_force)
             if claimed is None:
                 return "no auto-send step is ready"
             if not claimed.claimed or claimed.run_id is None:

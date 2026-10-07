@@ -1886,6 +1886,216 @@
         "title": "CheckState",
         "type": "string"
       },
+      "ConfigFieldOut": {
+        "properties": {
+          "applies": {
+            "enum": [
+              "now",
+              "restart"
+            ],
+            "title": "Applies",
+            "type": "string"
+          },
+          "applies_note": {
+            "title": "Applies Note",
+            "type": "string"
+          },
+          "default": {
+            "title": "Default"
+          },
+          "editable": {
+            "title": "Editable",
+            "type": "boolean"
+          },
+          "file_value": {
+            "title": "File Value"
+          },
+          "group": {
+            "enum": [
+              "linkedin_budgets",
+              "linkedin_hours",
+              "campaigns",
+              "llm",
+              "backup"
+            ],
+            "title": "Group",
+            "type": "string"
+          },
+          "help": {
+            "title": "Help",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "int",
+              "optional_int",
+              "float",
+              "bool",
+              "window",
+              "dates"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "locked_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locked Reason"
+          },
+          "maximum": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maximum"
+          },
+          "minimum": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minimum"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "restart_pending": {
+            "title": "Restart Pending",
+            "type": "boolean"
+          },
+          "source": {
+            "enum": [
+              "default",
+              "ui",
+              "file"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "stored_unreadable": {
+            "title": "Stored Unreadable",
+            "type": "boolean"
+          },
+          "ui_value": {
+            "title": "Ui Value"
+          },
+          "value": {
+            "title": "Value"
+          },
+          "warn_above": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Warn Above"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "key",
+          "group",
+          "label",
+          "help",
+          "kind",
+          "applies",
+          "applies_note",
+          "minimum",
+          "maximum",
+          "warn_above",
+          "value",
+          "default",
+          "ui_value",
+          "file_value",
+          "source",
+          "editable",
+          "locked_reason",
+          "restart_pending",
+          "stored_unreadable",
+          "warnings",
+          "notes"
+        ],
+        "title": "ConfigFieldOut",
+        "type": "object"
+      },
+      "ConfigIn": {
+        "properties": {
+          "values": {
+            "additionalProperties": true,
+            "minProperties": 1,
+            "title": "Values",
+            "type": "object"
+          }
+        },
+        "required": [
+          "values"
+        ],
+        "title": "ConfigIn",
+        "type": "object"
+      },
+      "ConfigOut": {
+        "properties": {
+          "config_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config Path"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/ConfigFieldOut"
+            },
+            "title": "Fields",
+            "type": "array"
+          }
+        },
+        "required": [
+          "config_path",
+          "fields"
+        ],
+        "title": "ConfigOut",
+        "type": "object"
+      },
       "ConfirmationRejected": {
         "description": "The body of a bulk action whose confirmation token does not hold up.\n\n``409`` when the token expired (ask for the count again); ``422`` when it is\nunreadable, was issued to someone else, or is for another action or another\nselection.",
         "properties": {
@@ -20978,6 +21188,61 @@
         "summary": "Get Posture",
         "tags": [
           "posture"
+        ]
+      }
+    },
+    "/api/v1/settings/config": {
+      "get": {
+        "description": "Every setting the Settings page shows, where its value comes from, and its warnings.",
+        "operationId": "get_config_settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Config Settings",
+        "tags": [
+          "settings"
+        ]
+      },
+      "put": {
+        "description": "Store new values, all or none. Each applies as its ``applies_note`` says.",
+        "operationId": "set_config_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "A value refused: nothing was stored"
+          }
+        },
+        "summary": "Set Config Settings",
+        "tags": [
+          "settings"
         ]
       }
     },

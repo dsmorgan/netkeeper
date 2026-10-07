@@ -1,8 +1,8 @@
 """``settings_kv``: runtime-adjustable values per user (spec 8.4 and 15).
 
 The first consumer of :mod:`netkeeper.scoping`. Values are JSON and a key is
-unique per user. Seeding from ``config.toml`` on first start is a later item;
-nothing here reads the config.
+unique per user. Nothing here reads the config: the Settings page's values
+(``config.*`` keys) are laid over it by :mod:`netkeeper.services.ui_settings` (#343).
 """
 
 from __future__ import annotations

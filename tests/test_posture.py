@@ -66,7 +66,6 @@ from netkeeper.services.posture import (
     ATTACH_ONLY,
     ENFORCED_BY,
     LOOPBACK_HOSTS,
-    MAX_ACTIVE_WINDOW_HOURS,
     MAX_BLOCKS_BEFORE_SKIP,
     MAX_PLAUSIBLE_HOLD_HOURS,
     MIN_HALF_LIFE_HOURS,
@@ -75,7 +74,6 @@ from netkeeper.services.posture import (
     REPLY_POLL_LATE_AFTER_POLLS,
     SINGLE_ACCOUNT_ID,
     UNENFORCED_TODAY,
-    WEEKEND_DAMPING_CEILING,
     PostureReport,
     Protection,
     SessionProbe,
@@ -96,6 +94,7 @@ from netkeeper.services.scheduler import (
     served_schedules,
     sync_account_schedule,
 )
+from netkeeper.services.setting_checks import MAX_ACTIVE_WINDOW_HOURS, WEEKEND_DAMPING_CEILING
 from netkeeper.services.settings_kv import delete_setting, set_setting
 
 #: A Wednesday, 14:00 in New York (the default configured zone), inside the
@@ -749,8 +748,9 @@ def test_an_explicit_week_below_five_days_of_the_daily_limit_is_a_note(writer: S
     )
 
     assert _notes_for(short, "budget profile_visits") == (
-        "The weekly limit (300) is below 5 times your daily limit (100); remove"
-        " profile_visits_per_week from config.toml to use 5 times daily (500).",
+        "The weekly limit (300) is below 5 times your daily limit (100); set the"
+        " weekly limit to automatic in Settings, or remove profile_visits_per_week from"
+        " config.toml, to use 5 times daily (500).",
     )
     assert short.ok is True
     assert _notes_for(exact, "budget profile_visits") == ()

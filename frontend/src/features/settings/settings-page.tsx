@@ -1,10 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
 
 import { meQuery } from '@/api/queries'
-import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 
 import { AboutYouSection } from './about-you-section'
+import { ConfigSections } from './config-section'
 import { DoNotSendSection } from './do-not-send-section'
 import { type GmailOutcome, GmailSection } from './gmail-section'
 import { PostureSection } from './posture-section'
@@ -19,16 +19,10 @@ export function SettingsPage({ gmail = {} }: { gmail?: GmailOutcome }) {
         <CardHeader>
           <CardTitle level={2}>Settings</CardTitle>
           <CardDescription>
-            Gmail auth, sending hours, about you, pacing, budgets, LLM, backups.
+            Gmail auth, sending hours, about you, LinkedIn budgets and hours, campaign defaults,
+            LLM, backups. You change them here; config.toml is optional, and a value it sets wins.
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex items-center gap-2">
-          <Badge variant="outline">Phase 3</Badge>
-          <span className="text-muted-foreground">
-            Gmail, the current user and posture are wired up. Each other section arrives with its
-            feature's phase.
-          </span>
-        </CardContent>
       </Card>
 
       <GmailSection outcome={gmail} />
@@ -36,6 +30,8 @@ export function SettingsPage({ gmail = {} }: { gmail?: GmailOutcome }) {
       <SendingHoursSection />
 
       <AboutYouSection />
+
+      <ConfigSections />
 
       <DoNotSendSection />
 

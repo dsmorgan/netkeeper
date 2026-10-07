@@ -53,6 +53,9 @@ describe('settings', () => {
           readable: true,
         })
       }
+      if (pathname === '/api/v1/settings/config') {
+        return jsonResponse({ config_path: null, fields: [] })
+      }
       if (pathname === '/api/v1/gmail-setup') {
         return jsonResponse({ project_id: null, sender_email: null, done: [], steps: [] })
       }

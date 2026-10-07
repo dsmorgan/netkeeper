@@ -568,14 +568,16 @@ def test_status_does_not_need_a_writer_session(
         (
             1000,
             300,
-            "The weekly limit (300) is below 5 times your daily limit (250); remove"
-            " profile_visits_per_week from config.toml to use 5 times daily (1,250).",
+            "The weekly limit (300) is below 5 times your daily limit (250); set the"
+            " weekly limit to automatic in Settings, or remove profile_visits_per_week from"
+            " config.toml, to use 5 times daily (1,250).",
         ),
         (
             101,
             500,
-            "The weekly limit (500) is below 5 times your daily limit (101); remove"
-            " profile_visits_per_week from config.toml to use 5 times daily (505).",
+            "The weekly limit (500) is below 5 times your daily limit (101); set the"
+            " weekly limit to automatic in Settings, or remove profile_visits_per_week from"
+            " config.toml, to use 5 times daily (505).",
         ),
     ],
 )
