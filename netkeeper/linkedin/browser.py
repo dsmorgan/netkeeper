@@ -1366,6 +1366,9 @@ class BrowserRun:
         self._click_url: str | None = None
         #: How many times :meth:`bring_tab_forward` ran: at most once per run.
         self._fronted = 0
+        #: #195: whether a tab had to be opened in front because a background one
+        #: couldn't be (:meth:`_open_tab`). The run's notes say so.
+        self._opened_in_front = False
         #: How many key calls were attempted (ADR 0007's point of no return).
         self._keys_sent = 0
         self._handed_over = False
@@ -1442,6 +1445,13 @@ class BrowserRun:
     def context(self) -> ContextLike:
         """The context this run reuses: the one the user's browsing already lives in."""
         return self._attachment.context
+
+    @property
+    def opened_in_front(self) -> bool:
+        """Whether this run had to open a tab in front because a background one couldn't
+        be opened (#195): Chrome may have taken focus. Never for a run that brought its
+        tab forward (a prefill or an auto-send): taking focus is what that run does."""
+        return self._opened_in_front and not self._fronted
 
     @property
     def reattached(self) -> bool:
@@ -2814,13 +2824,21 @@ class BrowserRun:
 
         When a background tab can't be opened while the browser is still there (a
         browser without the session, or one that never reports the tab), the run
-        opens its tab the way it used to, with ``new_page()``, and logs it: in front,
-        but working. A tab this created and couldn't identify is closed by its target
-        id. A browser that went away raises, for :meth:`_ensure_page`'s reattach.
+        opens its tab the way it used to, with ``new_page()``, logs it, and sets
+        :attr:`opened_in_front` so the run's notes say so: in front, but working. A tab
+        this created and couldn't identify is closed by its target id
+        (:meth:`_close_unclaimed_tab`), on a cancel too. A browser that went away
+        raises, for :meth:`_ensure_page`'s reattach.
+
         Only a prefill or an auto-send brings its tab forward, once, at its start
-        (:meth:`bring_tab_forward`).
+        (:meth:`bring_tab_forward`). Once it has, a tab it reopens opens in front with
+        ``new_page()``, as before #195, so the Message click, the typing, and the Send
+        never happen in a tab behind the one you see (ADR 0007, "while the person is
+        watching").
         """
         context = self._attachment.context
+        if self._fronted:
+            return await context.new_page()
         browser = self._attachment.browser
         before = {id(page) for page in context.pages}
         session: _CdpSessionLike | None = None
@@ -2839,18 +2857,22 @@ class BrowserRun:
                     for page in context.pages:
                         if id(page) in before or page.is_closed():
                             continue
+                        found = await self._target_id(page)
+                        if found is None:
+                            continue  # not attached yet: asked again on the next pass
                         before.add(id(page))
-                        if await self._target_id(page) == target_id:
+                        if found == target_id:
                             return page
                     await asyncio.sleep(BACKGROUND_TAB_POLL_S)
+        except asyncio.CancelledError:
+            if session is not None and target_id is not None:
+                await asyncio.shield(self._close_unclaimed_tab(session, target_id))
+            raise
         except Exception as exc:
             if not browser.is_connected():
                 raise
             if session is not None and target_id is not None:
-                try:
-                    await session.send("Target.closeTarget", {"targetId": target_id})
-                except Exception as close_exc:
-                    log.debug("could not close the unidentified tab: %s", close_exc)
+                await self._close_unclaimed_tab(session, target_id)
             log.warning(
                 "could not open the run's tab in the background (%s); opening it in front",
                 type(exc).__name__,
@@ -2858,7 +2880,17 @@ class BrowserRun:
         finally:
             if session is not None:
                 await _detach_quietly(session.detach)
+        self._opened_in_front = True
         return await context.new_page()
+
+    @staticmethod
+    async def _close_unclaimed_tab(session: _CdpSessionLike, target_id: str) -> None:
+        """Close the tab :meth:`_open_tab` created and never claimed, by its own target
+        id and nothing else (#195). Logged, never raised."""
+        try:
+            await session.send("Target.closeTarget", {"targetId": target_id})
+        except Exception as exc:
+            log.warning("could not close the background tab the run opened: %s", exc)
 
     async def _target_id(self, page: PageLike) -> str | None:
         """A tab's own CDP target id, or ``None`` when it can't be read (#195).

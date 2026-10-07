@@ -970,6 +970,48 @@ async def test_a_connections_page_that_lands_on_a_checkpoint_fetches_nothing(
         assert flag is not None and flag.outcome is Outcome.CHECKPOINT
 
 
+async def test_a_run_whose_tab_opened_in_front_says_so_in_its_notes(
+    session_factory: Any, settings: Settings
+) -> None:
+    """#195: a browser that can't open a background tab gets a tab in front, and the
+    run's notes say Chrome may have taken focus."""
+    from run_fakes import CheckpointContext
+
+    from netkeeper.worker import BrowserWorker
+
+    provider, _ = fake_provider(CheckpointContext())  # no browser-level CDP session
+    run_id, user_id = _manual_run(session_factory, SyncRunKind.CONNECTIONS_FULL)
+
+    await BrowserWorker(provider, session_factory, settings.linkedin).execute(run_id, user_id)
+
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        run = runs.get_run(session, user, run_id)
+        assert run.notes is not None and run.notes.endswith(runs.OPENED_IN_FRONT_NOTE)
+        assert run.stop_reason == "checkpoint", "the note doesn't change how the run ended"
+
+
+def test_a_note_goes_after_the_runs_own_notes(session_factory: Any) -> None:
+    """Appended, so a reader that matches the start of an auto-send's notes reads the
+    same words; the line keeps its length cap."""
+    run_id, user_id = _manual_run(session_factory, SyncRunKind.ENRICH)
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        runs.get_run(session, user, run_id).notes = "not sent: a reason"
+        run = runs.add_note(session, user, run_id, runs.OPENED_IN_FRONT_NOTE)
+        assert run.notes == f"not sent: a reason {runs.OPENED_IN_FRONT_NOTE}"
+        runs.get_run(session, user, run_id).notes = "x" * runs.MAX_MESSAGE_LENGTH
+        run = runs.add_note(session, user, run_id, "more")
+        assert run.notes == "x" * runs.MAX_MESSAGE_LENGTH
+    fresh, fresh_user = _manual_run(session_factory, SyncRunKind.ENRICH)
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, fresh_user)
+        assert user is not None
+        assert runs.add_note(session, user, fresh, "a note").notes == "a note"
+
+
 async def test_the_worker_refuses_a_flagged_session_before_it_attaches(
     session_factory: Any, settings: Settings
 ) -> None:

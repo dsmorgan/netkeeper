@@ -463,6 +463,24 @@ def finish_run(
     return run
 
 
+#: #195: the note a run gets when its tab had to open in front, so Chrome may have
+#: taken keyboard focus. Fixed words, added at the end of the line, so a reader that
+#: matches a note's start (the auto-send notes) reads the same words.
+OPENED_IN_FRONT_NOTE: Final = (
+    "the run's tab opened in front because a background tab couldn't be opened;"
+    " Chrome may have taken focus."
+)
+
+
+def add_note(session: Session, user: User, run_id: int, note: str) -> SyncRun:
+    """Add ``note`` at the end of the run's notes line, whether the run ended or not
+    (#195). The line keeps its :data:`MAX_MESSAGE_LENGTH` cap."""
+    _require_writer(session)
+    run = get_run(session, user, run_id)
+    run.notes = _line(f"{run.notes} {note}" if run.notes else note)
+    return run
+
+
 def request_cancel(
     session: Session,
     user: User,
