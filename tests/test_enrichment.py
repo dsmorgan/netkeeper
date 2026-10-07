@@ -532,14 +532,14 @@ async def test_a_profile_not_found_is_recorded_and_the_run_goes_on(
 
 
 def _cancel_after(
-    factory: sessionmaker[Session], user_id: int, visits: int
+    factory: sessionmaker[Session], user_id: int, visits: int, on: str = "click"
 ) -> Callable[[str, object], None]:
-    """An ``on_event`` that asks the running plan to stop once ``visits`` clicks are made."""
+    """An ``on_event`` that asks the running plan to stop at the ``visits``-th ``on`` event."""
     seen = 0
 
     def on_event(kind: str, value: object) -> None:
         nonlocal seen
-        if kind != "click":
+        if kind != on:
             return
         seen += 1
         if seen != visits:
@@ -577,6 +577,29 @@ async def test_cancel_stops_between_profiles_and_keeps_what_completed(
     assert plan.completed == (ids[101], ids[102])
     assert _contact(session_factory, user_id, ids[102]).headline == PROFILES[1].headline
     assert _spent(session_factory, user_id) == 2
+
+
+@pytest.mark.parametrize("during", ["scroll", "back"])
+async def test_a_cancel_mid_scroll_ends_the_run_cancelled_with_that_profile_untouched(
+    session_factory: sessionmaker[Session], during: str
+) -> None:
+    """#177: the gate's cancel check reaches ``source.scroll`` (and the scroll back to
+    the top). A cancel set on the run row while the second profile is scrolling ends the
+    run ``cancelled``: that profile is not clicked, saved, or counted completed."""
+    people = _people(4)
+    user_id, ids = _setup(session_factory, people)
+    browser = FakeBrowser.of(people, on_event=_cancel_after(session_factory, user_id, 2, during))
+
+    report = await _enrich(session_factory, user_id, browser)
+
+    assert report.result.reason is StopReason.CANCELLED
+    assert browser.visited() == [p.slug for p in people[:2]]
+    assert browser.kinds().count("click") == 1
+    plan = _plan(session_factory, user_id, report)
+    assert plan.status == "aborted"
+    assert _stop_reason(session_factory, user_id, report.run_id) == "cancelled"
+    assert plan.completed == (ids[101],)
+    assert _contact(session_factory, user_id, ids[102]).last_enriched_at is None
 
 
 async def test_resume_skips_what_completed_and_never_re_plans(
