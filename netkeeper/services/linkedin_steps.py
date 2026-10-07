@@ -321,13 +321,18 @@ AUTO_SEND_HOLD_BUBBLE: Final = "a message bubble is open in Chrome"
 #: process went away): nobody knows what its tab and bubble hold.
 AUTO_SEND_HOLD_INTERRUPTED: Final = "an auto-send stopped mid-run, so a message bubble may be open"
 
+#: Why auto-send stops when no Message control was on screen with nothing over it (#444):
+#: whatever covers it would stop the next auto-send too.
+AUTO_SEND_HOLD_COVERED: Final = "something covers the Message control in Chrome"
+
 #: Why auto-send stops when a sent message's bubble closed but its tab didn't.
 AUTO_SEND_HOLD_TAB: Final = "a tab is left open in Chrome"
 
 #: What the person does to let auto-send go again.
 AUTO_SEND_HOLD_CLEAR: Final = (
     "Close every LinkedIn message bubble (and the tab netkeeper left) in the netkeeper"
-    " Chrome window, sending or discarding what is in it first. Then resume auto-send:"
+    " Chrome window, sending or discarding what is in it first, and anything covering"
+    " a profile's Message button. Then resume auto-send:"
     ' click "I closed the bubbles, resume auto-send" on the LinkedIn queue, or run'
     " `netkeeper linkedin auto-send-resume`."
 )

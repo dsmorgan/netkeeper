@@ -52,6 +52,9 @@ from typing import Final
 from urllib.parse import quote, unquote, urlsplit
 
 from netkeeper.linkedin.browser import (
+    BUBBLE_ALREADY_OPEN,
+    BUBBLE_UNREADABLE,
+    MESSAGE_NOT_ON_SCREEN,
     BrowserRun,
     BubbleLayout,
     BubbleRecipient,
@@ -72,6 +75,7 @@ from netkeeper.linkedin.messaging import (
     MessageJobSpec,
     MessageOutcome,
     MessageOutcomeKind,
+    PreClickHold,
     PrefillResult,
     SendPermit,
     conversation_from_thread_request,
@@ -144,6 +148,16 @@ def _on_path(url: str, path: str) -> bool:
     except ValueError:
         return False
     return seen == unquote(path).rstrip("/").casefold()
+
+
+#: #444's pre-click refusals a person must clear: an auto-send holds on them (ADR 0008).
+#: A bubble already open, or a page whose bubbles couldn't be read, would refuse the next
+#: auto-send the same way; so would whatever covers every Message control.
+_PRE_CLICK_HOLDS: Final[dict[str, PreClickHold]] = {
+    BUBBLE_ALREADY_OPEN: PreClickHold.BUBBLE,
+    BUBBLE_UNREADABLE: PreClickHold.BUBBLE,
+    MESSAGE_NOT_ON_SCREEN: PreClickHold.COVERED,
+}
 
 
 def _not_typed(reason: str) -> PrefillResult:
@@ -280,7 +294,9 @@ class PagePrefill:
                 sleep=self._sleep,
             )
             if not click.clicked:
-                return _not_typed(click.refusal or "the Message control was not clicked")
+                refused = _not_typed(click.refusal or "the Message control was not clicked")
+                hold = _PRE_CLICK_HOLDS.get(click.refusal or "")
+                return refused if hold is None else replace(refused, pre_click_hold=hold)
             option = await self._compose_option(compose, spec.profile_id)
             if isinstance(option, ComposeRefusal):
                 return _not_typed(option.reason)

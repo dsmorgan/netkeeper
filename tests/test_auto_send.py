@@ -1399,6 +1399,7 @@ class _SentButNothingTyped:
     message_clicked = True
     send_attempted = True
     tab_closed = False
+    message_click_diagnostics: dict[str, str | None] = {}
 
     async def prefill(
         self, spec: MessageJobSpec, plan: Any, *, cancelled: Any, permit: Any = None
@@ -2025,8 +2026,8 @@ def test_record_quietly_holds_when_recording_fails(
 async def test_an_auto_send_leaves_li_prefills_spent_out_so_a_retry_asks_to_confirm(
     lane: Lane,
 ) -> None:
-    a = Auto(lane, MessagingSite(ZEPHYRINE, before=existing_bubble_html(ZEPHYRINE)))
-    await a.execute()  # clicked Message, then refused the second composer: not_typed
+    a = Auto(lane, MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, compose=None)))
+    await a.execute()  # clicked Message, then no compose option answered: not_typed
     counts = a.run().counts_json or {}
     assert "li_prefills_spent" not in counts and counts["message_click_attempted"] is True
     enrollment = lane.enrollment(a.enrollment_id)
@@ -2145,3 +2146,97 @@ async def test_run_prefills_second_lapse_check_gives_the_step_back_unopened(lane
         clock=lambda: NOW + timedelta(seconds=61),
     )
     _given_back_unopened(a, "the claim lapsed")
+
+
+# --- #444's pre-click refusals hold auto-send (ADR 0008) ----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("site", "reason"),
+    [
+        (
+            lambda: MessagingSite(ZEPHYRINE, before=existing_bubble_html(ZEPHYRINE)),
+            linkedin_steps.AUTO_SEND_HOLD_BUBBLE,
+        ),
+        (
+            lambda: MessagingSite(
+                ZEPHYRINE,
+                before=(
+                    '<div hidden><div contenteditable="true" role="textbox" '
+                    'aria-label="Write a message…"><p><br></p></div></div>'
+                ),
+            ),
+            linkedin_steps.AUTO_SEND_HOLD_BUBBLE,
+        ),
+    ],
+    ids=["bubble already open", "a minimized composer"],
+)
+async def test_a_pre_click_bubble_refusal_holds_auto_send(
+    lane: Lane, site: Callable[[], MessagingSite], reason: str
+) -> None:
+    a = Auto(lane, site())
+    await a.execute()
+    _no_send(a)
+    assert a.site.tab.clicks == []  # nothing clicked
+    run = a.run()
+    assert (run.counts_json or {}).get("message_click_attempted") is False
+    # After the navigation, so not given back unopened: the not_typed path, Try again.
+    assert "opened" not in (run.counts_json or {})
+    assert a.message() is None and lane.enrollment(a.enrollment_id).not_sent_count == 1
+    hold = _hold_of(lane)
+    assert hold is not None and hold.reason == reason and hold.run_id == a.run_id
+
+
+async def test_a_bubble_check_that_cannot_read_the_page_holds_auto_send(
+    lane: Lane, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def unreadable(self: BrowserRun, tab: Any) -> bool:
+        raise RuntimeError("read failed")
+
+    monkeypatch.setattr(BrowserRun, "_bubble_already_open", unreadable)
+    a = Auto(lane)
+    await a.execute()
+    _no_send(a)
+    hold = _hold_of(lane)
+    assert hold is not None and hold.reason == linkedin_steps.AUTO_SEND_HOLD_BUBBLE
+
+
+async def test_a_covered_message_control_holds_auto_send(
+    lane: Lane, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from netkeeper.linkedin import browser
+
+    monkeypatch.setattr(browser, "choose_message_target", lambda *args, **kwargs: None)
+    a = Auto(lane)
+    await a.execute()
+    _no_send(a)
+    assert a.site.tab.clicks == []
+    hold = _hold_of(lane)
+    assert hold is not None and hold.reason == linkedin_steps.AUTO_SEND_HOLD_COVERED
+
+
+async def test_a_pre_click_refusal_on_a_manual_prefill_holds_nothing(lane: Lane) -> None:
+    site = MessagingSite(ZEPHYRINE, before=existing_bubble_html(ZEPHYRINE))
+    provider, _ = fake_provider(site)
+    worker = BrowserWorker(
+        provider,
+        lane.factory,
+        AUTO.linkedin,
+        clock=Clock(),
+        sleep=no_sleep,
+        prefill_sources=fast_source,
+        campaign_settings=AUTO,
+    )
+    enrollment = lane.enroll(contact=dict(CONTACT))
+    claim = lane.claim(enrollment)
+    assert claim.claimed and claim.run_id is not None
+    await worker.execute(claim.run_id, lane.user_id)
+    assert _hold_of(lane) is None
+
+
+async def test_another_pre_click_refusal_holds_nothing(lane: Lane) -> None:
+    """Only #444's bubble and cover refusals hold: a profile with no Message control
+    refuses before the click and holds nothing (the next contact's profile differs)."""
+    a = Auto(lane, MessagingSite(ZEPHYRINE, profile_html="<main><h1>No controls</h1></main>"))
+    await a.execute()
+    assert _hold_of(lane) is None
