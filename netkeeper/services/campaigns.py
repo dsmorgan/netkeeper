@@ -519,6 +519,9 @@ class StepStatus:
     by_status: dict[MessageStatus, int] = field(default_factory=dict)
     """The step's outbound messages by status: a LinkedIn step's prefilled, sent and
     stale counts (#383)."""
+    newest_version: int | None = None
+    """The newest version of the step's template, when it is newer than the one the step
+    uses: the step can adopt it (#397, :mod:`netkeeper.services.template_adoption`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -575,6 +578,7 @@ def campaign_status(
     step_rows = []
     for step in steps:
         template = template_service.get_template(session, user, step.template_id)
+        newest = template_service.newest_version(session, user, template)
         step_rows.append(
             StepStatus(
                 step,
@@ -583,6 +587,7 @@ def campaign_status(
                 outbound[step.id, False],
                 outbound[step.id, True],
                 by_status.get(step.id, {}),
+                newest.version if newest.id != template.id else None,
             )
         )
     next_at = None

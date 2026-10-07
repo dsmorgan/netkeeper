@@ -42,6 +42,194 @@
         "title": "ActivationRefusedOut",
         "type": "object"
       },
+      "AdoptIn": {
+        "properties": {
+          "confirm": {
+            "default": false,
+            "title": "Confirm",
+            "type": "boolean"
+          },
+          "fingerprint": {
+            "maxLength": 64,
+            "title": "Fingerprint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fingerprint"
+        ],
+        "title": "AdoptIn",
+        "type": "object"
+      },
+      "AdoptedOut": {
+        "properties": {
+          "adopted_at": {
+            "format": "date-time",
+            "title": "Adopted At",
+            "type": "string"
+          },
+          "affected_total": {
+            "title": "Affected Total",
+            "type": "integer"
+          },
+          "campaign": {
+            "$ref": "#/components/schemas/CampaignOut"
+          },
+          "from_version": {
+            "title": "From Version",
+            "type": "integer"
+          },
+          "released": {
+            "title": "Released",
+            "type": "integer"
+          },
+          "to_version": {
+            "title": "To Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "from_version",
+          "to_version",
+          "released",
+          "affected_total",
+          "adopted_at",
+          "campaign"
+        ],
+        "title": "AdoptedOut",
+        "type": "object"
+      },
+      "AdoptionOut": {
+        "properties": {
+          "affected": {
+            "items": {
+              "$ref": "#/components/schemas/EnrollmentRefOut"
+            },
+            "title": "Affected",
+            "type": "array"
+          },
+          "affected_total": {
+            "title": "Affected Total",
+            "type": "integer"
+          },
+          "blocked": {
+            "items": {
+              "$ref": "#/components/schemas/MessagePreviewOut"
+            },
+            "title": "Blocked",
+            "type": "array"
+          },
+          "blocked_total": {
+            "title": "Blocked Total",
+            "type": "integer"
+          },
+          "campaign_id": {
+            "title": "Campaign Id",
+            "type": "integer"
+          },
+          "campaign_status": {
+            "$ref": "#/components/schemas/CampaignStatus"
+          },
+          "current": {
+            "$ref": "#/components/schemas/VersionOut"
+          },
+          "diff": {
+            "title": "Diff",
+            "type": "string"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/LintIssueOut"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "kept": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/MessageStatus"
+            },
+            "title": "Kept",
+            "type": "object"
+          },
+          "newest": {
+            "$ref": "#/components/schemas/VersionOut"
+          },
+          "open_messages": {
+            "items": {
+              "$ref": "#/components/schemas/OpenMessageOut"
+            },
+            "title": "Open Messages",
+            "type": "array"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "refusal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refusal"
+          },
+          "released": {
+            "title": "Released",
+            "type": "integer"
+          },
+          "samples": {
+            "items": {
+              "$ref": "#/components/schemas/MessagePreviewOut"
+            },
+            "title": "Samples",
+            "type": "array"
+          },
+          "step_id": {
+            "title": "Step Id",
+            "type": "integer"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/LintIssueOut"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "campaign_id",
+          "campaign_status",
+          "step_id",
+          "position",
+          "current",
+          "newest",
+          "diff",
+          "errors",
+          "warnings",
+          "refusal",
+          "affected_total",
+          "affected",
+          "released",
+          "kept",
+          "open_messages",
+          "samples",
+          "blocked_total",
+          "blocked",
+          "fingerprint"
+        ],
+        "title": "AdoptionOut",
+        "type": "object"
+      },
       "And-Input": {
         "additionalProperties": false,
         "properties": {
@@ -4148,6 +4336,33 @@
           "total"
         ],
         "title": "EnrollmentPageOut",
+        "type": "object"
+      },
+      "EnrollmentRefOut": {
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "contact_name": {
+            "title": "Contact Name",
+            "type": "string"
+          },
+          "enrollment_id": {
+            "title": "Enrollment Id",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/EnrollmentStatus"
+          }
+        },
+        "required": [
+          "enrollment_id",
+          "contact_id",
+          "contact_name",
+          "status"
+        ],
+        "title": "EnrollmentRefOut",
         "type": "object"
       },
       "EnrollmentStatus": {
@@ -8519,6 +8734,34 @@
         "title": "OAuthStartOut",
         "type": "object"
       },
+      "OpenMessageOut": {
+        "description": "A message of the step still in flight: it keeps the text it was rendered with.",
+        "properties": {
+          "contact_name": {
+            "title": "Contact Name",
+            "type": "string"
+          },
+          "enrollment_id": {
+            "title": "Enrollment Id",
+            "type": "integer"
+          },
+          "message_id": {
+            "title": "Message Id",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MessageStatus"
+          }
+        },
+        "required": [
+          "message_id",
+          "enrollment_id",
+          "contact_name",
+          "status"
+        ],
+        "title": "OpenMessageOut",
+        "type": "object"
+      },
       "OptionsOut": {
         "description": "What the step builder needs to know about LinkedIn steps (#383).",
         "properties": {
@@ -11165,6 +11408,17 @@
           "mode": {
             "$ref": "#/components/schemas/StepMode"
           },
+          "newest_template_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Newest Template Version"
+          },
           "outbound": {
             "additionalProperties": {
               "type": "integer"
@@ -11198,6 +11452,40 @@
           "sent": {
             "title": "Sent",
             "type": "integer"
+          },
+          "template_adopted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template Adopted At"
+          },
+          "template_adopted_by": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template Adopted By"
+          },
+          "template_adopted_from_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template Adopted From Version"
           },
           "template_id": {
             "title": "Template Id",
@@ -13388,6 +13676,46 @@
         "title": "ValidationError",
         "type": "object"
       },
+      "VersionOut": {
+        "properties": {
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "template_id": {
+            "title": "Template Id",
+            "type": "integer"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "template_id",
+          "name",
+          "version",
+          "subject",
+          "body"
+        ],
+        "title": "VersionOut",
+        "type": "object"
+      },
       "WaitingOut": {
         "description": "One LinkedIn message waiting for you. No message text.",
         "properties": {
@@ -15453,6 +15781,129 @@
           }
         },
         "summary": "Start Options",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/steps/{step_id}/adopt": {
+      "post": {
+        "description": "Have the step use the newest version of its template, as the preview showed it.\nEvery message that exists keeps its text; enrollments the step has not fired for get\nthe new version. The confirm approves the step in it.",
+        "operationId": "adopt_step_template",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step_id",
+            "required": true,
+            "schema": {
+              "title": "Step Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdoptIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdoptedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign or step"
+          },
+          "409": {
+            "description": "Refused: see the preview's refusal, or it changed since the preview"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Adopt",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/steps/{step_id}/adoption": {
+      "get": {
+        "description": "What adopting the newest version of the step's template would change. Changes\nnothing.",
+        "operationId": "step_template_adoption",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step_id",
+            "required": true,
+            "schema": {
+              "title": "Step Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdoptionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign or step"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Adoption",
         "tags": [
           "campaigns"
         ]

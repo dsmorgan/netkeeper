@@ -193,6 +193,24 @@ def is_superseded(session: Session, user: User, row: Template) -> bool:
     return newer is not None
 
 
+def newest_version(session: Session, user: User, row: Template) -> Template:
+    """The newest version of ``row``'s template: ``row`` itself when nothing replaced it.
+
+    Follows the chain forward. ``UNIQUE(user_id, previous_id)`` keeps it a line, so
+    each version has at most one successor.
+    """
+    current = row
+    seen = {row.id}
+    while True:
+        newer = session.scalars(
+            scoped(user, Template).where(Template.previous_id == current.id).limit(1)
+        ).first()
+        if newer is None or newer.id in seen:
+            return current
+        seen.add(newer.id)
+        current = newer
+
+
 def versions(session: Session, user: User, row: Template) -> list[Template]:
     """``row`` and every version before it, newest first."""
     chain = [row]
@@ -425,26 +443,27 @@ def activation_errors(row: Template) -> list[LintIssue]:
     return [issue for issue in issues if issue.severity is Severity.ERROR]
 
 
-REMOVED_FIELD_BLOCK: Final = (
-    "blocked: template uses removed field me.*; "
-    "end this campaign, fix the template, and start a new campaign from it"
+FIX_ADVICE: Final = (
+    "fix the template, then have the step use its newest version"
+    " (Use newest version on the campaign page, or `netkeeper campaigns adopt-template`)"
 )
+"""What to do about a step blocked by its template (#397): a step keeps the version it was
+activated with, so the fix is a new version, which the step adopts after a confirm
+(:mod:`netkeeper.services.template_adoption`)."""
+
+REMOVED_FIELD_BLOCK: Final = f"blocked: template uses removed field me.*; {FIX_ADVICE}"
 """Why the engine parked an enrollment whose step template names a removed ``me.*``
 field (#342). Stored on the enrollment and shown on the campaign page."""
 
-TEMPLATE_ERRORS_BLOCK: Final = (
-    "blocked: the step's template has lint errors; "
-    "end this campaign, fix the template, and start a new campaign from it"
-)
+TEMPLATE_ERRORS_BLOCK: Final = f"blocked: the step's template has lint errors; {FIX_ADVICE}"
 """Why the engine parked an enrollment whose step template has any other lint error."""
 
 
 def block_reason(row: Template | None) -> str | None:
     """Why a step with this template may not send, or None when it may. A template that
     names a removed ``me.*`` field says so (#342): the campaign was activated before the
-    fields were removed. Editing the template does not unblock it: the step keeps the
-    version it was activated with, so the way on is to end this campaign, fix the
-    template, and start a new campaign from it."""
+    fields were removed. Editing the template alone does not unblock it: the step keeps
+    the version it was activated with until a person has it adopt the new one (#397)."""
     if row is None:
         return "blocked: the step's template is gone"
     errors = activation_errors(row)
@@ -472,9 +491,9 @@ def removed_field_campaigns(session: Session, user: User) -> list[RemovedFieldCa
     """Every active or paused campaign whose step templates fail ``removed_field`` (#342).
 
     Those steps send nothing: a step keeps the template version it was activated with,
-    so editing the template does not help. End the campaign, fix the template, and start
-    a new campaign from it:
-    the startup log and the posture report name them. Reads only.
+    so editing the template alone does not help. Fix the template, then have the step
+    adopt its newest version (#397): the startup log and the posture report name them.
+    Reads only.
     """
     out: list[RemovedFieldCampaign] = []
     campaigns = session.scalars(
@@ -509,8 +528,7 @@ def describe_removed_field_campaigns(found: Sequence[RemovedFieldCampaign]) -> s
     )
     return (
         f"{named}: a step template uses the removed me.* fields (#342), so those steps send"
-        " nothing. To send it, "
-        "end this campaign, fix the template, and start a new campaign from it"
+        f" nothing. To send it, {FIX_ADVICE}"
     )
 
 

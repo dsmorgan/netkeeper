@@ -2175,7 +2175,7 @@ def test_an_active_campaign_using_a_removed_me_field_warns(writer: Session, user
     report = _report(writer, user)
     [warning] = _row(report, "campaign templates").warnings
     assert "'First 100'" in warning and "step 1" in warning
-    assert "end this campaign, fix the template, and start a new campaign from it" in warning
+    assert "fix the template, then have the step use its newest version" in warning
     assert "new template version" not in warning
     assert "campaign templates" in _warned(report)
 

@@ -138,6 +138,8 @@ API_PATHS = {
     "/api/v1/campaigns/{campaign_id}/start",
     "/api/v1/campaigns/{campaign_id}/start-options",
     "/api/v1/campaigns/{campaign_id}/steps/{step_id}/schedule",
+    "/api/v1/campaigns/{campaign_id}/steps/{step_id}/adoption",
+    "/api/v1/campaigns/{campaign_id}/steps/{step_id}/adopt",
     "/api/v1/campaigns/{campaign_id}/unarchive",
     "/api/v1/campaigns/linkedin/ready",
     "/api/v1/campaigns/linkedin/waiting",
@@ -363,6 +365,7 @@ def test_known_api_modules_are_discovered() -> None:
         "sending_hours",
         "tags",
         "tasks",
+        "template_adoption",
         "templates",
         "triage",
     ]

@@ -3297,3 +3297,54 @@ def test_0039_downgrades_to_messages_without_send_clicked_at(migration_engine: E
     columns = {c["name"] for c in inspect(migration_engine).get_columns("messages")}
     assert "send_clicked_at" not in columns
     migrations.upgrade(migration_engine, "0039")
+
+
+# --- a step adopts a newer template version (0040, #397) ------------------------------------
+
+ADOPTION_COLUMNS = {
+    "template_adopted_at",
+    "template_adopted_by",
+    "template_adopted_from_version",
+}
+
+
+def test_0040_adds_the_adoption_columns_and_keeps_every_step_unset(
+    migration_engine: Engine,
+) -> None:
+    migrations.upgrade(migration_engine, "0039")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+    migrations.upgrade(migration_engine, "0040")
+    columns = {c["name"] for c in inspect(migration_engine).get_columns("campaign_steps")}
+    assert columns >= ADOPTION_COLUMNS
+    with migration_engine.begin() as connection:
+        row = connection.execute(
+            text(
+                "SELECT template_id, template_adopted_at, template_adopted_by,"
+                " template_adopted_from_version FROM campaign_steps WHERE id = 1"
+            )
+        ).one()
+        assert tuple(row) == (1, None, None, None)
+        connection.execute(
+            text(
+                "UPDATE campaign_steps SET template_adopted_at = :t, template_adopted_by = 1,"
+                " template_adopted_from_version = 1 WHERE id = 1"
+            ),
+            {"t": STAMP},
+        )
+
+
+def test_0040_downgrades_to_steps_without_an_adoption(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0040")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+        connection.execute(
+            text("UPDATE campaign_steps SET template_adopted_at = :t WHERE id = 1"), {"t": STAMP}
+        )
+    migrations.downgrade(migration_engine, "0039")
+    columns = {c["name"] for c in inspect(migration_engine).get_columns("campaign_steps")}
+    assert columns.isdisjoint(ADOPTION_COLUMNS)
+    with migration_engine.begin() as connection:
+        assert _count(connection, "campaign_steps") == 1
+        assert _count(connection, "messages") == 1
+    migrations.upgrade(migration_engine, "0040")

@@ -20,6 +20,8 @@ export type Campaign = Schemas['CampaignOut']
 export type CampaignStatus = Schemas['CampaignStatus']
 export type CampaignCreate = Schemas['CampaignCreate']
 export type Step = Schemas['StepOut']
+export type Adoption = Schemas['AdoptionOut']
+export type Adopted = Schemas['AdoptedOut']
 export type StepIn = Schemas['StepIn']
 export type StepMode = Schemas['StepMode']
 export type StepCondition = Schemas['StepCondition']
@@ -96,6 +98,7 @@ export const campaignKeys = {
     [...campaignKeys.all, 'start-options', id, at] as const,
   results: (id: number) => [...campaignKeys.all, 'results', id] as const,
   deletePlan: (id: number) => [...campaignKeys.all, 'delete-plan', id] as const,
+  adoption: (id: number, stepId: number) => [...campaignKeys.all, 'adoption', id, stepId] as const,
 }
 
 /**
@@ -291,6 +294,43 @@ export async function endCampaign(id: number): Promise<Campaign> {
     params: { path: { campaign_id: id } },
   })
   if (data === undefined) fail(response.status, error, 'could not end the campaign')
+  return data
+}
+
+/**
+ * What adopting the newest version of a step's template would change (#397): the diff,
+ * the new version's lint, the enrollments that get it, the messages that keep their
+ * text, and why it is refused, if it is. Changes nothing.
+ */
+export function adoptionQuery(id: number, stepId: number) {
+  return queryOptions({
+    queryKey: campaignKeys.adoption(id, stepId),
+    queryFn: async ({ signal }): Promise<Adoption> => {
+      const { data, error, response } = await api.GET(
+        '/api/v1/campaigns/{campaign_id}/steps/{step_id}/adoption',
+        { params: { path: { campaign_id: id, step_id: stepId } }, signal },
+      )
+      if (data === undefined) fail(response.status, error, 'could not check the new version')
+      return data
+    },
+    staleTime: 0,
+  })
+}
+
+/** Have the step use the newest version, as the preview with `fingerprint` showed it. */
+export async function adoptStepTemplate(
+  id: number,
+  stepId: number,
+  fingerprint: string,
+): Promise<Adopted> {
+  const { data, error, response } = await api.POST(
+    '/api/v1/campaigns/{campaign_id}/steps/{step_id}/adopt',
+    {
+      params: { path: { campaign_id: id, step_id: stepId } },
+      body: { fingerprint, confirm: true },
+    },
+  )
+  if (data === undefined) fail(response.status, error, 'could not adopt the new version')
   return data
 }
 
