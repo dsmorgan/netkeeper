@@ -157,13 +157,14 @@ __all__ = [
     "Refusal",
     "claim_prefill",
     "discard",
+    "linkedin_positions",
     "needs_try_again",
     "ready_to_prefill",
     "record_prefill_outcome",
     "try_again",
 ]
 
-NOT_TYPED_PREFIX: Final = "not_typed:"
+NOT_TYPED_PREFIX: Final = engine.PREFILL_NOT_TYPED_PREFIX
 """How an enrollment's ``not_sent_error`` starts after a prefill that typed nothing
 (:func:`record_prefill_outcome`). With ``not_sent_count`` above zero, the step waits for
 a person to try it again (:func:`needs_try_again`, #445)."""
@@ -300,13 +301,20 @@ def needs_try_again(enrollment: Enrollment) -> bool:
     )
 
 
-def _needs_try_again_sql() -> ColumnElement[bool]:
-    """:func:`needs_try_again` in SQL. Never NULL, so its negation keeps an enrollment
-    with no ``not_sent_error`` (``NOT NULL`` would drop it from the ready list)."""
-    return and_(
-        Enrollment.not_sent_count > 0,
-        func.coalesce(Enrollment.not_sent_error, "").startswith(NOT_TYPED_PREFIX, autoescape=True),
+def linkedin_positions(session: Session, user: User, campaign_id: int) -> frozenset[int]:
+    """The positions of a campaign's LinkedIn steps: an enrollment row says it waits for
+    Try again only when its next step is one of them (#445). Read-only."""
+    return frozenset(
+        step.position
+        for step in engine._steps(session, user, campaign_id)
+        if step.channel is TemplateChannel.LINKEDIN
     )
+
+
+def _needs_try_again_sql() -> ColumnElement[bool]:
+    """:func:`needs_try_again` in SQL (the engine's own, so its tick and dashboard leave
+    these steps out too)."""
+    return engine.waits_for_try_again()
 
 
 def _ready_statement(user: User, now: datetime, campaign_id: int | None) -> Select[Enrollment]:
@@ -422,12 +430,16 @@ class LastTry:
 
 def last_try(session: Session, user: User, enrollment: Enrollment, *, now: datetime) -> LastTry:
     """The latest try of ``enrollment``'s step, which :func:`needs_try_again`. Read-only."""
-    reason = (enrollment.not_sent_error or "").removeprefix(NOT_TYPED_PREFIX).strip()
     run = (
         None
         if enrollment.last_prefill_run_id is None
         else get_scoped(session, user, SyncRun, enrollment.last_prefill_run_id)
     )
+    return _last_try(user, enrollment, run, now=now)
+
+
+def _last_try(user: User, enrollment: Enrollment, run: SyncRun | None, *, now: datetime) -> LastTry:
+    reason = (enrollment.not_sent_error or "").removeprefix(NOT_TYPED_PREFIX).strip()
     if run is None or run.stop_reason != MessageOutcomeKind.NOT_TYPED.value:
         return LastTry(reason, enrollment.not_sent_count, None, None, None, None, None)
     counts = run.counts_json or {}
@@ -515,8 +527,19 @@ def try_again(
     slots: schedule.Suggested | None = None
     with contextlib.suppress(schedule.ScheduleError):
         slots = engine.slots_for(settings, user)
+    listed = list(rows)
+    # Every row's run in one query, not one each.
+    run_ids = {e.last_prefill_run_id for e, *_ in listed if e.last_prefill_run_id is not None}
+    runs_by_id = (
+        {
+            run.id: run
+            for run in session.scalars(scoped(user, SyncRun).where(SyncRun.id.in_(run_ids)))
+        }
+        if run_ids
+        else {}
+    )
     found: list[TryAgainPrefill] = []
-    for enrollment, campaign, step, contact in rows:
+    for enrollment, campaign, step, contact in listed:
         held = (
             None
             if hours is None or slots is None
@@ -529,7 +552,12 @@ def try_again(
                 first_step=enrollment.current_step is None,
             )
         )
-        last = last_try(session, user, enrollment, now=now)
+        run = (
+            None
+            if enrollment.last_prefill_run_id is None
+            else runs_by_id.get(enrollment.last_prefill_run_id)
+        )
+        last = _last_try(user, enrollment, run, now=now)
         found.append(TryAgainPrefill(enrollment, campaign, step, contact, last, held))
     return found
 

@@ -605,3 +605,24 @@ async def test_the_enrollment_row_says_try_again_with_no_next_action(
     [row] = page["items"]
     assert (row["try_again"], row["next_action_at"]) == (True, None)
     assert row["not_sent_error"] == "not_typed: the Message control could not be clicked"
+
+
+async def test_the_enrollment_row_says_try_again_only_for_a_linkedin_step(
+    client: httpx.AsyncClient, running_app: FastAPI, executor: FakeExecutor
+) -> None:
+    """A "not_typed" note on an enrollment whose next step is an email never says Try again."""
+    with session_scope(running_app.state.session_factory, write=True) as session:
+        user = _local(session)
+        campaign = factories.make_campaign(session, user, channels=(TemplateChannel.EMAIL,))
+        enrollment = factories.make_enrollment(
+            session,
+            campaign,
+            factories.make_contact(session, user),
+            next_action_at=NOW,
+            not_sent_count=1,
+            not_sent_error="not_typed: the browser was busy",
+        )
+        campaign_id = campaign.id
+        enrollment_id = enrollment.id
+    [row] = (await client.get(f"/api/v1/campaigns/{campaign_id}/enrollments")).json()["items"]
+    assert (row["id"], row["try_again"]) == (enrollment_id, False)

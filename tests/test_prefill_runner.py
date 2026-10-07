@@ -476,6 +476,10 @@ async def test_a_cancelled_run_records_what_it_clicked(lane: Lane) -> None:
     with pytest.raises(asyncio.CancelledError):
         await f.execute()
     assert _click_counts(f) == {"message_click_attempted": True, "message_clicked": True}
+    # It got past the spend: that try used a unit, and Try again asks about the bubble.
+    assert (f.run().counts_json or {}).get("li_prefills_spent") is True
+    assert f.spent(ActionClass.LI_PREFILLS) == 1
+    assert _try(f).needs_confirmation
 
 
 # --- the budget is recorded, and Try again reads it with the click (#445) -----------------

@@ -522,6 +522,7 @@ def list_enrollments(
         page = service.list_enrollments(
             session, user, campaign_id, q=q, status=status, limit=limit, offset=offset
         )
+        on_linkedin = linkedin_steps.linkedin_positions(session, user, campaign_id)
     return EnrollmentPageOut(
         items=[
             EnrollmentOut(
@@ -536,6 +537,7 @@ def list_enrollments(
                 replied_at=row.enrollment.replied_at,
                 not_sent_error=row.enrollment.not_sent_error,
                 try_again=row.enrollment.status is EnrollmentStatus.ACTIVE
+                and (row.enrollment.current_step or 0) + 1 in on_linkedin
                 and linkedin_steps.needs_try_again(row.enrollment),
             )
             for row in page.items

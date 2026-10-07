@@ -55,11 +55,11 @@ export const TRY_AGAIN_STEP = 'To try again, click Try again in the LinkedIn que
 
 /** Asking before a retry whose last try clicked Message. */
 export function confirmBubbleTitle(name: string): string {
-  return `Is a message bubble for ${name} open in Chrome?`
+  return `Close any message bubble for ${name} in Chrome before you try again`
 }
 export const CONFIRM_BUBBLE_BODY =
-  'The last try clicked Message, so a message bubble for this contact may still be open in Chrome. Close it before you try again: netkeeper refuses a page with two message bubbles, and a bubble can keep a draft.'
-export const CONFIRM_BUBBLE_LABEL = 'No bubble is open, try again'
+  'The last try clicked Message, so a message bubble for this contact may still be open in Chrome. netkeeper refuses a page with two message bubbles, and a bubble can keep a draft.'
+export const CONFIRM_BUBBLE_LABEL = "It's closed, try again"
 
 /** What the last try did, as the backend recorded it (`LastTryOut`). */
 export interface TryBudget {

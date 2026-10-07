@@ -1218,6 +1218,24 @@ def _selectable(user: User) -> Select[Enrollment]:
     )
 
 
+PREFILL_NOT_TYPED_PREFIX: Final = "not_typed:"
+"""How ``not_sent_error`` starts after a LinkedIn prefill that typed nothing (#445). With
+``not_sent_count`` above zero, the step waits for a person to click Try again
+(:func:`netkeeper.services.linkedin_steps.needs_try_again`)."""
+
+
+def waits_for_try_again() -> ColumnElement[bool]:
+    """SQL: the enrollment's latest LinkedIn prefill typed nothing, so its step waits for
+    Try again (#445), never for a due time. Never NULL, so its negation keeps an
+    enrollment with no ``not_sent_error``."""
+    return and_(
+        Enrollment.not_sent_count > 0,
+        func.coalesce(Enrollment.not_sent_error, "").startswith(
+            PREFILL_NOT_TYPED_PREFIX, autoescape=True
+        ),
+    )
+
+
 def _not_on_linkedin() -> ColumnElement[bool]:
     """The next step, if any, is not on LinkedIn: the tick never fires one that is (P4)."""
     return or_(CampaignStep.id.is_(None), CampaignStep.channel != TemplateChannel.LINKEDIN)
@@ -1274,7 +1292,7 @@ def _linkedin_due(session: Session, user: User, now: datetime) -> list[int]:
         session.scalars(
             _selected(user, now)
             .with_only_columns(Enrollment.id)
-            .where(CampaignStep.channel == TemplateChannel.LINKEDIN)
+            .where(CampaignStep.channel == TemplateChannel.LINKEDIN, ~waits_for_try_again())
             .order_by(Enrollment.next_action_at, Enrollment.id)
             .limit(PAGE_SIZE)
         )
@@ -1352,6 +1370,9 @@ def upcoming(
     )
     if not include_linkedin:
         statement = statement.where(_not_on_linkedin())
+    else:
+        # A step waiting for Try again has no due time worth listing (#445).
+        statement = statement.where(or_(_not_on_linkedin(), ~waits_for_try_again()))
     total = session.scalar(statement.with_only_columns(func.count(Enrollment.id)).order_by(None))
     rows = session.execute(
         statement.add_columns(Campaign, CampaignStep, Contact)
@@ -2281,6 +2302,10 @@ def _after_settling(
 ) -> None:
     """The enrollment's next step, now that the message's outcome is known."""
     enrollment = _enrollment(session, user, message.enrollment_id)
+    if fired and (enrollment.not_sent_error or "").startswith(PREFILL_NOT_TYPED_PREFIX):
+        # The step fired (a discard, say): an earlier try's "typed nothing" belonged to
+        # it, and must not make the next step wait for Try again (#445).
+        _clear_not_sent(session, user, enrollment.id)
     if fired:
         position = _step_position(session, user, message.step_id)
         if position is not None:
