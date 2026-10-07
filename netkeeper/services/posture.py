@@ -55,8 +55,8 @@ from __future__ import annotations
 import enum
 import math
 import textwrap
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Final
@@ -462,6 +462,44 @@ class PostureReport:
         Notes (:attr:`notes`) do not count: they describe a choice, not a fault.
         """
         return not self.warnings
+
+
+#: Which posture row each settings read of ``serve`` (:mod:`netkeeper.services.read_failures`)
+#: shows on: the row's name, or its ``key`` for the Gmail reply poll row.
+_READ_FAILURE_ROWS: Final = {
+    "active hours": ("name", "active hours"),
+    "Gmail reply interval": ("key", KEY_GMAIL_REPLY_POLL),
+    "mailbox check interval": ("key", KEY_GMAIL_REPLY_POLL),
+}
+
+
+def with_read_failures(report: PostureReport, failures: Mapping[str, str]) -> PostureReport:
+    """``report`` with each settings read ``serve`` cannot make (#464) shown on the row it
+    governs: that row is not in force and carries the plain reason, so ``ok``, the warnings
+    and the verdict all count it. ``failures`` maps a read's name to its sentence."""
+    if not failures:
+        return report
+    extra: dict[int, list[str]] = {}
+    unplaced: list[tuple[str, str]] = []
+    for what, sentence in failures.items():
+        field, wanted = _READ_FAILURE_ROWS.get(what, ("name", what))
+        index = next(
+            (i for i, row in enumerate(report.protections) if getattr(row, field) == wanted),
+            None,
+        )
+        if index is None:
+            unplaced.append((what, sentence))
+        else:
+            extra.setdefault(index, []).append(sentence)
+    rows = [
+        replace(row, status=Status.OFF, warnings=(*row.warnings, *extra[i])) if i in extra else row
+        for i, row in enumerate(report.protections)
+    ]
+    rows.extend(
+        Protection(name=what, status=Status.OFF, value="unreadable", warnings=(sentence,))
+        for what, sentence in unplaced
+    )
+    return replace(report, protections=tuple(rows))
 
 
 def posture(

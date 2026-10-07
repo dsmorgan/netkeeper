@@ -1625,31 +1625,32 @@ def build_scheduler(
     unestablished: set[int] = set()
 
     def establish(user: User, account_id: int) -> bool:
-        user_start, user_end = active_start, active_end
-        if active_hours is not None:
-            try:
+        """Establish one user's schedule. False, logged, when it cannot be: the caller
+        skips only that user."""
+        try:
+            user_start, user_end = active_start, active_end
+            if active_hours is not None:
                 user_start, user_end = active_hours(user)
-            except Exception:
-                if user.id not in unestablished:
-                    log.exception(
-                        "scheduler: could not read the active hours of user %d; nothing fires"
-                        " for them until their schedule is established (tried again at each"
-                        " heartbeat)",
-                        user.id,
-                    )
-                return False
-        with session_scope(session_factory, write=True) as session:
-            sync_account_schedule(
-                session,
-                user,
-                account_id,
-                now=clock(),
-                schedules=schedules,
-                rng=jitter,
-                tz=user.timezone,
-                active_start=user_start,
-                active_end=user_end,
-            )
+            with session_scope(session_factory, write=True) as session:
+                sync_account_schedule(
+                    session,
+                    user,
+                    account_id,
+                    now=clock(),
+                    schedules=schedules,
+                    rng=jitter,
+                    tz=user.timezone,
+                    active_start=user_start,
+                    active_end=user_end,
+                )
+        except Exception:
+            if user.id not in unestablished:
+                log.exception(
+                    "scheduler: could not establish the schedule of user %d; nothing fires"
+                    " for them until it is (tried again at each heartbeat)",
+                    user.id,
+                )
+            return False
         return True
 
     for user, account_id in accounts():

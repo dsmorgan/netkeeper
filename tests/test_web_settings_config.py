@@ -258,10 +258,11 @@ async def test_the_auto_send_budget_warning_reads_the_settings_page(
     )
 
 
-async def test_the_posture_report_names_a_setting_serve_cannot_read(
+async def test_the_posture_report_shows_a_setting_serve_cannot_read_on_its_row(
     running_app: FastAPI, client: httpx.AsyncClient
 ) -> None:
-    """#464: a persistent read failure shows to the person, not only in the log."""
+    """#464: a persistent read failure shows on the row it governs, and the verdict
+    counts it, so the person sees it where the UI looks."""
     with session_scope(running_app.state.session_factory) as session:
         first = session.scalars(select(User)).first()
         assert first is not None
@@ -270,10 +271,29 @@ async def test_the_posture_report_names_a_setting_serve_cannot_read(
     failures = running_app.state.read_failures
     with pytest.raises(RuntimeError), failures.watching(user_id, "active hours"):
         raise RuntimeError("boom")
+    with pytest.raises(RuntimeError), failures.watching(user_id, "mailbox check interval"):
+        raise RuntimeError("boom")
     after = (await client.get("/api/v1/posture")).json()
-    added = [w for w in after["warnings"] if w not in before["warnings"]]
-    assert len(added) == 1 and "active hours" in added[0]
+
+    def row(body: dict[str, Any], key: str | None, name: str) -> dict[str, Any]:
+        return next(
+            p for p in body["protections"] if p["key"] == key and (key or p["name"] == name)
+        )
+
+    hours = row(after, None, "active hours")
+    assert hours["status"] == "off"
+    assert any("active hours setting" in w for w in hours["warnings"])
+    reply = row(after, "gmail_reply_poll", "")
+    assert reply["status"] == "off"
+    assert any("mailbox check interval setting" in w for w in reply["warnings"])
     assert after["ok"] is False
-    with running_app.state.read_failures.watching(user_id, "active hours"):
-        pass  # read again: cleared
-    assert (await client.get("/api/v1/posture")).json()["warnings"] == before["warnings"]
+    assert after["verdict"].startswith("NOT clear")
+    assert len(after["warnings"]) == len(before["warnings"]) + 2
+    # Read again: the rows go back to what they were.
+    with failures.watching(user_id, "active hours"):
+        pass
+    with failures.watching(user_id, "mailbox check interval"):
+        pass
+    again = (await client.get("/api/v1/posture")).json()
+    assert again["protections"] == before["protections"]
+    assert again["verdict"] == before["verdict"]
