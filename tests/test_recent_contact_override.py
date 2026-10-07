@@ -42,6 +42,8 @@ from netkeeper.scoping import scoped
 from netkeeper.services import campaign_engine, campaign_review
 from netkeeper.services import campaigns as campaign_service
 from netkeeper.services.campaign_guards import (
+    OVERRIDE_FUTURE,
+    OVERRIDE_STALE,
     ContactFacts,
     GuardPolicy,
     Reason,
@@ -57,6 +59,11 @@ LINKEDIN = TemplateChannel.LINKEDIN
 POLICY = GuardPolicy(contacted_within_days=30)
 RECENT = NOW - timedelta(days=5)
 _addresses = itertools.count(1)
+
+
+def _seen(*contact_ids: int, at: datetime = RECENT) -> dict[int, datetime]:
+    """The last contact the person was shown for each contact: ``RECENT`` by default."""
+    return dict.fromkeys(contact_ids, at)
 
 
 def facts(**changes: Any) -> ContactFacts:
@@ -197,7 +204,7 @@ def test_only_the_named_contacts_are_overridden(writer: Session, user: User) -> 
             campaign,
             [named.id, unnamed.id, fresh.id],
             now=NOW,
-            override_recent_contact=[named.id, fresh.id],
+            override_recent_contact=_seen(named.id, fresh.id),
         )
     }
 
@@ -212,9 +219,15 @@ def test_contact_in_the_future_is_not_overridden(writer: Session, user: User) ->
     campaign = _draft(writer, user)
     ahead = _contacted(writer, user, at=NOW + timedelta(hours=1))
     [verdict] = check_enrollment(
-        writer, user, campaign, [ahead.id], now=NOW, override_recent_contact=[ahead.id]
+        writer,
+        user,
+        campaign,
+        [ahead.id],
+        now=NOW,
+        override_recent_contact=_seen(ahead.id, at=NOW + timedelta(hours=1)),
     )
     assert verdict.reasons == (Reason.CONTACTED_RECENTLY,)
+    assert (verdict.overridden, verdict.override_refused) == (False, OVERRIDE_FUTURE)
 
 
 def _never(session: Session, user: User, campaign: Campaign) -> dict[str, Contact]:
@@ -248,7 +261,7 @@ def test_the_override_never_enrolls_a_contact_another_guard_excludes(
     ids = [c.id for c in never.values()]
 
     result = campaign_engine.enroll(
-        writer, user, campaign.id, ids, now=NOW, override_recent_contact=ids
+        writer, user, campaign.id, ids, now=NOW, override_recent_contact=_seen(*ids)
     )
 
     assert result.enrolled == () and result.overridden == ()
@@ -267,7 +280,12 @@ def test_the_override_never_enrolls_a_contact_without_a_linkedin_member_id(
     slug_only = _contacted(writer, user, li_urn=None)
 
     result = campaign_engine.enroll(
-        writer, user, campaign.id, [slug_only.id], now=NOW, override_recent_contact=[slug_only.id]
+        writer,
+        user,
+        campaign.id,
+        [slug_only.id],
+        now=NOW,
+        override_recent_contact=_seen(slug_only.id),
     )
 
     assert result.enrolled == ()
@@ -280,7 +298,12 @@ def test_the_enrollment_records_who_overrode_and_when(writer: Session, user: Use
     named, plain = _contacted(writer, user), factories.make_contact(writer, user, emails=["p@x.t"])
 
     result = campaign_engine.enroll(
-        writer, user, campaign.id, [named.id, plain.id], now=NOW, override_recent_contact=[named.id]
+        writer,
+        user,
+        campaign.id,
+        [named.id, plain.id],
+        now=NOW,
+        override_recent_contact=_seen(named.id),
     )
 
     assert sorted(result.enrolled) == sorted([named.id, plain.id])
@@ -305,7 +328,7 @@ def test_the_step_fire_keeps_the_override_for_earlier_contact_only(
     campaign = _draft(writer, user)
     named = _contacted(writer, user)
     campaign_engine.enroll(
-        writer, user, campaign.id, [named.id], now=NOW, override_recent_contact=[named.id]
+        writer, user, campaign.id, [named.id], now=NOW, override_recent_contact=_seen(named.id)
     )
     enrollment = _enrollment(writer, user, campaign, named)
     campaign.status = CampaignStatus.ACTIVE
@@ -324,7 +347,7 @@ def test_the_step_fire_still_runs_every_other_guard(writer: Session, user: User)
     campaign = _draft(writer, user)
     named = _contacted(writer, user)
     campaign_engine.enroll(
-        writer, user, campaign.id, [named.id], now=NOW, override_recent_contact=[named.id]
+        writer, user, campaign.id, [named.id], now=NOW, override_recent_contact=_seen(named.id)
     )
     enrollment = _enrollment(writer, user, campaign, named)
     campaign.status = CampaignStatus.ACTIVE
@@ -376,7 +399,7 @@ def test_an_overridden_enrollment_will_start_in_the_review(writer: Session, user
     _audience(writer, user, campaign, [named, unnamed])
 
     outcome = campaign_service.enroll(
-        writer, user, campaign.id, now=NOW, override_recent_contact=[named.id], confirm=True
+        writer, user, campaign.id, now=NOW, override_recent_contact=_seen(named.id), confirm=True
     )
 
     assert (outcome.enrolled, outcome.overridden, outcome.excluded) == (1, 1, 1)
@@ -392,7 +415,7 @@ def test_the_service_needs_confirm(writer: Session, user: User) -> None:
 
     with pytest.raises(campaign_service.InvalidCampaign, match="needs confirm"):
         campaign_service.enroll(
-            writer, user, campaign.id, now=NOW, override_recent_contact=[named.id]
+            writer, user, campaign.id, now=NOW, override_recent_contact=_seen(named.id)
         )
     assert writer.scalars(scoped(user, Enrollment)).all() == []
 
@@ -409,7 +432,7 @@ def test_the_service_refuses_a_new_source_with_an_override(writer: Session, user
             campaign.id,
             now=NOW,
             list_id=campaign.source_list_id,
-            override_recent_contact=[named.id],
+            override_recent_contact=_seen(named.id),
             confirm=True,
         )
 
@@ -425,7 +448,7 @@ def test_the_service_refuses_a_contact_outside_the_audience(writer: Session, use
             user,
             campaign.id,
             now=NOW,
-            override_recent_contact=[inside.id, outside.id],
+            override_recent_contact=_seen(inside.id, outside.id),
             confirm=True,
         )
     assert writer.scalars(scoped(user, Enrollment)).all() == []
@@ -446,7 +469,7 @@ def _overridden_and_active(
     session: Session, user: User, campaign: Campaign, contact: Contact
 ) -> Enrollment:
     campaign_engine.enroll(
-        session, user, campaign.id, [contact.id], now=NOW, override_recent_contact=[contact.id]
+        session, user, campaign.id, [contact.id], now=NOW, override_recent_contact=_seen(contact.id)
     )
     enrollment = _enrollment(session, user, campaign, contact)
     campaign.status = CampaignStatus.ACTIVE
@@ -535,7 +558,7 @@ def test_the_service_overrides_at_most_override_max_contacts(writer: Session, us
             user,
             campaign.id,
             now=NOW,
-            override_recent_contact=list(range(1, 502)),
+            override_recent_contact=dict.fromkeys(range(1, 502), RECENT),
             confirm=True,
         )
     assert writer.scalars(scoped(user, Enrollment)).all() == []
@@ -550,13 +573,93 @@ def test_one_user_cannot_override_for_another_users_contact(writer: Session, use
 
     with pytest.raises(campaign_service.InvalidCampaign, match=f"audience: {theirs.id}"):
         campaign_service.enroll(
-            writer, user, campaign.id, now=NOW, override_recent_contact=[theirs.id], confirm=True
+            writer,
+            user,
+            campaign.id,
+            now=NOW,
+            override_recent_contact=_seen(theirs.id),
+            confirm=True,
         )
     # Even named directly to the engine, it is nobody this user has.
     result = campaign_engine.enroll(
-        writer, user, campaign.id, [theirs.id], now=NOW, override_recent_contact=[theirs.id]
+        writer, user, campaign.id, [theirs.id], now=NOW, override_recent_contact=_seen(theirs.id)
     )
     assert result.enrolled == ()
     assert [v.reasons for v in result.verdicts] == [(Reason.UNKNOWN_CONTACT,)]
     assert last_contact(writer, user, [theirs.id]) == {}
     assert writer.scalars(scoped(stranger, Enrollment)).all() == []
+
+
+def test_contact_recorded_after_the_person_looked_is_refused_not_overridden(
+    writer: Session, user: User
+) -> None:
+    """The cutoff is what the person saw: a contact recorded between viewing the list
+    and the click is refused, and the contact stays skipped."""
+    campaign = _draft(writer, user)
+    named = _contacted(writer, user)
+    _audience(writer, user, campaign, [named])
+    shown = campaign_review.guard_report(writer, user, campaign, now=NOW).skipped[0]
+    assert shown.last_contacted_at == RECENT
+    add_interaction(writer, user, named.id, InteractionKind.LI_OUT, RECENT + timedelta(hours=2))
+
+    outcome = campaign_service.enroll(
+        writer,
+        user,
+        campaign.id,
+        now=NOW,
+        override_recent_contact={named.id: shown.last_contacted_at},
+        confirm=True,
+    )
+
+    assert (outcome.enrolled, outcome.overridden) == (0, 0)
+    assert outcome.override_refused == ((named.id, OVERRIDE_STALE),)
+    assert OVERRIDE_STALE == "contacted again since you looked; review again"
+    assert writer.scalars(scoped(user, Enrollment)).all() == []
+
+
+def test_the_cutoff_is_the_contact_shown(writer: Session, user: User) -> None:
+    campaign = _draft(writer, user)
+    named = _contacted(writer, user)
+    shown = RECENT + timedelta(minutes=1)  # the person saw a contact since deleted
+
+    campaign_engine.enroll(
+        writer, user, campaign.id, [named.id], now=NOW, override_recent_contact={named.id: shown}
+    )
+
+    assert _enrollment(writer, user, campaign, named).recent_contact_cutoff == shown
+
+
+def test_a_named_contact_outside_the_window_is_not_marked_overridden(
+    writer: Session, user: User
+) -> None:
+    campaign = _draft(writer, user)
+    old = _contacted(writer, user, at=NOW - timedelta(days=45))
+
+    result = campaign_engine.enroll(
+        writer,
+        user,
+        campaign.id,
+        [old.id],
+        now=NOW,
+        override_recent_contact=_seen(old.id, at=NOW - timedelta(days=45)),
+    )
+
+    assert (result.enrolled, result.overridden, result.override_refused) == ((old.id,), (), ())
+    [verdict] = result.verdicts
+    assert not verdict.overridden
+    enrollment = _enrollment(writer, user, campaign, old)
+    assert (enrollment.recent_contact_override_at, enrollment.recent_contact_cutoff) == (None, None)
+
+
+def test_a_last_contact_in_the_future_is_not_overridable_and_says_why(
+    writer: Session, user: User
+) -> None:
+    campaign = _draft(writer, user)
+    ahead = _contacted(writer, user, at=NOW + timedelta(days=1))
+    _audience(writer, user, campaign, [ahead])
+
+    [row] = campaign_review.guard_report(writer, user, campaign, now=NOW).skipped
+
+    assert row.reason_codes == ("contacted_recently",)
+    assert not row.overridable
+    assert row.override_note == OVERRIDE_FUTURE

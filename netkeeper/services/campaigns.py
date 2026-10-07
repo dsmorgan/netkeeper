@@ -307,6 +307,9 @@ class EnrollOutcome:
     becomes an enrollment is named too, such as the self contact ("1 yourself", #342)."""
     overridden: int = 0
     """Contacts enrolled only because the person overrode the recent-contact guard (#446)."""
+    override_refused: tuple[tuple[int, str], ...] = ()
+    """``(contact_id, why)`` for each override refused, such as a contact someone contacted
+    again since the person looked (#446). Those contacts stay skipped."""
 
 
 OVERRIDE_MAX: Final = 500
@@ -346,13 +349,16 @@ def enroll(
     list_id: int | None = None,
     filter: FilterTree | None = None,
     contact_ids: Sequence[int] = (),
-    override_recent_contact: Sequence[int] = (),
+    override_recent_contact: Mapping[int, datetime] | None = None,
     confirm: bool = False,
 ) -> EnrollOutcome:
     """Enroll the campaign's audience as ``pending``, through the guards.
 
-    ``override_recent_contact`` (#446) names contacts to enroll although someone
-    contacted them within the campaign's recent-contact window. It needs
+    ``override_recent_contact`` (#446) maps contacts to enroll although someone
+    contacted them within the campaign's recent-contact window to the last contact the
+    person was shown for each, which becomes the override's cutoff. A contact someone
+    contacted after what was shown is refused, not overridden
+    (:attr:`EnrollOutcome.override_refused`). It needs
     ``confirm``, cannot change the source in the same call, and each contact must be
     in the audience (the source's, or one of ``contact_ids``). Only the recent-contact
     guard is set aside, and only for those contacts: every other guard still decides
@@ -369,7 +375,8 @@ def enroll(
     campaign = get_campaign(session, user, campaign_id)
     if list_id is not None and filter is not None:
         raise InvalidCampaign("the audience is a list or a filter, not both")
-    chosen = set(override_recent_contact)
+    seen = dict(override_recent_contact or {})
+    chosen = set(seen)
     if chosen:
         if not confirm:
             raise InvalidCampaign(
@@ -405,7 +412,7 @@ def enroll(
         )
     try:
         result = campaign_engine.enroll(
-            session, user, campaign_id, ids, now=now, override_recent_contact=chosen
+            session, user, campaign_id, ids, now=now, override_recent_contact=seen
         )
     except campaign_engine.CampaignEngineError as exc:
         raise CampaignConflict(str(exc)) from exc
@@ -429,6 +436,7 @@ def enroll(
             result.verdicts, contacted_within_days=campaign.contacted_within_days_guard
         ),
         overridden=len(result.overridden),
+        override_refused=result.override_refused,
     )
 
 

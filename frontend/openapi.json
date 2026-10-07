@@ -3862,7 +3862,7 @@
           },
           "override_recent_contact": {
             "items": {
-              "type": "integer"
+              "$ref": "#/components/schemas/OverrideIn"
             },
             "maxItems": 500,
             "title": "Override Recent Contact",
@@ -3898,6 +3898,13 @@
             "default": 0,
             "title": "Overridden",
             "type": "integer"
+          },
+          "override_refused": {
+            "items": {
+              "$ref": "#/components/schemas/OverrideRefusedOut"
+            },
+            "title": "Override Refused",
+            "type": "array"
           },
           "pending": {
             "title": "Pending",
@@ -8570,6 +8577,44 @@
         "title": "OverlapOut",
         "type": "object"
       },
+      "OverrideIn": {
+        "description": "One contact to enroll although it was contacted recently (#446).",
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "seen_last_contacted_at": {
+            "format": "date-time",
+            "title": "Seen Last Contacted At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contact_id",
+          "seen_last_contacted_at"
+        ],
+        "title": "OverrideIn",
+        "type": "object"
+      },
+      "OverrideRefusedOut": {
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contact_id",
+          "reason"
+        ],
+        "title": "OverrideRefusedOut",
+        "type": "object"
+      },
       "Part": {
         "description": "Which text of the template an issue is about.",
         "enum": [
@@ -10648,6 +10693,17 @@
             "default": false,
             "title": "Overridable",
             "type": "boolean"
+          },
+          "override_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Override Note"
           },
           "reason_codes": {
             "items": {

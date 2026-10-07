@@ -114,6 +114,7 @@ from netkeeper.models import (
 from netkeeper.scoping import get_scoped, scoped, scoped_contacts
 from netkeeper.services import campaign_engine, mailboxes
 from netkeeper.services.campaign_guards import (
+    OVERRIDE_FUTURE,
     UNSENDABLE_EMAIL_STATUSES,
     GuardPolicy,
     Reason,
@@ -305,7 +306,9 @@ class SkippedContact:
     contact, and it has no enrollment of any status in this campaign (not pending, not
     removed), so a person may enroll it anyway (#446).
     ``last_contacted_at`` and ``last_contacted_channel`` say when and how someone last
-    contacted it, for a contact the recent-contact guard skips; otherwise ``None``."""
+    contacted it, for a contact the recent-contact guard skips; otherwise ``None``.
+    A contact whose last contact is dated in the future is not overridable, and
+    ``override_note`` says why."""
 
     contact_id: int
     name: str
@@ -314,6 +317,7 @@ class SkippedContact:
     overridable: bool = False
     last_contacted_at: datetime | None = None
     last_contacted_channel: str | None = None
+    override_note: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,6 +418,9 @@ def guard_report(
     skipped: list[SkippedContact] = []
     for v in shown:
         seen = recent.get(v.contact_id)
+        alone = v.reasons == (Reason.CONTACTED_RECENTLY,) and v.contact_id not in in_campaign
+        # A future date would never pass the cutoff check (check_enrollment refuses it).
+        future = seen is not None and seen.at > now
         skipped.append(
             SkippedContact(
                 v.contact_id,
@@ -422,10 +429,10 @@ def guard_report(
                 reason_codes=tuple(str(r) for r in v.reasons),
                 # The recent-contact guard alone, and only for a contact with no
                 # enrollment here: every other guard is never overridden (#446).
-                overridable=v.reasons == (Reason.CONTACTED_RECENTLY,)
-                and v.contact_id not in in_campaign,
+                overridable=alone and not future,
                 last_contacted_at=None if seen is None else seen.at,
                 last_contacted_channel=None if seen is None else seen.channel,
+                override_note=OVERRIDE_FUTURE if alone and future else None,
             )
         )
     return GuardReport(

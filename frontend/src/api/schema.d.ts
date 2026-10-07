@@ -4660,7 +4660,7 @@ export interface components {
             /** List Id */
             list_id?: number | null;
             /** Override Recent Contact */
-            override_recent_contact?: number[];
+            override_recent_contact?: components["schemas"]["OverrideIn"][];
         };
         /** EnrollOut */
         EnrollOut: {
@@ -4679,6 +4679,8 @@ export interface components {
              * @default 0
              */
             overridden: number;
+            /** Override Refused */
+            override_refused?: components["schemas"]["OverrideRefusedOut"][];
             /** Pending */
             pending: number;
             /** Removed */
@@ -6158,6 +6160,26 @@ export interface components {
             started_on: string | null;
         };
         /**
+         * OverrideIn
+         * @description One contact to enroll although it was contacted recently (#446).
+         */
+        OverrideIn: {
+            /** Contact Id */
+            contact_id: number;
+            /**
+             * Seen Last Contacted At
+             * Format: date-time
+             */
+            seen_last_contacted_at: string;
+        };
+        /** OverrideRefusedOut */
+        OverrideRefusedOut: {
+            /** Contact Id */
+            contact_id: number;
+            /** Reason */
+            reason: string;
+        };
+        /**
          * Part
          * @description Which text of the template an issue is about.
          * @enum {string}
@@ -7001,6 +7023,8 @@ export interface components {
              * @default false
              */
             overridable: boolean;
+            /** Override Note */
+            override_note?: string | null;
             /** Reason Codes */
             reason_codes?: string[];
             /** Reasons */

@@ -477,6 +477,55 @@ def test_guards_lists_each_skipped_contact_with_every_reason(world: World) -> No
     assert "error: no campaign 999" in missing.output
 
 
+def test_enroll_refuses_the_override_for_contact_recorded_while_asking(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#446: the prompt's last contact is the cutoff, so a contact recorded while the
+    person reads it is refused, not overridden."""
+    monkeypatch.setattr(cli_module, "_stdin_is_tty", lambda: True)
+    contact_id = world.contacts[0]
+    with session_scope(world.factory, write=True) as session:
+        add_interaction(
+            session,
+            _local(session),
+            contact_id,
+            InteractionKind.EMAIL_OUT,
+            datetime.now(UTC) - timedelta(days=2),
+        )
+    campaign_id = _create(world)
+
+    def answer_yes_after_a_new_contact(*_: Any, **__: Any) -> bool:
+        with session_scope(world.factory, write=True) as session:
+            add_interaction(
+                session,
+                _local(session),
+                contact_id,
+                InteractionKind.LI_OUT,
+                datetime.now(UTC) - timedelta(hours=1),
+            )
+        return True
+
+    monkeypatch.setattr(cli_module.typer, "confirm", answer_yes_after_a_new_contact)
+    result = _run(
+        "campaigns", "enroll", str(campaign_id), "--override-recent-contact", str(contact_id)
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "recent-contact guard overridden for 0 of 1 contacts" in result.output
+    assert (
+        f"contact {contact_id} not overridden: contacted again since you looked; review again"
+        in result.output
+    )
+    with session_scope(world.factory) as session:
+        enrolled = {
+            e.contact_id
+            for e in session.scalars(
+                scoped(_local(session), Enrollment).where(Enrollment.campaign_id == campaign_id)
+            )
+        }
+    assert contact_id not in enrolled
+
+
 def test_enroll_refuses_the_override_without_a_terminal(world: World) -> None:
     """#446: the override asks first, so it never runs unattended (stdin not a TTY)."""
     campaign_id = _create(world)
@@ -500,16 +549,11 @@ def test_enroll_overrides_the_recent_contact_guard_after_asking(
     """#446: an explicit flag, a prompt that names the count and the window, and the
     other guards still apply."""
     monkeypatch.setattr(cli_module, "_stdin_is_tty", lambda: True)  # a person at a terminal
+    contacted = (datetime.now(UTC) - timedelta(days=2)).replace(microsecond=0)
     with session_scope(world.factory, write=True) as session:
         user = _local(session)
         for contact_id in (world.contacts[0], world.contacts[3]):  # [3] is do-not-contact
-            add_interaction(
-                session,
-                user,
-                contact_id,
-                InteractionKind.EMAIL_OUT,
-                datetime.now(UTC) - timedelta(days=2),
-            )
+            add_interaction(session, user, contact_id, InteractionKind.EMAIL_OUT, contacted)
     campaign_id = _create(world)
     _ok("campaigns", "enroll", str(campaign_id))
     guards = _ok("campaigns", "guards", str(campaign_id))
@@ -526,6 +570,11 @@ def test_enroll_overrides_the_recent_contact_guard_after_asking(
         declined.output
     )
     assert "cancelled: nobody was enrolled" in declined.output
+    # Each contact's last contact, as the override will use it.
+    assert (
+        f"contact {world.contacts[0]}: last contacted {contacted:%Y-%m-%d %H:%M} UTC (email)"
+        in declined.output
+    )
 
     accepted = _run(
         "campaigns", "enroll", str(campaign_id), "--override-recent-contact", named, input="y\n"
@@ -543,6 +592,7 @@ def test_enroll_overrides_the_recent_contact_guard_after_asking(
         }
     assert rows[world.contacts[0]].recent_contact_override_by == user.id
     assert world.contacts[3] not in rows  # do-not-contact: never overridden
+    assert rows[world.contacts[0]].recent_contact_cutoff == contacted  # what was shown
 
     for bad in ("x", ","):
         refused = _run("campaigns", "enroll", str(campaign_id), "--override-recent-contact", bad)

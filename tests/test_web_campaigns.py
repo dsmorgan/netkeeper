@@ -210,26 +210,72 @@ async def test_enroll_overrides_the_recent_contact_guard_for_named_contacts_only
     assert rows[recent]["last_contacted_at"] is not None
     assert not rows[seed["contacts"][2]]["overridable"]
 
+    def shown(contact_id: int) -> dict[str, Any]:
+        """The contact and the last contact the guard details showed for it."""
+        return {
+            "contact_id": contact_id,
+            "seen_last_contacted_at": rows[contact_id]["last_contacted_at"],
+        }
+
+    twice = await client.post(
+        f"{base}/enroll",
+        json={"override_recent_contact": [shown(recent), shown(recent)], "confirm": True},
+        headers=CSRF,
+    )
+    assert twice.status_code == 422
+    naive = await client.post(
+        f"{base}/enroll",
+        json={
+            "override_recent_contact": [
+                {"contact_id": recent, "seen_last_contacted_at": "2030-01-01T00:00:00"}
+            ],
+            "confirm": True,
+        },
+        headers=CSRF,
+    )
+    assert naive.status_code == 422  # the time shown is always timezone-aware
+
     unconfirmed = await client.post(
-        f"{base}/enroll", json={"override_recent_contact": [recent]}, headers=CSRF
+        f"{base}/enroll", json={"override_recent_contact": [shown(recent)]}, headers=CSRF
     )
     assert unconfirmed.status_code == 422
     assert "confirm" in unconfirmed.text
     blocked = await client.post(
         f"{base}/enroll",
-        json={"override_recent_contact": [seed["contacts"][2]], "confirm": True},
+        json={"override_recent_contact": [shown(seed["contacts"][2])], "confirm": True},
         headers=CSRF,
     )
     assert blocked.status_code == 200, blocked.text
     assert (blocked.json()["enrolled"], blocked.json()["overridden"]) == (0, 0)
 
+    # Contacted again between viewing the list and the click: refused, still skipped.
+    with session_scope(factory, write=True) as session:
+        add_interaction(
+            session,
+            _local(session),
+            extra,
+            InteractionKind.LI_OUT,
+            datetime.now(UTC) - timedelta(hours=1),
+        )
+    stale = await client.post(
+        f"{base}/enroll",
+        json={"override_recent_contact": [shown(extra)], "confirm": True},
+        headers=CSRF,
+    )
+    assert stale.status_code == 200, stale.text
+    assert (stale.json()["enrolled"], stale.json()["overridden"]) == (0, 0)
+    assert stale.json()["override_refused"] == [
+        {"contact_id": extra, "reason": "contacted again since you looked; review again"}
+    ]
+
     overridden = await client.post(
         f"{base}/enroll",
-        json={"override_recent_contact": [recent], "confirm": True},
+        json={"override_recent_contact": [shown(recent)], "confirm": True},
         headers=CSRF,
     )
     assert overridden.status_code == 200, overridden.text
     assert (overridden.json()["enrolled"], overridden.json()["overridden"]) == (1, 1)
+    assert overridden.json()["override_refused"] == []
     assert overridden.json()["summary"] == (
         "3 will start, 2 skipped (1 do-not-contact, 1 contacted in the last 30 days)"
     )

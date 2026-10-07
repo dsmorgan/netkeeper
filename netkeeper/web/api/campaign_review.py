@@ -144,6 +144,9 @@ class SkippedContactOut(BaseModel):
     """When someone last contacted it, for a contact the recent-contact guard skips."""
     last_contacted_channel: str | None = None
     """How: ``email``, ``linkedin``, ``call`` or ``meeting``."""
+    override_note: str | None = None
+    """Why a contact only the recent-contact guard skips is still not overridable,
+    such as a last contact dated in the future."""
 
 
 class GuardsOut(BaseModel):
@@ -456,6 +459,7 @@ def get_guards(
                 overridable=c.overridable,
                 last_contacted_at=c.last_contacted_at,
                 last_contacted_channel=c.last_contacted_channel,
+                override_note=c.override_note,
             )
             for c in report.skipped
         ],
