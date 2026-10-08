@@ -28,10 +28,12 @@ runs with automatic collection held (:func:`gc_held`), and the collection runs a
 
 ``NETKEEPER_TEST_TIME_LIMIT_S``, read when the run starts, sets the per-test limit for
 an ordinary test (a ``slow`` one gets three times it), and ``0`` turns the guard off.
-``NETKEEPER_TEST_TIME_SCALE`` multiplies every budget, the per-test limit included, for
-a machine that is slower than a laptop (CI sets it). Keep a limit that stands for
-"did not wait out a real timeout" unscaled, and below that timeout, so a scaled run
-still fails the wait it guards against.
+``NETKEEPER_TEST_TIME_SCALE`` multiplies a performance budget written with
+:func:`scaled`, for a machine that is slower than a laptop (CI sets it). A limit that
+stands for "did not wait out a real timeout" stays unscaled, and below that timeout, so
+a scaled run still fails the wait it guards against. The per-test limit is one of those:
+10 s is half the 20 s landing wait it was written to catch, so it is never scaled, and
+with collection time left out it needs no headroom for a slow runner's collections.
 """
 
 from __future__ import annotations
@@ -163,8 +165,8 @@ def limit_for(item: pytest.Item) -> float | None:
     if base <= 0:
         return None
     if item.get_closest_marker("slow") is not None:
-        base *= SLOW_TIME_LIMIT_S / TIME_LIMIT_S
-    return scaled(base)
+        return base * SLOW_TIME_LIMIT_S / TIME_LIMIT_S
+    return base  # never scaled: it guards a real wait (see the module docstring)
 
 
 @pytest.hookimpl(wrapper=True)
@@ -196,6 +198,6 @@ def pytest_runtest_makereport(
         f" (plus {collecting:.1f}s collecting garbage), over its {limit:g}s limit"
         f" (tests/time_limit.py). A real asyncio wait its fake clock or sleep does not"
         f" cover is the usual cause: run it with --durations and pass the wait a test"
-        f" value. Set {SCALE_ENV} to scale the limit on a slow machine."
+        f" value. Set {LIMIT_ENV} to change the limit on a slow machine."
     )
     return report

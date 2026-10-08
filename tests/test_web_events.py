@@ -12,7 +12,7 @@ import signal
 import sys
 import threading
 import traceback
-from collections.abc import MutableMapping
+from collections.abc import Callable, MutableMapping
 from typing import Any
 
 import pytest
@@ -92,7 +92,27 @@ class SSEClient:
             raise
 
     def report(self, file: Any = sys.stderr) -> None:
-        """Print why the stream stalled: the app task's state, and every task and thread stack."""
+        """Print why the stream stalled: the app task's state, and every task and thread stack.
+
+        Each part is printed on its own, and one that raises (sse-starlette's state is
+        private, so an upgrade can move it) is reported and skipped, so the test still
+        fails with its TimeoutError.
+        """
+        parts: list[tuple[str, Callable[[], None]]] = [
+            ("app task", lambda: self._print_task(file)),
+            ("timing", lambda: print("since the request started:", self.watch, file=file)),
+            ("thread limiter", lambda: _print_thread_limiter(file)),
+            ("sse-starlette", lambda: print("sse-starlette:", _sse_state(), file=file)),
+            ("tasks", lambda: _print_tasks(file)),
+            ("threads", lambda: _print_threads(file)),
+        ]
+        for name, part in parts:
+            try:
+                part()
+            except Exception as exc:  # a diagnostic must never replace the failure
+                print(f"({name}: could not print, {exc!r})", file=file)
+
+    def _print_task(self, file: Any) -> None:
         task = self._task
         print("app task:", task, "status:", self.status, file=file)
         if task is not None and task.done() and not task.cancelled():
@@ -100,16 +120,6 @@ class SSEClient:
             print("app task exception:", repr(exc), file=file)
             if exc is not None:
                 traceback.print_exception(exc, file=file)
-        print("sse-starlette:", _sse_state(), file=file)
-        print("since the request started:", self.watch, file=file)
-        _print_anyio_threads(file)
-        for t in asyncio.all_tasks():
-            print("task:", t.get_name(), file=file)
-            _print_await_chain(t.get_coro(), file)
-        print("threads:", [t.name for t in threading.enumerate()], file=file)
-        for tid, frame in sys._current_frames().items():
-            print("thread stack", tid, file=file)
-            traceback.print_stack(frame, file=file)
 
     async def close(self) -> None:
         self._disconnect.set()
@@ -145,34 +155,26 @@ def _print_await_chain(awaitable: Any, file: Any) -> None:
         )
 
 
-def _print_anyio_threads(file: Any) -> None:
-    """The default thread limiter and anyio's worker threads, as this loop sees them."""
+def _print_thread_limiter(file: Any) -> None:
+    """anyio's default thread limiter: a request stuck waiting for a thread shows here."""
     import anyio.to_thread
-    from anyio._backends import _asyncio as backend
 
-    stats = anyio.to_thread.current_default_thread_limiter().statistics()
-    print("thread limiter:", stats, file=file)
-    loop = asyncio.get_running_loop()
-    print("loop:", loop, "time:", loop.time(), file=file)
-    idle = backend._threadpool_idle_workers.get(None)
-    for worker in backend._threadpool_workers.get(set()):
-        print(
-            "anyio worker:",
-            worker.ident,
-            "alive:",
-            worker.is_alive(),
-            "idle:",
-            idle is not None and worker in idle,
-            "same loop:",
-            worker.loop is loop,
-            "queued:",
-            worker.queue.qsize(),
-            "idle since:",
-            worker.idle_since,
-            "stopping:",
-            worker.stopping,
-            file=file,
-        )
+    print(
+        "thread limiter:", anyio.to_thread.current_default_thread_limiter().statistics(), file=file
+    )
+
+
+def _print_tasks(file: Any) -> None:
+    for task in asyncio.all_tasks():
+        print("task:", task.get_name(), file=file)
+        _print_await_chain(task.get_coro(), file)
+
+
+def _print_threads(file: Any) -> None:
+    print("threads:", [t.name for t in threading.enumerate()], file=file)
+    for tid, frame in sys._current_frames().items():
+        print("thread stack", tid, file=file)
+        traceback.print_stack(frame, file=file)
 
 
 def _sse_state() -> dict[str, Any]:
