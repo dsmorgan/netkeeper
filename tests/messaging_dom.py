@@ -182,7 +182,22 @@ def hidden(element: Element) -> bool:
 
 def box_of(element: Element) -> dict[str, float] | None:
     """An element's box, from its invented ``data-box="x,y,width,height"`` (#444)."""
-    raw = element.attrs.get("data-box")
+    return _box_attr(element, "data-box")
+
+
+#: The fake DOM's pseudo-elements (#475): an element's ``data-before-box`` or
+#: ``data-after-box`` draws a ``::before`` or ``::after`` there, as CSS ``content`` does.
+PSEUDO_BOXES = (("before", "data-before-box"), ("after", "data-after-box"))
+#: A pseudo-element's ``backendNodeId``: past every element's, as Chrome gives it its own.
+_PSEUDO_ID_BASE = 100_000
+
+
+def _pseudo_id(index: int, kind: str) -> int:
+    return _PSEUDO_ID_BASE + 2 * index + (1 if kind == "after" else 0)
+
+
+def _box_attr(element: Element, attr: str) -> dict[str, float] | None:
+    raw = element.attrs.get(attr)
     if raw is None or hidden(element):
         return None
     x, y, width, height = (float(v) for v in raw.split(","))
@@ -194,7 +209,9 @@ class GeometrySession:
     over the fake DOM. Node ids are positions in document order (from 1), for
     ``nodeId`` and ``backendNodeId`` alike. Boxes are the invented ``data-box`` ones.
     The hit at a point is the last element in document order whose box holds it (a
-    fixed overlay comes after what it covers), as ``elementFromPoint`` answers;
+    fixed overlay comes after what it covers), as ``elementFromPoint`` answers; an
+    element's ``data-before-box``/``data-after-box`` pseudo-elements (#475) are hit on
+    top of it, with their own ``backendNodeId``, and listed in its ``pseudoElements``;
     ``data-pointer-events="none"`` is skipped. A point outside the viewport, or one over
     no box, raises, as Chrome does. Boxes and quads are viewport coordinates, as Chrome's
     are; ``DOM.getNodeForLocation`` takes a document point and subtracts the site's
@@ -211,12 +228,27 @@ class GeometrySession:
 
     def _describe(self, element: Element, order: list[Element]) -> dict[str, Any]:
         children = [c for c in element.children if isinstance(c, Element)]
-        return {
-            "nodeId": order.index(element) + 1,
-            "backendNodeId": order.index(element) + 1,
+        index = order.index(element)
+        described: dict[str, Any] = {
+            "nodeId": index + 1,
+            "backendNodeId": index + 1,
             "nodeName": element.tag.upper(),
             "children": [self._describe(c, order) for c in children],
         }
+        # As Chrome's describeNode does (#475): a node's pseudo-elements beside its children.
+        pseudo = [
+            {
+                "nodeId": _pseudo_id(index, kind),
+                "backendNodeId": _pseudo_id(index, kind),
+                "nodeName": f"::{kind}",
+                "pseudoType": kind,
+            }
+            for kind, attr in PSEUDO_BOXES
+            if attr in element.attrs
+        ]
+        if pseudo:
+            described["pseudoElements"] = pseudo
+        return described
 
     async def send(self, method: str, params: Mapping[str, Any] | None = None) -> Any:
         self.sent.append((method, dict(params or {})))
@@ -267,17 +299,24 @@ class GeometrySession:
             width, height = self.viewport
             if not (0 <= x < width and 0 <= y < height):
                 raise RuntimeError("No node found at given location")
-            hit = None
-            for element in order:
-                box = box_of(element)
-                if box is None or element.attrs.get("data-pointer-events") == "none":
+            hit: int | None = None
+            for index, element in enumerate(order):
+                if element.attrs.get("data-pointer-events") == "none":
                     continue
-                inside_x = box["x"] <= x < box["x"] + box["width"]
-                if inside_x and box["y"] <= y < box["y"] + box["height"]:
-                    hit = element
+                # The element, then its ::before, then its ::after: the later one on top.
+                layers = [(index + 1, box_of(element))] + [
+                    (_pseudo_id(index, kind), _box_attr(element, attr))
+                    for kind, attr in PSEUDO_BOXES
+                ]
+                for node_id, box in layers:
+                    if box is None:
+                        continue
+                    inside_x = box["x"] <= x < box["x"] + box["width"]
+                    if inside_x and box["y"] <= y < box["y"] + box["height"]:
+                        hit = node_id
             if hit is None:
                 raise RuntimeError("No node found at given location")
-            return {"backendNodeId": order.index(hit) + 1, "frameId": "main"}
+            return {"backendNodeId": hit, "frameId": "main"}
         raise AssertionError(f"the geometry session never sends {method}")
 
     def on(self, event: str, handler: Callable[[Any], None]) -> None:
