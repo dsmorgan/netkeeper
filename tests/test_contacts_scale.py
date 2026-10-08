@@ -18,7 +18,6 @@ loaded CI box take.
 
 from __future__ import annotations
 
-import time
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -27,6 +26,7 @@ import pytest
 from fastapi import FastAPI
 from sqlalchemy import Engine, event, insert, select
 from sqlalchemy.orm import Session, sessionmaker
+from time_limit import Stopwatch, scaled
 
 from netkeeper.crm.filters import parse_filter
 from netkeeper.db import session_scope
@@ -45,7 +45,8 @@ from netkeeper.scoping import scoped_contacts
 
 CSRF = {"X-Netkeeper-Client": "1"}
 CONTACTS = 10_000
-BUDGET_MS = 300.0
+#: The best of RUNS pages, for this machine (#472).
+BUDGET_MS = scaled(300.0)
 RUNS = 5
 
 # Invented people: a name built from the row number, and companies and places
@@ -149,9 +150,9 @@ def _ms(timings: list[float]) -> str:
 
 
 async def _timed(client: httpx.AsyncClient, body: dict[str, Any]) -> tuple[float, dict[str, Any]]:
-    started = time.perf_counter()
+    watch = Stopwatch()
     response = await client.post("/api/v1/contacts/query", json=body, headers=CSRF)
-    elapsed = (time.perf_counter() - started) * 1000
+    elapsed = watch.elapsed * 1000
     assert response.status_code == 200, response.text
     page: dict[str, Any] = response.json()
     return elapsed, page

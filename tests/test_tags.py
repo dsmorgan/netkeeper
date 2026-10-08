@@ -5,7 +5,6 @@ from __future__ import annotations
 import itertools
 import re
 import string
-import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -18,6 +17,7 @@ import pytest
 import regex
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
+from time_limit import Stopwatch, scaled
 from typer.testing import CliRunner
 
 from netkeeper import migrations
@@ -551,9 +551,9 @@ def test_an_accepted_nested_pattern_does_not_backtrack_exponentially(pattern: st
     """
     compiled = re.compile(pattern, re.IGNORECASE)
     for title in NEAR_MISSES:
-        started = time.perf_counter()
+        watch = Stopwatch()  # unscaled: the ambiguous twins' fastest is 50 ms
         compiled.search(title)
-        assert time.perf_counter() - started < 0.05, title
+        assert watch.elapsed < 0.05, (title, str(watch))
 
 
 def test_the_patterns_from_63_match_what_they_were_written_for() -> None:
@@ -593,9 +593,10 @@ def full_scans(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return count
 
 
-QUICKLY_S = 3.0
+QUICKLY_S = scaled(3.0)
 """The bound on the saves below, which take 0.2 to 0.4 s alone. The regressions they
-exist for took 8 to 25 s; 1 s let a loaded runner fail them at random (#253)."""
+exist for took 8 to 25 s; 1 s let a loaded runner fail them at random (#253). Scaled
+for a slow machine (CI's 2 makes it 6 s) and measured without garbage collection (#472)."""
 
 
 def _branches_under_plus(pairs: Sequence[str]) -> str:
@@ -619,10 +620,10 @@ def test_an_alternation_needing_too_many_scans_is_refused_quickly(full_scans: li
     assert len(pattern) <= svc.PATTERN_MAX_LENGTH
     svc._CASE_CLASSES.clear()
     svc._overlap.cache_clear()
-    started = time.perf_counter()
+    watch = Stopwatch()
     with pytest.raises(InvalidPattern, match="too many alternatives"):
         compile_pattern(pattern)
-    assert time.perf_counter() - started < QUICKLY_S
+    assert watch.elapsed < QUICKLY_S, watch
     # The cap's 30 pairs, and one scan to learn the literals' case classes.
     assert full_scans[0] == 31
 
@@ -694,10 +695,10 @@ def test_the_scan_cap_is_one_budget_for_the_whole_pattern(full_scans: list[int])
     assert len(pattern) == 497 <= svc.PATTERN_MAX_LENGTH
     svc._CASE_CLASSES.clear()
     svc._overlap.cache_clear()
-    started = time.perf_counter()
+    watch = Stopwatch()
     with pytest.raises(InvalidPattern, match="too many alternatives"):
         compile_pattern(pattern)
-    assert time.perf_counter() - started < QUICKLY_S
+    assert watch.elapsed < QUICKLY_S, watch
     # The cap's 30 pairs and one scan per alternation to learn its literals' case
     # classes: past the cap the check goes on without scanning pairs, looking for an
     # ambiguity it can prove. A budget per alternation would be 372.
@@ -816,9 +817,9 @@ def test_a_large_alternation_under_a_repeat_saves_quickly(
     assert len(pattern) <= svc.PATTERN_MAX_LENGTH
     svc._CASE_CLASSES.clear()
     svc._overlap.cache_clear()
-    started = time.perf_counter()
+    watch = Stopwatch()
     compile_pattern(pattern)
-    assert time.perf_counter() - started < QUICKLY_S
+    assert watch.elapsed < QUICKLY_S, watch
     # Every literal's case class learned at once; a scan per pair was thousands.
     assert full_scans[0] == 1
 

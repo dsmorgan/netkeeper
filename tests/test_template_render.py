@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import time
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -11,6 +10,7 @@ import jinja2
 import pytest
 from jinja2 import nodes
 from jinja2.exceptions import SecurityError
+from time_limit import Stopwatch, scaled
 
 from netkeeper.campaigns import render as render_module
 from netkeeper.campaigns.render import (
@@ -664,11 +664,15 @@ def test_the_limits_are_pinned() -> None:
 # --- bounded work (#227 review) ---------------------------------------------------------
 
 
+#: A refusal takes milliseconds; a template that got through would take minutes or crash.
+FAST_S = scaled(1.0)
+
+
 def _fails_fast(body: str, values: MergeValues | None = None) -> TemplateRenderError:
-    start = time.perf_counter()
+    watch = Stopwatch()
     with pytest.raises(TemplateRenderError) as caught:
         render(LINKEDIN, None, body, values or _values(first_name="Bo"), today=TODAY)
-    assert time.perf_counter() - start < 1.0
+    assert watch.elapsed < FAST_S, watch
     return caught.value
 
 
@@ -746,9 +750,9 @@ def test_a_huge_number_literal_is_refused_not_a_crash(digits: int, rule: LintRul
 )
 def test_deep_nesting_is_refused_fast_not_a_crash(deep: str) -> None:
     body = "{{ first_name }}" + (deep if deep.startswith("{%") else "{{ " + deep + " }}")
-    start = time.perf_counter()
+    watch = Stopwatch()
     issues = lint(EMAIL, SUBJECT, body)
-    assert time.perf_counter() - start < 1.0
+    assert watch.elapsed < FAST_S, watch
     assert has_errors(issues)
     assert {issue.rule for issue in issues} <= {LintRule.UNSUPPORTED, LintRule.SYNTAX}
     _fails_fast(body)

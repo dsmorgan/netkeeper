@@ -63,6 +63,11 @@ INSIDE = datetime(2026, 9, 23, 18, 0, tzinfo=UTC)
 SETTINGS = Settings()
 CHECKPOINT_URL = "https://example.invalid/checkpoint/challenge"
 
+#: The short busy timeout runs while another thread holds the write lock, and a full
+#: garbage collection on CI (2-3 s) stops every thread but the busy wait itself, so
+#: one landing there used to fail a correct test (#472). These bodies hold collection.
+pytestmark = pytest.mark.wall_clock
+
 
 @pytest.fixture(autouse=True)
 def _short_busy_timeout(monkeypatch: pytest.MonkeyPatch) -> None:

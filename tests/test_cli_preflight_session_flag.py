@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-import time
 from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from pathlib import Path
@@ -30,12 +29,19 @@ import pytest
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from test_preflight import FAKE_CSRF_VALUE, cookie, make_context, make_provider, provider_for
+from time_limit import Stopwatch
 from typer.testing import CliRunner
 
 from netkeeper import migrations
 from netkeeper.cli import app as cli
 from netkeeper.config import Settings
-from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
+from netkeeper.db import (
+    SQLITE_BUSY_TIMEOUT_MS,
+    database_url,
+    make_engine,
+    make_session_factory,
+    session_scope,
+)
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import User
 from netkeeper.scoping import install_scope_guard
@@ -458,7 +464,7 @@ def test_clear_flag_prompt_does_not_hold_the_write_lock(
     place in the command's control flow where the bug could actually bite."""
     _flag_a_checkpoint(cli_db)
     concurrent_write_succeeded = False
-    started = time.monotonic()
+    watch = Stopwatch()
 
     def confirm_with_a_concurrent_writer(*_args: object, **_kwargs: object) -> bool:
         nonlocal concurrent_write_succeeded
@@ -476,11 +482,14 @@ def test_clear_flag_prompt_does_not_hold_the_write_lock(
     monkeypatch.setattr("typer.confirm", confirm_with_a_concurrent_writer)
 
     result = CliRunner().invoke(cli, ["linkedin", "clear-flag"])
-    elapsed = time.monotonic() - started
 
     assert result.exit_code == 0, result.output
     assert concurrent_write_succeeded, "a concurrent writer must succeed while the prompt is up"
-    assert elapsed < 2.0, f"took {elapsed:.1f}s -- looks like it waited on the busy timeout"
+    # Unscaled, and measured without garbage collection (#472): the bound stands for
+    # "did not sit out the busy timeout", so it stays under that timeout on any machine.
+    assert watch.elapsed < SQLITE_BUSY_TIMEOUT_MS / 1000 / 2, (
+        f"took {watch} -- looks like it waited on the busy timeout"
+    )
     assert _current_flag(cli_db) is None
 
 
