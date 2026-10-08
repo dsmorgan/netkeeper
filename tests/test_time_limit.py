@@ -1,6 +1,7 @@
 """The per-test time limit (#210) fails a slow test, spares a ``slow`` one, and pins its numbers.
 
-It also leaves out time in the garbage collector and scales on a slow machine (#472).
+It also leaves out time in the garbage collector, and only performance budgets scale on a
+slow machine (#472).
 """
 
 from __future__ import annotations
@@ -78,11 +79,13 @@ import pytest
 
 
 @pytest.fixture(scope="module")
-def big_heap() -> list[tuple[int]]:
-    return [(n,) for n in range(2_000_000)]
+def big_heap() -> list[list[int]]:
+    # Lists, which the collector tracks (a tuple of ints it untracks): each full
+    # collection walks all two million of them.
+    return [[n] for n in range(2_000_000)]
 
 
-def test_collects(big_heap: list[tuple[int]]) -> None:
+def test_collects(big_heap: list[list[int]]) -> None:
     for _ in range(3):
         gc.collect()
 
@@ -108,16 +111,20 @@ def test_time_in_the_garbage_collector_is_not_the_tests(
     pytester.runpytest_inprocess("-p", "time_limit").assert_outcomes(passed=3)
 
 
-def test_the_scale_multiplies_the_limit(
+def test_the_scale_leaves_the_per_test_limit_alone(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 0.2 s scaled by 3 is 0.6 s: the 0.3 s test passes, as a slow one does.
+    """The per-test limit guards a real wait, so a scaled run keeps it (#472)."""
     monkeypatch.setenv(time_limit.LIMIT_ENV, "0.2")
     monkeypatch.setattr(time_limit, "TIME_SCALE", 3.0)
     pytester.makepyfile(SLEEPS)
     pytester.makeini(INI)
 
-    pytester.runpytest_inprocess("-p", "time_limit").assert_outcomes(passed=3)
+    pytester.runpytest_inprocess("-p", "time_limit").assert_outcomes(passed=2, failed=1)
+
+
+def test_scaled_multiplies_a_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(time_limit, "TIME_SCALE", 3.0)
     assert time_limit.scaled(1.5) == 4.5
 
 
@@ -132,7 +139,7 @@ def test_the_scale_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_a_stopwatch_leaves_out_collections() -> None:
-    heap = [(n,) for n in range(1_000_000)]
+    heap = [[n] for n in range(1_000_000)]  # lists: tracked, so the collection walks them
     watch = time_limit.Stopwatch()
     gc.collect()
     assert watch.gc > 0
