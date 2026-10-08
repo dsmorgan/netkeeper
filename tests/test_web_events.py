@@ -105,26 +105,7 @@ async def test_published_events_arrive_on_the_stream(
     bus: EventBus = running_app.state.bus
     stream = SSEClient(running_app)
     stream.start()
-    try:
-        await asyncio.wait_for(stream.started.wait(), timeout=WAIT_S)
-    except TimeoutError:
-        import sys
-        import threading
-        import traceback
-
-        task = stream._task
-        print("DIAG app task done:", task is not None and task.done(), file=sys.stderr)
-        if task is not None and task.done() and not task.cancelled():
-            print("DIAG app task exception:", repr(task.exception()), file=sys.stderr)
-            traceback.print_exception(task.exception(), file=sys.stderr)
-        for t in asyncio.all_tasks():
-            print("DIAG task:", t.get_name(), t.get_coro(), file=sys.stderr)
-            t.print_stack(file=sys.stderr)
-        print("DIAG threads:", [t.name for t in threading.enumerate()], file=sys.stderr)
-        for tid, frame in sys._current_frames().items():
-            print("DIAG thread stack", tid, file=sys.stderr)
-            traceback.print_stack(frame, file=sys.stderr)
-        raise
+    await asyncio.wait_for(stream.started.wait(), timeout=WAIT_S)
 
     assert stream.status == 200
     assert stream.headers["content-type"].startswith("text/event-stream")
