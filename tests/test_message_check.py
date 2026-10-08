@@ -810,8 +810,10 @@ def test_the_stop_reason_has_plain_words() -> None:
             "an element inside a shadow root the tree didn't include",
         ),
         (
-            '<iframe data-frame-owner="child-1" data-box="0,300,1280,300">'
-            '<div data-untreed data-frame="child-1" data-box="40,400,110,32"></div></iframe>',
+            # The frame's document is a sibling here, not the <iframe>'s child: newer
+            # html.parser releases (3.12.15) read an <iframe>'s content as raw text.
+            '<iframe data-frame-owner="child-1" data-box="0,300,1280,300"></iframe>'
+            '<div data-untreed data-frame="child-1" data-box="40,400,110,32"></div>',
             "",
             HitRelation.IN_FRAME,
             "an element inside a frame",
