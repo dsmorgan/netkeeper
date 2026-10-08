@@ -1,6 +1,6 @@
 # 0007. The prefill's inputs: one Message click, typing into one verified composer, never Enter
 
-Date: 2026-10-03, updated 2026-10-05 with the P4-06 messaging capture (#374), accepted 2026-10-06, amended 2026-10-06 for #444 (which Message control is clicked)
+Date: 2026-10-03, updated 2026-10-05 with the P4-06 messaging capture (#374), accepted 2026-10-06, amended 2026-10-06 for #444 (which Message control is clicked), amended 2026-10-07 for #470 (scrolling back up to a covered control)
 
 ## Status
 
@@ -124,14 +124,29 @@ This binds the click to the contact by URN, not by where the control sits or how
 
 "Nothing over its center" is a hit test at the point Playwright's click would press: the middle of the control's first content quad, clipped to the viewport, with an area over 0.99 square pixels (Playwright's own rule; a link that holds a tall icon has more than one quad, and its box's center can lie in none of them). The element the page would hit there must be the control's link or an element inside it, matched by DOM node, not by size, because an icon may overflow its link's box. Another copy of the link over this one counts as covering it, as Playwright's check would. The hit test and the viewport come from the page's own geometry, read over a DevTools session on the run's tab, with no script in the page:
 
-- `Page.getLayoutMetrics`, for the layout viewport's size, which Playwright doesn't know for a tab it attached to;
+- `Page.getLayoutMetrics`, for the layout viewport's size, which Playwright doesn't know for a tab it attached to, and how far the page is scrolled;
 - `DOM.getDocument` (depth 0), `DOM.querySelectorAll` for the links with each verified compose `href`, and `DOM.describeNode` for each one's subtree: which nodes belong to which link;
 - `DOM.getBoxModel` and `DOM.getContentQuads` for each link: its box, matched to Playwright's box for the control, and its click point;
-- `DOM.getNodeForLocation` at that point, with `ignorePointerEventsNone`, which answers as `document.elementFromPoint` does.
+- `DOM.getNodeForLocation` at that point, with `ignorePointerEventsNone`, which answers as `document.elementFromPoint` does. The quads are in viewport coordinates and this method takes document ones, so the point is sent with the page's scroll offset added (#470).
 
 The session is opened in `BrowserRun._read_click_geometry`, sends only those seven read-only methods, describes at most 32 links per `href` (`MESSAGE_MAX_LINKS`; hidden copies count, so the cap sits far above the three the capture rendered), gives up after 3 seconds (`GEOMETRY_TIMEOUT_S`, so a hung renderer is a failed read), and detaches before the click. They change nothing the page can see, run no script, and dispatch no event. A session that can't open, or a read that fails, chooses without geometry: the top card's control, else the first visible one, as before #444. Playwright's own actionability checks still run at the click and refuse a covered or off-screen control, so the hit test only chooses; it never makes a click land where Playwright's checks wouldn't.
 
 `click(trial=True)` was rejected for the hit test: it moves the mouse over the control (a hover the page sees) and scrolls, which are inputs this ADR doesn't authorize.
+
+#### Scrolling back up to a covered control
+
+*Amended 2026-10-07 for #470.* The prefill scrolls briefly before the click (one or two wheel steps of 120 to 360 pixels). On LinkedIn, a sticky header with its own **Message** control slides in at the top once a profile scrolls a little. A brief scroll can leave the top card's control inside the viewport but under that header: covered, so step 1 passes it over, and on screen, so step 3 doesn't apply. The header's own control isn't a clear candidate (its shape was never captured, #429), so the click refuses. CP8 saw that refusal three times in a row on one contact.
+
+A second cause showed up while reproducing this on an isolated Chrome. `DOM.getContentQuads` answers in viewport coordinates, but `DOM.getNodeForLocation` takes document coordinates: Chrome subtracts the scroll offset from the point it's given. Before #470, the hit test sent the viewport point unchanged. So on any scrolled page it tested a point above the control, by the scroll's depth. That point either held some other element (the control read as covered, and the click could refuse) or lay above the viewport (the read failed, and the click went unchecked). Every page in #444's tests had a scroll offset of 0, so none of them showed it. The hit test now adds `cssLayoutViewport`'s `pageX` and `pageY` to the point. The method and its parameters are unchanged.
+
+So, after the brief scroll and before the click, `PagePrefill.prefill` asks `BrowserRun.message_cover`, a read with no input, whether the click would refuse because the top card's control is on screen but covered and no other control is clear. That read makes the same reads the click makes, in the same order (decision 3's bubble check, decision 4's href check, the visible controls, and the geometry read above, in its own session, with the same seven methods), and answers with a fixed category. When it says covered, the prefill scrolls back up once, the way a person scrolls back to a button they can't reach: `scroll_back_to_top`'s upward wheel steps, the size of the brief scroll's (120 to 360 pixels), until they cover the brief scroll's depth and one step more, then a short look. The click then reads the page again and chooses as above; when nothing is clear it still refuses, with no click.
+
+- The scroll back comes before the click, so the rule that nothing scrolls after the click holds (#456).
+- The click stays bound to the contact's verified `href`: the top card's control or another verified, clear candidate. netkeeper doesn't click the sticky header's own control unless its shape is verified by a capture.
+- An off-screen top card isn't covered: step 3 still lets Playwright scroll it into view as part of the click.
+- The brief scroll's size is unchanged. Bounding it so it can't park the top card under the header would need the header's height and the top card's position on the real page, which no capture shows.
+
+A refusal logs why, as a fixed category, never a name, a slug, a URL, or the page's text: `no_candidates`, `no_top_card`, `top_card_off_screen`, `covered_by_sticky_header`, `covered_by_bubble`, or `covered_by_other`. The hit test learns only that the element at the click point isn't the control's own, not what it is, so the cover is placed by where that point sits: within 160 pixels of the viewport's top is the sticky header (or the global navigation above it), within 64 pixels of its bottom is the Messaging bar or a bubble, and anywhere else is something else.
 
 The run's counts record which control was chosen (`message_click_target`: `top_card`, `on_screen`, `top_card_off_screen`, or `unchecked`) and, for a click that raised, `message_click_failure`.
 
@@ -299,6 +314,7 @@ Runtime pins, against a fake page:
 - Three Message links with the contact's `href` give one click, on the first visible one, through a locator that matches the `href`.
 - A link named Message that names another profile, mismatched `profileUrn` and `recipient`, a repeated query parameter, no link, or no visible link gives `not_typed` with no click.
 - A `button` named Message beside the links is ignored: the prefill proceeds and never clicks it.
+- A brief scroll that leaves the top card's control under a sticky header that appears on scroll gives one scroll back up before the click, then one click on the top card's control at the page's top. A page that stays covered gives `not_typed` with no click and a log line with the category only. The sticky header's own button is never clicked, and an auto-send scrolls back the same way and sends once (#470).
 - The compose-option and `messengerMessages` observations are opened before the click; after the click, no `observe`, `scroll`, `ensure_page`, `new_page`, or `goto` is called.
 - A compose option whose path id or `recipientUrns` isn't the contact's, with more than one recipient, with an unknown `composeOptionType`, or missing, gives `not_typed`.
 - A `REPLY` bubble whose header `h2` links to another profile id, or holds two links, gives `not_typed`. A `REPLY` page with any `New message` heading gives `not_typed`.

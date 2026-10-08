@@ -89,6 +89,8 @@ class Scenario:
     #: control sits under a fixed bar; a Highlights copy below it is clear. ``sidebar``:
     #: "More profiles for you" with other people's Message buttons. ``minimized``: three
     #: minimized bubbles from earlier conversations and the Messaging bar.
+    #: ``scroll_sticky`` (#470): a page that scrolls, with a fixed navigation bar and an
+    #: invented sticky header that appears once it has scrolled 200 pixels.
     layout: str = ""
 
 
@@ -111,6 +113,9 @@ SCENARIOS = {
     "sidebar": Scenario(_member(312), layout="sidebar"),
     "minimized": Scenario(_member(313), layout="minimized"),
     "leftover": Scenario(_member(314), layout="leftover"),
+    "scroll_sticky": Scenario(_member(315), layout="scroll_sticky"),
+    "scroll_sticky_unfixed": Scenario(_member(316), layout="scroll_sticky"),
+    "scroll_clear": Scenario(_member(317), layout="scroll_sticky"),
     # ADR 0008: auto-send, against this replica only.
     "auto_existing": Scenario(_member(320)),
     "auto_never_messaged": Scenario(_member(321), existing=False, enter_sends=False),
@@ -220,6 +225,8 @@ def _layout_html(scenario: Scenario) -> str:
     """#444's profile layouts, in fixed pixels on a page that doesn't scroll, so the
     prefill's brief scroll leaves every box where it is."""
     member = scenario.member
+    if scenario.layout == "scroll_sticky":
+        return _scrolling_layout_html(member)
     top = _keyed(member, "top-card", "position:absolute;left:40px;top:220px")
     highlights = (
         '<section style="position:absolute;left:40px;top:420px"><h2>Highlights</h2>'
@@ -264,6 +271,38 @@ def _layout_html(scenario: Scenario) -> str:
         f"{escape(member.name)}</h1>{top}{highlights}"
         f"<a href='/in/{member.slug}/' style='position:absolute;left:40px;top:560px'>"
         f"{escape(member.name)}</a></main>{extra}"
+    )
+
+
+#: #470's scrolling page: where the top card's control sits, and the brief scroll that
+#: parks its center under the sticky header (52 to 116 pixels from the top).
+SCROLL_TOP_CARD_PX = 400
+COVERING_SCROLL_PX = 330
+
+
+def _scrolling_layout_html(member: Member) -> str:
+    """A profile that scrolls (#470). A fixed navigation bar sits at the top; once the
+    page has scrolled 200 pixels, an invented sticky header appears under it, with a
+    Message *button* (the real header's shape was never captured, #429). Invented
+    boxes, not LinkedIn's."""
+    return (
+        "<style>html,body{margin:0}svg{width:16px;height:16px}</style>"
+        "<nav style='position:fixed;top:0;left:0;right:0;height:52px;background:#333;"
+        "z-index:40'>Invented navigation</nav>"
+        "<header id='sticky' style='position:fixed;top:52px;left:0;right:0;height:64px;"
+        "background:#fff;z-index:30;display:none'><button type='button' "
+        "style='position:absolute;right:40px;top:12px'><span>Message</span></button></header>"
+        "<main style='position:relative;height:3000px'>"
+        f"<h1 style='position:absolute;left:40px;top:300px;margin:0'>{escape(member.name)}</h1>"
+        f"{_keyed(member, 'top-card', f'position:absolute;left:40px;top:{SCROLL_TOP_CARD_PX}px')}"
+        "<section style='position:absolute;left:40px;top:1700px'><h2>Highlights</h2>"
+        f"{_keyed(member, 'highlights')}</section>"
+        f"<a href='/in/{member.slug}/' style='position:absolute;left:40px;top:1900px'>"
+        f"{escape(member.name)}</a></main>"
+        "<script>addEventListener('scroll', () => {"
+        "document.getElementById('sticky').style.display = scrollY >= 200 ? 'block' : 'none';"
+        "note('scroll:' + Math.round(scrollY));"
+        "});</script>"
     )
 
 
@@ -404,6 +443,7 @@ async def _prefill(
         # Read the tab before the run ends: a run that never clicked closes its tab.
         state = await _inspect(origin, scenario)
         state["attempted"] = source.message_click_attempted
+        state["diagnostics"] = source.message_click_diagnostics
     return result, state
 
 
@@ -650,3 +690,83 @@ async def test_an_auto_send_whose_gate_refuses_types_but_never_clicks_send(origi
     assert result.send_refusal == "outside LinkedIn's active hours"
     _no_send(state)
     assert state["text"].replace("\u00a0", " ").rstrip("\n") == BODY
+
+
+@pytest.fixture
+def covering_scroll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the prefill's brief scroll to one step that leaves the scrolling page's top
+    card under its sticky header (#470)."""
+    from netkeeper.linkedin import page_messaging
+    from netkeeper.linkedin.pacing import scroll_like_a_person
+
+    monkeypatch.setattr(page_messaging, "BRIEF_SCROLL_STEPS", (1, 1))
+    monkeypatch.setattr(
+        page_messaging, "BRIEF_SCROLL_DELTA_PX", (COVERING_SCROLL_PX, COVERING_SCROLL_PX)
+    )
+
+    def no_back_up(rng: Any, **kwargs: Any) -> Any:
+        return scroll_like_a_person(rng, back_up_p=0.0, **kwargs)
+
+    monkeypatch.setattr(page_messaging, "scroll_like_a_person", no_back_up)
+
+
+@pytest.mark.usefixtures("covering_scroll")
+async def test_without_the_scroll_back_the_sticky_header_makes_the_click_refuse(
+    origin: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#470's failure, in a real Chrome: with the probe answering nothing, the brief
+    scroll leaves the top card's control under the sticky header and the click refuses."""
+    from netkeeper.linkedin.browser import MESSAGE_NOT_ON_SCREEN, BrowserRun
+
+    async def nothing(self: BrowserRun, profile_path: str, profile_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(BrowserRun, "message_cover", nothing)
+    result, state = await _prefill(origin, SCENARIOS["scroll_sticky_unfixed"])
+    assert result.outcome.kind is MessageOutcomeKind.NOT_TYPED, (
+        state["diagnostics"],
+        state["events"],
+    )
+    assert result.outcome.reason == MESSAGE_NOT_ON_SCREEN
+    assert not state["attempted"], state["events"]
+    assert not [e for e in state["events"] if e.startswith("click:")], state["events"]
+
+
+@pytest.mark.usefixtures("covering_scroll")
+async def test_a_top_card_under_the_sticky_header_is_scrolled_back_to_and_clicked(
+    origin: str,
+) -> None:
+    """#470's fix, in a real Chrome: the run scrolls back up with real wheel events, the
+    sticky header goes, and the one click lands on the top card's control. The sticky
+    header's own button is never clicked."""
+    result, state = await _prefill(origin, SCENARIOS["scroll_sticky"])
+    assert result.outcome.kind is MessageOutcomeKind.PREFILLED, (result, state.get("html"))
+    _no_send(state)
+    clicks = [e for e in state["events"] if e.startswith("click:")]
+    assert clicks == [f"click:{compose_href(SCENARIOS['scroll_sticky'].member)}"]
+    assert [e for e in state["events"] if e.startswith("card:")] == ["card:top-card"]
+
+
+async def test_a_scrolled_page_is_hit_tested_where_the_control_is(
+    origin: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#470, in a real Chrome: ``DOM.getNodeForLocation`` takes document coordinates, so
+    on a page scrolled 120 pixels (the sticky header not yet shown) the top card's
+    control reads clear, and the click needs no scroll back."""
+    from netkeeper.linkedin import page_messaging
+    from netkeeper.linkedin.pacing import scroll_like_a_person
+
+    monkeypatch.setattr(page_messaging, "BRIEF_SCROLL_STEPS", (1, 1))
+    monkeypatch.setattr(page_messaging, "BRIEF_SCROLL_DELTA_PX", (120, 120))
+
+    def no_back_up(rng: Any, **kwargs: Any) -> Any:
+        return scroll_like_a_person(rng, back_up_p=0.0, **kwargs)
+
+    monkeypatch.setattr(page_messaging, "scroll_like_a_person", no_back_up)
+    result, state = await _prefill(origin, SCENARIOS["scroll_clear"])
+    assert result.outcome.kind is MessageOutcomeKind.PREFILLED, (result, state.get("html"))
+    assert state["diagnostics"]["message_click_target"] == "top_card", state["diagnostics"]
+    before_click = state["events"][
+        : next(i for i, e in enumerate(state["events"]) if e.startswith("click:"))
+    ]
+    assert before_click == ["scroll:120"], state["events"]

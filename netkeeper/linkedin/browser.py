@@ -622,6 +622,19 @@ class MessageClick:
     failure: ClickFailure | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _MessageControls:
+    """What :meth:`BrowserRun._find_message_controls` found: decision 4's refusal (if
+    any), the visible controls with their boxes, which of them is the top card's, and
+    the verified compose ``href`` values the geometry read looks up."""
+
+    refusal: str | None
+    candidates: list[_MessagingLocator]
+    boxes: list[Mapping[str, float] | None]
+    top_card: int | None
+    verified: list[str]
+
+
 #: The markers of Playwright's actionability log (the call log a failed click's error
 #: carries), each with its category. The last marker line in the log wins: it's the
 #: state the click was waiting on when it gave up.
@@ -685,6 +698,9 @@ class ClickGeometry:
 
     viewport: tuple[float, float]
     hits: tuple[Mapping[str, float] | None, ...]
+    #: Where Playwright's click would press each candidate (:func:`_click_point`), or
+    #: ``None`` when that wasn't read. Only :func:`not_clear_reason` reads it (#470).
+    points: tuple[tuple[float, float] | None, ...] = ()
 
 
 def _on_screen(box: Mapping[str, float] | None, viewport: tuple[float, float]) -> bool:
@@ -771,6 +787,76 @@ def choose_message_target(
     ):
         return top_card, ClickTarget.TOP_CARD_OFF_SCREEN
     return None
+
+
+class NotClear(enum.StrEnum):
+    """Why no Message control was clear to click, as a fixed category (#470).
+
+    Logged when the click refuses, never with a name, a slug, a url, or the page's text.
+    What covers a control is inferred from where its click point sits, not read from the
+    page: the hit test learns only that the element there isn't the control's own."""
+
+    NO_CANDIDATES = "no_candidates"
+    """No visible Message link for the contact."""
+
+    NO_TOP_CARD = "no_top_card"
+    """No top card (no single ``h1``), and no other control on screen and clear."""
+
+    TOP_CARD_OFF_SCREEN = "top_card_off_screen"
+    """The top card's control has no box, so there's nothing to scroll to."""
+
+    COVERED_BY_STICKY_HEADER = "covered_by_sticky_header"
+    """The top card's control is on screen, and its click point is covered within
+    :data:`STICKY_HEADER_BAND_PX` of the viewport's top: under LinkedIn's global
+    navigation or the profile's sticky header."""
+
+    COVERED_BY_BUBBLE = "covered_by_bubble"
+    """The top card's control is on screen, and its click point is covered within
+    :data:`BUBBLE_BAND_PX` of the viewport's bottom: under the Messaging bar or a
+    minimized bubble."""
+
+    COVERED_BY_OTHER = "covered_by_other"
+    """The top card's control is on screen, and something else covers its click point."""
+
+
+#: The categories in which the top card's control is on screen but covered: the prefill
+#: scrolls back up once before the click when its probe reads one of these (#470).
+TOP_CARD_COVERED: Final = frozenset(
+    {NotClear.COVERED_BY_STICKY_HEADER, NotClear.COVERED_BY_BUBBLE, NotClear.COVERED_BY_OTHER}
+)
+#: How far down from the viewport's top a covered click point counts as under a sticky
+#: header, in CSS pixels: LinkedIn's global navigation (about 52) and the profile's
+#: sticky header below it, whose height was never captured (#429). Used for the log's
+#: category only, never for a choice.
+STICKY_HEADER_BAND_PX: Final = 160.0
+#: How far up from the viewport's bottom a covered click point counts as under the
+#: Messaging bar or a minimized bubble, in CSS pixels. Used for the log's category only.
+BUBBLE_BAND_PX: Final = 64.0
+
+
+def not_clear_reason(
+    boxes: Sequence[Mapping[str, float] | None],
+    top_card: int | None,
+    geometry: ClickGeometry,
+) -> NotClear:
+    """Why :func:`choose_message_target` chose nothing, for the log (#470).
+
+    Call it only when the choice was ``None`` with ``geometry`` read. The cover is
+    placed by the top card's click point, or its box's center when that wasn't read."""
+    if not boxes:
+        return NotClear.NO_CANDIDATES
+    if top_card is None:
+        return NotClear.NO_TOP_CARD
+    box = boxes[top_card]
+    if box is None or not _on_screen(box, geometry.viewport):
+        return NotClear.TOP_CARD_OFF_SCREEN
+    point = geometry.points[top_card] if top_card < len(geometry.points) else None
+    y = point[1] if point is not None else box["y"] + box["height"] / 2
+    if y < STICKY_HEADER_BAND_PX:
+        return NotClear.COVERED_BY_STICKY_HEADER
+    if y >= geometry.viewport[1] - BUBBLE_BAND_PX:
+        return NotClear.COVERED_BY_BUBBLE
+    return NotClear.COVERED_BY_OTHER
 
 
 def _quad_box(quad: Sequence[float]) -> Mapping[str, float]:
@@ -1914,7 +2000,8 @@ class BrowserRun:
            card's (:data:`MESSAGE_TOP_CARD`) when it's on screen with nothing over its
            click point, else another that is, by the page's own geometry
            (:meth:`_read_click_geometry`). None that is, and no top card to scroll to,
-           refuses with no click.
+           refuses with no click, and logs why as a fixed category (:class:`NotClear`,
+           #470), never the page's text.
         5. Clicks it once, through a locator bound to the contact's verified href (never
            by position alone), at the control's own box, with a person's press length.
            A click that fails isn't tried again; its category
@@ -1955,57 +2042,37 @@ class BrowserRun:
         if leftover:
             log.info("prefill: a message bubble was already on the page; nothing was clicked")
             return MessageClick(False, False, BUBBLE_ALREADY_OPEN)
-        controls = tab.get_by_role(
-            MESSAGE_CONTROL_ROLE, name=MESSAGE_CONTROL_NAME, exact=True, include_hidden=True
-        )
         try:
-            matches = await controls.count()
-            hrefs = [
-                await controls.nth(index).get_attribute("href", timeout=MESSAGING_READ_TIMEOUT_MS)
-                for index in range(matches)
-            ]
-            refusal = message_control_refusal(hrefs, profile_id)
-            candidates: list[_MessagingLocator] = []
-            boxes: list[Mapping[str, float] | None] = []
-            top_card: int | None = None
-            if refusal is None:
-                headings = tab.locator(PROFILE_HEADING)
-                after_heading = (
-                    headings.locator(MESSAGE_TOP_CARD) if await headings.count() == 1 else None
-                )
-                for href in dict.fromkeys(h for h in hrefs if h is not None):
-                    bound = controls.and_(tab.locator(f"[href={_css_string(href)}]"))
-                    if top_card is None and after_heading is not None:
-                        top = bound.and_(after_heading).filter(visible=True)
-                        if await top.count() > 0:
-                            top_card = len(candidates)
-                            candidates.append(top.first)
-                            boxes.append(await _box(top.first))
-                    visible = bound.filter(visible=True)
-                    for index in range(await visible.count()):
-                        if len(candidates) >= MESSAGE_MAX_CANDIDATES:
-                            break
-                        box = await _box(visible.nth(index))
-                        if top_card is not None and box is not None and box == boxes[top_card]:
-                            continue  # the top card's control again, in document order
-                        candidates.append(visible.nth(index))
-                        boxes.append(box)
+            found = await self._find_message_controls(tab, profile_id)
         except Exception as exc:
             if self._lost(page):
                 raise BrowserUnavailable("lost the tab while finding Message") from exc
             return MessageClick(False, False, "the Message control could not be read")
-        if refusal is not None:
-            return MessageClick(False, False, refusal)
-        if not candidates:
+        if found.refusal is not None:
+            return MessageClick(False, False, found.refusal)
+        if not found.candidates:
+            log.warning(
+                "prefill: no Message control was clear to click (%s); nothing was clicked",
+                NotClear.NO_CANDIDATES.value,
+            )
             return MessageClick(False, False, "no Message control is visible")
-        verified = [h for h in dict.fromkeys(hrefs) if h is not None]
-        geometry = await self._read_click_geometry(page, boxes, verified)
-        choice = choose_message_target(boxes, top_card, geometry)
+        geometry = await self._read_click_geometry(page, found.boxes, found.verified)
+        choice = choose_message_target(found.boxes, found.top_card, geometry)
         if choice is None:
-            log.warning("prefill: no Message control was clear to click; nothing was clicked")
+            # A choice of None means the geometry was read (without it the top card, or
+            # the first control, is chosen unchecked).
+            reason = (
+                not_clear_reason(found.boxes, found.top_card, geometry)
+                if geometry is not None
+                else NotClear.NO_CANDIDATES
+            )
+            log.warning(
+                "prefill: no Message control was clear to click (%s); nothing was clicked",
+                reason.value,
+            )
             return MessageClick(False, False, MESSAGE_NOT_ON_SCREEN)
         index, chosen = choice
-        target = candidates[index]
+        target = found.candidates[index]
         self._click_target = chosen
         self._message_clicked = True
         self._click_url = page.url
@@ -2025,6 +2092,86 @@ class BrowserRun:
             )
         self._message_click_landed = True
         return MessageClick(True, True, target=chosen)
+
+    async def message_cover(self, profile_path: str, profile_id: str) -> NotClear | None:
+        """Why :meth:`click_message` would refuse right now for want of a clear control,
+        or ``None`` (#470). A read before the click, for the prefill's one scroll back up.
+
+        The same reads as :meth:`click_message`'s, in the same order, with no pause and
+        no input: decision 3's bubble check, decision 4's href check, the visible
+        controls, and the page's own geometry (:meth:`_read_click_geometry`). ``None``
+        whenever :meth:`click_message` wouldn't refuse for this reason: a control is
+        clear, the top card is off screen (Playwright scrolls it in), the geometry
+        couldn't be read, a bubble is open, a link names someone else, the tab left the
+        profile, or anything raised. :meth:`click_message` then reads everything again
+        and decides as before; this never clicks, and never stands in for its checks."""
+        page = self._page
+        if page is None or page.is_closed() or self._message_clicked:
+            return None
+        if not _on_path(page.url, profile_path):
+            return None
+        tab = cast(_MessagingPage, page)
+        try:
+            if await self._bubble_already_open(tab):
+                return None
+            found = await self._find_message_controls(tab, profile_id)
+        except Exception as exc:
+            log.info("prefill: the Message controls could not be read (%s)", type(exc).__name__)
+            return None
+        if found.refusal is not None or not found.candidates:
+            return None
+        geometry = await self._read_click_geometry(page, found.boxes, found.verified)
+        if geometry is None or choose_message_target(found.boxes, found.top_card, geometry):
+            return None
+        return not_clear_reason(found.boxes, found.top_card, geometry)
+
+    async def _find_message_controls(
+        self, tab: _MessagingPage, profile_id: str
+    ) -> _MessageControls:
+        """The contact's Message controls, as :meth:`click_message` chooses among them.
+
+        Every link named exactly "Message", hidden or visible, must open this contact's
+        compose (decision 4, :func:`message_control_refusal`); otherwise ``refusal`` says
+        why and there are no candidates. The candidates are the visible ones, each
+        through a locator bound to its verified ``href``, the top card's control
+        (:data:`MESSAGE_TOP_CARD`) first when there is one. Reads only; it raises what
+        the page's reads raise."""
+        controls = tab.get_by_role(
+            MESSAGE_CONTROL_ROLE, name=MESSAGE_CONTROL_NAME, exact=True, include_hidden=True
+        )
+        matches = await controls.count()
+        hrefs = [
+            await controls.nth(index).get_attribute("href", timeout=MESSAGING_READ_TIMEOUT_MS)
+            for index in range(matches)
+        ]
+        refusal = message_control_refusal(hrefs, profile_id)
+        candidates: list[_MessagingLocator] = []
+        boxes: list[Mapping[str, float] | None] = []
+        top_card: int | None = None
+        if refusal is None:
+            headings = tab.locator(PROFILE_HEADING)
+            after_heading = (
+                headings.locator(MESSAGE_TOP_CARD) if await headings.count() == 1 else None
+            )
+            for href in dict.fromkeys(h for h in hrefs if h is not None):
+                bound = controls.and_(tab.locator(f"[href={_css_string(href)}]"))
+                if top_card is None and after_heading is not None:
+                    top = bound.and_(after_heading).filter(visible=True)
+                    if await top.count() > 0:
+                        top_card = len(candidates)
+                        candidates.append(top.first)
+                        boxes.append(await _box(top.first))
+                visible = bound.filter(visible=True)
+                for index in range(await visible.count()):
+                    if len(candidates) >= MESSAGE_MAX_CANDIDATES:
+                        break
+                    box = await _box(visible.nth(index))
+                    if top_card is not None and box is not None and box == boxes[top_card]:
+                        continue  # the top card's control again, in document order
+                    candidates.append(visible.nth(index))
+                    boxes.append(box)
+        verified = [h for h in dict.fromkeys(hrefs) if h is not None]
+        return _MessageControls(refusal, candidates, boxes, top_card, verified)
 
     async def _bubble_already_open(self, tab: _MessagingPage) -> bool:
         """Whether any message composer or ``Messaging`` dialog is on the page, hidden ones
@@ -2049,8 +2196,8 @@ class BrowserRun:
         only these read-only methods (ADR 0007's amendment for #444;
         ``tests/test_browser_safety.py`` pins them):
 
-        - ``Page.getLayoutMetrics``: the layout viewport's size. Playwright doesn't know
-          it for a tab this run attaches to.
+        - ``Page.getLayoutMetrics``: the layout viewport's size, which Playwright doesn't
+          know for a tab this run attaches to, and how far the page is scrolled.
         - ``DOM.getDocument`` (depth 0), then ``DOM.querySelectorAll`` for the links
           with each verified compose ``href``, ``DOM.describeNode`` for each one's
           subtree, ``DOM.getBoxModel`` for its box, and ``DOM.getContentQuads`` for
@@ -2058,7 +2205,10 @@ class BrowserRun:
           belong to which Message link, and where each link is.
         - ``DOM.getNodeForLocation``: the element the page would hit at a point, as
           ``document.elementFromPoint`` answers it (``pointer-events: none`` skipped),
-          at the click point of each control that is wholly on screen.
+          at the click point of each control that is wholly on screen. The quads are in
+          viewport coordinates and this method takes document ones (Chrome subtracts the
+          scroll offset), so the point is sent with the page's scroll added (#470).
+          Without it, a scrolled page is hit-tested where the control isn't.
 
         A hit counts for a control when it is the link or inside it, matched by node, not
         by size: an icon may overflow its link's box. No script runs in the page,
@@ -2077,6 +2227,9 @@ class BrowserRun:
                 metrics = await session.send("Page.getLayoutMetrics")
                 layout = metrics["cssLayoutViewport"]
                 viewport = (float(layout["clientWidth"]), float(layout["clientHeight"]))
+                # #470: how far the page is scrolled, to turn a viewport point (the quads')
+                # into the document point DOM.getNodeForLocation takes.
+                scroll_x, scroll_y = float(layout["pageX"]), float(layout["pageY"])
                 document = await session.send("DOM.getDocument", {"depth": 0})
                 root = document["root"]["nodeId"]
                 links: list[_Link] = []
@@ -2104,21 +2257,29 @@ class BrowserRun:
                             )
                         )
                 hits: list[Mapping[str, float] | None] = []
+                points: list[tuple[float, float] | None] = []
                 for box in boxes:
                     link = next((k for k in links if box is not None and _clear(box, k.box)), None)
                     if box is None or link is None or link.point is None:
                         hits.append(None)
+                        points.append(None)
                         continue
                     if not _on_screen(box, viewport):
                         hits.append(None)
+                        points.append(None)
                         continue
                     x, y = link.point
+                    points.append(link.point)
                     hit = await session.send(
                         "DOM.getNodeForLocation",
-                        {"x": round(x), "y": round(y), "ignorePointerEventsNone": True},
+                        {
+                            "x": round(x + scroll_x),
+                            "y": round(y + scroll_y),
+                            "ignorePointerEventsNone": True,
+                        },
                     )
                     hits.append(link.box if hit["backendNodeId"] in link.owned else None)
-                return ClickGeometry(viewport, tuple(hits))
+                return ClickGeometry(viewport, tuple(hits), tuple(points))
         except Exception as exc:
             log.info("prefill: the page's geometry could not be read (%s)", type(exc).__name__)
             return None

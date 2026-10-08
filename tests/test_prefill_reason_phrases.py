@@ -201,8 +201,9 @@ PASS_THROUGH = frozenset(
         (_B, "_await_bubble", "refusal"),
         (_B, "_composer_refusal", "bubble"),
         (_B, "type_into_composer", "refusal"),
-        # click_message passes message_control_refusal's phrase on (scanned).
-        (_B, "click_message", "refusal"),
+        # click_message passes message_control_refusal's phrase on (scanned), as
+        # _find_message_controls found it (#470).
+        (_B, "click_message", "found.refusal"),
         # The one-line helpers take their caller's phrase; every call site is scanned.
         (_P, "_not_typed", "reason"),
         (_M, "_not_typed", "reason"),

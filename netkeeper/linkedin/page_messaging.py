@@ -11,6 +11,10 @@ that, as it does the other observing modules). In order:
    A checkpoint or a login wall stops here, with no key sent; the runner sets the
    session flag (spec 9.7).
 3. Rest the pointer and scroll briefly, like a person reading the top of the profile.
+   If that left the top card's Message control on screen but covered (under the
+   sticky header that appears on scroll, say) and no other control clear
+   (:meth:`~netkeeper.linkedin.browser.BrowserRun.message_cover`, a read), scroll back
+   up to the top once, in small steps, and look (#470). The click reads the page again.
 4. Read the profile's one ``h1``, if there's exactly one, for the chip check, and open
    the two observations the click is read through: the compose option, and the
    page's own thread request (for the conversation's URN). After this, nothing
@@ -55,6 +59,7 @@ from netkeeper.linkedin.browser import (
     BUBBLE_ALREADY_OPEN,
     BUBBLE_UNREADABLE,
     MESSAGE_NOT_ON_SCREEN,
+    TOP_CARD_COVERED,
     BrowserRun,
     BubbleLayout,
     BubbleRecipient,
@@ -91,7 +96,12 @@ from netkeeper.linkedin.observe import (
     ResponseMatch,
     ResponseRule,
 )
-from netkeeper.linkedin.pacing import TypingPlan, scroll_like_a_person
+from netkeeper.linkedin.pacing import (
+    TypingPlan,
+    depth_after,
+    scroll_back_to_top,
+    scroll_like_a_person,
+)
 from netkeeper.linkedin.strict_origin import NotAStrictOrigin, parse_strict_origin
 
 log = logging.getLogger(__name__)
@@ -118,6 +128,9 @@ SEND_DWELL_RANGE_S: Final = (2.0, 9.0)
 BRIEF_SCROLL_STEPS: Final = (1, 2)
 BRIEF_SCROLL_DELTA_PX: Final = (120, 360)
 BRIEF_SCROLL_DWELL_S: Final = 1.2
+#: The wheel steps of the one scroll back up when the brief scroll left the top card's
+#: Message control covered (#470): the brief scroll's own size, smaller than enrichment's.
+SCROLL_BACK_DELTA_PX: Final = BRIEF_SCROLL_DELTA_PX
 #: The profile path prefix the prefill opens.
 PROFILE_PREFIX: Final = "/in/"
 
@@ -269,6 +282,23 @@ class PagePrefill:
         await self._run.scroll(scroll, sleep=self._sleep, rng=self._rng)
         if await cancelled():
             return _not_typed("cancelled")
+        # #470: a scroll that leaves the top card's Message control under the sticky
+        # header that appears on scroll would make the click refuse. A person would
+        # scroll back up to it, so the run does, once; the click reads the page again
+        # and refuses as before if nothing is clear. At least one step: the page may
+        # have scrolled further than the plan says.
+        cover = await self._run.message_cover(path, spec.profile_id)
+        if cover in TOP_CARD_COVERED:
+            log.info(
+                "prefill: the top card's Message control is covered (%s); scrolling back up",
+                cover,
+            )
+            back = scroll_back_to_top(
+                self._rng, max(depth_after(scroll), 1), delta_range_px=SCROLL_BACK_DELTA_PX
+            )
+            await self._run.scroll(back, sleep=self._sleep, rng=self._rng)
+            if await cancelled():
+                return _not_typed("cancelled")
         profile_name = await self._run.read_profile_heading()
         compose = await self._run.observe(
             ResponseMatch(self._origin, (ResponseRule("GET", COMPOSE_OPTIONS_PATH, prefix=True),))

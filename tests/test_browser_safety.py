@@ -1848,7 +1848,9 @@ def test_the_locator_scanner_sees_a_send_button() -> None:
 
 def test_the_message_click_is_bound_to_the_contacts_href() -> None:
     """ADR 0007: the click in ``click_message`` is on a locator narrowed with ``and_`` to
-    an ``[href=...]`` match, never on a bare ``nth`` of the role locator."""
+    an ``[href=...]`` match, never on a bare ``nth`` of the role locator. The locators
+    are built in ``_find_message_controls`` (#470), which ``click_message`` and the
+    read-only ``message_cover`` share, and the click target is one of them."""
     source = read_source(LINKEDIN / "browser.py")
     clicks = [
         call for where, call in _calls_named(source, "click") if where == "BrowserRun.click_message"
@@ -1860,22 +1862,18 @@ def test_the_message_click_is_bound_to_the_contacts_href() -> None:
         and isinstance(receiver.func, ast.Attribute)
         and receiver.func.attr == "nth"
     )
-    ands = [
-        ast.unparse(call)
-        for where, call in _calls_named(source, "and_")
-        if where == "BrowserRun.click_message"
-    ]
+    finder = "BrowserRun._find_message_controls"
+    assert not [w for w, _ in _calls_named(source, "and_") if w == "BrowserRun.click_message"]
+    ands = [ast.unparse(call) for where, call in _calls_named(source, "and_") if where == finder]
     # #444: the top card's control is the href-bound locator narrowed again, never a
     # locator of its own.
     assert len(ands) == 2
     assert ands[0].startswith("controls.and_(tab.locator(") and "[href=" in ands[0]
     assert ands[1] == "bound.and_(after_heading)"
     # Every control the click can be sent to is drawn from the href-bound locator.
-    method = next(
-        node
-        for node in walk(parse(source))
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "click_message"
-    )
+    tree = parse(source)
+    methods = _methods(tree, "BrowserRun")
+    method = methods["_find_message_controls"]
     appended = [
         ast.unparse(node.args[0])
         for node in walk(method)
@@ -1892,7 +1890,18 @@ def test_the_message_click_is_bound_to_the_contacts_href() -> None:
     }
     assert assigned["visible"] == "bound.filter(visible=True)"
     assert assigned["top"] == "bound.and_(after_heading).filter(visible=True)"
-    assert assigned["target"] == "candidates[index]"
+    # click_message's target is one of those candidates, from that finder alone.
+    click = methods["click_message"]
+    assigned = {
+        ast.unparse(node.targets[0]): ast.unparse(node.value)
+        for node in walk(click)
+        if isinstance(node, ast.Assign) and len(node.targets) == 1
+    }
+    assert assigned["target"] == "found.candidates[index]"
+    assert assigned["found"] == "await self._find_message_controls(tab, profile_id)"
+    # message_cover only reads: it never clicks, and builds no locator of its own.
+    cover = methods["message_cover"]
+    assert not [n for n in walk(cover) if isinstance(n, ast.Attribute) and n.attr == "click"]
 
 
 def test_bring_to_front_is_called_once_at_the_prefills_start() -> None:
