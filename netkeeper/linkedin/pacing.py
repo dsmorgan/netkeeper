@@ -273,19 +273,29 @@ BACK_TO_TOP_DWELL_MEDIAN_S: Final = 1.0
 BACK_TO_TOP_DWELL_SIGMA: Final = 0.4
 
 
-def scroll_back_to_top(rng: random.Random, depth_px: int) -> ScrollPlan:
+def scroll_back_to_top(
+    rng: random.Random,
+    depth_px: int,
+    *,
+    delta_range_px: tuple[int, int] = BACK_TO_TOP_DELTA_RANGE_PX,
+) -> ScrollPlan:
     """A person scrolling back up to the top of a page ``depth_px`` down, then a look.
 
     Upward wheel steps until they have covered ``depth_px``, and one more: a person
     overshoots, and the page stops at its top. A page that was never scrolled needs no
     steps, only the look. Enrichment replays this before the Contact info click (#190),
     so the link in the top card is on screen when it is clicked, the way a person
-    would find it, instead of the page jumping to it.
+    would find it, instead of the page jumping to it. The prefill replays it, with
+    smaller steps (``delta_range_px``), when its brief scroll left the top card's
+    Message control covered (#470).
     """
+    low, high = delta_range_px
+    if low < 1 or high < low:
+        raise ValueError(f"delta_range_px must have 1 <= low <= high, got {delta_range_px!r}")
     steps: list[ScrollStep] = []
     covered = 0
     while depth_px > 0 and covered <= depth_px:
-        delta = rng.randint(*BACK_TO_TOP_DELTA_RANGE_PX)
+        delta = rng.randint(*delta_range_px)
         covered += delta
         steps.append(ScrollStep(delta_px=-delta, pause_s=rng.uniform(*BACK_TO_TOP_PAUSE_RANGE_S)))
     dwell = human_delay(

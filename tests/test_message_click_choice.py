@@ -281,9 +281,11 @@ async def test_a_sticky_copy_first_in_the_page_and_off_screen_is_never_clicked()
         "message_click_target": "top_card",
         "message_click_failure": None,
     }
-    # The geometry session sent its reads, and detached.
-    [session] = site.geometry_sessions
-    assert session.detached
+    # The geometry sessions sent their reads, and detached: the prefill's read-only
+    # probe before the click (#470), then the click's own read.
+    probe, session = site.geometry_sessions
+    assert probe.detached and session.detached
+    assert probe.sent == session.sent  # the same reads of an unchanged page
     # The top card is one candidate, not two: it's found again among the visible links
     # and passed over, so only the two controls on screen are hit-tested.
     hits = [m for m, _ in session.sent if m == "DOM.getNodeForLocation"]

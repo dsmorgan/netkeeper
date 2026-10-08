@@ -196,7 +196,9 @@ class GeometrySession:
     The hit at a point is the last element in document order whose box holds it (a
     fixed overlay comes after what it covers), as ``elementFromPoint`` answers;
     ``data-pointer-events="none"`` is skipped. A point outside the viewport, or one over
-    no box, raises, as Chrome does."""
+    no box, raises, as Chrome does. Boxes and quads are viewport coordinates, as Chrome's
+    are; ``DOM.getNodeForLocation`` takes a document point and subtracts the site's
+    ``scroll_offset``, as Chrome does (#470)."""
 
     def __init__(self, tab: MessagingTab, viewport: tuple[float, float]) -> None:
         self.tab = tab
@@ -225,9 +227,17 @@ class GeometrySession:
             await asyncio.sleep(3600)  # a renderer that never answers
         params = dict(params or {})
         order = self._all()
+        scroll_x, scroll_y = self.tab.site.scroll_offset
         if method == "Page.getLayoutMetrics":
             width, height = self.viewport
-            return {"cssLayoutViewport": {"clientWidth": width, "clientHeight": height}}
+            return {
+                "cssLayoutViewport": {
+                    "clientWidth": width,
+                    "clientHeight": height,
+                    "pageX": scroll_x,
+                    "pageY": scroll_y,
+                }
+            }
         if method == "DOM.getDocument":
             assert params == {"depth": 0}
             return {"root": {"nodeId": 0}}
@@ -252,7 +262,8 @@ class GeometrySession:
             return {"quads": [[x, y, x + w, y, x + w, y + h, x, y + h]]}
         if method == "DOM.getNodeForLocation":
             assert params.get("ignorePointerEventsNone") is True
-            x, y = params["x"], params["y"]
+            # As Chrome does (#470): a document point, the scroll offset subtracted.
+            x, y = params["x"] - scroll_x, params["y"] - scroll_y
             width, height = self.viewport
             if not (0 <= x < width and 0 <= y < height):
                 raise RuntimeError("No node found at given location")
@@ -866,6 +877,8 @@ class MessagingSite(FakeContext):
         #: The layout viewport the geometry session reports (#444); ``None`` means the
         #: session can't be opened, as a fake without CDP, so the click is unchecked.
         self.viewport: tuple[float, float] | None = None
+        #: How far the page is scrolled, as ``Page.getLayoutMetrics`` reports it (#470).
+        self.scroll_offset: tuple[float, float] = (0.0, 0.0)
         self.geometry_error: BaseException | None = None
         self.geometry_hangs = False
         self.geometry_sessions: list[GeometrySession] = []
