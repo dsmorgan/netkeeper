@@ -774,3 +774,223 @@ def test_the_stop_reason_has_plain_words() -> None:
     assert runs.STOP_REASON_TEXT[message_check.MESSAGE_CHECK_STOP] == (
         "checked the Message control up to the click; nothing was clicked"
     )
+
+
+# --- pseudo-elements, shadow roots and frames (review of #474) ------------------------------
+
+
+@pytest.mark.usefixtures("no_scroll")
+@pytest.mark.parametrize(
+    ("after_link", "link_attrs", "relation", "words"),
+    [
+        (
+            "",
+            ' data-after-box="40,400,110,32"',
+            HitRelation.PSEUDO_INSIDE,
+            "a pseudo-element inside the control (its host: a, link)",
+        ),
+        (
+            '<div data-box="0,300,1280,300" data-after-box="40,400,110,32"></div>',
+            "",
+            HitRelation.PSEUDO_COVERED,
+            "covered by a pseudo-element of div (none), middle",
+        ),
+        (
+            '<my-overlay data-box="0,300,1280,300"><shadow-root>'
+            '<span data-box="40,400,110,32"></span></shadow-root></my-overlay>',
+            "",
+            HitRelation.COVERED,
+            "covered by span (none) in a shadow root, middle",
+        ),
+        (
+            '<my-overlay data-box="0,300,1280,300">'
+            '<span data-untreed data-box="40,400,110,32"></span></my-overlay>',
+            "",
+            HitRelation.IN_SHADOW_ROOT,
+            "an element inside a shadow root the tree didn't include",
+        ),
+        (
+            '<iframe data-frame-owner="child-1" data-box="0,300,1280,300">'
+            '<div data-untreed data-frame="child-1" data-box="40,400,110,32"></div></iframe>',
+            "",
+            HitRelation.IN_FRAME,
+            "an element inside a frame",
+        ),
+        (
+            # A frame whose owner the tree doesn't show: its frame id isn't the page's.
+            '<div data-untreed data-frame="child-2" data-box="40,400,110,32"></div>',
+            "",
+            HitRelation.IN_FRAME,
+            "an element inside a frame",
+        ),
+    ],
+)
+async def test_a_pseudo_element_a_shadow_root_and_a_frame_are_told_apart(
+    after_link: str, link_attrs: str, relation: HitRelation, words: str
+) -> None:
+    html = (
+        f"<main><h1>{ZEPHYRINE.name}</h1>"
+        f'<a data-box="40,400,110,32" href="{escape(HREF)}"{link_attrs}><span>Message</span></a>'
+        f"{after_link}</main>"
+    )
+    site = static_site(html)
+    result, run = await check(site)
+    assert_untouched(site, run)
+    [candidate] = last(result).candidates
+    assert candidate.hit is not None and candidate.hit.relation is relation
+    text = report(result)
+    assert words in text
+    assert_sanitized(text)
+
+
+@pytest.mark.usefixtures("no_scroll")
+async def test_a_covers_label_and_role_text_never_reach_the_report() -> None:
+    """A covering landmark with an invented label, and a role attribute holding invented
+    words: the report names the tag and a role from the ARIA list, nothing else."""
+    html = (
+        f"<main><h1>{ZEPHYRINE.name}</h1>{link('40,400,110,32')}</main>"
+        '<header aria-label="Invented Secret Label" role="Zephyrine Mockwell"'
+        ' data-box="0,380,1280,80">'
+        '<div role="Invented-Text" aria-label="Invented Other" data-box="0,380,1280,80"></div>'
+        "</header>"
+    )
+    result, _ = await check(static_site(html))
+    [candidate] = last(result).candidates
+    hit = candidate.hit
+    assert hit is not None and hit.relation is HitRelation.COVERED
+    assert (hit.tag, hit.role, hit.landmark) == ("div", "other", "header (other)")
+    text = report(result)
+    assert "covered by div (other) in header (other)" in text
+    assert "Secret" not in text and "Label" not in text and "Mockwell" not in text
+    assert_sanitized(text)
+
+
+def test_a_role_is_a_listed_aria_role_or_other() -> None:
+    from netkeeper.linkedin.browser import _check_role
+
+    assert _check_role("div", {"role": "Navigation"}) == "navigation"
+    assert _check_role("div", {"role": "region extra words"}) == "region"
+    assert _check_role("div", {"role": "invented"}) == "other"
+    assert _check_role("div", {"role": "Zephyrine Mockwell"}) == "other"
+    assert _check_role("header", {}) == "banner"
+    assert _check_role("a", {"href": "x"}) == "link" and _check_role("a", {}) == "none"
+
+
+async def test_each_snapshot_says_when_it_was_taken(no_scroll: None) -> None:
+    result, _ = await check(ScrollingSite())
+    assert len(result.since_load_s) == 3
+    assert all(s >= 0 for s in result.since_load_s)
+    assert list(result.since_load_s) == sorted(result.since_load_s)
+    assert f"[after load] {result.since_load_s[0]:.1f} s after the load" in report(result)
+
+
+@pytest.mark.usefixtures("no_scroll")
+async def test_a_hidden_controls_top_card_selector_is_marked_hidden() -> None:
+    html = (
+        f"<main><h1>{ZEPHYRINE.name}</h1>{link('40,400,110,32')}"
+        f'<div style="display: none">{link("40,900,110,32")}</div></main>'
+    )
+    result, _ = await check(static_site(html))
+    [shown, hidden] = last(result).controls
+    assert shown.visible and not hidden.visible and hidden.top_card_selector is True
+    assert "yes (hidden)" in report(result)
+
+
+# --- the gates under the lock, and a wall's heat (review of #474) ---------------------------
+
+
+def _start(factory: sessionmaker[Session]) -> message_check.CheckTarget:
+    contact_id = _contact(factory)
+    with session_scope(factory, write=True) as session:
+        return message_check.start(
+            session, _user(session), contact_id, now=datetime.now(UTC), settings=Settings()
+        )
+
+
+@pytest.mark.usefixtures("inside_active_hours")
+async def test_a_session_flagged_after_the_start_refuses_under_the_lock(
+    cli_db: sessionmaker[Session],
+) -> None:
+    target = _start(cli_db)
+    with session_scope(cli_db, write=True) as session:
+        flag_session(session, _user(session), Outcome.CHECKPOINT, url="/checkpoint/x")
+    site = ScrollingSite()
+    provider, _ = fake_provider(site)
+    result = await run_message_check(
+        provider, cli_db, 1, target, settings=Settings(), sleep=no_sleep
+    )
+    assert result.snapshots == () and site.navigations == []
+    with session_scope(cli_db) as session:
+        run = runs.get_run(session, _user(session), target.run_id)
+        assert (run.status, run.stop_reason) == (SyncRunStatus.FAILED, "session_flagged")
+    assert _visits(cli_db, ActionClass.PROFILE_VISITS) == 0
+
+
+@pytest.mark.usefixtures("inside_active_hours")
+async def test_heat_over_its_threshold_after_the_start_refuses_under_the_lock(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from netkeeper.services import heat as heat_service
+
+    target = _start(cli_db)
+    monkeypatch.setattr(heat_service, "should_skip", lambda *_, **__: True)
+    site = ScrollingSite()
+    provider, _ = fake_provider(site)
+    result = await run_message_check(
+        provider, cli_db, 1, target, settings=Settings(), sleep=no_sleep
+    )
+    assert result.snapshots == () and site.navigations == []
+    with session_scope(cli_db) as session:
+        run = runs.get_run(session, _user(session), target.run_id)
+        assert (run.status, run.stop_reason) == (SyncRunStatus.FAILED, "heat_skip")
+    assert _visits(cli_db, ActionClass.PROFILE_VISITS) == 0
+
+
+@pytest.mark.usefixtures("inside_active_hours")
+@pytest.mark.parametrize(
+    ("wall", "heated", "flagged"),
+    [
+        (Outcome.THROTTLED, True, False),
+        (Outcome.CHECKPOINT, True, True),
+        (Outcome.LOGGED_OUT, False, True),
+    ],
+)
+def test_a_wall_raises_heat_and_flags_as_a_prefills_does(
+    cli_db: sessionmaker[Session], wall: Outcome, heated: bool, flagged: bool
+) -> None:
+    from netkeeper.services import heat as heat_service
+
+    target = _start(cli_db)
+    message_check.finish(
+        cli_db,
+        1,
+        target,
+        status=SyncRunStatus.FAILED,
+        stop_reason=wall.value,
+        now=datetime.now(UTC),
+        settings=Settings(),
+        wall=wall,
+        wall_url="https://www.linkedin.com/checkpoint/challenge/x",
+    )
+    with session_scope(cli_db) as session:
+        user = _user(session)
+        state = heat_service.state(session, user, target.account_id)
+        assert (state is not None and state.score > 0) is heated
+        assert (session_flag(session, user) is not None) is flagged
+
+
+@pytest.mark.usefixtures("inside_active_hours")
+def test_the_check_records_its_run_through_its_own_gate(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gates: list[object] = []
+    real = runs.create_run
+
+    def recording(*args: Any, **kwargs: Any) -> Any:
+        gates.append(kwargs.get("gate"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(runs, "create_run", recording)
+    _start(cli_db)
+    assert gates == [runs.MESSAGE_CHECK_GATE]
+    assert runs.MESSAGE_CHECK_GATE is not runs.MESSAGE_SEND_GATE

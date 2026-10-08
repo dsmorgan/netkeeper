@@ -938,8 +938,61 @@ CHECK_AFTER_HEADING: Final = "xpath=following::*"
 CHECK_NAME_PREFIX: Final = re.compile(r"^\s*Message\b")
 #: The tags the check names for a control or a hit element; anything else is ``other``.
 _CHECK_TAG: Final = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
-#: The roles the check names; anything else is ``other``. Never the page's own text.
-_CHECK_ROLE: Final = re.compile(r"^[a-z]{1,24}$")
+#: The roles the check names, from WAI-ARIA's list; any other ``role`` value is
+#: ``other``. Never the page's own text: a ``role`` attribute can hold anything.
+_CHECK_ROLES: Final = frozenset(
+    {
+        "alert",
+        "alertdialog",
+        "application",
+        "article",
+        "banner",
+        "button",
+        "cell",
+        "checkbox",
+        "combobox",
+        "complementary",
+        "contentinfo",
+        "dialog",
+        "document",
+        "feed",
+        "figure",
+        "form",
+        "generic",
+        "grid",
+        "group",
+        "heading",
+        "img",
+        "link",
+        "list",
+        "listbox",
+        "listitem",
+        "log",
+        "main",
+        "menu",
+        "menubar",
+        "menuitem",
+        "navigation",
+        "none",
+        "note",
+        "option",
+        "presentation",
+        "progressbar",
+        "region",
+        "row",
+        "search",
+        "separator",
+        "status",
+        "switch",
+        "tab",
+        "tablist",
+        "tabpanel",
+        "textbox",
+        "toolbar",
+        "tooltip",
+        "tree",
+    }
+)
 #: The implicit role of the tags a hit is likely to land on.
 _IMPLICIT_ROLES: Final[Mapping[str, str]] = {
     "button": "button",
@@ -975,7 +1028,10 @@ class HitRelation(enum.StrEnum):
     INSIDE = "inside the control"
     COVERED = "covered"
     NO_NODE = "no element at the point"
-    OUTSIDE_TREE = "an element outside the document tree (a frame or a shadow root)"
+    PSEUDO_INSIDE = "a pseudo-element inside the control"
+    PSEUDO_COVERED = "covered by a pseudo-element"
+    IN_FRAME = "an element inside a frame"
+    IN_SHADOW_ROOT = "an element inside a shadow root the tree didn't include"
     NOT_READ = "not read"
 
 
@@ -986,7 +1042,10 @@ class CheckHit:
 
     ``tag`` and ``role`` are the hit element's. For a covered point, ``band`` places it
     the way :func:`not_clear_reason` does, and ``landmark`` names the nearest ``header``,
-    ``nav``, ``aside``, ``footer`` or dialog around the covering element, if any."""
+    ``nav``, ``aside``, ``footer`` or dialog around the covering element, if any. For a
+    pseudo-element (``::before``, ``::after``) ``tag`` and ``role`` are its host's.
+    ``scope`` says when the hit element sits in a shadow root or a frame the tree
+    included."""
 
     point: tuple[float, float] | None
     relation: HitRelation
@@ -994,6 +1053,7 @@ class CheckHit:
     role: str | None = None
     band: str | None = None
     landmark: str | None = None
+    scope: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1052,6 +1112,54 @@ class MessageCheckSnapshot:
     verdict: str
     category: NotClear | None
     errors: tuple[str, ...]
+
+
+#: The scopes :class:`_CheckTree` marks: a pseudo-element, and what sits in a shadow root
+#: or a frame's document the tree included. Fixed words, printed as they are.
+PSEUDO_SCOPE: Final = "pseudo-element"
+SHADOW_SCOPE: Final = "shadow root"
+FRAME_SCOPE: Final = "frame"
+
+
+@dataclass(frozen=True, slots=True)
+class _CheckTree:
+    """``DOM.getDocument``'s tree, indexed by ``backendNodeId`` (#473): each node, its
+    parent (a pseudo-element's, shadow root's or frame document's is its host), and the
+    scope of what isn't in the plain light DOM. ``child_frames`` are the ids frame owner
+    elements name; ``root_frame`` the document's own, when the answer gives one."""
+
+    nodes: dict[int, Mapping[str, Any]]
+    parents: dict[int, Mapping[str, Any] | None]
+    scopes: dict[int, str]
+    child_frames: frozenset[str]
+    root_frame: str | None
+
+    @classmethod
+    def of(cls, root: Mapping[str, Any]) -> _CheckTree:
+        nodes: dict[int, Mapping[str, Any]] = {}
+        parents: dict[int, Mapping[str, Any] | None] = {}
+        scopes: dict[int, str] = {}
+        frames: set[str] = set()
+        stack: list[tuple[Mapping[str, Any], Mapping[str, Any] | None, str | None]] = [
+            (root, None, None)
+        ]
+        while stack:
+            node, parent, scope = stack.pop()
+            backend = int(node.get("backendNodeId", -1))
+            nodes[backend] = node
+            parents[backend] = parent
+            if scope is not None:
+                scopes[backend] = scope
+            if node is not root and node.get("frameId") is not None:
+                frames.add(str(node["frameId"]))
+            stack.extend((child, node, scope) for child in node.get("children", ()))
+            stack.extend((p, node, PSEUDO_SCOPE) for p in node.get("pseudoElements", ()))
+            stack.extend((r, node, SHADOW_SCOPE) for r in node.get("shadowRoots", ()))
+            content = node.get("contentDocument")
+            if content is not None:
+                stack.append((content, node, FRAME_SCOPE))
+        frame = root.get("frameId")
+        return cls(nodes, parents, scopes, frozenset(frames), None if frame is None else str(frame))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1119,7 +1227,7 @@ def _check_role(tag: str, attributes: Mapping[str, str]) -> str:
     explicit = attributes.get("role")
     if explicit:
         token = explicit.split()[0].casefold()
-        return token if _CHECK_ROLE.fullmatch(token) else "other"
+        return token if token in _CHECK_ROLES else "other"
     if tag == "a":
         return "link" if "href" in attributes else "none"
     return _IMPLICIT_ROLES.get(tag, "none")
@@ -2744,7 +2852,9 @@ class BrowserRun:
           CSS one).
         - ``DOM.getDocument`` with ``depth: -1``: the DOM tree, once, so a hit element's
           tag, role and ancestors are looked up here, not asked of the page again.
-          Frames and shadow roots aren't in it; a hit inside one says so.
+          Pseudo-elements, and any shadow roots and frame documents it holds, are
+          walked with their host as their parent. A hit on an element the tree doesn't
+          hold is in a frame (by its ``frameId``) or in a shadow root, and says which.
         - ``DOM.getNodeForLocation``: the element the page would hit at each probe's
           point (a candidate's click point, or an on-screen control's center), sent as a
           document point, as :meth:`_read_click_geometry` sends it.
@@ -2773,17 +2883,7 @@ class BrowserRun:
                 device = metrics.get("layoutViewport") or {}
                 ratio = _ratio(device.get("clientWidth"), layout["clientWidth"])
                 document = await session.send("DOM.getDocument", {"depth": -1})
-                parents: dict[int, Mapping[str, Any] | None] = {}
-                nodes: dict[int, Mapping[str, Any]] = {}
-                stack: list[tuple[Mapping[str, Any], Mapping[str, Any] | None]] = [
-                    (document["root"], None)
-                ]
-                while stack:
-                    node, parent = stack.pop()
-                    backend = int(node.get("backendNodeId", -1))
-                    nodes[backend] = node
-                    parents[backend] = parent
-                    stack.extend((child, node) for child in node.get("children", ()))
+                tree = _CheckTree.of(document["root"])
                 hits: list[CheckHit | None] = []
                 for box, given, tag in probes:
                     point = given
@@ -2793,9 +2893,7 @@ class BrowserRun:
                         hits.append(CheckHit(point, HitRelation.NOT_READ))
                         continue
                     hits.append(
-                        await self._check_hit(
-                            session, nodes, parents, box, point, tag, viewport, scroll
-                        )
+                        await self._check_hit(session, tree, box, point, tag, viewport, scroll)
                     )
                 return _CheckDetail(viewport, scroll, zoom, ratio, tuple(hits))
         except Exception as exc:
@@ -2807,8 +2905,7 @@ class BrowserRun:
     @staticmethod
     async def _check_hit(
         session: _CdpSessionLike,
-        nodes: Mapping[int, Mapping[str, Any]],
-        parents: Mapping[int, Mapping[str, Any] | None],
+        tree: _CheckTree,
         box: Mapping[str, float],
         point: tuple[float, float],
         tag: str,
@@ -2830,9 +2927,25 @@ class BrowserRun:
             )
         except Exception:
             return CheckHit(point, HitRelation.NO_NODE)
-        hit = nodes.get(int(found["backendNodeId"]))
+        backend = int(found["backendNodeId"])
+        hit = tree.nodes.get(backend)
         if hit is None:
-            return CheckHit(point, HitRelation.OUTSIDE_TREE)
+            frame = found.get("frameId")
+            if frame is not None and (
+                frame in tree.child_frames
+                or (tree.root_frame is not None and frame != tree.root_frame)
+            ):
+                return CheckHit(point, HitRelation.IN_FRAME)
+            return CheckHit(point, HitRelation.IN_SHADOW_ROOT)
+        scope = tree.scopes.get(backend)
+        pseudo = scope == PSEUDO_SCOPE
+        if pseudo:
+            # A ::before or ::after: described by its host, and the walk starts there.
+            host = tree.parents.get(backend)
+            if host is None:
+                return CheckHit(point, HitRelation.IN_SHADOW_ROOT)
+            hit = host
+            scope = tree.scopes.get(int(host.get("backendNodeId", -1)))
         hit_tag = _check_tag(hit.get("nodeName", ""))
         hit_role = _check_role(hit_tag, _attributes(hit))
         landmark: str | None = None
@@ -2846,16 +2959,27 @@ class BrowserRun:
                 try:
                     model = await session.send("DOM.getBoxModel", {"nodeId": node["nodeId"]})
                     if _same_box(_quad_box(model["model"]["border"]), box):
-                        relation = HitRelation.CONTROL if node is hit else HitRelation.INSIDE
-                        return CheckHit(point, relation, hit_tag, hit_role)
+                        if pseudo:
+                            relation = HitRelation.PSEUDO_INSIDE
+                        elif node is hit:
+                            relation = HitRelation.CONTROL
+                        else:
+                            relation = HitRelation.INSIDE
+                        return CheckHit(point, relation, hit_tag, hit_role, scope=scope)
                 except Exception as exc:
                     log.debug("message check: an ancestor has no box (%s)", type(exc).__name__)
             node_role = _check_role(node_tag, attributes)
             if landmark is None and (node_tag in _LANDMARK_TAGS or node_role in _LANDMARK_ROLES):
                 landmark = f"{node_tag} ({node_role})"
-            node = parents.get(int(node.get("backendNodeId", -1)))
+            node = tree.parents.get(int(node.get("backendNodeId", -1)))
         return CheckHit(
-            point, HitRelation.COVERED, hit_tag, hit_role, _band(point[1], viewport), landmark
+            point,
+            HitRelation.PSEUDO_COVERED if pseudo else HitRelation.COVERED,
+            hit_tag,
+            hit_role,
+            _band(point[1], viewport),
+            landmark,
+            scope,
         )
 
     async def type_into_composer(
