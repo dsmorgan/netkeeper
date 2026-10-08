@@ -8,12 +8,12 @@ import json
 import logging
 import socket
 import threading
-import time
 import urllib.request
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from gmail_fakes import CLIENT_ID, CLIENT_SECRET, FAKE_EMAIL, FakeGoogle
+from time_limit import Stopwatch
 
 from netkeeper.campaigns import gmail_oauth
 from netkeeper.campaigns.gmail_oauth import (
@@ -368,13 +368,13 @@ def _wait_in_thread(
         except TimeoutError as exc:
             outcome.append(exc)
 
-    started = time.monotonic()
+    watch = Stopwatch()  # without garbage collection (#472)
     thread = threading.Thread(target=wait, daemon=True)
     thread.start()
     thread.join(5)
     assert not thread.is_alive(), "the wait outlived its timeout"
     [result] = outcome
-    return result, time.monotonic() - started
+    return result, watch.elapsed
 
 
 @pytest.mark.parametrize("connection_timeout_s", [0.1, 10.0])

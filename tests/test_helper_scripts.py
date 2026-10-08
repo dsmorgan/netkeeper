@@ -27,6 +27,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
+from time_limit import Stopwatch
 
 from netkeeper.services import browser_launch
 
@@ -508,14 +509,14 @@ def test_curl_shim_refuses_a_9222_argument_without_a_network_call(tmp_path: Path
     shim_dir = tmp_path / "shim"
     shim_dir.mkdir()
     _curl_shim(shim_dir)
-    start = time.monotonic()
+    watch = Stopwatch()  # without garbage collection (#472)
     result = subprocess.run(
         [str(shim_dir / "curl"), "-fsS", "--max-time", "2", "http://192.0.2.1:9222/json/version"],
         capture_output=True,
         text=True,
         timeout=5,
     )
-    elapsed = time.monotonic() - start
+    elapsed = watch.elapsed
     assert result.returncode != 0
     assert "refused: 9222" in result.stderr
     assert elapsed < 1, "the shim must refuse instantly, not attempt the request first"

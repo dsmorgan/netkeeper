@@ -134,10 +134,12 @@ jobs:
       - run: uv sync --all-extras
       # Across every core the runner has (pytest-xdist); `make test-serial` is the
       # one-process fallback. The slowest twenty are printed so the headroom under
-      # tests/time_limit.py's limit shows on every run (#220).
+      # tests/time_limit.py's limit shows on every run (#220). A runner is slower than
+      # a laptop, so every time budget there is doubled (#472).
       - run: make test
         env:
           PYTEST_ADDOPTS: --durations=20
+          NETKEEPER_TEST_TIME_SCALE: "2"
 
   # The name the single Python job had, kept so a branch-protection rule that
   # requires it still finds it: green when all three jobs above passed, or when the

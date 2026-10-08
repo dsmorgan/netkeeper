@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -15,6 +14,7 @@ import pytest
 from campaign_fakes import NOW, SETTINGS, FakeSender, make_mailbox
 from fastapi import FastAPI
 from sqlalchemy import Connection, Engine, event, select
+from time_limit import Stopwatch
 
 from netkeeper.campaigns.gmail_fake import FakeGmail
 from netkeeper.config import Settings
@@ -168,13 +168,13 @@ async def test_a_request_holding_the_write_lock_during_a_tick_does_not_deadlock(
     engine: Engine = running_app.state.engine
     event.listen(engine, "begin", on_begin)
     try:
-        started = time.monotonic()
+        watch = Stopwatch()
         ticking = asyncio.create_task(tick_once_the_request_holds_the_lock())
         response = await client.post(
             "/api/v1/linkedin/pins", json={"contact_id": to_pin}, headers=CLIENT
         )
         [result] = await asyncio.wait_for(ticking, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000 * 2)
-        elapsed = time.monotonic() - started
+        elapsed = watch.elapsed  # without garbage collection (#472)
     finally:
         event.remove(engine, "begin", on_begin)
 

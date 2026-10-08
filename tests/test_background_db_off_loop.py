@@ -47,6 +47,11 @@ from netkeeper.worker import BrowserWorker
 #: Short enough that the old deadlock fails fast; the fixed path never waits it out.
 BUSY_TIMEOUT_MS = 300
 
+#: The short busy timeout runs while another thread holds the write lock, and a full
+#: garbage collection on CI (2-3 s) stops every thread but the busy wait itself, so
+#: one landing there used to fail a correct test (#472). These bodies hold collection.
+pytestmark = pytest.mark.wall_clock
+
 
 @pytest.fixture
 def engine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Engine]:
