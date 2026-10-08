@@ -81,12 +81,12 @@ import pytest
 @pytest.fixture(scope="module")
 def big_heap() -> list[list[int]]:
     # Lists, which the collector tracks (a tuple of ints it untracks): each full
-    # collection walks all two million of them.
-    return [[n] for n in range(2_000_000)]
+    # collection walks all half a million of them.
+    return [[n] for n in range(500_000)]
 
 
 def test_collects(big_heap: list[list[int]]) -> None:
-    for _ in range(3):
+    for _ in range(15):  # about 0.15 s on a laptop: three times the limit
         gc.collect()
 
 
@@ -139,7 +139,7 @@ def test_the_scale_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_a_stopwatch_leaves_out_collections() -> None:
-    heap = [[n] for n in range(1_000_000)]  # lists: tracked, so the collection walks them
+    heap = [[n] for n in range(500_000)]  # lists: tracked, so the collection walks them
     watch = time_limit.Stopwatch()
     gc.collect()
     assert watch.gc > 0

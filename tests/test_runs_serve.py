@@ -31,7 +31,7 @@ from fastapi import FastAPI
 from run_fakes import Clock, ConnectionsContext, Gate, fake_provider, worker_extractor
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
-from test_web_events import SSEClient
+from test_web_events import WAIT_S, SSEClient
 
 from netkeeper.config import Settings
 from netkeeper.db import make_session_factory, session_scope
@@ -362,6 +362,7 @@ async def test_an_app_without_the_extractor_starts_no_scheduler_and_no_run(
     assert (await client.get("/api/v1/linkedin/runs")).json()["total"] == 0
 
 
+@pytest.mark.wall_clock  # an asyncio timeout bounds a step (#472)
 async def test_the_event_stream_starts_nothing(
     bare_engine: Engine, settings: Settings, no_frontend: None
 ) -> None:
@@ -372,7 +373,7 @@ async def test_the_event_stream_starts_nothing(
         for _ in range(3):  # a reconnect is the same request again
             stream = SSEClient(app)
             stream.start()
-            async with asyncio.timeout(2):
+            async with asyncio.timeout(WAIT_S):
                 await stream.started.wait()
             assert stream.status == 200
             await stream.close()
@@ -442,6 +443,7 @@ async def test_arming_through_the_api_seeds_a_served_kind_with_no_due_time(
 # --- start, watch, stop: P2-10's done-when ---------------------------------------------
 
 
+@pytest.mark.wall_clock  # an asyncio timeout bounds a step (#472)
 async def test_the_ui_can_start_a_run_watch_it_and_stop_it(
     bare_engine: Engine, settings: Settings, no_frontend: None
 ) -> None:
@@ -878,6 +880,7 @@ def test_the_real_serve_builds_its_extractor_on_the_attach_provider(
     assert executor.provider.locks.legacy_partner == account_key(local_account)
 
 
+@pytest.mark.wall_clock  # an asyncio timeout bounds a step (#472)
 async def test_shutting_down_mid_run_records_it_interrupted(
     bare_engine: Engine, settings: Settings, no_frontend: None
 ) -> None:

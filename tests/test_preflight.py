@@ -236,6 +236,7 @@ async def test_a_browser_that_is_not_running_is_a_problem_not_an_exception() -> 
     assert report.fingerprint is None
 
 
+@pytest.mark.wall_clock  # BUSY_TIMEOUT_S bounds an instant refusal (#472)
 async def test_preflight_waits_for_nobody_and_reports_busy() -> None:
     """Spec 9.9: the "check session" path takes the same lock as a run.
 

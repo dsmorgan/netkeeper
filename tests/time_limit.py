@@ -109,7 +109,11 @@ def gc_seconds() -> float:
 
 
 class Stopwatch:
-    """Elapsed wall time, less the time the garbage collector held the process."""
+    """Elapsed wall time, less the time the garbage collector held the process.
+
+    It subtracts collections run by any thread, so don't use it to bound a wait that
+    releases the GIL (a subprocess, a socket, a lock) while another thread allocates.
+    """
 
     def __init__(self) -> None:
         self._started = time.perf_counter()

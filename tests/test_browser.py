@@ -311,6 +311,7 @@ async def test_a_navigation_that_merely_fails_belongs_to_the_caller() -> None:
 # --- the activity lock -------------------------------------------------------
 
 
+@pytest.mark.wall_clock  # BUSY_TIMEOUT_S bounds an instant refusal (#472)
 async def test_one_run_at_a_time_for_an_account() -> None:
     """Spec 9.9: two CDP clients on one browser drop each other's connection."""
     connector = FakeConnector()
@@ -340,6 +341,7 @@ async def test_a_second_account_runs_while_the_first_is_busy() -> None:
         assert provider.locks.lock_for("account-1") is not provider.locks.lock_for("account-2")
 
 
+@pytest.mark.wall_clock  # BUSY_TIMEOUT_S bounds an instant refusal (#472)
 async def test_one_registry_gates_every_provider_that_shares_it() -> None:
     """One registry, handed to everything that attaches in a process, is one gate."""
     locks = ActivityLocks()
@@ -352,6 +354,7 @@ async def test_one_registry_gates_every_provider_that_shares_it() -> None:
                 pass
 
 
+@pytest.mark.wall_clock  # BUSY_TIMEOUT_S bounds an instant refusal (#472)
 async def test_a_second_registry_is_gated_by_the_file_lock() -> None:
     """Issue #153: a registry of its own is what `netkeeper preflight` in a terminal has.
 
@@ -1191,6 +1194,7 @@ def test_the_lock_key_is_the_account_row() -> None:
         activity_lock.account_key(0)
 
 
+@pytest.mark.wall_clock  # BUSY_TIMEOUT_S bounds an instant refusal (#472)
 async def test_an_older_process_holding_the_legacy_lock_blocks_account_one() -> None:
     """A pre-P2-10 netkeeper holds only ``browser-local.lock``; a new hold of account 1
     must not attach alongside it, and a new hold must keep an old one out too."""
