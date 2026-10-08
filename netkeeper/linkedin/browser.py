@@ -902,9 +902,13 @@ def _click_point(
 
 
 def _backend_ids(node: Mapping[str, Any]) -> list[int]:
-    """Every ``backendNodeId`` in a ``DOM.describeNode`` answer's subtree, its own first."""
+    """Every ``backendNodeId`` in a ``DOM.describeNode`` answer's subtree, its own first.
+
+    The subtree counts each node's ``pseudoElements`` (``::before``, ``::after``) as
+    well as its ``children`` (#475): ``DOM.getNodeForLocation`` over a link's own
+    pseudo-element answers with the pseudo-element's id, not the link's."""
     ids = [int(node["backendNodeId"])]
-    for child in node.get("children", ()):
+    for child in (*node.get("children", ()), *node.get("pseudoElements", ())):
         ids.extend(_backend_ids(child))
     return ids
 
@@ -2211,10 +2215,11 @@ class BrowserRun:
           Without it, a scrolled page is hit-tested where the control isn't.
 
         A hit counts for a control when it is the link or inside it, matched by node, not
-        by size: an icon may overflow its link's box. No script runs in the page,
-        nothing is input, and nothing the page can see changes. ``None`` when the
-        session can't start or a read fails: the click then chooses without geometry
-        (:class:`ClickTarget` ``UNCHECKED``).
+        by size: an icon may overflow its link's box. The link's own pseudo-elements, and
+        its descendants', are inside it (#475); another element's are not. No script
+        runs in the page, nothing is input, and nothing the page can see changes.
+        ``None`` when the session can't start or a read fails: the click then chooses
+        without geometry (:class:`ClickTarget` ``UNCHECKED``).
         """
         context = cast(_TapContext, self._attachment.context)
         try:

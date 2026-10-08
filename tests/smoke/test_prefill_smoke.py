@@ -49,7 +49,12 @@ from messaging_pages import (
     never_messaged_bubble_html,
 )
 
-from netkeeper.linkedin.browser import AttachBrowserProvider, ClickFailure, classify_click_failure
+from netkeeper.linkedin.browser import (
+    MESSAGE_NOT_ON_SCREEN,
+    AttachBrowserProvider,
+    ClickFailure,
+    classify_click_failure,
+)
 from netkeeper.linkedin.messaging import (
     COMPOSE_OPTIONS_PATH,
     MessageJobSpec,
@@ -91,6 +96,9 @@ class Scenario:
     #: minimized bubbles from earlier conversations and the Messaging bar.
     #: ``scroll_sticky`` (#470): a page that scrolls, with a fixed navigation bar and an
     #: invented sticky header that appears once it has scrolled 200 pixels.
+    #: ``pseudo_icon`` (#475): the top card's link draws its icon with a ``::before``
+    #: over its whole box, click point included. ``pseudo_cover``: another element's
+    #: ``::after`` lies over both of the contact's controls.
     layout: str = ""
 
 
@@ -116,6 +124,8 @@ SCENARIOS = {
     "scroll_sticky": Scenario(_member(315), layout="scroll_sticky"),
     "scroll_sticky_unfixed": Scenario(_member(316), layout="scroll_sticky"),
     "scroll_clear": Scenario(_member(317), layout="scroll_sticky"),
+    "pseudo_icon": Scenario(_member(318), layout="pseudo_icon"),
+    "pseudo_cover": Scenario(_member(319), layout="pseudo_cover"),
     # ADR 0008: auto-send, against this replica only.
     "auto_existing": Scenario(_member(320)),
     "auto_never_messaged": Scenario(_member(321), existing=False, enter_sends=False),
@@ -254,6 +264,19 @@ def _layout_html(scenario: Scenario) -> str:
         extra = (
             '<aside style="position:absolute;left:700px;top:220px"><h2>More profiles for you'
             f"</h2><ul>{people}</ul></aside>"
+        )
+    elif scenario.layout == "pseudo_icon":
+        # The link's own pseudo-element, on its inner span: what the hit test answers.
+        extra = (
+            "<style>[componentkey=top-card] a{position:relative;display:inline-block}"
+            "[componentkey=top-card] a>span::before{content:'';position:absolute;inset:0;"
+            "background:#0a66c2;opacity:.3}</style>"
+        )
+    elif scenario.layout == "pseudo_cover":
+        # An empty element whose ::after is a fixed overlay over both controls.
+        extra = (
+            "<style>#veil::after{content:'';position:fixed;left:0;top:180px;width:600px;"
+            "height:420px;background:#eee;z-index:20}</style><div id='veil'></div>"
         )
     elif scenario.layout == "minimized":
         extra = _minimized_bubbles()
@@ -497,6 +520,7 @@ def _no_send(state: dict[str, Any]) -> None:
         "sticky",
         "covered",
         "sidebar",
+        "pseudo_icon",
     ],
 )
 async def test_the_body_is_typed_into_a_real_composer_and_never_sent(
@@ -517,7 +541,12 @@ async def test_the_body_is_typed_into_a_real_composer_and_never_sent(
     clicks = [e for e in state["events"] if e.startswith("click:")]
     assert clicks == [f"click:{compose_href(SCENARIOS[name].member)}"]
     # #444: which control took the click, on the layouts that have a choice.
-    expected_card = {"sticky": "top-card", "covered": "highlights", "sidebar": "top-card"}
+    expected_card = {
+        "sticky": "top-card",
+        "covered": "highlights",
+        "sidebar": "top-card",
+        "pseudo_icon": "top-card",
+    }
     if name in expected_card:
         cards = [e for e in state["events"] if e.startswith("card:")]
         assert cards == [f"card:{expected_card[name]}"], state["events"]
@@ -532,11 +561,22 @@ REFUSALS = {
     # click, refuses them and a leftover open bubble with no click.
     "minimized": "a message bubble is already open in Chrome, minimized ones included",
     "leftover": "a message bubble is already open in Chrome, minimized ones included",
+    # #475: another element's ::after over every control covers them; no click.
+    "pseudo_cover": MESSAGE_NOT_ON_SCREEN,
 }
 
 
 @pytest.mark.parametrize(
-    "name", ["decoy_link", "draft", "other_recipient", "two_composers", "minimized", "leftover"]
+    "name",
+    [
+        "decoy_link",
+        "draft",
+        "other_recipient",
+        "two_composers",
+        "minimized",
+        "leftover",
+        "pseudo_cover",
+    ],
 )
 async def test_a_refused_prefill_types_nothing(origin: str, name: str) -> None:
     result, state = await _prefill(origin, SCENARIOS[name])
@@ -546,6 +586,9 @@ async def test_a_refused_prefill_types_nothing(origin: str, name: str) -> None:
     _no_send(state)
     if name == "decoy_link":
         assert not [e for e in state["events"] if e.startswith("click:")]
+    if name == "pseudo_cover":
+        assert not state["attempted"], state["events"]
+        assert not [e for e in state["events"] if e.startswith("click:")], state["events"]
     if name in ("minimized", "leftover"):
         # No click, so no second bubble: only the leftover composers are on the page.
         assert state["open"] and not state["attempted"]

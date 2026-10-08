@@ -26,6 +26,7 @@ from messaging_pages import (
     existing_bubble_html,
     message_control_html,
 )
+from run_fakes import fake_provider
 from test_prefill_page import assert_no_keys, prefill
 
 from netkeeper.linkedin import browser as browser_module
@@ -39,6 +40,7 @@ from netkeeper.linkedin.browser import (
     ClickFailure,
     ClickGeometry,
     ClickTarget,
+    NotClear,
     _click_point,
     choose_message_target,
     classify_click_failure,
@@ -476,3 +478,77 @@ async def test_a_hit_on_the_links_own_icon_counts_even_when_it_overflows_the_lin
     assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
     assert _clicked_key(site) == "top-card"
     assert ran.run.message_click_diagnostics["message_click_target"] == "top_card"
+
+
+# --- #475: CSS pseudo-elements at the click point -------------------------------------------
+
+#: The top card's click point is the middle of its box, (95, 316): a 20-pixel square
+#: around it, where an icon drawn with ``::before`` sits.
+ICON_AT_CLICK_POINT = "85,306,20,20"
+
+
+def _top_card_icon(profile: str, attr: str = "data-before-box") -> str:
+    """``profile`` with the top card's icon drawn by a pseudo-element at its click point."""
+    link = profile.index('<a data-box="40,300,110,32"')
+    svg = profile.index("<svg ", link)
+    return f'{profile[:svg]}<svg {attr}="{ICON_AT_CLICK_POINT}" {profile[svg + 5 :]}'
+
+
+@pytest.mark.parametrize("attr", ["data-before-box", "data-after-box"])
+async def test_a_hit_on_the_links_own_pseudo_element_icon_counts(attr: str) -> None:
+    """#475: the hit at the click point is the icon's ``::before`` (or ``::after``), with
+    its own ``backendNodeId``; it is the link's own, not something over it."""
+    site = _site(_top_card_icon(_profile(), attr))
+    ran = await prefill(site)
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert _clicked_key(site) == "top-card"
+    assert ran.run.message_click_diagnostics["message_click_target"] == "top_card"
+
+
+async def test_a_pseudo_element_on_the_link_itself_counts() -> None:
+    profile = _profile().replace(
+        '<a data-box="40,300,110,32"', '<a data-box="40,300,110,32" data-after-box="40,300,110,32"'
+    )
+    site = _site(profile)
+    ran = await prefill(site)
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert _clicked_key(site) == "top-card"
+    assert ran.run.message_click_diagnostics["message_click_target"] == "top_card"
+
+
+async def test_another_elements_pseudo_element_over_the_top_card_still_covers_it() -> None:
+    """#475: only the link's own pseudo-elements are its own. An overlay drawn by another
+    element's ``::after`` covers the top card, so the Highlights copy is clicked."""
+    bar = '<aside data-after-box="0,280,600,80"><h2>Messaging</h2></aside>'
+    site = _site(_top_card_icon(_profile(extra=bar)))
+    ran = await prefill(site)
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert _clicked_key(site) == "highlights"
+    assert ran.run.message_click_diagnostics["message_click_target"] == "on_screen"
+
+
+async def test_another_elements_pseudo_element_over_every_control_refuses() -> None:
+    cover = '<aside data-before-box="0,0,1280,800"><h2>Messaging</h2></aside>'
+    site = _site(_top_card_icon(_profile(extra=cover)))
+    ran = await prefill(site)
+    assert_no_keys(ran)
+    assert ran.result.outcome.reason == MESSAGE_NOT_ON_SCREEN
+    assert site.tab.clicks == [] and not ran.run.message_click_attempted
+
+
+async def test_the_scroll_back_probe_counts_the_links_own_pseudo_elements_too() -> None:
+    """#475 in :meth:`BrowserRun.message_cover` (#470), which reads the same geometry: the
+    link's own ``::before`` is clear, another element's ``::after`` covers it. The
+    Highlights copy is moved off screen, so the top card is the only choice."""
+    path = f"/in/{ZEPHYRINE.slug}/"
+    for extra, expected in [
+        ("", None),
+        ('<aside data-after-box="0,280,600,80"></aside>', NotClear.COVERED_BY_OTHER),
+    ]:
+        profile = _profile(extra=extra).replace('"40,620,110,32"', '"40,1620,110,32"')
+        site = _site(_top_card_icon(profile))
+        provider, _ = fake_provider(site)
+        async with provider.run() as run:
+            await run.goto(f"https://www.linkedin.com{path}")
+            assert await run.message_cover(path, ZEPHYRINE.profile_id) is expected
+            assert site.tab.clicks == [] and not run.message_click_attempted
