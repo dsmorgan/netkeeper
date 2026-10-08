@@ -233,6 +233,7 @@ class GeometrySession:
             "nodeId": index + 1,
             "backendNodeId": index + 1,
             "nodeName": element.tag.upper(),
+            "attributes": [part for pair in element.attrs.items() for part in pair],
             "children": [self._describe(c, order) for c in children],
         }
         # As Chrome's describeNode does (#475): a node's pseudo-elements beside its children.
@@ -262,15 +263,31 @@ class GeometrySession:
         scroll_x, scroll_y = self.tab.site.scroll_offset
         if method == "Page.getLayoutMetrics":
             width, height = self.viewport
+            ratio = self.tab.site.device_pixel_ratio
             return {
                 "cssLayoutViewport": {
                     "clientWidth": width,
                     "clientHeight": height,
                     "pageX": scroll_x,
                     "pageY": scroll_y,
-                }
+                },
+                # Deprecated, in device pixels, as Chrome still sends it (#473).
+                "layoutViewport": {"clientWidth": width * ratio, "clientHeight": height * ratio},
+                "cssVisualViewport": {"zoom": self.tab.site.zoom, "scale": 1.0},
             }
         if method == "DOM.getDocument":
+            if params == {"depth": -1}:
+                # The whole tree (#473's detail read): the document node, then every
+                # element, with the same ids the other methods use.
+                children = [c for c in self.tab.document.children if isinstance(c, Element)]
+                return {
+                    "root": {
+                        "nodeId": 0,
+                        "backendNodeId": 0,
+                        "nodeName": "#document",
+                        "children": [self._describe(c, order) for c in children],
+                    }
+                }
             assert params == {"depth": 0}
             return {"root": {"nodeId": 0}}
         if method == "DOM.querySelectorAll":
@@ -461,14 +478,19 @@ class FakeLocator:
                 return _unique(out)
 
             return self._then(up, f".locator({selector})")
-        if selector == "xpath=following::a":
-            # Every <a> after the element in document order, outside it (#444's top card).
+        if selector in ("xpath=following::a", "xpath=following::*"):
+            # Every <a> (or every element, for #473's check) after the element in document
+            # order, outside it (#444's top card).
+            wanted = selector.rpartition("::")[2]
+
             def following(found: list[Element]) -> list[Element]:
                 order = list(self._page.document.elements())
                 out: list[Element] = []
                 for element in found:
                     after = order[order.index(element) + 1 :]
-                    out.extend(e for e in after if e.tag == "a" and not element.contains(e))
+                    out.extend(
+                        e for e in after if wanted in ("*", e.tag) and not element.contains(e)
+                    )
                 return _unique(out)
 
             return self._then(following, f".locator({selector})")
@@ -918,6 +940,9 @@ class MessagingSite(FakeContext):
         self.viewport: tuple[float, float] | None = None
         #: How far the page is scrolled, as ``Page.getLayoutMetrics`` reports it (#470).
         self.scroll_offset: tuple[float, float] = (0.0, 0.0)
+        #: The page zoom and device pixels per CSS pixel the metrics report (#473).
+        self.zoom = 1.0
+        self.device_pixel_ratio = 2.0
         self.geometry_error: BaseException | None = None
         self.geometry_hangs = False
         self.geometry_sessions: list[GeometrySession] = []

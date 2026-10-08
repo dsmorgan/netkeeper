@@ -13,7 +13,9 @@ owns only what needs the browser.
 **Who calls it.** ``netkeeper serve``'s scheduler (through
 :mod:`netkeeper.services.scheduled_runs`), the runs API (which submits it to
 the task runner and answers ``202``, never awaiting it inside the request,
-spec 9.9), and ``netkeeper linkedin sync``/``enrich`` on their own loops. The
+spec 9.9), and ``netkeeper linkedin sync``/``enrich`` on their own loops.
+``netkeeper linkedin message-check`` calls :func:`run_message_check` (#473), a
+prefill's steps up to its click, on its own loop. The
 app and the API reach it only as a :class:`~netkeeper.services.runs.RunExecutor`,
 so no request handler imports the browser (``tests/test_browser_safety.py``
 lists this module among the browser's few callers on purpose).
@@ -69,16 +71,19 @@ from netkeeper.linkedin.browser import (
     BrowserUnavailable,
 )
 from netkeeper.linkedin.connections import ConnectionsSource, SyncMode
-from netkeeper.linkedin.enrich import ProfileSource
+from netkeeper.linkedin.enrich import LINKEDIN_ORIGIN, ProfileSource
 from netkeeper.linkedin.inbox import InboxSource
 from netkeeper.linkedin.messaging import MessageOutcome, MessageOutcomeKind, PrefillSource
 from netkeeper.linkedin.page_connections import PageConnections
 from netkeeper.linkedin.page_inbox import PageInbox
-from netkeeper.linkedin.page_messaging import PagePrefill
+
+# Re-exported for the CLI's report, so the CLI reaches the page source only through here.
+from netkeeper.linkedin.page_messaging import MessageCheckResult as MessageCheckResult
+from netkeeper.linkedin.page_messaging import PageMessageCheck, PagePrefill
 from netkeeper.linkedin.page_profiles import PageProfiles
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
-from netkeeper.services import message_send, route_breaker, runs, ui_settings
+from netkeeper.services import message_check, message_send, route_breaker, runs, ui_settings
 from netkeeper.services.budgets import (
     ActionClass,
     li_message_risk_warning,
@@ -96,6 +101,9 @@ log = logging.getLogger(__name__)
 
 Clock = Callable[[], datetime]
 Sleep = Callable[[float], Awaitable[None]]
+
+#: How often, at most, a Message check asks the database whether it was cancelled.
+CANCEL_POLL_S: Final = 1.0
 
 
 def _utcnow() -> datetime:
@@ -715,3 +723,94 @@ def dev_app() -> FastAPI:
     """
     setup_logging()
     return serve_app(load_settings())
+
+
+async def run_message_check(
+    provider: BrowserProvider,
+    factory: sessionmaker[Session],
+    user_id: int,
+    target: message_check.CheckTarget,
+    *,
+    settings: Settings,
+    sleep: Sleep = asyncio.sleep,
+    clock: Clock = _utcnow,
+    rng: random.Random | None = None,
+    origin: str = LINKEDIN_ORIGIN,
+) -> MessageCheckResult:
+    """Run a recorded Message check (#473) and record how its run ended.
+
+    Under the account's activity lock, never waiting for it (as a prefill): attach,
+    re-check the gates and spend one profile visit (:func:`message_check.spend`), then
+    :class:`~netkeeper.linkedin.page_messaging.PageMessageCheck` on the run's own tab,
+    which the provider closes at the end. A busy or missing browser, a refusal, or a
+    failure ends the run ``failed`` with fixed words or an exception's type name, never
+    a page's text. A cancel from outside records ``aborted`` and propagates."""
+    asked_at = -CANCEL_POLL_S
+
+    async def cancelled() -> bool:
+        nonlocal asked_at
+        loop = asyncio.get_running_loop()
+        if loop.time() - asked_at < CANCEL_POLL_S:
+            return False
+        asked_at = loop.time()
+        return await off_loop(message_check.cancel_requested, factory, user_id, target.run_id)
+
+    async def end(status: SyncRunStatus, reason: str, error: str | None = None) -> None:
+        await off_loop(
+            message_check.finish_quietly,
+            factory,
+            user_id,
+            target,
+            status=status,
+            stop_reason=reason,
+            now=clock(),
+            settings=settings,
+            error=error,
+        )
+
+    try:
+        async with provider.run(account_key(target.account_id)) as browser:
+            refused = await off_loop(
+                message_check.spend, factory, user_id, target, settings=settings, now=clock()
+            )
+            if refused is not None:
+                await end(SyncRunStatus.FAILED, *refused)
+                return MessageCheckResult(stopped=refused[1])
+            check = PageMessageCheck(browser, origin=origin, sleep=sleep, rng=rng)
+            result = await check.run(target.public_id, target.profile_id, cancelled=cancelled)
+    except (BrowserBusy, BrowserUnavailable) as exc:
+        reason = "browser_busy" if isinstance(exc, BrowserBusy) else "browser_unavailable"
+        log.warning("message check run %d could not use the browser: %s", target.run_id, exc)
+        await end(SyncRunStatus.FAILED, reason, runs.describe_stop_reason(reason))
+        return MessageCheckResult(stopped=runs.describe_stop_reason(reason))
+    except asyncio.CancelledError:
+        await end(SyncRunStatus.ABORTED, "interrupted", runs.INTERRUPTED)
+        raise
+    except Exception as exc:
+        # The type only: a Playwright error's text can quote a selector, and a selector
+        # here holds the contact's compose href.
+        log.error("message check run %d failed (%s)", target.run_id, type(exc).__name__)
+        await end(SyncRunStatus.FAILED, "error", f"the check failed ({type(exc).__name__})")
+        return MessageCheckResult(stopped=f"the check failed ({type(exc).__name__})")
+    if result.stopped is None:
+        status, reason = SyncRunStatus.COMPLETED, message_check.MESSAGE_CHECK_STOP
+    elif result.stopped == "cancelled":
+        status, reason = SyncRunStatus.ABORTED, runs.CANCELLED
+    elif result.wall is not None:
+        status, reason = SyncRunStatus.FAILED, result.wall.value
+    else:
+        status, reason = SyncRunStatus.FAILED, "error"
+    await off_loop(
+        message_check.finish,
+        factory,
+        user_id,
+        target,
+        status=status,
+        stop_reason=reason,
+        now=clock(),
+        settings=settings,
+        error=result.stopped if status is SyncRunStatus.FAILED else None,
+        wall=result.wall,
+        wall_url=result.wall_url,
+    )
+    return result

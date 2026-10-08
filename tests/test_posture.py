@@ -1028,12 +1028,14 @@ def test_a_caller_nothing_starts_is_not_live() -> None:
         package / "services" / "enrichment.py",
         package / "services" / "inbox_poll.py",  # P4-08
         package / "services" / "message_send.py",  # P4-03
+        package / "services" / "message_check.py",  # #473: a wall at the checked profile
     }
     assert _callers_of("netkeeper.services.heat.raise_heat") == {
         package / "services" / "connections_sync.py",
         package / "services" / "enrichment.py",
         package / "services" / "inbox_poll.py",
         package / "services" / "message_send.py",
+        package / "services" / "message_check.py",
     }
     # The prefill's runner is live through the worker (P4-03), and only through it.
     assert package / "services" / "message_send.py" in live
