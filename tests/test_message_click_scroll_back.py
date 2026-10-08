@@ -33,6 +33,7 @@ from netkeeper.linkedin.browser import (
     MESSAGE_NOT_ON_SCREEN,
     STICKY_HEADER_BAND_PX,
     TOP_CARD_COVERED,
+    BrowserRun,
     ClickGeometry,
     NotClear,
     not_clear_reason,
@@ -409,3 +410,69 @@ async def test_a_scrolled_page_is_hit_tested_at_the_document_point() -> None:
         "y": round(TOP_CARD_Y - 120 + 16 + 120),
         "ignorePointerEventsNone": True,
     }
+
+
+def _count_scrolls(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Count ``BrowserRun.scroll`` calls, recording each plan's step count."""
+    calls: list[int] = []
+    real = BrowserRun.scroll
+
+    async def counted(self: BrowserRun, plan: Any, **kwargs: Any) -> Any:
+        calls.append(len(plan.steps))
+        return await real(self, plan, **kwargs)
+
+    monkeypatch.setattr(BrowserRun, "scroll", counted)
+    return calls
+
+
+@pytest.mark.usefixtures("covering_scroll")
+async def test_the_scroll_back_runs_once_even_when_the_page_stays_covered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One scroll back, never a loop: the brief scroll, then one scroll back, however
+    covered the page stays."""
+    calls = _count_scrolls(monkeypatch)
+    site = ScrollingSite(stuck=True)
+    ran = await prefill(site)
+    assert_no_keys(ran)
+    assert len(calls) == 2 and calls[1] > 0
+    back = [dy for dy in _wheels(site) if dy < 0]
+    assert len(back) == calls[1]
+    assert -sum(back) <= COVERING_SCROLL_PX + SCROLL_BACK_DELTA_PX[1]
+
+
+@pytest.mark.parametrize(
+    "category",
+    [NotClear.NO_TOP_CARD, NotClear.TOP_CARD_OFF_SCREEN, NotClear.NO_CANDIDATES],
+)
+async def test_a_category_that_isnt_covered_never_scrolls_back(
+    monkeypatch: pytest.MonkeyPatch, category: NotClear
+) -> None:
+    """Only a covered top card scrolls back; any other answer leaves the page alone."""
+    calls = _count_scrolls(monkeypatch)
+
+    async def answer(self: BrowserRun, profile_path: str, profile_id: str) -> NotClear:
+        return category
+
+    monkeypatch.setattr(BrowserRun, "message_cover", answer)
+    site = ScrollingSite()
+    ran = await prefill(site)
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert len(calls) == 1  # the brief scroll alone
+    assert all(dy > 0 for dy in _wheels(site))
+
+
+@pytest.mark.usefixtures("covering_scroll")
+async def test_the_probe_answers_nothing_once_the_message_click_was_sent() -> None:
+    site = ScrollingSite()
+    provider, _ = fake_provider(site)
+    path = f"/in/{ZEPHYRINE.slug}/"
+    async with provider.run() as run:
+        await run.goto(f"https://www.linkedin.com{path}")
+        click = await run.click_message(path, ZEPHYRINE.profile_id, pause_s=0.0)
+        assert click.clicked
+        sessions = len(site.geometry_sessions)
+        # Scrolled under the sticky header, a probe before the click would say covered.
+        await site.tab.mouse.wheel(0, COVERING_SCROLL_PX)
+        assert await run.message_cover(path, ZEPHYRINE.profile_id) is None
+        assert len(site.geometry_sessions) == sessions  # nothing read after the click

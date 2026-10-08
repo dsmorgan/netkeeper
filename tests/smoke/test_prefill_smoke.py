@@ -284,7 +284,9 @@ def _scrolling_layout_html(member: Member) -> str:
     """A profile that scrolls (#470). A fixed navigation bar sits at the top; once the
     page has scrolled 200 pixels, an invented sticky header appears under it, with a
     Message *button* (the real header's shape was never captured, #429). Invented
-    boxes, not LinkedIn's."""
+    boxes, not LinkedIn's. The pixel numbers here and in :data:`COVERING_SCROLL_PX`
+    assume the isolated Chrome runs at 100% zoom: wheel deltas are screen points, so
+    another zoom scrolls the page a different number of CSS pixels."""
     return (
         "<style>html,body{margin:0}svg{width:16px;height:16px}</style>"
         "<nav style='position:fixed;top:0;left:0;right:0;height:52px;background:#333;"
