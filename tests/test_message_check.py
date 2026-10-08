@@ -818,7 +818,7 @@ def test_the_stop_reason_has_plain_words() -> None:
         ),
         (
             # A frame whose owner the tree doesn't show: its frame id isn't the page's.
-            '<div data-untreed data-frame="child-2" data-box="40,400,110,32"></div>',
+            '<div data-untreed data-frame="Invented Frame Name" data-box="40,400,110,32"></div>',
             "",
             HitRelation.IN_FRAME,
             "an element inside a frame",
@@ -838,8 +838,12 @@ async def test_a_pseudo_element_a_shadow_root_and_a_frame_are_told_apart(
     assert_untouched(site, run)
     [candidate] = last(result).candidates
     assert candidate.hit is not None and candidate.hit.relation is relation
+    if relation in (HitRelation.IN_FRAME, HitRelation.IN_SHADOW_ROOT):
+        # Nothing of the hit is named: never its frame id, as a tag or otherwise.
+        assert (candidate.hit.tag, candidate.hit.role, candidate.hit.scope) == (None, None, None)
     text = report(result)
     assert words in text
+    assert "Frame Name" not in text and "child-1" not in text and "main-frame" not in text
     assert_sanitized(text)
 
 

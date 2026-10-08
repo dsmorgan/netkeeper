@@ -1117,6 +1117,8 @@ class MessageCheckSnapshot:
 #: The scopes :class:`_CheckTree` marks: a pseudo-element, and what sits in a shadow root
 #: or a frame's document the tree included. Fixed words, printed as they are.
 PSEUDO_SCOPE: Final = "pseudo-element"
+#: The elements whose ``frameId`` names a child frame (#473).
+_FRAME_OWNER_TAGS: Final = frozenset({"iframe", "frame", "object", "embed", "fencedframe"})
 SHADOW_SCOPE: Final = "shadow root"
 FRAME_SCOPE: Final = "frame"
 
@@ -1150,7 +1152,10 @@ class _CheckTree:
             parents[backend] = parent
             if scope is not None:
                 scopes[backend] = scope
-            if node is not root and node.get("frameId") is not None:
+            # Chrome puts a frameId on the document's <html> too (its own frame's), so only
+            # a frame owner's names a child frame.
+            owner = str(node.get("nodeName", "")).casefold() in _FRAME_OWNER_TAGS
+            if node.get("frameId") is not None and (owner or "contentDocument" in node):
                 frames.add(str(node["frameId"]))
             stack.extend((child, node, scope) for child in node.get("children", ()))
             stack.extend((p, node, PSEUDO_SCOPE) for p in node.get("pseudoElements", ()))
@@ -1159,6 +1164,16 @@ class _CheckTree:
             if content is not None:
                 stack.append((content, node, FRAME_SCOPE))
         frame = root.get("frameId")
+        if frame is None:
+            # Chrome gives the document node none; its <html> element carries the frame's.
+            frame = next(
+                (
+                    child.get("frameId")
+                    for child in root.get("children", ())
+                    if str(child.get("nodeName", "")).casefold() == "html"
+                ),
+                None,
+            )
         return cls(nodes, parents, scopes, frozenset(frames), None if frame is None else str(frame))
 
 
@@ -2853,7 +2868,9 @@ class BrowserRun:
         - ``DOM.getDocument`` with ``depth: -1``: the DOM tree, once, so a hit element's
           tag, role and ancestors are looked up here, not asked of the page again.
           Pseudo-elements, and any shadow roots and frame documents it holds, are
-          walked with their host as their parent. A hit on an element the tree doesn't
+          walked with their host as their parent. Without ``pierce`` (never sent),
+          Chrome lists a shadow root or a frame's document but doesn't expand its
+          children, so only those root nodes are indexed. A hit on an element the tree doesn't
           hold is in a frame (by its ``frameId``) or in a shadow root, and says which.
         - ``DOM.getNodeForLocation``: the element the page would hit at each probe's
           point (a candidate's click point, or an on-screen control's center), sent as a

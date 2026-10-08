@@ -301,11 +301,21 @@ class GeometrySession:
                         "nodeId": 0,
                         "backendNodeId": 0,
                         "nodeName": "#document",
-                        "frameId": "main-frame",
+                        # As Chrome: no frameId on the document node, and the main
+                        # frame's on its <html> element (invented id -2 here).
                         "children": [
-                            self._describe(c, order)
-                            for c in children
-                            if "data-untreed" not in c.attrs
+                            {
+                                "nodeId": -2,
+                                "backendNodeId": -2,
+                                "nodeName": "HTML",
+                                "frameId": "main-frame",
+                                "attributes": [],
+                                "children": [
+                                    self._describe(c, order)
+                                    for c in children
+                                    if "data-untreed" not in c.attrs
+                                ],
+                            }
                         ],
                     }
                 }
