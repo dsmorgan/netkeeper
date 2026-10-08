@@ -51,6 +51,8 @@ from netkeeper.linkedin.browser import (
     ActivityLocks,
     AttachBrowserProvider,
     BrowserError,
+    CheckHit,
+    HitRelation,
 )
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.preflight import LoginState, PreflightReport
@@ -91,6 +93,7 @@ from netkeeper.services import (
     history_scan,
     keychain,
     linkedin_steps,
+    message_check,
     route_breaker,
     run_diagnostics,
     runs,
@@ -148,7 +151,7 @@ from netkeeper.services.simulate_run import render as render_simulation
 from netkeeper.services.users import ensure_local_user
 from netkeeper.web.api.campaigns import results_out
 from netkeeper.web.app import create_app, openapi_json
-from netkeeper.worker import BrowserWorker, serve_app
+from netkeeper.worker import BrowserWorker, MessageCheckResult, run_message_check, serve_app
 
 log = logging.getLogger(__name__)
 
@@ -1670,6 +1673,204 @@ def _since(text: str) -> timedelta:
     if window > _SINCE_MAX:
         raise typer.BadParameter("look back at most 3650d (ten years)")
     return window
+
+
+@linkedin_app.command("message-check")
+def linkedin_message_check(
+    ctx: typer.Context,
+    contact_id: Annotated[int, typer.Argument(help="The contact whose profile to check.")],
+) -> None:
+    """Check why a prefill would refuse its Message click, without clicking (#473).
+
+    This runs a prefill's steps up to the Message click and stops: it brings its own
+    tab to the front, opens the contact's profile, scrolls briefly, scrolls back up if
+    the top card's Message button is covered, and waits the click's pause. It never
+    clicks, types, or focuses anything, and it claims no message, so no step or message
+    changes and no prefill budget is spent. It takes the same browser lock, gates, and
+    active hours a prefill does, and counts as one profile visit, which the contact may
+    see in Who viewed your profile.
+
+    It prints a report to this terminal only: sizes, positions, tag and role names,
+    and fixed words, never a name, a URL, an href, or the page's text. Nothing it reads
+    is stored; the database gets only the run's own row and the visit.
+    """
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
+    with _campaign_db() as factory:
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            user_id = user.id
+            try:
+                target = message_check.start(
+                    session, user, contact_id, now=datetime.now(UTC), settings=settings
+                )
+            except (
+                LookupError,
+                message_check.CheckRefused,
+                runs.RunError,
+                runs.HeatSkipped,
+                runs.SessionFlagged,
+                runs.OutsideActiveHours,
+            ) as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+        typer.echo(
+            "note: this opens the contact's profile from your account, so they may see a"
+            " visit in Who viewed your profile."
+        )
+        typer.echo(
+            f"run {target.run_id} (message check) started; nothing is clicked, typed, or"
+            f" focused. `netkeeper linkedin cancel {target.run_id}` stops it"
+        )
+        result = asyncio.run(
+            run_message_check(_provider(settings), factory, user_id, target, settings=settings)
+        )
+        with session_scope(factory) as session:
+            finished = runs.get_run(session, _local_user_or_exit(session), target.run_id)
+            status = finished.status
+            reason = runs.describe_stop_reason(finished.stop_reason) or "-"
+    for line in _message_check_lines(target.run_id, result):
+        typer.echo(line)
+    typer.echo(f"run {target.run_id}: {status.value} ({reason})")
+    if status is not SyncRunStatus.COMPLETED:
+        raise typer.Exit(code=1)
+
+
+def _check_box(box: Mapping[str, float] | None) -> str:
+    if box is None:
+        return "-"
+    return f"{box['x']:.0f},{box['y']:.0f} {box['width']:.0f}x{box['height']:.0f}"
+
+
+def _check_point(point: tuple[float, float] | None) -> str:
+    return "-" if point is None else f"{point[0]:.0f},{point[1]:.0f}"
+
+
+def _yes(value: bool | None) -> str:
+    return "-" if value is None else ("yes" if value else "no")
+
+
+def _check_hit(hit: CheckHit | None) -> str:
+    if hit is None:
+        return "-"
+    if hit.relation in (HitRelation.CONTROL, HitRelation.INSIDE):
+        return f"{hit.relation.value} ({hit.tag}, {hit.role})"
+    if hit.relation is HitRelation.COVERED:
+        own = f"{hit.tag} ({hit.role})"
+        where = f" in {hit.landmark}" if hit.landmark and hit.landmark != own else ""
+        return f"covered by {own}{where}, {hit.band}"
+    return hit.relation.value
+
+
+def _check_count(value: int | None) -> str:
+    return "-" if value is None else str(value)
+
+
+def _check_number(value: float | None) -> str:
+    return "-" if value is None else f"{value:g}"
+
+
+def _message_check_lines(run_id: int, result: MessageCheckResult) -> list[str]:
+    """The Message check's report (#473): numbers, fixed words, tag and role names."""
+    lines = [
+        "--- message check report (no names, URLs, hrefs, or page text) ---",
+        f"run {run_id}: nothing was clicked, typed, or focused",
+    ]
+    if result.stopped is not None:
+        lines.append(f"stopped before its reads finished: {result.stopped}")
+    if result.snapshots[1:]:
+        lines.append(f"brief scroll: {result.brief_scroll_px} px planned")
+        cover = result.cover.value if result.cover is not None else "none (nothing to scroll for)"
+        lines.append(
+            f"scroll back (#471): {'ran' if result.scrolled_back else 'did not run'};"
+            f" the cover probe answered {cover}"
+        )
+    for snap in result.snapshots:
+        lines += ["", f"[{snap.phase}]"]
+        viewport = (
+            "-" if snap.viewport is None else f"{snap.viewport[0]:g}x{snap.viewport[1]:g} CSS px"
+        )
+        scroll = "-" if snap.scroll is None else f"x {snap.scroll[0]:g}, y {snap.scroll[1]:g}"
+        lines.append(
+            f"  viewport {viewport}; scroll {scroll}; zoom {_check_number(snap.zoom)};"
+            f" device px per CSS px {_check_number(snap.device_pixel_ratio)}"
+        )
+        lines.append(
+            f"  on the profile's path: {_yes(snap.on_profile)};"
+            f" h1 count: {'-' if snap.heading_count is None else snap.heading_count};"
+            f" top-card selector (the h1, then following::a) matched: {_yes(snap.top_card_matched)}"
+        )
+        lines.append(f"  message bubble on the page: {snap.bubble}")
+        lines.append(
+            "  decision 4 (every Message link opens this contact's compose): "
+            + ("ok" if snap.decision_4 is None else snap.decision_4)
+        )
+        links = sum(1 for c in snap.controls if c.role == "link")
+        buttons = len(snap.controls) - links
+        like_links = _check_count(snap.links_named_like)
+        like_buttons = _check_count(snap.buttons_named_like)
+        lines.append(
+            f"  named exactly Message: {links} link(s), {buttons} button(s);"
+            f" named Message plus more: {like_links} link(s), {like_buttons} button(s)"
+        )
+        if snap.controls:
+            table = _format_table(
+                (
+                    "#",
+                    "ROLE",
+                    "TAG",
+                    "VISIBLE",
+                    "AFTER H1",
+                    "TOP SEL",
+                    "BOX",
+                    "ON SCREEN",
+                    "HREF",
+                    "HIT AT ITS CENTER",
+                ),
+                [
+                    (
+                        str(number),
+                        c.role,
+                        c.tag,
+                        _yes(c.visible),
+                        _yes(c.after_heading),
+                        _yes(c.top_card_selector),
+                        _check_box(c.box),
+                        _yes(c.on_screen),
+                        c.href,
+                        _check_hit(c.hit),
+                    )
+                    for number, c in enumerate(snap.controls, start=1)
+                ],
+            )
+            lines += [f"    {line}" for line in table.splitlines()]
+        top = "none" if snap.top_card is None else f"candidate {snap.top_card}"
+        lines.append(
+            f"  the click's candidates: {len(snap.candidates)} (top card: {top});"
+            f" geometry read: {_yes(snap.geometry_read)}"
+        )
+        if snap.candidates:
+            table = _format_table(
+                ("#", "CONTROL", "BOX", "ON SCREEN", "CLEAR", "CLICK POINT", "HIT AT THE POINT"),
+                [
+                    (
+                        str(number),
+                        "-" if c.control is None else str(c.control),
+                        _check_box(c.box),
+                        _yes(c.on_screen),
+                        _yes(c.unobstructed),
+                        _check_point(c.hit.point if c.hit is not None else None),
+                        _check_hit(c.hit),
+                    )
+                    for number, c in enumerate(snap.candidates, start=1)
+                ],
+            )
+            lines += [f"    {line}" for line in table.splitlines()]
+        category = "" if snap.category is None else f" ({snap.category.value})"
+        lines.append(f"  the click would: {snap.verdict}{category}")
+        if snap.errors:
+            lines.append(f"  reads that failed: {'; '.join(snap.errors)}")
+    lines.append("--- end of report ---")
+    return lines
 
 
 @linkedin_app.command("unreadable")

@@ -41,6 +41,10 @@ that, as it does the other observing modules). In order:
    longer netkeeper's. Every outcome after the first key hands it over.
 
 No body, name, slug, or url reaches a log line or a reason from here.
+
+:class:`PageMessageCheck` (#473) runs steps 1 to 3 and stops before step 4: no
+observation, no click, no key. It reads the page instead, and its report says what the
+click would have decided (``netkeeper linkedin message-check``).
 """
 
 from __future__ import annotations
@@ -50,7 +54,7 @@ import logging
 import math
 import random
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Final
 from urllib.parse import quote, unquote, urlsplit
@@ -63,6 +67,8 @@ from netkeeper.linkedin.browser import (
     BrowserRun,
     BubbleLayout,
     BubbleRecipient,
+    MessageCheckSnapshot,
+    NotClear,
     SendClick,
     TypingEnd,
     TypingResult,
@@ -516,3 +522,108 @@ class PagePrefill:
             MessageOutcome(kind, typing.reason, conversation, typing.typed_chars, name_checked),
             typing_started_at=typing.started_at,
         )
+
+
+# --- #473: the Message check -----------------------------------------------------------
+
+
+#: The moments the Message check reads the page at, in order. The last is when the
+#: prefill's click would read it: after the scroll back, if any, and the click's pause.
+CHECK_PHASES: Final = ("after load", "after the brief scroll", "at the click")
+
+
+@dataclass(frozen=True, slots=True)
+class MessageCheckResult:
+    """What :meth:`PageMessageCheck.run` saw (#473). Fixed words and numbers only.
+
+    ``snapshots`` are the reads at each of :data:`CHECK_PHASES` reached. ``cover`` is what
+    :meth:`~netkeeper.linkedin.browser.BrowserRun.message_cover` answered after the brief
+    scroll, and ``scrolled_back`` whether the #470 scroll back then ran. ``stopped`` says
+    why the check ended before its reads, and ``wall`` names a checkpoint, login or
+    throttle page it landed on, with ``wall_url`` for the session flag."""
+
+    snapshots: tuple[MessageCheckSnapshot, ...] = ()
+    cover: NotClear | None = None
+    scrolled_back: bool = False
+    brief_scroll_px: int = 0
+    stopped: str | None = None
+    wall: Outcome | None = None
+    wall_url: str | None = field(default=None, repr=False)
+
+
+class PageMessageCheck:
+    """The prefill's steps up to its Message click, and never the click (#473).
+
+    :meth:`run` runs :meth:`PagePrefill.prefill`'s steps in its order, through the same
+    :class:`~netkeeper.linkedin.browser.BrowserRun` methods, with the same constants:
+    bring the run's tab to the front, open the profile, the brief scroll, the cover
+    probe, and the one scroll back up when the top card's control is covered. Then it
+    waits the click's own pause and stops. In between it reads the page
+    (:meth:`~netkeeper.linkedin.browser.BrowserRun.message_check_snapshot`): right after
+    the load, after the brief scroll, and when the click would read it. It never clicks,
+    types, focuses, or observes, and it never reaches ``click_message``.
+    ``tests/test_browser_safety.py`` pins all of that. One instance per check."""
+
+    def __init__(
+        self,
+        run: BrowserRun,
+        *,
+        origin: str = LINKEDIN_ORIGIN,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        rng: random.Random | None = None,
+    ) -> None:
+        self._run = run
+        self._origin = _require_origin(origin)
+        self._sleep = sleep
+        self._rng = rng if rng is not None else random.Random()  # noqa: S311 -- pacing
+        self._used = False
+
+    async def run(
+        self, public_id: str, profile_id: str, *, cancelled: Cancelled
+    ) -> MessageCheckResult:
+        """Run the steps in the class docstring. See there for each one."""
+        if self._used:
+            raise RuntimeError("a PageMessageCheck runs once")
+        self._used = True
+        path = f"{PROFILE_PREFIX}{quote(public_id, safe='')}/"
+        await self._run.bring_tab_forward()
+        page = await self._run.goto(f"{self._origin}{path}")
+        landed = classify(200, page.url, "")
+        if landed in _WALLS:
+            log.warning("message check: the profile landed on a %s page", landed.value)
+            return MessageCheckResult(
+                stopped=f"the page answered {landed.value}", wall=landed, wall_url=page.url
+            )
+        if not _on_path(page.url, path):
+            return MessageCheckResult(stopped="the profile opened somewhere else")
+        if await cancelled():
+            return MessageCheckResult(stopped="cancelled")
+        first, brief, click = CHECK_PHASES
+        snapshots = [await self._run.message_check_snapshot(path, profile_id, first)]
+        scroll = scroll_like_a_person(
+            self._rng,
+            steps_range=BRIEF_SCROLL_STEPS,
+            delta_range_px=BRIEF_SCROLL_DELTA_PX,
+            dwell_median_s=BRIEF_SCROLL_DWELL_S,
+        )
+        await self._run.scroll(scroll, sleep=self._sleep, rng=self._rng)
+        depth = depth_after(scroll)
+        if await cancelled():
+            return MessageCheckResult(tuple(snapshots), brief_scroll_px=depth, stopped="cancelled")
+        # The prefill's probe comes first, as in the prefill; then the check's own read.
+        cover = await self._run.message_cover(path, profile_id)
+        snapshots.append(await self._run.message_check_snapshot(path, profile_id, brief))
+        scrolled_back = cover in TOP_CARD_COVERED
+        if scrolled_back:
+            log.info(
+                "message check: the top card's Message control is covered (%s); scrolling back up",
+                cover,
+            )
+            back = scroll_back_to_top(self._rng, max(depth, 1), delta_range_px=SCROLL_BACK_DELTA_PX)
+            await self._run.scroll(back, sleep=self._sleep, rng=self._rng)
+            if await cancelled():
+                return MessageCheckResult(tuple(snapshots), cover, True, depth, stopped="cancelled")
+        # The click's own pause (click_message waits it before its reads), never the click.
+        await self._sleep(self._rng.uniform(*CLICK_PAUSE_RANGE_S))
+        snapshots.append(await self._run.message_check_snapshot(path, profile_id, click))
+        return MessageCheckResult(tuple(snapshots), cover, scrolled_back, depth)

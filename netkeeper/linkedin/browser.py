@@ -918,6 +918,282 @@ async def _box(locator: _MessagingLocator) -> Mapping[str, float] | None:
     return await locator.bounding_box(timeout=MESSAGING_READ_TIMEOUT_MS)
 
 
+# --- #473: the Message check, the prefill's reads with no click ------------------------
+
+#: How many controls of each role named "Message" the check describes. The capture
+#: rendered three links; hidden copies count, so the cap sits well above that.
+CHECK_MAX_CONTROLS: Final = 16
+#: How long the check's own detail read may take, in seconds. It reads the whole DOM
+#: tree once, so it gets longer than the click's geometry read; it is a diagnostic, and
+#: nothing waits on it but the person at the terminal.
+CHECK_DETAIL_TIMEOUT_S: Final = 10.0
+#: How many ancestors of a hit element the check walks, looking for the control that
+#: holds it or a landmark that covers it.
+CHECK_MAX_ANCESTORS: Final = 24
+#: Any element after the profile's one ``h1`` in document order: whether a control sits
+#: where the top card's selector (:data:`MESSAGE_TOP_CARD`, links only) would look.
+CHECK_AFTER_HEADING: Final = "xpath=following::*"
+#: A name that starts with "Message" but isn't exactly that ("Message Zephyrine", say):
+#: counted, never printed.
+CHECK_NAME_PREFIX: Final = re.compile(r"^\s*Message\b")
+#: The tags the check names for a control or a hit element; anything else is ``other``.
+_CHECK_TAG: Final = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+#: The roles the check names; anything else is ``other``. Never the page's own text.
+_CHECK_ROLE: Final = re.compile(r"^[a-z]{1,24}$")
+#: The implicit role of the tags a hit is likely to land on.
+_IMPLICIT_ROLES: Final[Mapping[str, str]] = {
+    "button": "button",
+    "header": "banner",
+    "nav": "navigation",
+    "aside": "complementary",
+    "footer": "contentinfo",
+    "dialog": "dialog",
+    "main": "main",
+    "section": "region",
+    "img": "img",
+    "svg": "img",
+    "h1": "heading",
+    "h2": "heading",
+    "h3": "heading",
+    "li": "listitem",
+    "ul": "list",
+    "form": "form",
+    "textarea": "textbox",
+    "input": "textbox",
+}
+#: What makes a covering element a landmark the report names: these tags, or these roles.
+_LANDMARK_TAGS: Final = frozenset({"header", "nav", "aside", "footer", "dialog"})
+_LANDMARK_ROLES: Final = frozenset(
+    {"banner", "navigation", "complementary", "contentinfo", "dialog", "alertdialog"}
+)
+
+
+class HitRelation(enum.StrEnum):
+    """What the hit test found at a point, relative to the control asked about (#473)."""
+
+    CONTROL = "the control itself"
+    INSIDE = "inside the control"
+    COVERED = "covered"
+    NO_NODE = "no element at the point"
+    OUTSIDE_TREE = "an element outside the document tree (a frame or a shadow root)"
+    NOT_READ = "not read"
+
+
+@dataclass(frozen=True, slots=True)
+class CheckHit:
+    """What the check's hit test found at one point (#473): fixed words and tag and role
+    names only, never an attribute's value or the page's text.
+
+    ``tag`` and ``role`` are the hit element's. For a covered point, ``band`` places it
+    the way :func:`not_clear_reason` does, and ``landmark`` names the nearest ``header``,
+    ``nav``, ``aside``, ``footer`` or dialog around the covering element, if any."""
+
+    point: tuple[float, float] | None
+    relation: HitRelation
+    tag: str | None = None
+    role: str | None = None
+    band: str | None = None
+    landmark: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CheckControl:
+    """One element named exactly "Message", hidden ones counted (#473)."""
+
+    role: str
+    tag: str
+    visible: bool
+    after_heading: bool | None
+    top_card_selector: bool | None
+    href: str
+    box: Mapping[str, float] | None
+    on_screen: bool | None
+    hit: CheckHit | None
+
+
+@dataclass(frozen=True, slots=True)
+class CheckCandidate:
+    """One of the click's candidates (:meth:`BrowserRun._find_message_controls`), as the
+    click's own geometry read saw it, and what the check's hit test found at its point.
+    ``control`` is the matching :class:`CheckControl`'s number (from 1), by box."""
+
+    control: int | None
+    box: Mapping[str, float] | None
+    on_screen: bool | None
+    unobstructed: bool | None
+    hit: CheckHit | None
+
+
+@dataclass(frozen=True, slots=True)
+class MessageCheckSnapshot:
+    """What :meth:`BrowserRun.message_check_snapshot` read at one moment (#473).
+
+    Every field is a number, a fixed phrase, or a tag or role name: no name, slug, url,
+    ``href`` value, or page text. ``verdict`` is what :meth:`BrowserRun.click_message`
+    would decide on this page, by the same reads in the same order; ``category`` is its
+    :class:`NotClear` category when it would refuse for want of a clear control."""
+
+    phase: str
+    on_profile: bool
+    viewport: tuple[float, float] | None
+    scroll: tuple[float, float] | None
+    zoom: float | None
+    device_pixel_ratio: float | None
+    heading_count: int | None
+    top_card_matched: bool
+    bubble: str
+    decision_4: str | None
+    controls: tuple[CheckControl, ...]
+    links_named_like: int | None
+    buttons_named_like: int | None
+    candidates: tuple[CheckCandidate, ...]
+    top_card: int | None
+    geometry_read: bool
+    verdict: str
+    category: NotClear | None
+    errors: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _CheckDetail:
+    viewport: tuple[float, float]
+    scroll: tuple[float, float]
+    zoom: float | None
+    device_pixel_ratio: float | None
+    hits: tuple[CheckHit | None, ...]
+
+
+def href_shape(href: str | None, profile_id: str) -> str:
+    """A Message control's ``href``, described in fixed words, never its value (#473).
+
+    ``verified compose`` is :func:`message_control_refusal`'s own test. Otherwise it
+    says which part differs: no ``href``, another path or host, or, for the compose
+    path, whether each of ``profileUrn`` and ``recipient`` is missing, repeated, matches
+    the contact, or differs."""
+    if href is None:
+        return "no href"
+    if _is_contact_compose(href, profile_id):
+        return "verified compose"
+    try:
+        split = urlsplit(href)
+    except ValueError:
+        return "unparsable"
+    foreign = bool(split.scheme or split.netloc) and (
+        split.scheme != "https" or split.netloc != MESSAGE_COMPOSE_HOST
+    )
+    if split.path != MESSAGE_COMPOSE_PATH:
+        return "not a compose link"
+    if foreign:
+        return "compose on another host"
+    try:
+        pairs = parse_qsl(split.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        return "compose, unparsable query"
+    keys = [key for key, _ in pairs]
+    values = dict(pairs)
+    parts: list[str] = []
+    for key, want in (
+        ("profileUrn", f"urn:li:fsd_profile:{profile_id}"),
+        ("recipient", profile_id),
+    ):
+        seen = keys.count(key)
+        if seen == 0:
+            parts.append(f"{key} missing")
+        elif seen > 1:
+            parts.append(f"{key} repeated")
+        else:
+            parts.append(f"{key} {'matches' if values[key] == want else 'differs'}")
+    if split.fragment:
+        parts.append("has a fragment")
+    return "compose, " + ", ".join(parts)
+
+
+def _check_tag(name: object) -> str:
+    tag = str(name).casefold()
+    return tag if _CHECK_TAG.fullmatch(tag) else "other"
+
+
+def _check_role(tag: str, attributes: Mapping[str, str]) -> str:
+    """An element's role as the report names it: its own ``role``, sanitized, else the
+    tag's implicit one, else ``none``. ``a`` is a link only with an ``href``."""
+    explicit = attributes.get("role")
+    if explicit:
+        token = explicit.split()[0].casefold()
+        return token if _CHECK_ROLE.fullmatch(token) else "other"
+    if tag == "a":
+        return "link" if "href" in attributes else "none"
+    return _IMPLICIT_ROLES.get(tag, "none")
+
+
+def _attributes(node: Mapping[str, Any]) -> dict[str, str]:
+    flat = node.get("attributes") or []
+    return {str(flat[i]): str(flat[i + 1]) for i in range(0, len(flat) - 1, 2)}
+
+
+def _band(y: float, viewport: tuple[float, float]) -> str:
+    """Where a covered point sits, as :func:`not_clear_reason` places it."""
+    if y < STICKY_HEADER_BAND_PX:
+        return f"top {STICKY_HEADER_BAND_PX:.0f} px (sticky header band)"
+    if y >= viewport[1] - BUBBLE_BAND_PX:
+        return f"bottom {BUBBLE_BAND_PX:.0f} px (bubble band)"
+    return "middle"
+
+
+def _center(box: Mapping[str, float]) -> tuple[float, float]:
+    return box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+
+
+def _same_box(a: Mapping[str, float] | None, b: Mapping[str, float] | None) -> bool:
+    return a is not None and b is not None and _inside(a, b) and _inside(b, a)
+
+
+def _ratio(numerator: object, denominator: object) -> float | None:
+    try:
+        top, bottom = float(cast(float, numerator)), float(cast(float, denominator))
+    except (TypeError, ValueError):
+        return None
+    return round(top / bottom, 3) if bottom > 0 else None
+
+
+def _number(value: object) -> float | None:
+    try:
+        return float(cast(float, value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _verdict(
+    on_profile: bool,
+    bubble: str,
+    found: _MessageControls | None,
+    geometry: ClickGeometry | None,
+    choice: tuple[int, ClickTarget] | None,
+) -> tuple[str, NotClear | None]:
+    """What :meth:`BrowserRun.click_message` would decide from these reads, in its order,
+    in fixed words, and its :class:`NotClear` category when it refuses for that."""
+    if not on_profile:
+        return "refuses: the tab is not on the contact's profile", None
+    if bubble == "open":
+        return f"refuses: {BUBBLE_ALREADY_OPEN}", None
+    if bubble != "none":
+        return f"refuses: {BUBBLE_UNREADABLE}", None
+    if found is None:
+        return "refuses: the Message control could not be read", None
+    if found.refusal is not None:
+        return f"refuses: {found.refusal}", None
+    if not found.candidates:
+        return "refuses: no Message control is visible", NotClear.NO_CANDIDATES
+    if choice is None:
+        reason = (
+            not_clear_reason(found.boxes, found.top_card, geometry)
+            if geometry is not None
+            else NotClear.NO_CANDIDATES
+        )
+        return f"refuses: {MESSAGE_NOT_ON_SCREEN}", reason
+    index, target = choice
+    return f"clicks candidate {index + 1} ({target.value})", None
+
+
 class TypingEnd(enum.StrEnum):
     """How :meth:`BrowserRun.type_into_composer` ended."""
 
@@ -2293,6 +2569,294 @@ class BrowserRun:
                 await session.detach()
             except Exception as exc:
                 log.info("prefill: the geometry session could not detach (%s)", type(exc).__name__)
+
+    async def message_check_snapshot(
+        self, profile_path: str, profile_id: str, phase: str
+    ) -> MessageCheckSnapshot:
+        """Everything :meth:`click_message` would read before its click, and more, with
+        no click (#473, ``netkeeper linkedin message-check``). Reads only.
+
+        First the click's own reads, in its order and through its own code: the tab's
+        path, decision 3's bubble check (:meth:`_bubble_already_open`), decision 4 and
+        the candidates (:meth:`_find_message_controls`), the page's geometry
+        (:meth:`_read_click_geometry`) and the choice (:func:`choose_message_target`).
+        So the verdict is the click's, on this page. No pause: the caller waits it out.
+
+        Then what the click doesn't read: the ``h1`` count; every link and every button
+        named exactly "Message", hidden ones counted (its tag, whether it's visible,
+        after the ``h1``, matched by :data:`MESSAGE_TOP_CARD`, the shape of its
+        ``href`` in fixed words, and its box); and one more CDP session
+        (:meth:`_read_check_detail`) for the viewport, the scroll, the zoom, and what
+        the hit test finds at each on-screen control's center and at each candidate's
+        click point. Nothing is input, no script runs, and no focus changes. A read
+        that fails is listed in ``errors`` by its exception's type, never its text."""
+        page = self._page
+        if page is None or page.is_closed() or self._message_clicked:
+            raise BrowserUnavailable("the run's tab went away before the Message check read it")
+        tab = cast(_MessagingPage, page)
+        errors: list[str] = []
+        on_profile = _on_path(page.url, profile_path)
+        try:
+            bubble = "open" if await self._bubble_already_open(tab) else "none"
+        except Exception as exc:
+            if self._lost(page):
+                raise BrowserUnavailable("lost the tab during the Message check") from exc
+            errors.append(f"bubble check: {type(exc).__name__}")
+            bubble = "unreadable"
+        found: _MessageControls | None = None
+        try:
+            found = await self._find_message_controls(tab, profile_id)
+        except Exception as exc:
+            if self._lost(page):
+                raise BrowserUnavailable("lost the tab during the Message check") from exc
+            errors.append(f"Message controls: {type(exc).__name__}")
+        geometry: ClickGeometry | None = None
+        choice: tuple[int, ClickTarget] | None = None
+        if found is not None and found.refusal is None and found.candidates:
+            geometry = await self._read_click_geometry(page, found.boxes, found.verified)
+            choice = choose_message_target(found.boxes, found.top_card, geometry)
+        verdict, category = _verdict(on_profile, bubble, found, geometry, choice)
+
+        headings = tab.locator(PROFILE_HEADING)
+        heading_count: int | None = None
+        try:
+            heading_count = await headings.count()
+        except Exception as exc:
+            errors.append(f"headings: {type(exc).__name__}")
+        one_heading = heading_count == 1
+        controls: list[tuple[str, str, bool, bool | None, bool | None, str, Any]] = []
+        named_like: dict[str, int | None] = {}
+        for role in (MESSAGE_CONTROL_ROLE, "button"):
+            try:
+                exact = tab.get_by_role(
+                    role, name=MESSAGE_CONTROL_NAME, exact=True, include_hidden=True
+                )
+                prefixed = tab.get_by_role(role, name=CHECK_NAME_PREFIX, include_hidden=True)
+                matches = await exact.count()
+                named_like[role] = await prefixed.count() - matches
+                for index in range(min(matches, CHECK_MAX_CONTROLS)):
+                    element = exact.nth(index)
+                    tag = "other"
+                    for name in ("a", "button"):
+                        if await element.and_(tab.locator(name)).count() == 1:
+                            tag = name
+                            break
+                    visible = await element.filter(visible=True).count() == 1
+                    after: bool | None = None
+                    top: bool | None = None
+                    if one_heading:
+                        after = (
+                            await element.and_(headings.locator(CHECK_AFTER_HEADING)).count() == 1
+                        )
+                        top = await element.and_(headings.locator(MESSAGE_TOP_CARD)).count() == 1
+                    href = await element.get_attribute("href", timeout=MESSAGING_READ_TIMEOUT_MS)
+                    box = await _box(element) if visible else None
+                    controls.append(
+                        (role, tag, visible, after, top, href_shape(href, profile_id), box)
+                    )
+            except Exception as exc:
+                if self._lost(page):
+                    raise BrowserUnavailable("lost the tab during the Message check") from exc
+                errors.append(f"{role}s named Message: {type(exc).__name__}")
+                named_like.setdefault(role, None)
+
+        boxes = list(found.boxes) if found is not None else []
+        points = list(geometry.points) if geometry is not None else []
+        probes: list[tuple[Mapping[str, float] | None, tuple[float, float] | None, str]] = [
+            (box, None, tag) for _, tag, _, _, _, _, box in controls
+        ]
+        probes += [
+            (box, points[index] if index < len(points) else None, "a")
+            for index, box in enumerate(boxes)
+        ]
+        detail = await self._read_check_detail(page, probes, errors)
+        viewport = detail.viewport if detail is not None else None
+        if viewport is None and geometry is not None:
+            viewport = geometry.viewport
+        hits: tuple[CheckHit | None, ...] = (
+            detail.hits if detail is not None else tuple(None for _ in probes)
+        )
+        described = tuple(
+            CheckControl(
+                role,
+                tag,
+                visible,
+                after,
+                top,
+                shape,
+                box,
+                None if viewport is None or box is None else _on_screen(box, viewport),
+                hits[index],
+            )
+            for index, (role, tag, visible, after, top, shape, box) in enumerate(controls)
+        )
+        candidates = tuple(
+            CheckCandidate(
+                next(
+                    (n + 1 for n, c in enumerate(described) if _same_box(c.box, box)),
+                    None,
+                ),
+                box,
+                None if geometry is None or box is None else _on_screen(box, geometry.viewport),
+                None
+                if geometry is None or box is None
+                else _clear(box, geometry.hits[index] if index < len(geometry.hits) else None),
+                hits[len(controls) + index],
+            )
+            for index, box in enumerate(boxes)
+        )
+        return MessageCheckSnapshot(
+            phase=phase,
+            on_profile=on_profile,
+            viewport=viewport,
+            scroll=detail.scroll if detail is not None else None,
+            zoom=detail.zoom if detail is not None else None,
+            device_pixel_ratio=detail.device_pixel_ratio if detail is not None else None,
+            heading_count=heading_count,
+            top_card_matched=found is not None and found.top_card is not None,
+            bubble=bubble,
+            decision_4=None if found is None else found.refusal,
+            controls=described,
+            links_named_like=named_like.get(MESSAGE_CONTROL_ROLE),
+            buttons_named_like=named_like.get("button"),
+            candidates=candidates,
+            top_card=None if found is None or found.top_card is None else found.top_card + 1,
+            geometry_read=geometry is not None,
+            verdict=verdict,
+            category=category,
+            errors=tuple(errors),
+        )
+
+    async def _read_check_detail(
+        self,
+        page: PageLike,
+        probes: Sequence[tuple[Mapping[str, float] | None, tuple[float, float] | None, str]],
+        errors: list[str],
+    ) -> _CheckDetail | None:
+        """The Message check's own geometry read (#473): passive DevTools reads only.
+
+        One CDP session on the run's tab, detached before this returns, which sends a
+        subset of :meth:`_read_click_geometry`'s read-only methods
+        (``tests/test_browser_safety.py`` pins them):
+
+        - ``Page.getLayoutMetrics``: the viewport, the scroll offset, the page zoom, and
+          the device pixels per CSS pixel (the deprecated device-pixel viewport over the
+          CSS one).
+        - ``DOM.getDocument`` with ``depth: -1``: the DOM tree, once, so a hit element's
+          tag, role and ancestors are looked up here, not asked of the page again.
+          Frames and shadow roots aren't in it; a hit inside one says so.
+        - ``DOM.getNodeForLocation``: the element the page would hit at each probe's
+          point (a candidate's click point, or an on-screen control's center), sent as a
+          document point, as :meth:`_read_click_geometry` sends it.
+        - ``DOM.getBoxModel``: the box of each ancestor of a hit element whose tag is
+          the control's, to tell the control itself from something over it.
+
+        Each probe is ``(box, point, tag)``: the control's box, the point to test
+        (``None`` for the box's center, when the box is wholly on screen), and the
+        control's tag. Nothing is input, no script runs, and nothing the page can see
+        changes. ``None`` when the session can't start or a read fails, with the
+        failure's type in ``errors``."""
+        context = cast(_TapContext, self._attachment.context)
+        try:
+            session = cast(_CdpSessionLike, await context.new_cdp_session(page))
+        except Exception as exc:
+            errors.append(f"detail read: {type(exc).__name__}")
+            return None
+        try:
+            async with asyncio.timeout(CHECK_DETAIL_TIMEOUT_S):
+                metrics = await session.send("Page.getLayoutMetrics")
+                layout = metrics["cssLayoutViewport"]
+                viewport = (float(layout["clientWidth"]), float(layout["clientHeight"]))
+                scroll = (float(layout["pageX"]), float(layout["pageY"]))
+                visual = metrics.get("cssVisualViewport") or metrics.get("visualViewport") or {}
+                zoom = _number(visual.get("zoom"))
+                device = metrics.get("layoutViewport") or {}
+                ratio = _ratio(device.get("clientWidth"), layout["clientWidth"])
+                document = await session.send("DOM.getDocument", {"depth": -1})
+                parents: dict[int, Mapping[str, Any] | None] = {}
+                nodes: dict[int, Mapping[str, Any]] = {}
+                stack: list[tuple[Mapping[str, Any], Mapping[str, Any] | None]] = [
+                    (document["root"], None)
+                ]
+                while stack:
+                    node, parent = stack.pop()
+                    backend = int(node.get("backendNodeId", -1))
+                    nodes[backend] = node
+                    parents[backend] = parent
+                    stack.extend((child, node) for child in node.get("children", ()))
+                hits: list[CheckHit | None] = []
+                for box, given, tag in probes:
+                    point = given
+                    if point is None and box is not None and _on_screen(box, viewport):
+                        point = _center(box)
+                    if box is None or point is None:
+                        hits.append(CheckHit(point, HitRelation.NOT_READ))
+                        continue
+                    hits.append(
+                        await self._check_hit(
+                            session, nodes, parents, box, point, tag, viewport, scroll
+                        )
+                    )
+                return _CheckDetail(viewport, scroll, zoom, ratio, tuple(hits))
+        except Exception as exc:
+            errors.append(f"detail read: {type(exc).__name__}")
+            return None
+        finally:
+            await _detach_quietly(session.detach)
+
+    @staticmethod
+    async def _check_hit(
+        session: _CdpSessionLike,
+        nodes: Mapping[int, Mapping[str, Any]],
+        parents: Mapping[int, Mapping[str, Any] | None],
+        box: Mapping[str, float],
+        point: tuple[float, float],
+        tag: str,
+        viewport: tuple[float, float],
+        scroll: tuple[float, float],
+    ) -> CheckHit:
+        """What :meth:`_read_check_detail`'s hit test found at ``point``, for a control
+        with ``box`` and ``tag``. Sends ``DOM.getNodeForLocation`` and ``DOM.getBoxModel``
+        only, through the caller's session."""
+        x, y = point
+        try:
+            found = await session.send(
+                "DOM.getNodeForLocation",
+                {
+                    "x": round(x + scroll[0]),
+                    "y": round(y + scroll[1]),
+                    "ignorePointerEventsNone": True,
+                },
+            )
+        except Exception:
+            return CheckHit(point, HitRelation.NO_NODE)
+        hit = nodes.get(int(found["backendNodeId"]))
+        if hit is None:
+            return CheckHit(point, HitRelation.OUTSIDE_TREE)
+        hit_tag = _check_tag(hit.get("nodeName", ""))
+        hit_role = _check_role(hit_tag, _attributes(hit))
+        landmark: str | None = None
+        node: Mapping[str, Any] | None = hit
+        for _ in range(CHECK_MAX_ANCESTORS):
+            if node is None:
+                break
+            node_tag = _check_tag(node.get("nodeName", ""))
+            attributes = _attributes(node)
+            if node_tag == tag and "nodeId" in node:
+                try:
+                    model = await session.send("DOM.getBoxModel", {"nodeId": node["nodeId"]})
+                    if _same_box(_quad_box(model["model"]["border"]), box):
+                        relation = HitRelation.CONTROL if node is hit else HitRelation.INSIDE
+                        return CheckHit(point, relation, hit_tag, hit_role)
+                except Exception as exc:
+                    log.debug("message check: an ancestor has no box (%s)", type(exc).__name__)
+            node_role = _check_role(node_tag, attributes)
+            if landmark is None and (node_tag in _LANDMARK_TAGS or node_role in _LANDMARK_ROLES):
+                landmark = f"{node_tag} ({node_role})"
+            node = parents.get(int(node.get("backendNodeId", -1)))
+        return CheckHit(
+            point, HitRelation.COVERED, hit_tag, hit_role, _band(point[1], viewport), landmark
+        )
 
     async def type_into_composer(
         self,

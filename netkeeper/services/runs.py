@@ -117,6 +117,13 @@ MESSAGE_SEND_GATE: Final = object()
 :func:`netkeeper.services.linkedin_steps.start_message_send_run` passes it, after the
 claim's checks (P4-09), and tests that stand in for it."""
 
+MESSAGE_CHECK_GATE: Final = object()
+"""The token :func:`create_run` also takes for a manual ``message_send`` run: the Message
+check (#473), a dry run of a prefill up to its click that claims no message. Only
+:func:`netkeeper.services.message_check.start` passes it, and tests that stand in for it.
+The run is that kind so the scheduler's gap after a prefill and auto-send's spacing count
+it, and so no prefill starts while it runs."""
+
 AUTO_SEND_GATE: Final = object()
 """The token :func:`create_run` needs for a **scheduled** ``message_send`` run: an
 auto-send (ADR 0008). Only :func:`netkeeper.services.linkedin_steps.start_auto_send_run`
@@ -325,9 +332,9 @@ def create_run(
     A manual ``message_send`` run is recorded only with ``gate``
     :data:`MESSAGE_SEND_GATE`, which only
     :func:`netkeeper.services.linkedin_steps.start_message_send_run` passes, inside a
-    prefill claim (P4-09); a scheduled one only with :data:`AUTO_SEND_GATE`, inside an
-    auto-send claim (ADR 0008). Never through ``POST /linkedin/runs`` or the CLI's run
-    commands.
+    prefill claim (P4-09), or :data:`MESSAGE_CHECK_GATE`, for the Message check (#473);
+    a scheduled one only with :data:`AUTO_SEND_GATE`, inside an auto-send claim (ADR
+    0008). Never through ``POST /linkedin/runs`` or the CLI's run commands.
 
     Refuses (see the module docstring) a kind with no runner
     (:class:`RunError`), a second run while one is running
@@ -355,6 +362,7 @@ def create_run(
         kind is SyncRunKind.MESSAGE_SEND
         and trigger is SyncRunTrigger.MANUAL
         and gate is not MESSAGE_SEND_GATE
+        and gate is not MESSAGE_CHECK_GATE
     ):
         raise RunError("a message_send run is started only by a LinkedIn prefill claim")
     if kind not in RUNNABLE_KINDS:
@@ -729,6 +737,8 @@ STOP_REASON_TEXT: Final[Mapping[str, str]] = {
     "browser_unavailable": "Chrome was not reachable or went away mid-run",
     "interrupted": "the netkeeper process running it stopped",
     "error": "an error stopped it",
+    # #473: a Message check, a dry run of a prefill up to the click
+    "message_check": "checked the Message control up to the click; nothing was clicked",
 }
 
 

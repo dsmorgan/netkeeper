@@ -121,6 +121,8 @@ ALLOWED_CONTEXT_MUTATIONS = frozenset(
     {
         (LINKEDIN / "browser.py", "BrowserRun._open_body_tap", "new_cdp_session"),
         (LINKEDIN / "browser.py", "BrowserRun._read_click_geometry", "new_cdp_session"),
+        # #473: the Message check's own detail read, a subset of those same reads.
+        (LINKEDIN / "browser.py", "BrowserRun._read_check_detail", "new_cdp_session"),
         # #195: the run's tab opens in the background. A browser-level session creates
         # it (and `_close_unclaimed_tab` closes it on that session, by its own target id,
         # when it can't be identified), and a page-level session reads the target id of
@@ -179,6 +181,9 @@ ALLOWED_CDP_METHODS = {**READ_ONLY_CDP_METHODS, **TAB_CDP_METHODS}
 CDP_SENDERS = {
     (LINKEDIN / "browser.py", "BrowserRun._open_body_tap"): 2,
     (LINKEDIN / "browser.py", "BrowserRun._read_click_geometry"): 7,
+    # #473: the Message check's detail read, and the hit test it makes on that session.
+    (LINKEDIN / "browser.py", "BrowserRun._read_check_detail"): 2,
+    (LINKEDIN / "browser.py", "BrowserRun._check_hit"): 2,
     (LINKEDIN / "browser.py", "BrowserRun._open_tab"): 1,
     (LINKEDIN / "browser.py", "BrowserRun._close_unclaimed_tab"): 1,
     (LINKEDIN / "browser.py", "BrowserRun._target_id"): 1,
@@ -198,6 +203,12 @@ CDP_SENDER_METHODS = {
             "DOM.getContentQuads",
             "DOM.getNodeForLocation",
         }
+    ),
+    (LINKEDIN / "browser.py", "BrowserRun._read_check_detail"): frozenset(
+        {"Page.getLayoutMetrics", "DOM.getDocument"}
+    ),
+    (LINKEDIN / "browser.py", "BrowserRun._check_hit"): frozenset(
+        {"DOM.getNodeForLocation", "DOM.getBoxModel"}
     ),
     (LINKEDIN / "browser.py", "BrowserRun._open_tab"): frozenset({"Target.createTarget"}),
     (LINKEDIN / "browser.py", "BrowserRun._close_unclaimed_tab"): frozenset({"Target.closeTarget"}),
@@ -944,7 +955,12 @@ def test_the_one_cdp_session_is_read_only() -> None:
         assert item.params == ALLOWED_CDP_METHODS[item.method], (
             f"{item.where}: {item.method} with params {item.params}"
         )
-    assert sorted(str(i.method) for i in found) == sorted(ALLOWED_CDP_METHODS)
+    # Every allowed method is sent somewhere, and each site sends each of its methods
+    # once: #473's detail read sends four of the geometry read's seven again.
+    assert {str(i.method) for i in found} == set(ALLOWED_CDP_METHODS)
+    assert sorted(str(i.method) for i in found) == sorted(
+        method for methods in CDP_SENDER_METHODS.values() for method in methods
+    )
     for site, count in CDP_SENDERS.items():
         hits = [i for i in found if (i.where.path, i.where.function) == site]
         assert len(hits) == count, (
@@ -1907,7 +1923,8 @@ def test_the_message_click_is_bound_to_the_contacts_href() -> None:
 def test_bring_to_front_is_called_once_at_the_prefills_start() -> None:
     """ADR 0007 (decision 1): one ``bring_to_front`` in the package, inside
     ``BrowserRun.bring_tab_forward``, which only ``PagePrefill.prefill`` calls, before it
-    calls ``click_message``."""
+    calls ``click_message``, and the Message check (#473), which runs the prefill's steps
+    up to that click (``test_the_message_check_never_reaches_an_input``)."""
     fronts = [
         (path, item.function)
         for path in python_files(PACKAGE)
@@ -1920,7 +1937,8 @@ def test_bring_to_front_is_called_once_at_the_prefills_start() -> None:
         for item, _ in name_reaches(read_source(path), "bring_tab_forward", path)
     ]
     assert [(p, f) for p, f, _ in callers] == [
-        (LINKEDIN / "page_messaging.py", "PagePrefill.prefill")
+        (LINKEDIN / "page_messaging.py", "PagePrefill.prefill"),
+        (LINKEDIN / "page_messaging.py", "PageMessageCheck.run"),
     ]
     source = read_source(LINKEDIN / "page_messaging.py")
     clicks = [
@@ -2429,3 +2447,166 @@ def test_the_sent_bubble_and_tab_are_closed_only_after_a_landed_send() -> None:
     assert _enclosing_ifs(tree, call("close_sent_tab")) == ["self._run.bubble_closed"]
     clicks = [i for i in package_inputs() if i.function == "BrowserRun.close_sent_bubble"]
     assert [i.name for i in clicks] == ["click"]
+
+
+#: #473: what the Message check may never reach, in itself or anything it calls: every
+#: page input, the prefill's own click and typing methods, script in the page, and any
+#: other way to bring a tab forward. ``bring_to_front`` is listed too: the check reaches
+#: it once, through ``bring_tab_forward``, as the prefill does before its click.
+CHECK_BANNED = frozenset(
+    (INPUT_CALLS - {"move"})
+    | SCRIPT_CALLS
+    | {
+        "bring_to_front",
+        "bringToFront",
+        "Page.bringToFront",
+        "Target.activateTarget",
+        "click_message",
+        "type_into_composer",
+        "click_send",
+        "close_sent_bubble",
+        "close_sent_tab",
+        "click_contact_info",
+        "_focus_seam",
+        "hand_over",
+        "observe",
+        "_open_body_tap",
+    }
+)
+#: The CDP sites the check may reach: the click's geometry read, its own detail read
+#: and hit test, and the background tab's three (#195).
+CHECK_CDP_SITES = frozenset(
+    {
+        "_read_click_geometry",
+        "_read_check_detail",
+        "_check_hit",
+        "_open_tab",
+        "_close_unclaimed_tab",
+        "_target_id",
+    }
+)
+
+
+def _check_reaches(
+    messaging: str, browser: str, banned: frozenset[str] = CHECK_BANNED
+) -> list[str]:
+    """Every name in ``banned`` that ``PageMessageCheck.run`` reaches, transitively."""
+    tree = ast.parse(messaging)
+    check = _methods(tree, "PageMessageCheck")["run"]
+    run = _scope(ast.parse(browser), "BrowserRun")
+    return _reached_banned(tree, "PageMessageCheck", [check], banned, run=run)
+
+
+def test_the_message_check_never_reaches_an_input() -> None:
+    """#473: ``PageMessageCheck.run``, and every ``BrowserRun`` method and function it
+    reaches, transitively, never reaches a click, a key, typing, a focus, script, the
+    prefill's click or typing methods, or an observation. The one thing on the list it
+    reaches is ``bring_to_front``, once, inside ``bring_tab_forward``: what the prefill
+    does before its click. And it holds no input under another name."""
+    messaging = read_source(LINKEDIN / "page_messaging.py")
+    reached = _check_reaches(messaging, read_source(LINKEDIN / "browser.py"))
+    assert [r.split(" ")[0] for r in reached] == ["bring_to_front"], reached
+    browser_tree = parse(read_source(LINKEDIN / "browser.py"))
+    fronting = _methods(browser_tree, "BrowserRun")["bring_tab_forward"]
+    [line] = [int(r.split("line ")[1].rstrip(")")) for r in reached]
+    assert fronting.lineno <= line <= (fronting.end_lineno or 0)
+    check = _methods(parse(messaging), "PageMessageCheck")["run"]
+    held = _held_not_called(check, CHECK_BANNED)
+    assert not held, f"PageMessageCheck.run holds an input without calling it: {held}"
+    # The prefill reaches that same bring_to_front before its click.
+    prefill = _methods(parse(messaging), "PagePrefill")["prefill"]
+    assert any(
+        isinstance(n, ast.Attribute) and n.attr == "bring_tab_forward" for n in walk(prefill)
+    )
+
+
+def test_the_message_check_sends_only_from_the_allowed_cdp_sites() -> None:
+    """#473: the only CDP senders the check reaches are the click's geometry read, its
+    own detail read and hit test, and the background tab's; each sends only the
+    read-only methods ``test_the_one_cdp_session_is_read_only`` pins for it."""
+    senders = frozenset(function.split(".")[-1] for _, function in CDP_SENDERS)
+    reached = _check_reaches(
+        read_source(LINKEDIN / "page_messaging.py"), read_source(LINKEDIN / "browser.py"), senders
+    )
+    names = {r.split(" ")[0] for r in reached}
+    assert names <= CHECK_CDP_SITES, names
+    assert {"_read_click_geometry", "_read_check_detail", "_check_hit"} <= names
+    for site in ("_read_check_detail", "_check_hit"):
+        methods = CDP_SENDER_METHODS[(LINKEDIN / "browser.py", f"BrowserRun.{site}")]
+        assert methods <= frozenset(READ_ONLY_CDP_METHODS)
+
+
+def test_the_message_check_takes_the_prefills_steps_up_to_its_click() -> None:
+    """#473: the check calls the same ``BrowserRun`` methods as ``PagePrefill.prefill``,
+    in the same order, up to the prefill's first read after its scroll back (the
+    heading), with only its own reads (``message_check_snapshot``) between them."""
+    tree = parse(read_source(LINKEDIN / "page_messaging.py"))
+
+    def run_calls(function: ast.AST) -> list[str]:
+        calls = [
+            node.func
+            for node in walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "_run"
+        ]
+        return [c.attr for c in sorted(calls, key=lambda c: (c.lineno, c.col_offset))]
+
+    prefill = run_calls(_methods(tree, "PagePrefill")["prefill"])
+    before_click = prefill[: prefill.index("read_profile_heading")]
+    check = run_calls(_methods(tree, "PageMessageCheck")["run"])
+    assert [c for c in check if c != "message_check_snapshot"] == before_click
+    assert before_click == ["bring_tab_forward", "goto", "scroll", "message_cover", "scroll"]
+    assert check.count("message_check_snapshot") == 3
+
+
+@pytest.mark.parametrize(
+    ("where", "line"),
+    [
+        ("check", "await self._run.click_message(path, profile_id, pause_s=0.0)"),
+        ("check", "await self._run.type_into_composer(None, None, clock=None)"),
+        ("check", "await self._run.observe(None)"),
+        ("check", "held = self._run.click_message"),
+        ("snapshot", "await tab.keyboard.press('Enter')"),
+        ("snapshot", "await exact.first.click()"),
+        ("snapshot", "await exact.first.focus()"),
+        ("snapshot", "await exact.first.fill('x')"),
+        ("snapshot", "await tab.bring_to_front()"),
+        ("snapshot", "await tab.evaluate('1')"),
+        ("detail", "await session.send('Page.bringToFront')"),
+        ("helper", "await page.click('a')"),
+    ],
+)
+def test_the_message_check_pin_catches_each_mutation(where: str, line: str) -> None:
+    """Each input #473 rules out, added to the check, its snapshot, its detail read, or a
+    module function the snapshot calls, fails the pin."""
+    messaging = read_source(LINKEDIN / "page_messaging.py")
+    browser = read_source(LINKEDIN / "browser.py")
+    if where == "check":
+        anchor = "        first, brief, click = CHECK_PHASES\n"
+        assert anchor in messaging
+        messaging = messaging.replace(anchor, f"{anchor}        {line}\n", 1)
+        if line.startswith("held"):
+            check = _methods(ast.parse(messaging), "PageMessageCheck")["run"]
+            assert _held_not_called(check, CHECK_BANNED)
+            return
+    elif where == "snapshot":
+        anchor = "                for index in range(min(matches, CHECK_MAX_CONTROLS)):\n"
+        assert anchor in browser
+        browser = browser.replace(anchor, f"                {line}\n{anchor}", 1)
+    elif where == "detail":
+        anchor = '                metrics = await session.send("Page.getLayoutMetrics")\n'
+        assert browser.count(anchor) == 2
+        cut = browser.index("    async def _read_check_detail(")
+        tail = browser[cut:].replace(anchor, f"{anchor}                {line}\n", 1)
+        browser = browser[:cut] + tail
+    else:
+        helper = "def _verdict(\n"
+        assert helper in browser
+        head, _, rest = browser.partition(helper)
+        signature, _, body = rest.partition(":\n")
+        browser = f"{head}{helper}{signature}:\n    page: Any = None\n    {line}\n{body}"
+    # Unmutated, the check reaches one name on the list: bring_tab_forward's own.
+    reached = _check_reaches(messaging, browser)
+    assert len(reached) > 1, f"the pin missed {line!r} in {where}"

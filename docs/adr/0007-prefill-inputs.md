@@ -1,6 +1,6 @@
 # 0007. The prefill's inputs: one Message click, typing into one verified composer, never Enter
 
-Date: 2026-10-03, updated 2026-10-05 with the P4-06 messaging capture (#374), accepted 2026-10-06, amended 2026-10-06 for #444 (which Message control is clicked), amended 2026-10-07 for #470 (scrolling back up to a covered control)
+Date: 2026-10-03, updated 2026-10-05 with the P4-06 messaging capture (#374), accepted 2026-10-06, amended 2026-10-06 for #444 (which Message control is clicked), amended 2026-10-07 for #470 (scrolling back up to a covered control), amended 2026-10-08 for #473 (the Message check, a dry run up to the click)
 
 ## Status
 
@@ -151,6 +151,18 @@ A refusal logs why, as a fixed category, never a name, a slug, a URL, or the pag
 The run's counts record which control was chosen (`message_click_target`: `top_card`, `on_screen`, `top_card_off_screen`, or `unchecked`) and, for a click that raised, `message_click_failure`.
 
 The click opens a bubble on the profile page, and the tab doesn't navigate. Any change of the tab's URL after the click stops the run.
+
+#### Checking the Message click without clicking
+
+*Amended 2026-10-08 for #473.* After #470, a live prefill still refused with `MESSAGE_NOT_ON_SCREEN` on a profile with no bubble open and a normal **Message** button in its top card. Each try spent a prefill and said one category word. `netkeeper linkedin message-check <contact id>` runs the prefill's steps up to the click and stops, so the next failure can be diagnosed in one run.
+
+- It takes the prefill's gates: active hours, the session flag and heat before the run is recorded, and again under the browser lock, which it never waits for. Its run is a `message_send` run started by hand through its own gate token (`runs.MESSAGE_CHECK_GATE`), so the scheduler's gap after a prefill and auto-send's spacing count it, and no prefill starts while it runs. It claims no message, so no message or step changes. It spends one `profile_visits` unit before the navigation, as a prefill does, and no `li_prefills` or `li_messages_auto` unit. A wall at the profile sets the session flag or raises heat, as a prefill's does. The run ends `completed` with stop reason `message_check`.
+- `PageMessageCheck.run` calls the same `BrowserRun` methods as `PagePrefill.prefill`, in the same order, up to the prefill's heading read: `bring_tab_forward`, `goto`, the brief `scroll`, `message_cover`, and the scroll back when the cover is covered. Then it waits the click's pause. It never reaches `click_message`, `type_into_composer`, `observe`, any page input, or script in the page. The provider closes its tab at the end, as any run's.
+- It reads the page three times, right after the load, after the brief scroll, and when the click would read it, through `BrowserRun.message_check_snapshot`. That method first makes the click's own reads, through the click's own code (decision 3's bubble check, `_find_message_controls`, `_read_click_geometry`, and `choose_message_target`), so the verdict it reports is the click's. Then it reads more: the `h1` count, every link and button named exactly "Message", hidden ones counted, with each one's tag, visibility, position after the `h1`, and the shape of its `href` in fixed words, and a count of names that only start with "Message".
+- One more CDP session per read (`BrowserRun._read_check_detail`, with its hit test in `_check_hit`) sends four of the seven read-only methods above: `Page.getLayoutMetrics` (the viewport, the scroll, the zoom, and device pixels per CSS pixel), `DOM.getDocument` with `depth: -1` (the tree once, so a hit element's tag, role and ancestors are looked up locally), `DOM.getNodeForLocation` at each candidate's click point and each on-screen control's center, and `DOM.getBoxModel` for ancestors of a hit whose tag is the control's. The allowlist of methods and parameters is unchanged.
+- The report goes to the terminal only. It holds numbers, fixed words, and tag and role names: never a name, a slug, a URL, an `href` value, or the page's text. A read that fails is listed by its exception's type. Nothing it reads is stored; the run row gets fixed words, or an exception's type name when the check fails.
+
+`tests/test_browser_safety.py` pins that the check, and every method and function it reaches, reaches no input, no script, and no observation; that its only `bring_to_front` is `bring_tab_forward`'s, as the prefill's before its click; that its calls are the prefill's up to the click; and that it sends only from the allowed CDP sites.
 
 ### After the click: no reattach, no navigation
 
