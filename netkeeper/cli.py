@@ -1752,12 +1752,16 @@ def _yes(value: bool | None) -> str:
 def _check_hit(hit: CheckHit | None) -> str:
     if hit is None:
         return "-"
+    own = f"{hit.tag} ({hit.role})"
+    scope = f" in a {hit.scope}" if hit.scope else ""
     if hit.relation in (HitRelation.CONTROL, HitRelation.INSIDE):
-        return f"{hit.relation.value} ({hit.tag}, {hit.role})"
-    if hit.relation is HitRelation.COVERED:
-        own = f"{hit.tag} ({hit.role})"
+        return f"{hit.relation.value} ({hit.tag}, {hit.role}){scope}"
+    if hit.relation is HitRelation.PSEUDO_INSIDE:
+        return f"{hit.relation.value} (its host: {hit.tag}, {hit.role})"
+    if hit.relation in (HitRelation.COVERED, HitRelation.PSEUDO_COVERED):
         where = f" in {hit.landmark}" if hit.landmark and hit.landmark != own else ""
-        return f"covered by {own}{where}, {hit.band}"
+        what = f"a pseudo-element of {own}" if hit.relation is HitRelation.PSEUDO_COVERED else own
+        return f"covered by {what}{scope}{where}, {hit.band}"
     return hit.relation.value
 
 
@@ -1784,8 +1788,10 @@ def _message_check_lines(run_id: int, result: MessageCheckResult) -> list[str]:
             f"scroll back (#471): {'ran' if result.scrolled_back else 'did not run'};"
             f" the cover probe answered {cover}"
         )
-    for snap in result.snapshots:
-        lines += ["", f"[{snap.phase}]"]
+    for index, snap in enumerate(result.snapshots):
+        since = result.since_load_s[index] if index < len(result.since_load_s) else None
+        when = "" if since is None else f" {since:.1f} s after the load"
+        lines += ["", f"[{snap.phase}]{when}"]
         viewport = (
             "-" if snap.viewport is None else f"{snap.viewport[0]:g}x{snap.viewport[1]:g} CSS px"
         )
@@ -1833,7 +1839,7 @@ def _message_check_lines(run_id: int, result: MessageCheckResult) -> list[str]:
                         c.tag,
                         _yes(c.visible),
                         _yes(c.after_heading),
-                        _yes(c.top_card_selector),
+                        _yes(c.top_card_selector) + ("" if c.visible else " (hidden)"),
                         _check_box(c.box),
                         _yes(c.on_screen),
                         c.href,

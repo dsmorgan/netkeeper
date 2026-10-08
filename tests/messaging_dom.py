@@ -227,14 +227,22 @@ class GeometrySession:
         return list(self.tab.document.elements())
 
     def _describe(self, element: Element, order: list[Element]) -> dict[str, Any]:
-        children = [c for c in element.children if isinstance(c, Element)]
+        """A node as CDP describes it. Its pseudo-elements are ``pseudoElements`` entries
+        (#475's ``data-before-box``/``data-after-box``). For #473's check, invented markers
+        stand in for the rest of what Chrome reports apart from ``children``: a
+        ``<shadow-root>`` child is a ``shadowRoots`` entry, ``data-frame-owner`` the frame id
+        a frame owner element names, and anything marked ``data-untreed`` is left out of the
+        tree (a closed shadow root, or a frame's document, which the tree never pierces)."""
+        children = [
+            c for c in element.children if isinstance(c, Element) and "data-untreed" not in c.attrs
+        ]
         index = order.index(element)
         described: dict[str, Any] = {
             "nodeId": index + 1,
             "backendNodeId": index + 1,
             "nodeName": element.tag.upper(),
             "attributes": [part for pair in element.attrs.items() for part in pair],
-            "children": [self._describe(c, order) for c in children],
+            "children": [self._describe(c, order) for c in children if c.tag != "shadow-root"],
         }
         # As Chrome's describeNode does (#475): a node's pseudo-elements beside its children.
         pseudo = [
@@ -249,6 +257,14 @@ class GeometrySession:
         ]
         if pseudo:
             described["pseudoElements"] = pseudo
+        roots = [c for c in children if c.tag == "shadow-root"]
+        if roots:
+            described["shadowRoots"] = [
+                {**self._describe(c, order), "nodeName": "#document-fragment", "attributes": []}
+                for c in roots
+            ]
+        if "data-frame-owner" in element.attrs:
+            described["frameId"] = element.attrs["data-frame-owner"]
         return described
 
     async def send(self, method: str, params: Mapping[str, Any] | None = None) -> Any:
@@ -285,7 +301,12 @@ class GeometrySession:
                         "nodeId": 0,
                         "backendNodeId": 0,
                         "nodeName": "#document",
-                        "children": [self._describe(c, order) for c in children],
+                        "frameId": "main-frame",
+                        "children": [
+                            self._describe(c, order)
+                            for c in children
+                            if "data-untreed" not in c.attrs
+                        ],
                     }
                 }
             assert params == {"depth": 0}
@@ -333,7 +354,19 @@ class GeometrySession:
                         hit = node_id
             if hit is None:
                 raise RuntimeError("No node found at given location")
-            return {"backendNodeId": hit, "frameId": "main"}
+            # #473: the frame a hit belongs to, from an invented data-frame on it or above.
+            owner = (
+                order[(hit - _PSEUDO_ID_BASE) // 2] if hit >= _PSEUDO_ID_BASE else order[hit - 1]
+            )
+            frame = next(
+                (
+                    a.attrs["data-frame"]
+                    for a in (owner, *owner.ancestors())
+                    if "data-frame" in a.attrs
+                ),
+                "main-frame",
+            )
+            return {"backendNodeId": hit, "frameId": frame}
         raise AssertionError(f"the geometry session never sends {method}")
 
     def on(self, event: str, handler: Callable[[Any], None]) -> None:

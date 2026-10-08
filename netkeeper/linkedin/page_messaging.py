@@ -540,9 +540,11 @@ class MessageCheckResult:
     :meth:`~netkeeper.linkedin.browser.BrowserRun.message_cover` answered after the brief
     scroll, and ``scrolled_back`` whether the #470 scroll back then ran. ``stopped`` says
     why the check ended before its reads, and ``wall`` names a checkpoint, login or
-    throttle page it landed on, with ``wall_url`` for the session flag."""
+    throttle page it landed on, with ``wall_url`` for the session flag. ``since_load_s``
+    is when each snapshot was taken, in seconds after the profile loaded."""
 
     snapshots: tuple[MessageCheckSnapshot, ...] = ()
+    since_load_s: tuple[float, ...] = ()
     cover: NotClear | None = None
     scrolled_back: bool = False
     brief_scroll_px: int = 0
@@ -599,7 +601,11 @@ class PageMessageCheck:
         if await cancelled():
             return MessageCheckResult(stopped="cancelled")
         first, brief, click = CHECK_PHASES
+        loop = asyncio.get_running_loop()
+        loaded = loop.time()
+        since: list[float] = []
         snapshots = [await self._run.message_check_snapshot(path, profile_id, first)]
+        since.append(round(loop.time() - loaded, 1))
         scroll = scroll_like_a_person(
             self._rng,
             steps_range=BRIEF_SCROLL_STEPS,
@@ -609,10 +615,13 @@ class PageMessageCheck:
         await self._run.scroll(scroll, sleep=self._sleep, rng=self._rng)
         depth = depth_after(scroll)
         if await cancelled():
-            return MessageCheckResult(tuple(snapshots), brief_scroll_px=depth, stopped="cancelled")
+            return MessageCheckResult(
+                tuple(snapshots), tuple(since), brief_scroll_px=depth, stopped="cancelled"
+            )
         # The prefill's probe comes first, as in the prefill; then the check's own read.
         cover = await self._run.message_cover(path, profile_id)
         snapshots.append(await self._run.message_check_snapshot(path, profile_id, brief))
+        since.append(round(loop.time() - loaded, 1))
         scrolled_back = cover in TOP_CARD_COVERED
         if scrolled_back:
             log.info(
@@ -622,8 +631,11 @@ class PageMessageCheck:
             back = scroll_back_to_top(self._rng, max(depth, 1), delta_range_px=SCROLL_BACK_DELTA_PX)
             await self._run.scroll(back, sleep=self._sleep, rng=self._rng)
             if await cancelled():
-                return MessageCheckResult(tuple(snapshots), cover, True, depth, stopped="cancelled")
+                return MessageCheckResult(
+                    tuple(snapshots), tuple(since), cover, True, depth, stopped="cancelled"
+                )
         # The click's own pause (click_message waits it before its reads), never the click.
         await self._sleep(self._rng.uniform(*CLICK_PAUSE_RANGE_S))
         snapshots.append(await self._run.message_check_snapshot(path, profile_id, click))
-        return MessageCheckResult(tuple(snapshots), cover, scrolled_back, depth)
+        since.append(round(loop.time() - loaded, 1))
+        return MessageCheckResult(tuple(snapshots), tuple(since), cover, scrolled_back, depth)
