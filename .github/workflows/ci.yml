@@ -135,7 +135,7 @@ jobs:
       # Across every core the runner has (pytest-xdist); `make test-serial` is the
       # one-process fallback. The slowest twenty are printed so the headroom under
       # tests/time_limit.py's limit shows on every run (#220). A runner is slower than
-      # a laptop, so every time budget there is doubled (#472).
+      # a laptop, so every scaled() budget there is doubled (#472).
       - run: make test
         env:
           PYTEST_ADDOPTS: --durations=20
