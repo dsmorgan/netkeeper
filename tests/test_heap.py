@@ -12,6 +12,7 @@ import gc
 import factories
 import heap
 import httpx
+import pytest
 import test_browser_safety as browser_safety
 import test_extractor_boundary
 import test_posture
@@ -19,6 +20,9 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session
 
 from netkeeper.models import Base
+
+#: Raised by a test below, as a fake raises a module constant.
+RAISED = LookupError("a module-level exception")
 
 
 def _compiled_entries() -> int:
@@ -72,3 +76,27 @@ def test_the_syntax_tree_caches_last_one_module() -> None:
     # Every module that fills the caches empties them when it ends.
     for module in (browser_safety, test_posture, test_extractor_boundary):
         assert module.ast_caches is browser_safety.ast_caches
+
+
+def _raise(error: BaseException) -> None:
+    try:
+        try:
+            raise KeyError("first")
+        except KeyError:
+            raise error  # noqa: B904  (chained on purpose: the context goes too)
+    except type(error):
+        pass
+
+
+@pytest.mark.parametrize("error", [ValueError("a parameter")], ids=["param"])
+def test_a_long_lived_exception_forgets_the_test_that_raised_it(
+    request: pytest.FixtureRequest, error: ValueError
+) -> None:
+    for each in (RAISED, error):
+        _raise(each)
+        assert each.__traceback__ is not None and each.__context__ is not None
+
+    heap.pytest_runtest_teardown(request.node)
+
+    for each in (RAISED, error):
+        assert each.__traceback__ is None and each.__context__ is None
