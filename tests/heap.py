@@ -21,6 +21,13 @@ keeps that pause out of the timed tests; this plugin shrinks the pause itself:
   nothing; a running app keeps one engine and its own endpoints, so neither cache
   grows there.
 
+* **A long-lived exception forgets where it was raised.** An exception instance in
+  ``@pytest.mark.parametrize`` or in a module constant lives as long as the run. A fake
+  that raises it gives it a traceback, and the traceback holds the test's frames, with
+  every fixture value in them: the engine, its compiled statements, the app.
+  :func:`pytest_runtest_teardown` drops the traceback (and the exceptions chained to
+  it) once the test is over.
+
 ``tests/test_browser_safety.py`` keeps its parsed syntax trees for one module at a
 time and drops them at the module's end (see ``ast_caches`` there).
 """
@@ -59,6 +66,37 @@ def clear_per_test_caches() -> None:
             compiled.clear()
     for cached in _fastapi_dependency_caches():
         cached.cache_clear()  # type: ignore[attr-defined]
+
+
+def _forget_raised(error: BaseException) -> None:
+    """Drop ``error``'s traceback, and the exceptions it was raised from or during."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        current.__traceback__ = None
+        chained = current.__cause__ or current.__context__
+        current.__cause__ = current.__context__ = None
+        current = chained
+
+
+def _long_lived(item: pytest.Item) -> Iterator[object]:
+    """The test's parameters and its module's globals."""
+    callspec = getattr(item, "callspec", None)
+    if callspec is not None:
+        yield from callspec.params.values()
+    module = getattr(item, "module", None)
+    if module is not None:
+        yield from vars(module).values()
+
+
+def pytest_runtest_teardown(item: pytest.Item) -> None:
+    for value in _long_lived(item):  # and one container level inside each
+        if isinstance(value, dict):
+            value = tuple(value.values())
+        for candidate in value if isinstance(value, tuple | list) else (value,):
+            if isinstance(candidate, BaseException):
+                _forget_raised(candidate)
 
 
 @pytest.fixture(autouse=True)
