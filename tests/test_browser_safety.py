@@ -486,16 +486,22 @@ class Finding:
         return f"{self.path}:{self.line}: {self.detail}"
 
 
-# --- One parse per file per run -----------------------------------------------------------
+# --- One parse per file per module ---------------------------------------------------------
 #
 # Every check below reads the same ~100 modules, and an AST walk costs far more than the
 # parse, so a test that re-walked the package for each rule took 10-20 s on a loaded
-# machine (#452). These helpers share the work across the session: ``read_source`` reads a
+# machine (#452). These helpers share the work across the module: ``read_source`` reads a
 # file once, ``parse`` parses a source once, ``walk`` lists a tree's nodes once (in
 # ``ast.walk`` order), and ``_scoped`` maps its scopes once. The results are shared, so a
 # check must never mutate a tree or a scope map. To add a pin, call ``read_source``,
 # ``parse``, ``walk`` and ``_scoped`` where you would have called ``read_text``,
 # ``ast.parse``, ``ast.walk`` and a scope builder; the assertion itself is unchanged.
+#
+# The caches hold about 700,000 syntax-tree objects, and every one of them would sit in
+# each later full garbage collection of the process (#478). So they last one module:
+# ``ast_caches`` empties them when the module ends. The modules that borrow these helpers
+# (test_posture.py, test_extractor_boundary.py) use it too. Parsing and walking the whole
+# package again costs about half a second.
 
 
 @cache
@@ -519,6 +525,19 @@ def _walk_cached(tree: ast.AST) -> tuple[ast.AST, ...]:
 
 def walk(tree: ast.AST) -> tuple[ast.AST, ...]:
     return _walk_cached(tree)
+
+
+def clear_caches() -> None:
+    """Drop every read file, parsed tree, tree walk and scope map."""
+    for cached in (read_source, _parse_cached, _walk_cached, _scoped):
+        cached.cache_clear()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def ast_caches() -> Iterator[None]:
+    """The syntax-tree caches, kept while a module runs and emptied when it ends (#478)."""
+    yield
+    clear_caches()
 
 
 def python_files(root: Path) -> list[Path]:

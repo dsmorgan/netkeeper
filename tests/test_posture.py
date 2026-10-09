@@ -97,6 +97,9 @@ from netkeeper.services.scheduler import (
 from netkeeper.services.setting_checks import MAX_ACTIVE_WINDOW_HOURS, WEEKEND_DAMPING_CEILING
 from netkeeper.services.settings_kv import delete_setting, set_setting
 
+#: test_browser_safety.py's syntax-tree caches, emptied when this module ends (#478).
+ast_caches = browser_safety.ast_caches
+
 #: A Wednesday, 14:00 in New York (the default configured zone), inside the
 #: default 08:30-21:30 window. Deliberately not a weekend and deliberately
 #: inside the window, so the cases that change either have something to change.
