@@ -18,10 +18,10 @@ keeps that pause out of the timed tests; this plugin shrinks the pause itself:
   module-level caches keyed by the function, which pins a test's app when the test
   defines its endpoints inside a function (``tests/test_web_deps.py``). An entry for
   another test's engine or function is never looked up again, so emptying them costs
-  nothing; a running app keeps one engine and its own endpoints, so neither cache
-  grows there. SQLAlchemy's PostgreSQL dialect class caches its reflection queries per
-  dialect too, which pins every engine ``tests/test_migrations.py`` opens on CI.
-
+  nothing. SQLAlchemy's PostgreSQL dialect class caches its reflection queries per
+  dialect too, which pins every engine ``tests/test_migrations.py`` opens on CI. A
+  running app keeps one engine and module-level endpoints, so none of these caches
+  grows in production.
 * **A long-lived exception forgets where it was raised.** An exception instance in
   ``@pytest.mark.parametrize`` or in a module constant lives as long as the run. A fake
   that raises it gives it a traceback, and the traceback holds the test's frames, with
