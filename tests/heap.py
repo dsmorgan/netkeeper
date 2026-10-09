@@ -27,7 +27,9 @@ keeps that pause out of the timed tests; this plugin shrinks the pause itself:
   that raises it gives it a traceback, and the traceback holds the test's frames, with
   every fixture value in them: the engine, its compiled statements, the app.
   :func:`pytest_runtest_teardown` drops the traceback (and the exceptions chained to
-  it) once the test is over.
+  it) once the test and its fixtures are torn down. Only a raised exception is touched,
+  so a constant built with a ``__cause__`` keeps it until a test raises it; after that
+  test, a raised module-level exception's chain is gone.
 
 ``tests/test_browser_safety.py`` keeps its parsed syntax trees for one module at a
 time and drops them at the module's end (see ``ast_caches`` there).
@@ -85,6 +87,7 @@ def _forget_raised(error: BaseException) -> None:
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         current.__traceback__ = None
+        # An explicit ``raise ... from`` cause wins; otherwise the exception being handled.
         chained = current.__cause__ or current.__context__
         current.__cause__ = current.__context__ = None
         current = chained
@@ -100,12 +103,13 @@ def _long_lived(item: pytest.Item) -> Iterator[object]:
         yield from vars(module).values()
 
 
+@pytest.hookimpl(trylast=True)  # after the fixtures' teardown, which may still raise one
 def pytest_runtest_teardown(item: pytest.Item) -> None:
     for value in _long_lived(item):  # and one container level inside each
         if isinstance(value, dict):
             value = tuple(value.values())
         for candidate in value if isinstance(value, tuple | list) else (value,):
-            if isinstance(candidate, BaseException):
+            if isinstance(candidate, BaseException) and candidate.__traceback__ is not None:
                 _forget_raised(candidate)
 
 
