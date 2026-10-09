@@ -19,7 +19,8 @@ keeps that pause out of the timed tests; this plugin shrinks the pause itself:
   defines its endpoints inside a function (``tests/test_web_deps.py``). An entry for
   another test's engine or function is never looked up again, so emptying them costs
   nothing; a running app keeps one engine and its own endpoints, so neither cache
-  grows there.
+  grows there. SQLAlchemy's PostgreSQL dialect class caches its reflection queries per
+  dialect too, which pins every engine ``tests/test_migrations.py`` opens on CI.
 
 * **A long-lived exception forgets where it was raised.** An exception instance in
   ``@pytest.mark.parametrize`` or in a module constant lives as long as the run. A fake
@@ -35,6 +36,7 @@ time and drops them at the module's end (see ``ast_caches`` there).
 from __future__ import annotations
 
 import gc
+import sys
 from collections.abc import Iterator
 
 import pytest
@@ -48,13 +50,21 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     gc.freeze()
 
 
-def _fastapi_dependency_caches() -> list[object]:
-    """FastAPI's ``lru_cache``-wrapped classifiers, found by shape, not by private name."""
+def _caches_in(namespace: object) -> list[object]:
+    """The ``lru_cache``-wrapped callables in ``namespace``, found by shape, not by name."""
     return [
-        value
-        for value in vars(fastapi_dependency_models).values()
-        if callable(getattr(value, "cache_clear", None))
+        value for value in vars(namespace).values() if callable(getattr(value, "cache_clear", None))
     ]
+
+
+def _fastapi_dependency_caches() -> list[object]:
+    return _caches_in(fastapi_dependency_models)
+
+
+def _postgresql_dialect_caches() -> list[object]:
+    """The PostgreSQL dialect's per-dialect query caches, once something imported it."""
+    module = sys.modules.get("sqlalchemy.dialects.postgresql.base")
+    return [] if module is None else _caches_in(module.PGDialect)
 
 
 def clear_per_test_caches() -> None:
@@ -64,7 +74,7 @@ def clear_per_test_caches() -> None:
         compiled = mapper.__dict__.get("_compiled_cache")
         if compiled is not None:
             compiled.clear()
-    for cached in _fastapi_dependency_caches():
+    for cached in _fastapi_dependency_caches() + _postgresql_dialect_caches():
         cached.cache_clear()  # type: ignore[attr-defined]
 
 
