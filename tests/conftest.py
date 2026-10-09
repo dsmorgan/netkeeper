@@ -20,8 +20,9 @@ from netkeeper.models import Base
 from netkeeper.scoping import install_scope_guard
 from netkeeper.web.app import create_app
 
-# The per-test time limit (#210), and pytester for the test that shows it fails a test.
-pytest_plugins = ["time_limit", "pytester"]
+# The per-test time limit (#210), a small heap for short collections (#478), and pytester
+# for the test that shows the limit fails a test.
+pytest_plugins = ["time_limit", "heap", "pytester"]
 
 
 @pytest.fixture(autouse=True)

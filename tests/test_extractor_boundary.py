@@ -30,6 +30,9 @@ import test_browser_safety as browser_safety
 from netkeeper.linkedin import connections, enrich, inbox
 from netkeeper.models import Base
 
+#: test_browser_safety.py's syntax-tree caches, emptied when this module ends (#478).
+ast_caches = browser_safety.ast_caches
+
 # --- the interface is plain data ---------------------------------------------------
 
 #: Everything that crosses the boundary from the job's side (spec 9.10's table).

@@ -18,10 +18,12 @@ not sit out the busy timeout). Use :class:`Stopwatch` for the elapsed time and
 :func:`scaled` for a performance budget.
 
 Both kinds leave out the time the garbage collector held the process. Each xdist worker
-ends up holding about three million objects (the imported package, session caches,
-leftovers of thousands of tests), and on a CI runner one full collection of that heap
-takes 2-3 s. It lands wherever an allocation happens to trigger it, so a correct test
-used to fail a 1 s or 2 s limit at random (#472). Collections are timed with
+used to end up holding about three million objects (the imported package, session
+caches, leftovers of thousands of tests), and on a CI runner one full collection of that
+heap took 2-3 s. It lands wherever an allocation happens to trigger it, so a correct
+test used to fail a 1 s or 2 s limit at random (#472). ``tests/heap.py`` now keeps the
+heap far smaller (#478), but a collection's pause still varies with the machine and
+the suite, so the limits keep leaving it out. Collections are timed with
 :data:`gc.callbacks` and subtracted. Where a limit is an ``asyncio`` timeout or a SQLite
 busy timeout, which a stopwatch cannot adjust, mark the test ``wall_clock``: its body
 runs with automatic collection held (:func:`gc_held`), and the collection runs after it.
