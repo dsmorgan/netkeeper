@@ -23,6 +23,29 @@ from netkeeper.models import Base
 
 #: Raised by a test below, as a fake raises a module constant.
 RAISED = LookupError("a module-level exception")
+#: Built with a cause and never raised: it keeps the cause.
+CAUSED = LookupError("built with a cause")
+CAUSED.__cause__ = KeyError("the cause")
+
+#: Two test modules for pytester: the first fills test_browser_safety's caches through
+#: ``ast_caches``, the second sees them empty.
+FILLS = """
+import test_browser_safety as browser_safety
+
+ast_caches = browser_safety.ast_caches
+
+
+def test_fills():
+    browser_safety.parse("x = 1")
+    assert browser_safety._parse_cached.cache_info().currsize
+"""
+SEES_EMPTY = """
+import test_browser_safety as browser_safety
+
+
+def test_sees_empty():
+    assert browser_safety._parse_cached.cache_info().currsize == 0
+"""
 
 
 def _compiled_entries() -> int:
@@ -32,6 +55,10 @@ def _compiled_entries() -> int:
 def test_the_heap_after_collection_is_frozen() -> None:
     # The imported package alone is well over this; an unfrozen run has a few hundred.
     assert gc.get_freeze_count() > 50_000
+
+
+def test_every_test_empties_the_caches_after_it(request: pytest.FixtureRequest) -> None:
+    assert "_per_test_caches" in request.fixturenames
 
 
 def test_a_mappers_compiled_statements_are_dropped(session: Session) -> None:
@@ -78,6 +105,14 @@ def test_the_syntax_tree_caches_last_one_module() -> None:
         assert module.ast_caches is browser_safety.ast_caches
 
 
+def test_the_syntax_tree_caches_are_empty_after_a_module_that_used_them(
+    pytester: pytest.Pytester,
+) -> None:
+    pytester.makepyfile(test_a_fills=FILLS, test_b_sees_empty=SEES_EMPTY)
+    pytester.makeini("[pytest]\nasyncio_default_fixture_loop_scope = function\n")
+    pytester.runpytest_inprocess("-p", "no:cacheprovider").assert_outcomes(passed=2)
+
+
 def _raise(error: BaseException) -> None:
     try:
         try:
@@ -100,9 +135,18 @@ def test_a_long_lived_exception_forgets_the_test_that_raised_it(
 
     for each in (RAISED, error):
         assert each.__traceback__ is None and each.__context__ is None
+    assert isinstance(CAUSED.__cause__, KeyError), "an exception never raised keeps its cause"
 
 
-def test_the_postgresql_dialects_query_caches_are_found() -> None:
-    import sqlalchemy.dialects.postgresql.base  # noqa: F401  (what a PostgreSQL engine loads)
+def test_the_postgresql_dialects_query_caches_are_dropped() -> None:
+    from sqlalchemy.dialects.postgresql.base import PGDialect
+    from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 
     assert heap._postgresql_dialect_caches(), "PGDialect no longer caches queries in lru_caches"
+    dialect = PGDialect()  # type: ignore[no-untyped-call]
+    dialect._table_oids_query(None, False, ObjectScope.ANY, ObjectKind.TABLE)
+    assert PGDialect._table_oids_query.cache_info().currsize
+
+    heap.clear_per_test_caches()
+
+    assert PGDialect._table_oids_query.cache_info().currsize == 0
