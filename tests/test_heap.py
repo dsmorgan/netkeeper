@@ -100,3 +100,9 @@ def test_a_long_lived_exception_forgets_the_test_that_raised_it(
 
     for each in (RAISED, error):
         assert each.__traceback__ is None and each.__context__ is None
+
+
+def test_the_postgresql_dialects_query_caches_are_found() -> None:
+    import sqlalchemy.dialects.postgresql.base  # noqa: F401  (what a PostgreSQL engine loads)
+
+    assert heap._postgresql_dialect_caches(), "PGDialect no longer caches queries in lru_caches"
