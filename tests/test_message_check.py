@@ -17,6 +17,7 @@ Every page, box and name here is invented; nothing is a capture of LinkedIn's pa
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import random
 from collections.abc import Iterator
@@ -747,6 +748,36 @@ async def test_a_failure_records_only_its_type(
     with session_scope(cli_db) as session:
         run = runs.get_run(session, _user(session), target.run_id)
         assert run.status is SyncRunStatus.FAILED and run.error == "the check failed (ValueError)"
+
+
+async def test_a_check_keeps_its_run_s_heartbeat_while_it_works(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#467: a Message check holds the browser like any run, so another data directory
+    sharing the database must see it alive: its heartbeat is written while it works."""
+    monkeypatch.setattr(runs, "refuse_if_outside_active_hours", lambda *_, **__: None)
+    contact_id = _contact(cli_db)
+    with session_scope(cli_db, write=True) as session:
+        target = message_check.start(
+            session, _user(session), contact_id, now=datetime.now(UTC), settings=Settings()
+        )
+    seen: list[tuple[datetime | None, str | None]] = []
+
+    async def look(self: BrowserRun, *args: object) -> None:
+        async with asyncio.timeout(5):
+            while True:
+                with session_scope(cli_db) as session:
+                    run = runs.get_run(session, _user(session), target.run_id)
+                    if run.heartbeat_at is not None:
+                        seen.append((run.heartbeat_at, run.heartbeat_by))
+                        break
+                await asyncio.sleep(0.005)
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(BrowserRun, "message_check_snapshot", look)
+    provider, _ = fake_provider(ScrollingSite())
+    await run_message_check(provider, cli_db, 1, target, settings=Settings(), sleep=no_sleep)
+    assert len(seen) == 1 and seen[0][1] == runs.runner_id()
 
 
 def test_a_message_check_run_needs_its_gate(cli_db: sessionmaker[Session]) -> None:

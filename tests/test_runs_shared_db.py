@@ -248,9 +248,128 @@ def test_the_staleness_constants_keep_their_values() -> None:
     assert timedelta(seconds=20) == runs.HEARTBEAT_EVERY
 
 
-def _beat(factory: sessionmaker[Session], user_id: int, run_id: int, at: datetime) -> bool:
+#: Directory A's runner id, as A's process would write it. The tests run in B.
+A_RUNNER: Final = "a" * runs.RUNNER_ID_LENGTH
+
+
+def _beat(
+    factory: sessionmaker[Session], user_id: int, run_id: int, at: datetime, by: str = A_RUNNER
+) -> bool:
     with session_scope(factory, write=True) as session:
-        return runs.beat(session, _user(session, user_id), run_id, now=at)
+        return runs.beat(session, _user(session, user_id), run_id, now=at, by=by)
+
+
+def test_the_runner_id_names_the_data_directory_not_the_process(
+    data_dirs: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a, b = data_dirs
+    in_b = runs.runner_id()
+    assert re.fullmatch(r"[0-9a-f]{32}", in_b)
+    assert str(b) not in in_b
+    assert runs.runner_id() == in_b  # every process on B gets the same id
+    monkeypatch.setenv("NETKEEPER_DATA", str(a))
+    assert runs.runner_id() != in_b
+    monkeypatch.setenv("NETKEEPER_DATA", str(b / ".." / b.name))
+    assert runs.runner_id() == in_b  # the same directory, however it is spelled
+    monkeypatch.setattr("socket.gethostname", lambda: "another-host")
+    assert runs.runner_id() != in_b
+
+
+def test_a_crashed_run_of_this_directory_is_recovered_at_once_however_recently_it_beat(
+    session_factory: sessionmaker[Session], user_id: int, data_dirs: tuple[Path, Path]
+) -> None:
+    """A single install: ``serve`` was killed mid-run, a beat ago. Its lock went with it,
+    and this directory can see that, so the restart fails the run at once, and the next
+    run starts, without waiting out the heartbeat."""
+    with session_scope(session_factory, write=True) as session:
+        user = _user(session, user_id)
+        left = runs.create_run(
+            session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW
+        )
+        other = runs.create_run(
+            session,
+            factories.make_user(session),
+            SyncRunKind.ENRICH,
+            trigger=SyncRunTrigger.MANUAL,
+            now=NOW,
+        )
+        other_id = other.user_id
+    restart = NOW + timedelta(minutes=30)
+    here = runs.runner_id()
+    assert _beat(session_factory, user_id, left.id, restart - timedelta(seconds=1), by=here)
+    assert _beat(session_factory, other_id, other.id, restart - timedelta(seconds=1), by=here)
+
+    with session_scope(session_factory, write=True) as session:
+        assert runs.fail_interrupted_runs(session, now=restart) == 2
+    with session_scope(session_factory, write=True) as session:
+        runs.create_run(
+            session,
+            _user(session, user_id),
+            SyncRunKind.ENRICH,
+            trigger=SyncRunTrigger.MANUAL,
+            now=restart,
+        )
+    stored = _stored(session_factory, user_id, left.id)
+    assert (stored.status, stored.stop_reason) == (SyncRunStatus.FAILED, "interrupted")
+
+
+def test_this_directory_s_crashed_run_fails_on_create_and_on_cancel_too(
+    session_factory: sessionmaker[Session], user_id: int, data_dirs: tuple[Path, Path]
+) -> None:
+    with session_scope(session_factory, write=True) as session:
+        user = _user(session, user_id)
+        first = runs.create_run(
+            session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW
+        ).id
+    later = NOW + timedelta(minutes=30)
+    assert _beat(session_factory, user_id, first, later, by=runs.runner_id())
+    with session_scope(session_factory, write=True) as session:
+        user = _user(session, user_id)
+        second = runs.create_run(
+            session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=later
+        ).id
+    assert _stored(session_factory, user_id, first).status is SyncRunStatus.FAILED
+    assert _beat(session_factory, user_id, second, later, by=runs.runner_id())
+    with session_scope(session_factory, write=True) as session:
+        runs.request_cancel(session, _user(session, user_id), second, now=later + runs.STALE_AFTER)
+    assert _stored(session_factory, user_id, second).status is SyncRunStatus.FAILED
+
+
+def test_this_directory_s_run_inside_its_start_grace_is_left_alone(
+    session_factory: sessionmaker[Session], user_id: int, data_dirs: tuple[Path, Path]
+) -> None:
+    """The rule from before #467: a run younger than STALE_AFTER may be one whose
+    process is about to take the lock."""
+    with session_scope(session_factory, write=True) as session:
+        run_id = runs.create_run(
+            session,
+            _user(session, user_id),
+            SyncRunKind.ENRICH,
+            trigger=SyncRunTrigger.MANUAL,
+            now=NOW,
+        ).id
+    assert _beat(session_factory, user_id, run_id, NOW, by=runs.runner_id())
+    with session_scope(session_factory, write=True) as session:
+        assert runs.fail_interrupted_runs(session, now=LATER - timedelta(seconds=1)) == 0
+        assert runs.fail_interrupted_runs(session, now=LATER) == 1
+
+
+def test_runs_elsewhere_reads_who_beat(
+    session_factory: sessionmaker[Session], user_id: int, data_dirs: tuple[Path, Path]
+) -> None:
+    with session_scope(session_factory, write=True) as session:
+        run = runs.create_run(
+            session,
+            _user(session, user_id),
+            SyncRunKind.ENRICH,
+            trigger=SyncRunTrigger.MANUAL,
+            now=NOW,
+        )
+        assert not runs.runs_elsewhere(run)  # no beat yet
+        run.heartbeat_by = runs.runner_id()
+        assert not runs.runs_elsewhere(run)
+        run.heartbeat_by = A_RUNNER
+        assert runs.runs_elsewhere(run)
 
 
 def test_b_refuses_to_start_a_run_while_a_s_heartbeat_is_fresh(
@@ -378,7 +497,26 @@ def test_a_beat_lands_only_on_the_users_own_running_run(
         assert runs.beat(session, user, run.id, now=LATER)
         runs.finish_run(session, user, run.id, status=SyncRunStatus.COMPLETED, now=LATER)
         assert not runs.beat(session, user, run.id, now=LATER + timedelta(minutes=1))
-    assert _stored(session_factory, user_id, run.id).heartbeat_at == LATER
+    stored = _stored(session_factory, user_id, run.id)
+    assert (stored.heartbeat_at, stored.heartbeat_by) == (LATER, runs.runner_id())
+
+
+def test_a_beat_never_moves_the_heartbeat_back(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    with session_scope(session_factory, write=True) as session:
+        run_id = runs.create_run(
+            session,
+            _user(session, user_id),
+            SyncRunKind.ENRICH,
+            trigger=SyncRunTrigger.MANUAL,
+            now=NOW,
+        ).id
+    assert _beat(session_factory, user_id, run_id, LATER)
+    assert _beat(session_factory, user_id, run_id, NOW)  # still running: True
+    assert _stored(session_factory, user_id, run_id).heartbeat_at == LATER
+    assert _beat(session_factory, user_id, run_id, LATER + timedelta(seconds=20))
+    assert _stored(session_factory, user_id, run_id).heartbeat_at == LATER + timedelta(seconds=20)
 
 
 def test_a_heartbeat_older_than_the_start_counts_as_none(
@@ -411,7 +549,10 @@ async def _until(predicate: Callable[[], bool]) -> None:
 
 
 async def test_the_heartbeat_keeps_a_run_alive_and_stops_with_its_block(
-    session_factory: sessionmaker[Session], user_id: int, data_dirs: tuple[Path, Path]
+    session_factory: sessionmaker[Session],
+    user_id: int,
+    data_dirs: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The context manager beats at once and then every ``every`` with the clock's time;
     once the block is gone (its process died, say), the beats stop and B recovers."""
@@ -433,8 +574,12 @@ async def test_the_heartbeat_keeps_a_run_alive_and_stops_with_its_block(
     def beat_at(at: datetime) -> Callable[[], bool]:
         return lambda: _stored(session_factory, user_id, run_id).heartbeat_at == at
 
+    a, b = data_dirs
+    monkeypatch.setenv("NETKEEPER_DATA", str(a))  # A's process enters the block
     task = asyncio.create_task(a_s_runner())
     await _until(beat_at(NOW))
+    monkeypatch.setenv("NETKEEPER_DATA", str(b))  # and B looks at the row
+    assert _stored(session_factory, user_id, run_id).heartbeat_by not in (None, runs.runner_id())
     clock.at = NOW + timedelta(hours=1)
     await _until(beat_at(clock.at))
     with (
@@ -544,8 +689,12 @@ async def test_the_worker_keeps_a_live_run_s_heartbeat_so_b_cannot_start_another
     )
     gate = Gate()  # never opened: the run waits between pages
     worker = BrowserWorker(provider, session_factory, Settings().linkedin, clock=clock, sleep=gate)
+    monkeypatch.setenv("NETKEEPER_DATA", str(a))  # A's process starts the run
     task = asyncio.create_task(worker.execute(run_id, user_id))
     try:
+        await _until(lambda: _stored(session_factory, user_id, run_id).heartbeat_at is not None)
+        monkeypatch.setenv("NETKEEPER_DATA", str(data_dirs[1]))  # B looks at the row
+        assert runs.runs_elsewhere(_stored(session_factory, user_id, run_id))
         await _until(lambda: gate.calls > 0)
         clock.at = NOW + timedelta(hours=1)
         await _until(lambda: _stored(session_factory, user_id, run_id).heartbeat_at == clock.at)

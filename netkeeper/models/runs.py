@@ -27,6 +27,9 @@ Columns beyond spec 8.4's list, each read by something:
   running it (#467). A live runner refreshes it every
   ``services.runs.HEARTBEAT_EVERY``, so another data directory that shares this
   database can tell a live run from one whose process went away.
+* ``heartbeat_by`` -- which install wrote that heartbeat: a hash of the host name
+  and the data directory (``services.runs.runner_id``), never the path itself.
+  The directory that runs a run judges it by its own lock, not the heartbeat.
 * ``max_visits`` -- a manual enrichment's own cap. It only ever lowers the
   day's budget, never raises it.
 * ``error`` -- what went wrong, one line, for a ``failed`` run. Never a cookie,
@@ -52,6 +55,7 @@ from netkeeper.models.base import Base, TimestampMixin, UserOwned, UTCDateTime, 
 
 STOP_REASON_MAX_LENGTH: Final = 32
 BROWSER_MODE_MAX_LENGTH: Final = 16
+HEARTBEAT_BY_MAX_LENGTH: Final = 32
 
 
 class SyncRunKind(enum.StrEnum):
@@ -109,6 +113,7 @@ class SyncRun(UserOwned, TimestampMixin, Base):
     error: Mapped[str | None] = mapped_column(Text)
     cancel_requested_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    heartbeat_by: Mapped[str | None] = mapped_column(String(HEARTBEAT_BY_MAX_LENGTH))
     max_visits: Mapped[int | None] = mapped_column(Integer)
     resume_of_id: Mapped[int | None] = mapped_column(
         ForeignKey("sync_runs.id", ondelete="SET NULL"), index=True

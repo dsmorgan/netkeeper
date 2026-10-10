@@ -52,12 +52,15 @@ a scheduled one waits for its next due time.
 cannot see its browser lock: another ``NETKEEPER_DATA`` directory sharing this
 database through ``NETKEEPER_DATABASE_URL``, whose lock files are its own. The
 worker holds :func:`heartbeat` around everything it does for a run, which
-writes ``heartbeat_at`` at once and then every :data:`HEARTBEAT_EVERY`. A run
-counts as left behind only when its newest sign of life (its heartbeat, or its
-start when it has none yet) is :data:`STALE_AFTER` old *and* no lock this
-process can see is held. So a second data directory refuses to start a run
-while the first one's runner is alive, and still recovers a run whose process
-died, once its heartbeat stops.
+writes ``heartbeat_at`` at once and then every :data:`HEARTBEAT_EVERY`, with
+``heartbeat_by``, the :func:`runner_id` of the data directory doing the run. A
+run this directory runs (or one with no heartbeat yet) is judged as before: left
+behind once it is :data:`STALE_AFTER` old and no process holds its lock here, so a
+crashed ``serve`` never blocks the next run. Another directory's run, whose lock
+this process can't see, is left behind only once its heartbeat is
+:data:`STALE_AFTER` old. So a second data directory refuses to start a run while
+the first one's runner is alive, and still recovers a run whose process died,
+once its heartbeat stops.
 
 **Counts only.** ``progress_json`` and ``counts_json`` hold numbers and short
 reason words, never a name, URN, slug, cookie, or body, and ``error`` is one
@@ -73,16 +76,19 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import hashlib
 import logging
+import socket
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any, Final, Protocol, cast
 
-from sqlalchemy import CursorResult, select
+from sqlalchemy import CursorResult, case, literal, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper import paths
 from netkeeper.config import LinkedInSettings
 from netkeeper.db import CancelledWhileFailing, is_writer, off_loop, session_scope
 from netkeeper.linkedin import activity_lock, pacing
@@ -169,6 +175,17 @@ STALE_AFTER: Final = timedelta(minutes=2)
 #: row failed or its process stopped.
 HEARTBEAT_EVERY: Final = timedelta(seconds=20)
 
+#: What a cancel or pause adds for a run another data directory runs (#467): this
+#: process can only set the flag, and a runner that never reaches its next check
+#: (stuck in the browser) keeps beating, so only its own process can stop it.
+ELSEWHERE_NOTE: Final = (
+    "the run is in another netkeeper data directory on this database; if it doesn't"
+    " stop, stop the netkeeper process that runs it"
+)
+
+#: The length of :func:`runner_id`, and of ``sync_runs.heartbeat_by``.
+RUNNER_ID_LENGTH: Final = 32
+
 BrowserHeld = Callable[[int], bool]
 
 
@@ -194,6 +211,25 @@ def browser_held_for(session: Session) -> BrowserHeld:
     return lambda account_id: lock_held(account_id, legacy=account_id == local)
 
 
+def runner_id() -> str:
+    """Which install is running here (#467): a hash of the host name and the resolved
+    data directory, 32 hex characters.
+
+    Every process on one data directory (``serve``, a terminal's ``netkeeper linkedin
+    sync``) has the same id, and they share the lock files, so they can see each
+    other's locks. Another data directory, or the same path on another host, has
+    another id. The path itself never reaches the database.
+    """
+    where = f"{socket.gethostname()}\0{paths.data_dir().expanduser().resolve()}"
+    return hashlib.sha256(where.encode()).hexdigest()[:RUNNER_ID_LENGTH]
+
+
+def runs_elsewhere(run: SyncRun) -> bool:
+    """Whether another data directory (or host) is running ``run``: its last heartbeat
+    came from another :func:`runner_id` (#467). Read-only."""
+    return run.heartbeat_by is not None and run.heartbeat_by != runner_id()
+
+
 def last_sign_of_life(run: SyncRun) -> datetime:
     """When the run was last known alive: its newest heartbeat, or its start (#467)."""
     beat = run.heartbeat_at
@@ -201,7 +237,18 @@ def last_sign_of_life(run: SyncRun) -> datetime:
 
 
 def _stale(run: SyncRun, *, now: datetime, held: BrowserHeld) -> bool:
-    return now - last_sign_of_life(run) >= STALE_AFTER and not held(run.linkedin_account_id)
+    """Whether ``run`` was left behind by a process that went away.
+
+    Never while a lock this process can see is held. A run this data directory
+    runs, or one with no heartbeat yet, is judged by its start, as before #467:
+    its lock is visible here, so a crashed process is caught as soon as the start
+    grace is over, however recently it beat. Another directory's run is judged by
+    its heartbeat, the only sign of life visible from here.
+    """
+    if held(run.linkedin_account_id):
+        return False
+    since = last_sign_of_life(run) if runs_elsewhere(run) else run.started_at
+    return now - since >= STALE_AFTER
 
 
 def _fail_stale(session: Session, user: User, run: SyncRun, *, now: datetime) -> None:
@@ -370,9 +417,9 @@ def create_run(
     (and no start) within :data:`STALE_AFTER`, was left behind by a process that
     went away (a CLI run killed with ``SIGKILL``): it is marked ``failed`` here
     rather than blocking every new run until the next start. ``browser_held``
-    defaults to reading the lock files (:func:`browser_held_for`). A run whose
-    heartbeat is fresh is refused as running, even when no lock here is held: its
-    process may be another data directory's on this database (#467).
+    defaults to reading the lock files (:func:`browser_held_for`). Another data
+    directory's run on this database is refused as running while its heartbeat is
+    fresh, though no lock here is held (#467).
     """
     _require_writer(session)
     _require_aware(now)
@@ -625,19 +672,27 @@ def cancel_requested(session: Session, user: User, run_id: int) -> bool:
     return requested_at is not None or status is not SyncRunStatus.RUNNING
 
 
-def beat(session: Session, user: User, run_id: int, *, now: datetime) -> bool:
-    """Write ``now`` as run ``run_id``'s heartbeat (#467), if it is still ``running``.
+def beat(
+    session: Session, user: User, run_id: int, *, now: datetime, by: str | None = None
+) -> bool:
+    """Write ``now`` as run ``run_id``'s heartbeat (#467), from ``by`` (default
+    :func:`runner_id`), if the run is still ``running``.
 
     Returns whether it was: a run that already ended (or that another data
     directory failed) gets no heartbeat, and its runner stops at its next check
-    (:func:`cancel_requested`). Never moves a heartbeat back.
+    (:func:`cancel_requested`). A heartbeat never moves back: a ``now`` older than
+    the stored one keeps the stored one, and still answers ``True``.
     """
     _require_writer(session)
     _require_aware(now)
+    stamp = literal(now, SyncRun.__table__.c.heartbeat_at.type)
     statement = (
         scoped_update(user, SyncRun)
         .where(SyncRun.id == run_id, SyncRun.status == SyncRunStatus.RUNNING)
-        .values(heartbeat_at=now)
+        .values(
+            heartbeat_at=case((SyncRun.heartbeat_at > stamp, SyncRun.heartbeat_at), else_=stamp),
+            heartbeat_by=runner_id() if by is None else by,
+        )
         .execution_options(synchronize_session=False)
     )
     result = cast(CursorResult[Any], session.execute(statement))
@@ -645,14 +700,18 @@ def beat(session: Session, user: User, run_id: int, *, now: datetime) -> bool:
 
 
 def _beat_quietly(
-    factory: sessionmaker[Session], user_id: int, run_id: int, clock: Callable[[], datetime]
+    factory: sessionmaker[Session],
+    user_id: int,
+    run_id: int,
+    clock: Callable[[], datetime],
+    by: str,
 ) -> bool:
     """:func:`beat` in its own writer session. A failed write is logged and answers
     ``True``: the runner keeps going, and the next beat tries again."""
     try:
         with session_scope(factory, write=True) as session:
             user = session.get(User, user_id)
-            return user is not None and beat(session, user, run_id, now=clock())
+            return user is not None and beat(session, user, run_id, now=clock(), by=by)
     except Exception:
         log.warning("could not write run %d's heartbeat", run_id, exc_info=True)
         return True
@@ -681,10 +740,11 @@ async def heartbeat(
     """
 
     interval = (HEARTBEAT_EVERY if every is None else every).total_seconds()
+    by = runner_id()  # this process's directory, read once as the run starts
 
     async def beat_forever() -> None:
         while True:
-            if not await off_loop(_beat_quietly, factory, user_id, run_id, clock):
+            if not await off_loop(_beat_quietly, factory, user_id, run_id, clock, by):
                 return  # the run ended: nothing left to keep alive
             await asyncio.sleep(interval)
 
@@ -713,8 +773,7 @@ def fail_interrupted_runs(
     because it may be a ``netkeeper linkedin sync`` in a terminal that is still
     going. So is one younger than :data:`STALE_AFTER`: a terminal's run in the
     moment between committing its row and taking the lock (#175 review, F7). So
-    is one whose heartbeat is younger than that: another data directory's live
-    run on this database (#467).
+    is another data directory's run whose heartbeat is younger than that (#467).
     ``create_run`` and ``request_cancel`` catch it later if it really was left.
     """
     _require_writer(session)
