@@ -1421,8 +1421,8 @@ class BubbleCheck:
 
     ``tabs`` is the context's open tabs; ``on_origin`` those on LinkedIn's origin;
     ``with_bubble`` those with any ``Messaging`` dialog; ``for_contact`` those with one
-    whose header links only this contact. The rest is read only when exactly one tab is
-    the contact's: its ``Messaging`` dialogs and composers (hidden ones counted), how
+    whose header links only this contact. The rest is read in the first of those tabs,
+    when there is one: its ``Messaging`` dialogs and composers (hidden ones counted), how
     many of its dialogs are the contact's, whether the first of those holds a composer,
     and that dialog's close-control shape."""
 
@@ -1812,7 +1812,7 @@ class NameRelation(enum.StrEnum):
 
     EXACT = "exact"
     WHITESPACE = "equal after whitespace normalization"
-    UNICODE = "equal after whitespace and NFC normalization"
+    UNICODE = "equal after NFC normalization"
     CASE = "differ only in case"
     HEADER_STARTS = "header name starts with suffix"
     SUFFIX_STARTS = "suffix starts with header name"
@@ -1861,6 +1861,23 @@ def _longer(difference: int, longer: str, shorter: str) -> str:
     return "same length"
 
 
+def _plus(difference: int) -> str:
+    """A length difference, header minus suffix, in the note's short form."""
+    if difference > 0:
+        return f"header +{difference}"
+    if difference < 0:
+        return f"suffix +{-difference}"
+    return "same length"
+
+
+#: #495: the longest the shape may be in a run's note. ``runs`` cuts a note at 500
+#: characters, and the refusal's own words, the ``bubble left open:`` prefix, and the
+#: in-front note (#195) must fit beside it; parts past this are counted as ``+N more``.
+CLOSE_SHAPE_NOTE_MAX: Final = 280
+#: How many close buttons a run's note describes one by one.
+CLOSE_SHAPE_NOTE_BUTTONS: Final = 2
+
+
 @dataclass(frozen=True, slots=True)
 class CloseButtonShape:
     """One button whose name starts with :data:`CLOSE_CONTROL_PREFIX` (#495).
@@ -1868,7 +1885,8 @@ class CloseButtonShape:
     ``relation`` and ``difference`` (header minus suffix, in characters) are ``None``
     when its name, or the header's, could not be read; ``why`` then says which, in fixed
     words. ``hidden_text`` is whether its name changes when hidden text is counted, as
-    the close lookup counts it (``include_hidden=True``)."""
+    the close lookup counts it (``include_hidden=True``); ``None`` for a hidden button,
+    whose name is read with hidden text already."""
 
     visible: bool
     relation: NameRelation | None = None
@@ -1878,6 +1896,7 @@ class CloseButtonShape:
     why: str | None = None
 
     def describe(self) -> str:
+        """The CLI's words for this button."""
         where = "visible" if self.visible else "hidden"
         if self.relation is None or self.difference is None:
             return f"{where}, {self.why or 'not compared'}"
@@ -1888,10 +1907,23 @@ class CloseButtonShape:
         ]
         if self.source is not None:
             parts.append(f"its name from {self.source.value}")
-        if self.hidden_text is not None:
-            parts.append(
-                "hidden text changes its name" if self.hidden_text else "no hidden text in its name"
-            )
+        parts.append(
+            "hidden text unknown"
+            if self.hidden_text is None
+            else "hidden text changes its name"
+            if self.hidden_text
+            else "no hidden text in its name"
+        )
+        return ", ".join(parts)
+
+    def brief(self) -> str:
+        """The note's shorter words for this button."""
+        where = "visible" if self.visible else "hidden"
+        if self.relation is None or self.difference is None:
+            return f"{where}, {self.why or 'not compared'}"
+        parts = [where, _plus(self.difference), self.relation.value]
+        if self.hidden_text:
+            parts.append("hidden text")
         return ", ".join(parts)
 
 
@@ -1952,25 +1984,59 @@ class CloseShape:
             parts.append("NFC changes it")
         return ", ".join(parts)
 
+    def header_brief(self) -> str:
+        """The note's shorter words for the header link."""
+        if self.header_links != 1:
+            return f"{self.header_links} header links"
+        if self.header_source is None:
+            return "header name unreadable"
+        source = {
+            NameSource.LABEL: "aria-label",
+            NameSource.TEXT: "text",
+            NameSource.SHOWN: "text minus aria-hidden",
+        }[self.header_source]
+        parts = [f"header from {source}"]
+        if self.header_labelled and self.header_source is not NameSource.LABEL:
+            parts.append("has aria-label")
+        if self.header_elements is not None:
+            parts.append(f"{self.header_elements} elements")
+        if self.header_hidden_parts:
+            parts.append(f"{self.header_hidden_parts} aria-hidden")
+        extra = self.header_text_extra
+        if extra:
+            parts.append(f"text {'+' if extra > 0 else '-'}{abs(extra)}")
+        if self.header_nfc_changes:
+            parts.append("NFC changes it")
+        return ", ".join(parts)
+
     def describe(self) -> str:
-        """One line for a run's note: why the close lookup missed, in fixed words."""
-        parts = [
-            f"{self.by_prefix} close button(s) by prefix",
-            f"{self.by_prefix_visible} visible",
-        ]
+        """One line for a run's note: why the close lookup missed, in fixed words, at most
+        :data:`CLOSE_SHAPE_NOTE_MAX` characters. The header first, then the counts, then
+        the first :data:`CLOSE_SHAPE_NOTE_BUTTONS` buttons; what doesn't fit is counted."""
+        counts = [f"{self.by_prefix} by prefix", f"{self.by_prefix_visible} visible"]
         if self.exact is not None:
-            parts.append(f"{self.exact} by the exact name")
+            counts.append(f"{self.exact} exact")
         if self.by_prefix_shown_names != self.by_prefix_visible:
-            parts.append(f"{self.by_prefix_shown_names} by prefix without hidden text")
+            counts.append(f"{self.by_prefix_shown_names} without hidden text")
         if self.on_page_by_prefix != self.by_prefix:
-            parts.append(f"{self.on_page_by_prefix} by prefix on the page")
+            counts.append(f"{self.on_page_by_prefix} on page")
         if self.any_close != self.by_prefix:
-            parts.append(f"{self.any_close} named Close-anything")
+            counts.append(f"{self.any_close} any Close")
         if self.draft_close:
-            parts.append(f"{self.draft_close} named {DRAFT_CLOSE_NAME!r}")
-        parts += [f"button {n}: {b.describe()}" for n, b in enumerate(self.buttons, start=1)]
-        parts.append(self.header_words())
-        return "; ".join(parts)
+            counts.append(f"{self.draft_close} draft Close")
+        line = f"{self.header_brief()}; close buttons: {', '.join(counts)}"
+        described = 0
+        for number, button in enumerate(self.buttons[:CLOSE_SHAPE_NOTE_BUTTONS], start=1):
+            part = f"; #{number} {button.brief()}"
+            # Room kept for the "+N more" a later part may need.
+            if len(line) + len(part) > CLOSE_SHAPE_NOTE_MAX - 12:
+                break
+            line += part
+            described += 1
+        more = self.by_prefix - described
+        if more > 0:
+            line += f"; +{more} more"
+        return line[:CLOSE_SHAPE_NOTE_MAX]
 
     def lines(self) -> list[str]:
         """The CLI's report lines (``netkeeper linkedin message-check --bubble``)."""
@@ -2077,7 +2143,9 @@ async def _close_button_shape(
         return CloseButtonShape(visible, source=read.source, why="no prefix without hidden text")
     # The close lookup counts hidden text in a button's name (include_hidden=True).
     same = tab.get_by_role(CLOSE_CONTROL_ROLE, name=read.candidate, exact=True, include_hidden=True)
-    hidden_text = await button.and_(same).count() != 1
+    # A hidden button's name was read with hidden text already: whether it changes it
+    # can't be told from here.
+    hidden_text = await button.and_(same).count() != 1 if visible else None
     if header is None:
         return CloseButtonShape(
             visible, source=read.source, hidden_text=hidden_text, why="no header name to compare"
@@ -3945,9 +4013,9 @@ class BrowserRun:
         Of the context's open tabs, it reads only those on ``origin``. A tab is the
         contact's when one of its ``Messaging`` dialogs (hidden ones counted, the first
         :data:`BUBBLE_CHECK_MAX_DIALOGS`) has exactly one header link, to
-        ``/in/<profile id>/``, as :meth:`close_sent_bubble` checks it. With exactly one
-        such tab, it reports that tab's dialog and composer counts and the shape of that
-        dialog's close control (:func:`read_close_shape`)."""
+        ``/in/<profile id>/``, as :meth:`close_sent_bubble` checks it. It reports how many
+        tabs are the contact's and, for the first, that tab's dialog and composer counts
+        and the shape of its first such dialog's close control (:func:`read_close_shape`)."""
         want = urlsplit(origin)
         path = f"{PROFILE_PATH_PREFIX}{profile_id}/"
         pages = [page for page in self._attachment.context.pages if not page.is_closed()]
@@ -3985,7 +4053,7 @@ class BrowserRun:
             if mine:
                 found.append((tab, mine[0], count, len(mine)))
         check = BubbleCheck(len(pages), len(on_origin), with_bubble, len(found))
-        if len(found) != 1:
+        if not found:
             return check
         tab, dialog, count, for_contact = found[0]
         composer = tab.get_by_role(

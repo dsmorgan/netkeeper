@@ -13,6 +13,7 @@ Every page and name here is invented; nothing is a capture of LinkedIn's page.
 from __future__ import annotations
 
 import functools
+import logging
 import unicodedata
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
@@ -39,6 +40,7 @@ from netkeeper.linkedin.browser import (
     NO_ONE_CLOSE_CONTROL,
     BrowserRun,
     BubbleCheck,
+    CloseButtonShape,
     CloseShape,
     NameRelation,
     NameSource,
@@ -54,6 +56,7 @@ from netkeeper.services import budgets, message_check, runs
 from netkeeper.services.budgets import ActionClass
 from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.linkedin_session import flag_session
+from netkeeper.services.linkedin_steps import BUBBLE_LEFT_OPEN_NOTE
 from netkeeper.services.users import ensure_local_user
 from netkeeper.worker import BubbleCheckResult, run_bubble_check
 
@@ -163,7 +166,7 @@ def test_the_relation_words_are_fixed() -> None:
     assert {r.value for r in NameRelation} == {
         "exact",
         "equal after whitespace normalization",
-        "equal after whitespace and NFC normalization",
+        "equal after NFC normalization",
         "differ only in case",
         "header name starts with suffix",
         "suffix starts with header name",
@@ -200,8 +203,11 @@ async def test_a_badge_in_the_header_link_makes_the_header_name_longer() -> None
     [button] = shape.buttons
     assert (button.relation, button.difference) == (NameRelation.HEADER_STARTS, 8)
     assert shape.header_elements == 1 and shape.header_hidden_parts == 0
-    assert "header name longer by 8, header name starts with suffix" in shape.describe()
-    assert "1 element(s) under the link" in shape.describe()
+    assert shape.describe() == (
+        "header from text, 1 elements; close buttons: 1 by prefix, 1 visible, 0 exact;"
+        " #1 visible, header +8, header name starts with suffix"
+    )
+    assert "suffix vs header name: header name longer by 8" in "\n".join(shape.lines())
 
 
 async def test_an_aria_hidden_badge_is_counted_and_left_out_of_the_name() -> None:
@@ -211,7 +217,10 @@ async def test_an_aria_hidden_badge_is_counted_and_left_out_of_the_name() -> Non
     assert shape.header_source is NameSource.SHOWN and shape.header_hidden_parts == 1
     assert shape.header_text_extra == 2
     assert shape.buttons[0].relation is NameRelation.EXACT
-    assert "its text longer than its name by 2" in shape.describe()
+    assert shape.describe().startswith(
+        "header from text minus aria-hidden, 1 elements, 1 aria-hidden, text +2;"
+    )
+    assert "its text longer than its name by 2" in "\n".join(shape.lines())
 
 
 async def test_an_aria_label_on_the_header_link_is_named_as_its_source() -> None:
@@ -267,9 +276,13 @@ async def test_hidden_and_visible_close_controls_are_counted_apart() -> None:
     shape = await shape_of(_bubble(two))
     assert (shape.by_prefix, shape.by_prefix_visible, shape.exact) == (2, 1, 2)
     assert [b.visible for b in shape.buttons] == [True, False]
-    assert shape.describe().startswith(
-        "2 close button(s) by prefix; 1 visible; 2 by the exact name"
+    assert [b.hidden_text for b in shape.buttons] == [False, None]
+    assert shape.describe().endswith(
+        "close buttons: 2 by prefix, 1 visible, 2 exact; #1 visible, same length, exact;"
+        " #2 hidden, same length, exact"
     )
+    assert "close button 2: hidden" in "\n".join(shape.lines())
+    assert "hidden text unknown" in "\n".join(shape.lines())
 
 
 async def test_hidden_text_in_the_close_control_is_named() -> None:
@@ -287,7 +300,8 @@ async def test_hidden_text_in_the_close_control_is_named() -> None:
     [button] = shape.buttons
     assert button.relation is NameRelation.EXACT and button.hidden_text is True
     assert button.source is NameSource.SHOWN
-    assert "hidden text changes its name" in shape.describe()
+    assert shape.describe().endswith("#1 visible, same length, exact, hidden text")
+    assert "hidden text changes its name" in "\n".join(shape.lines())
 
 
 async def test_hidden_text_before_the_prefix_is_counted_without_it() -> None:
@@ -299,7 +313,7 @@ async def test_hidden_text_before_the_prefix_is_counted_without_it() -> None:
 
     shape = await shape_of(_bubble(icon))
     assert (shape.by_prefix, shape.by_prefix_shown_names, shape.exact) == (0, 1, 0)
-    assert "1 by prefix without hidden text" in shape.describe()
+    assert "0 by prefix, 0 visible, 0 exact, 1 without hidden text" in shape.describe()
 
 
 async def test_the_never_messaged_header_controls_are_counted() -> None:
@@ -316,7 +330,8 @@ async def test_the_never_messaged_header_controls_are_counted() -> None:
     assert (shape.by_prefix, shape.exact, shape.draft_close, shape.any_close) == (0, 0, 1, 1)
     assert (shape.minimize_by_prefix, shape.draft_minimize, shape.options_by_prefix) == (0, 1, 1)
     assert shape.buttons == ()
-    assert "1 named 'Close your draft conversation'" in shape.describe()
+    assert shape.describe().endswith("1 any Close, 1 draft Close")
+    assert "named 'Close your draft conversation': 1" in "\n".join(shape.lines())
 
 
 async def test_a_close_control_outside_the_dialog_is_counted_on_the_page() -> None:
@@ -358,7 +373,7 @@ async def test_at_most_four_close_controls_are_described() -> None:
 
 
 async def test_the_refusal_keeps_its_words_when_the_shape_cannot_be_read(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     async def boom(*_: Any) -> CloseShape:
         raise RuntimeError(f"locator for {PERSON.name} timed out")
@@ -367,8 +382,12 @@ async def test_the_refusal_keeps_its_words_when_the_shape_cannot_be_read(
     site = MessagingSite(PERSON)
     tab = _tab(site, _bubble(_rename_close(OTHER.name)))
     dialog = tab.get_by_role("dialog", name="Messaging", exact=True, include_hidden=True)
-    refusal = await browser._no_one_close_control(cast(Any, tab), cast(Any, dialog))
+    with caplog.at_level(logging.DEBUG):
+        refusal = await browser._no_one_close_control(cast(Any, tab), cast(Any, dialog))
     assert refusal == f"{NO_ONE_CLOSE_CONTROL} (its shape could not be read)"
+    assert "the close control's shape could not be read (RuntimeError)" in caplog.text
+    assert "timed out" not in caplog.text and "locator" not in caplog.text
+    assert_no_pii(caplog.text)
 
 
 def test_the_refusal_s_words_are_pinned() -> None:
@@ -420,17 +439,23 @@ async def test_no_tab_with_the_contact_s_bubble_reports_counts_only() -> None:
     assert found.shape is None and found.dialogs is None
     assert_untouched(site, tabs)
     report = "\n".join(_bubble_check_lines(9, BubbleCheckResult(found)))
-    assert "open it by hand in the netkeeper Chrome window" in report
+    assert "If the tab auto-send left open is still open, run this against it" in report
+    assert "open the bubble by hand in the netkeeper Chrome window" in report
     assert_no_pii(report)
 
 
-async def test_two_tabs_with_the_contact_s_bubble_are_not_read_further() -> None:
+async def test_two_tabs_with_the_contact_s_bubble_are_counted_and_the_first_read() -> None:
     site = MessagingSite(PERSON)
-    tabs = [_tab(site, _bubble()), _tab(site, _bubble())]
+    first = _tab(site, _bubble(_rename_close(PERSON.first)))
+    second = _tab(site, _bubble())
     found, _ = await bubble_check(site)
-    assert found.for_contact == 2 and found.shape is None
-    assert_untouched(site, tabs)
-    assert "close all but one" in "\n".join(_bubble_check_lines(9, BubbleCheckResult(found)))
+    assert found.for_contact == 2 and found.shape is not None
+    [button] = found.shape.buttons
+    assert button.relation is NameRelation.HEADER_STARTS  # the first tab's bubble
+    assert_untouched(site, [first, second])
+    report = "\n".join(_bubble_check_lines(9, BubbleCheckResult(found)))
+    assert "2 tabs hold this contact's bubble; this reads the first" in report
+    assert_no_pii(report)
 
 
 async def test_a_second_dialog_in_the_tab_is_counted() -> None:
@@ -574,7 +599,9 @@ async def test_a_busy_browser_fails_the_bubble_check(cli_db: sessionmaker[Sessio
 
 @pytest.mark.usefixtures("inside_active_hours")
 async def test_a_bubble_check_failure_records_only_its_type(
-    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+    cli_db: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     contact_id = _contact(cli_db)
     with session_scope(cli_db, write=True) as session:
@@ -592,8 +619,13 @@ async def test_a_bubble_check_failure_records_only_its_type(
 
     monkeypatch.setattr(BrowserRun, "bubble_check", boom)
     provider, _ = fake_provider(MessagingSite(PERSON))
-    result = await run_bubble_check(provider, cli_db, 1, target, settings=Settings())
+    with caplog.at_level(logging.DEBUG):
+        result = await run_bubble_check(provider, cli_db, 1, target, settings=Settings())
     assert result.stopped == "the check failed (ValueError)"
+    assert f"bubble check run {target.run_id} failed (ValueError)" in caplog.text
+    assert "timed out" not in caplog.text and "name=" not in caplog.text
+    for secret in (PERSON.first, PERSON.last, PERSON.slug, PERSON.profile_id):
+        assert secret not in caplog.text
     with session_scope(cli_db) as session:
         run = runs.get_run(session, _user(session), target.run_id)
         assert run.status is SyncRunStatus.FAILED and run.error == "the check failed (ValueError)"
@@ -619,3 +651,171 @@ def test_the_diagnostic_s_names_are_pinned() -> None:
         "Minimize your conversation",
     )
     assert (browser.CLOSE_SHAPE_MAX, browser.BUBBLE_CHECK_MAX_DIALOGS) == (4, 8)
+
+
+# --- review follow-ups ------------------------------------------------------------------------
+
+
+async def test_a_close_control_whose_name_cannot_be_read_says_so_in_fixed_words() -> None:
+    """A name given only through ``aria-labelledby`` can't be read without script."""
+
+    def labelled(html: str) -> str:
+        return html.replace(
+            _close_button(PERSON.name),
+            '<button aria-labelledby="nk-495-close"><span>x</span></button>'
+            f'<span id="nk-495-close" hidden>{CLOSE}{PERSON.name}</span>',
+        )
+
+    shape = await shape_of(_bubble(labelled))
+    assert shape.by_prefix == 1
+    [button] = shape.buttons
+    assert button.relation is None and button.why == "its name could not be read"
+    assert shape.describe().endswith("#1 visible, its name could not be read")
+
+
+def _worst_shape(buttons: int) -> CloseShape:
+    return CloseShape(
+        by_prefix=99,
+        by_prefix_visible=98,
+        by_prefix_shown_names=97,
+        on_page_by_prefix=96,
+        any_close=95,
+        draft_close=94,
+        options_by_prefix=93,
+        minimize_by_prefix=92,
+        draft_minimize=91,
+        exact=90,
+        header_links=1,
+        header_source=NameSource.SHOWN,
+        header_labelled=True,
+        header_elements=999,
+        header_hidden_parts=999,
+        header_text_extra=-999,
+        header_nfc_changes=True,
+        buttons=tuple(
+            CloseButtonShape(False, NameRelation.WHITESPACE, -999, NameSource.SHOWN, True)
+            for _ in range(buttons)
+        ),
+    )
+
+
+def _note(shape: CloseShape) -> str:
+    """The run's note line as auto-send writes it, with the in-front note after it."""
+    left_open = f"{BUBBLE_LEFT_OPEN_NOTE}{NO_ONE_CLOSE_CONTROL} ({shape.describe()})"
+    return runs._line(f"{left_open} {runs.OPENED_IN_FRONT_NOTE}")
+
+
+async def test_a_two_button_note_and_the_in_front_note_both_stay_whole() -> None:
+    def two(html: str) -> str:
+        hidden = f'<button style="display: none"><span>{CLOSE}{PERSON.first}</span></button>'
+        return html.replace("</header>", f"{hidden}</header>", 1)
+
+    shape = await shape_of(_bubble(two))
+    assert len(shape.buttons) == 2
+    note = _note(shape)
+    assert note.endswith(f"({shape.describe()}) {runs.OPENED_IN_FRONT_NOTE}")
+    assert "#1 visible" in note and "#2 hidden" in note and "more" not in note
+
+
+def test_the_worst_case_note_leaves_room_for_the_in_front_note() -> None:
+    shape = _worst_shape(4)
+    words = shape.describe()
+    assert len(words) <= browser.CLOSE_SHAPE_NOTE_MAX == 280
+    assert words.startswith("header from text minus aria-hidden, has aria-label,")
+    assert words.endswith("more")
+    assert _note(shape).endswith(runs.OPENED_IN_FRONT_NOTE)
+    assert len(_note(shape)) <= runs.MAX_MESSAGE_LENGTH
+
+
+def test_the_note_counts_the_buttons_it_does_not_describe() -> None:
+    shape = CloseShape(
+        by_prefix=4,
+        by_prefix_visible=4,
+        by_prefix_shown_names=4,
+        on_page_by_prefix=4,
+        any_close=4,
+        draft_close=0,
+        options_by_prefix=1,
+        minimize_by_prefix=1,
+        draft_minimize=0,
+        exact=0,
+        header_links=1,
+        header_source=NameSource.TEXT,
+        header_labelled=False,
+        header_elements=1,
+        header_hidden_parts=0,
+        header_text_extra=8,
+        header_nfc_changes=False,
+        buttons=tuple(
+            CloseButtonShape(True, NameRelation.HEADER_STARTS, 8, NameSource.TEXT, False)
+            for _ in range(4)
+        ),
+    )
+    assert shape.describe() == (
+        "header from text, 1 elements, text +8; close buttons: 4 by prefix, 4 visible,"
+        " 0 exact; #1 visible, header +8, header name starts with suffix; #2 visible,"
+        " header +8, header name starts with suffix; +2 more"
+    )
+
+
+def test_the_worst_case_note_counts_every_button_it_has_no_room_for() -> None:
+    assert _worst_shape(4).describe().endswith("94 draft Close; +99 more")
+
+
+async def _cancelled_target(factory: sessionmaker[Session]) -> message_check.CheckTarget:
+    contact_id = _contact(factory)
+    with session_scope(factory, write=True) as session:
+        return message_check.start(
+            session,
+            _user(session),
+            contact_id,
+            now=datetime.now(UTC),
+            settings=Settings(),
+            bubble=True,
+        )
+
+
+def _cancel(factory: sessionmaker[Session], run_id: int) -> None:
+    with session_scope(factory, write=True) as session:
+        runs.request_cancel(
+            session, _user(session), run_id, now=datetime.now(UTC), browser_held=lambda _: True
+        )
+
+
+@pytest.mark.usefixtures("inside_active_hours")
+async def test_a_cancel_before_the_read_ends_the_run_aborted(
+    cli_db: sessionmaker[Session],
+) -> None:
+    target = await _cancelled_target(cli_db)
+    _cancel(cli_db, target.run_id)
+    site = MessagingSite(PERSON)
+    tab = _tab(site, _bubble())
+    provider, _ = fake_provider(site)
+    result = await run_bubble_check(provider, cli_db, 1, target, settings=Settings())
+    assert result.bubble is None and tab.reads == 0
+    with session_scope(cli_db) as session:
+        run = runs.get_run(session, _user(session), target.run_id)
+        assert (run.status, run.stop_reason) == (SyncRunStatus.ABORTED, runs.CANCELLED)
+
+
+@pytest.mark.usefixtures("inside_active_hours")
+async def test_a_cancel_during_the_read_ends_the_run_aborted(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = await _cancelled_target(cli_db)
+    real = BrowserRun.bubble_check
+
+    async def then_cancel(self: BrowserRun, profile_id: str, origin: str) -> BubbleCheck:
+        found = await real(self, profile_id, origin)
+        _cancel(cli_db, target.run_id)
+        return found
+
+    monkeypatch.setattr(BrowserRun, "bubble_check", then_cancel)
+    site = MessagingSite(PERSON)
+    _tab(site, _bubble())
+    provider, _ = fake_provider(site)
+    result = await run_bubble_check(provider, cli_db, 1, target, settings=Settings())
+    assert result.stopped == "cancelled" and result.bubble is not None
+    with session_scope(cli_db) as session:
+        run = runs.get_run(session, _user(session), target.run_id)
+        assert (run.status, run.stop_reason) == (SyncRunStatus.ABORTED, runs.CANCELLED)

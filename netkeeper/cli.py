@@ -1691,9 +1691,9 @@ def linkedin_message_check(
         typer.Option(
             "--bubble",
             help=(
-                "Read the message bubble you opened by hand for this contact, in the tab"
-                " it is in, and report its close control's shape (#495). Opens no"
-                " profile and spends no profile visit."
+                "Read this contact's open message bubble, in the tab it is in (the tab"
+                " auto-send left open, or one you opened by hand), and report its close"
+                " control's shape (#495). Opens no profile and spends no profile visit."
             ),
         ),
     ] = False,
@@ -1712,11 +1712,16 @@ def linkedin_message_check(
     and fixed words, never a name, a URL, an href, or the page's text. Nothing it reads
     is stored; the database gets only the run's own row and the visit.
 
-    With --bubble (#495), it opens nothing. Open the contact's message bubble by hand
-    in the netkeeper Chrome window first; it finds the tab that holds that bubble and
-    reports, in counts and fixed words, how the bubble's close control matches the name
-    in its header, which is what auto-send's close click looks for. Same lock, gates,
-    and run row; no profile visit.
+    With --bubble (#495), it opens nothing. It finds the tab that holds the contact's
+    message bubble and reports, in counts and fixed words, how the bubble's close
+    control matches the name in its header, which is what auto-send's close click looks
+    for. If the tab auto-send left open is still open, run it against that tab before
+    you close anything: that is the bubble's state right after a send. Otherwise open
+    the bubble by hand in the netkeeper Chrome window first. An exact match on a bubble
+    you opened by hand means the mismatch comes from the bubble's state right after a
+    send, not from the match itself. It needs active hours, as message-check does,
+    takes the same lock and gates, and records a run that counts toward auto-send's
+    spacing; it spends no profile visit.
     """
     settings = _load_settings_or_exit(ctx.ensure_object(CliState))
     if bubble:
@@ -1822,15 +1827,15 @@ def _bubble_check_lines(run_id: int, result: BubbleCheckResult) -> list[str]:
         f" with a Messaging dialog: {read.with_bubble};"
         f" with this contact's bubble: {read.for_contact}"
     )
-    if read.for_contact != 1:
+    if read.for_contact == 0:
         lines.append(
-            "no tab holds this contact's bubble: open it by hand in the netkeeper Chrome"
-            " window, then run this again"
-            if read.for_contact == 0
-            else "more than one tab holds this contact's bubble: close all but one, then"
-            " run this again"
+            "no tab holds this contact's bubble. If the tab auto-send left open is still"
+            " open, run this against it before you close anything; otherwise open the"
+            " bubble by hand in the netkeeper Chrome window, then run this again"
         )
         return lines
+    if read.for_contact > 1:
+        lines.append(f"{read.for_contact} tabs hold this contact's bubble; this reads the first")
     lines.append(
         f"in that tab: Messaging dialogs (hidden ones counted): {_check_count(read.dialogs)};"
         f" this contact's: {_check_count(read.dialogs_for_contact)};"
