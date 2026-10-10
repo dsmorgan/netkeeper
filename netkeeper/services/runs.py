@@ -48,6 +48,17 @@ removes the marker.
 resumed on its own: an interrupted enrichment can be resumed by a person, and
 a scheduled one waits for its next due time.
 
+**The heartbeat** (#467) is how a run proves it is alive to a process that
+cannot see its browser lock: another ``NETKEEPER_DATA`` directory sharing this
+database through ``NETKEEPER_DATABASE_URL``, whose lock files are its own. The
+worker holds :func:`heartbeat` around everything it does for a run, which
+writes ``heartbeat_at`` at once and then every :data:`HEARTBEAT_EVERY`. A run
+counts as left behind only when its newest sign of life (its heartbeat, or its
+start when it has none yet) is :data:`STALE_AFTER` old *and* no lock this
+process can see is held. So a second data directory refuses to start a run
+while the first one's runner is alive, and still recovers a run whose process
+died, once its heartbeat stops.
+
 **Counts only.** ``progress_json`` and ``counts_json`` hold numbers and short
 reason words, never a name, URN, slug, cookie, or body, and ``error`` is one
 line from the exception that ended the run. An enrichment's per-visit reasons
@@ -67,9 +78,9 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
-from typing import Any, Final, Protocol
+from typing import Any, Final, Protocol, cast
 
-from sqlalchemy import select
+from sqlalchemy import CursorResult, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import LinkedInSettings
@@ -85,7 +96,7 @@ from netkeeper.models import (
     SyncRunTrigger,
     User,
 )
-from netkeeper.scoping import get_scoped, scoped, scoped_count
+from netkeeper.scoping import get_scoped, scoped, scoped_count, scoped_update
 from netkeeper.services import heat as heat_service
 from netkeeper.services.linkedin_accounts import (
     ensure_account,
@@ -143,13 +154,20 @@ CANCELLED: Final = "cancelled"
 #: The longest ``error`` or ``notes`` line kept. A traceback belongs in the log.
 MAX_MESSAGE_LENGTH: Final = 500
 
-#: How long a ``running`` run may go without its account's browser lock being
-#: held before it counts as left behind by a process that went away. A live run
-#: holds the lock for its whole length, except in the moment between the row
-#: being committed and the worker taking the lock; this grace covers that
-#: moment, so a run just asked for is never failed under the process about to
-#: start it (#175 review, F7).
+#: How long a ``running`` run may go without a sign of life (its heartbeat, or
+#: its start) and without its account's browser lock being held before it counts
+#: as left behind by a process that went away. A live run holds the lock for its
+#: whole length, except in the moment between the row being committed and the
+#: worker taking the lock; this grace covers that moment, so a run just asked for
+#: is never failed under the process about to start it (#175 review, F7). From
+#: another data directory the lock can't be seen, so there the heartbeat is what
+#: keeps a live run from looking stale (#467).
 STALE_AFTER: Final = timedelta(minutes=2)
+
+#: How often a live run's process refreshes ``heartbeat_at`` (#467). Six beats fit
+#: in :data:`STALE_AFTER`, so a run is judged stale only after several writes in a
+#: row failed or its process stopped.
+HEARTBEAT_EVERY: Final = timedelta(seconds=20)
 
 BrowserHeld = Callable[[int], bool]
 
@@ -176,8 +194,14 @@ def browser_held_for(session: Session) -> BrowserHeld:
     return lambda account_id: lock_held(account_id, legacy=account_id == local)
 
 
+def last_sign_of_life(run: SyncRun) -> datetime:
+    """When the run was last known alive: its newest heartbeat, or its start (#467)."""
+    beat = run.heartbeat_at
+    return run.started_at if beat is None or beat < run.started_at else beat
+
+
 def _stale(run: SyncRun, *, now: datetime, held: BrowserHeld) -> bool:
-    return now - run.started_at >= STALE_AFTER and not held(run.linkedin_account_id)
+    return now - last_sign_of_life(run) >= STALE_AFTER and not held(run.linkedin_account_id)
 
 
 def _fail_stale(session: Session, user: User, run: SyncRun, *, now: datetime) -> None:
@@ -342,11 +366,13 @@ def create_run(
     (:class:`ScheduledRunsDisarmed`). ``max_visits`` is for enrichment only
     and must be at least 1; it can only lower the day's budget.
 
-    A ``running`` run whose account's browser lock nobody holds, older than
-    :data:`STALE_AFTER`, was left behind by a process that went away (a CLI run
-    killed with ``SIGKILL``): it is marked ``failed`` here rather than blocking
-    every new run until the next start. ``browser_held`` defaults to reading the
-    lock files (:func:`browser_held_for`).
+    A ``running`` run whose account's browser lock nobody holds, with no heartbeat
+    (and no start) within :data:`STALE_AFTER`, was left behind by a process that
+    went away (a CLI run killed with ``SIGKILL``): it is marked ``failed`` here
+    rather than blocking every new run until the next start. ``browser_held``
+    defaults to reading the lock files (:func:`browser_held_for`). A run whose
+    heartbeat is fresh is refused as running, even when no lock here is held: its
+    process may be another data directory's on this database (#467).
     """
     _require_writer(session)
     _require_aware(now)
@@ -503,10 +529,11 @@ def request_cancel(
     process that went away (see :func:`create_run`) has nobody to read the flag,
     so it is marked ``failed`` at once instead, and returned.
 
-    The flag is set first, stale or not (#177 G1). "Stale" is judged from this
-    process's lock files, so a live run in another data directory that shares
-    this database looks stale from here. Its runner still reads the flag, and
-    the ``failed`` status, and stops.
+    The flag is set first, stale or not (#177 G1). "Stale" is judged from the
+    run's heartbeat and this process's lock files, so a live run in another data
+    directory that shares this database is not stale while its heartbeat is
+    fresh (#467). Should one be judged stale anyway (its heartbeat writes failed),
+    its runner still reads the flag, and the ``failed`` status, and stops.
     """
     _require_writer(session)
     _require_aware(now)
@@ -598,6 +625,79 @@ def cancel_requested(session: Session, user: User, run_id: int) -> bool:
     return requested_at is not None or status is not SyncRunStatus.RUNNING
 
 
+def beat(session: Session, user: User, run_id: int, *, now: datetime) -> bool:
+    """Write ``now`` as run ``run_id``'s heartbeat (#467), if it is still ``running``.
+
+    Returns whether it was: a run that already ended (or that another data
+    directory failed) gets no heartbeat, and its runner stops at its next check
+    (:func:`cancel_requested`). Never moves a heartbeat back.
+    """
+    _require_writer(session)
+    _require_aware(now)
+    statement = (
+        scoped_update(user, SyncRun)
+        .where(SyncRun.id == run_id, SyncRun.status == SyncRunStatus.RUNNING)
+        .values(heartbeat_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    result = cast(CursorResult[Any], session.execute(statement))
+    return result.rowcount > 0
+
+
+def _beat_quietly(
+    factory: sessionmaker[Session], user_id: int, run_id: int, clock: Callable[[], datetime]
+) -> bool:
+    """:func:`beat` in its own writer session. A failed write is logged and answers
+    ``True``: the runner keeps going, and the next beat tries again."""
+    try:
+        with session_scope(factory, write=True) as session:
+            user = session.get(User, user_id)
+            return user is not None and beat(session, user, run_id, now=clock())
+    except Exception:
+        log.warning("could not write run %d's heartbeat", run_id, exc_info=True)
+        return True
+
+
+@asynccontextmanager
+async def heartbeat(
+    factory: sessionmaker[Session],
+    user_id: int,
+    run_id: int,
+    *,
+    clock: Callable[[], datetime],
+    every: timedelta | None = None,
+) -> AsyncIterator[None]:
+    """Keep run ``run_id``'s heartbeat fresh while the block runs (#467).
+
+    A background task writes one beat as soon as the block first waits, then one
+    every ``every`` (default :data:`HEARTBEAT_EVERY`) on the real event-loop clock
+    (never a runner's injected sleep, so a test's instant sleep cannot spin it),
+    each off the loop (:func:`netkeeper.db.off_loop`). Entering awaits nothing, so
+    a cancel can't land between here and the block's own handlers. The task stops
+    once the run is no longer ``running``, and when the block ends, however it
+    ends. A failed write never stops the run; after several in a row, another data
+    directory may judge the run stale and fail it, and the runner then stops at
+    its next check.
+    """
+
+    interval = (HEARTBEAT_EVERY if every is None else every).total_seconds()
+
+    async def beat_forever() -> None:
+        while True:
+            if not await off_loop(_beat_quietly, factory, user_id, run_id, clock):
+                return  # the run ended: nothing left to keep alive
+            await asyncio.sleep(interval)
+
+    task = asyncio.create_task(beat_forever(), name=f"run-{run_id}-heartbeat")
+    try:
+        yield
+    finally:
+        task.cancel()
+        await asyncio.wait({task})
+        if not task.cancelled() and (error := task.exception()) is not None:
+            log.warning("run %d's heartbeat stopped on an error", run_id, exc_info=error)
+
+
 def fail_interrupted_runs(
     session: Session,
     *,
@@ -612,7 +712,9 @@ def fail_interrupted_runs(
     files, :func:`browser_held_for`); a run on such an account is left alone,
     because it may be a ``netkeeper linkedin sync`` in a terminal that is still
     going. So is one younger than :data:`STALE_AFTER`: a terminal's run in the
-    moment between committing its row and taking the lock (#175 review, F7).
+    moment between committing its row and taking the lock (#175 review, F7). So
+    is one whose heartbeat is younger than that: another data directory's live
+    run on this database (#467).
     ``create_run`` and ``request_cancel`` catch it later if it really was left.
     """
     _require_writer(session)

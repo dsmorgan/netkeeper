@@ -252,6 +252,13 @@ class BrowserWorker:
         facts = await off_loop(self._facts, run_id, user_id)
         if facts is None:
             return runs.RunOutcome.DONE
+        # #467: the run's heartbeat stays fresh for as long as this process works on it,
+        # so another data directory sharing the database never takes it for left behind.
+        async with runs.heartbeat(self._factory, user_id, run_id, clock=self._clock):
+            return await self._execute(run_id, user_id, facts)
+
+    async def _execute(self, run_id: int, user_id: int, facts: _RunFacts) -> runs.RunOutcome:
+        """:meth:`execute` for a run that is still ``running``, inside its heartbeat."""
         # The Settings page's values (#343), read once as the run starts: a change applies
         # from the next run, and this one keeps the limits it started with.
         settings = await off_loop(self._resolved, user_id)
@@ -769,7 +776,10 @@ async def run_message_check(
         )
 
     try:
-        async with provider.run(account_key(target.account_id)) as browser:
+        async with (
+            runs.heartbeat(factory, user_id, target.run_id, clock=clock),
+            provider.run(account_key(target.account_id)) as browser,
+        ):
             refused = await off_loop(
                 message_check.spend, factory, user_id, target, settings=settings, now=clock()
             )

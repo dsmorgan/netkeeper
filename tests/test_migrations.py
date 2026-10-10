@@ -3348,3 +3348,57 @@ def test_0040_downgrades_to_steps_without_an_adoption(migration_engine: Engine) 
         assert _count(connection, "campaign_steps") == 1
         assert _count(connection, "messages") == 1
     migrations.upgrade(migration_engine, "0040")
+
+
+# --- a run's heartbeat (0041, #467) ----------------------------------------------------------
+
+
+def _seed_a_running_run(connection: Connection) -> None:
+    _seed_users(connection, 1)
+    connection.execute(
+        text(
+            "INSERT INTO linkedin_accounts (user_id, label, created_at, updated_at)"
+            " VALUES (1, 'default', :t, :t)"
+        ),
+        {"t": STAMP},
+    )
+    connection.execute(
+        text(
+            "INSERT INTO sync_runs (id, user_id, linkedin_account_id, kind, status, trigger,"
+            " started_at, browser_mode, created_at, updated_at)"
+            " VALUES (1, 1, 1, 'enrich', 'running', 'manual', :t, 'attach', :t, :t)"
+        ),
+        {"t": STAMP},
+    )
+
+
+def test_0041_adds_heartbeat_at_and_leaves_every_run_without_one(
+    migration_engine: Engine,
+) -> None:
+    migrations.upgrade(migration_engine, "0040")
+    with migration_engine.begin() as connection:
+        _seed_a_running_run(connection)
+    migrations.upgrade(migration_engine, "0041")
+    with migration_engine.begin() as connection:
+        row = connection.execute(
+            text("SELECT status, heartbeat_at FROM sync_runs WHERE id = 1")
+        ).one()
+        assert tuple(row) == ("running", None)
+        connection.execute(
+            text("UPDATE sync_runs SET heartbeat_at = :t WHERE id = 1"), {"t": STAMP}
+        )
+
+
+def test_0041_downgrades_to_runs_without_a_heartbeat(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0041")
+    with migration_engine.begin() as connection:
+        _seed_a_running_run(connection)
+        connection.execute(
+            text("UPDATE sync_runs SET heartbeat_at = :t WHERE id = 1"), {"t": STAMP}
+        )
+    migrations.downgrade(migration_engine, "0040")
+    columns = {c["name"] for c in inspect(migration_engine).get_columns("sync_runs")}
+    assert "heartbeat_at" not in columns
+    with migration_engine.begin() as connection:
+        assert _count(connection, "sync_runs") == 1
+    migrations.upgrade(migration_engine, "0041")
