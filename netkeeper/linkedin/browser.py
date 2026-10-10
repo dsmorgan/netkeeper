@@ -26,8 +26,8 @@ import os
 import random
 import re
 import unicodedata
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -684,6 +684,53 @@ def classify_click_failure(exc: BaseException) -> ClickFailure:
         resolved = any(_LOCATOR_RESOLVED in line for line in lines)
         return ClickFailure.TIMEOUT if resolved else ClickFailure.DETACHED
     return ClickFailure.OTHER
+
+
+class ReadFailure(enum.StrEnum):
+    """What kind of failure a read raised, as fixed words (#497).
+
+    Read from the exception's class and the first line of its text by
+    :func:`classify_read_failure`. Only the kind is recorded or logged, never the text,
+    which can quote a selector, and a selector can hold a person's name."""
+
+    TIMEOUT = "timeout"
+    TARGET_CLOSED = "target or tab closed"
+    INVALID_SELECTOR = "invalid selector"
+    STRICT_MODE = "strict mode violation"
+    NOT_HTML = "not an HTML element"
+    """``inner_text`` on an element that isn't HTML: an icon's ``svg``, say."""
+    OTHER = "other"
+
+
+#: The markers in the first line of a Playwright error's text, each with its kind, as
+#: Playwright 1.63 words them against Chrome (``tests/smoke/test_bubble_check_smoke.py``).
+_READ_FAILURE_MARKERS: Final = (
+    ("strict mode violation", ReadFailure.STRICT_MODE),
+    ("node is not an htmlelement", ReadFailure.NOT_HTML),
+    ("while parsing css selector", ReadFailure.INVALID_SELECTOR),
+    ("while parsing selector", ReadFailure.INVALID_SELECTOR),
+    ("invalidselectorerror", ReadFailure.INVALID_SELECTOR),
+    ("unknown engine", ReadFailure.INVALID_SELECTOR),
+    ("target page, context or browser has been closed", ReadFailure.TARGET_CLOSED),
+    ("target closed", ReadFailure.TARGET_CLOSED),
+    ("target crashed", ReadFailure.TARGET_CLOSED),
+)
+
+
+def classify_read_failure(exc: BaseException) -> ReadFailure:
+    """The fixed kind of an exception a read raised (#497). The text is never returned
+    or logged."""
+    name = type(exc).__name__
+    if name == "TimeoutError":
+        return ReadFailure.TIMEOUT
+    if name == "TargetClosedError":
+        return ReadFailure.TARGET_CLOSED
+    lines = str(exc).casefold().splitlines()
+    first = lines[0] if lines else ""
+    for marker, kind in _READ_FAILURE_MARKERS:
+        if marker in first:
+            return kind
+    return ReadFailure.OTHER
 
 
 #: The profile's top card control: the first Message link after the profile's one
@@ -1437,6 +1484,38 @@ class BubbleCheck:
     shape: CloseShape | None = None
 
 
+class BubbleCheckStep(enum.StrEnum):
+    """Which step of :meth:`BrowserRun.bubble_check` a failure stopped (#497)."""
+
+    TABS = "finding tabs"
+    DIALOGS = "reading dialogs"
+    COMPOSER = "reading the composer"
+    CLOSE_CONTROL = "reading the close control"
+
+
+class BubbleCheckFailed(Exception):
+    """:meth:`BrowserRun.bubble_check` failed (#497): the step, the exception's class, and
+    its kind (:func:`classify_read_failure`). Fixed words only, never the cause's text."""
+
+    def __init__(self, step: BubbleCheckStep, error: str, kind: ReadFailure) -> None:
+        self.step = step
+        self.error = error
+        self.kind = kind
+        super().__init__(f"{step.value} failed ({error}: {kind.value})")
+
+
+@contextmanager
+def _bubble_step(step: BubbleCheckStep) -> Iterator[None]:
+    """Turn a failure inside ``step`` into :class:`BubbleCheckFailed`, without its text."""
+    try:
+        yield
+    except BubbleCheckFailed:
+        raise
+    except Exception as exc:
+        # The cause is dropped: its text can quote a selector with a name in it.
+        raise BubbleCheckFailed(step, type(exc).__name__, classify_read_failure(exc)) from None
+
+
 @dataclass(frozen=True, slots=True)
 class BubbleClose:
     """What :meth:`BrowserRun.close_sent_bubble` did (ADR 0008, D1). ``closed`` is true
@@ -1772,10 +1851,24 @@ async def _read_accessible_name(
     label = await element.get_attribute("aria-label", timeout=MESSAGING_READ_TIMEOUT_MS)
     text = await element.inner_text(timeout=MESSAGING_READ_TIMEOUT_MS)
     hidden_parts = element.locator(ARIA_HIDDEN)
-    shown = text
+    shown: str | None = text
     for index in range(await hidden_parts.count()):
-        part = await hidden_parts.nth(index).inner_text(timeout=MESSAGING_READ_TIMEOUT_MS)
-        if part:
+        hidden = hidden_parts.nth(index)
+        # An icon's svg is aria-hidden too, and Playwright reads inner_text only from an
+        # HTML element (#497). A part with no text has nothing to take out. One that
+        # isn't HTML but holds text can't be taken out as it renders, so the text
+        # without its aria-hidden parts isn't tried.
+        content = await hidden.text_content(timeout=MESSAGING_READ_TIMEOUT_MS)
+        if not (content or "").strip():
+            continue
+        try:
+            part = await hidden.inner_text(timeout=MESSAGING_READ_TIMEOUT_MS)
+        except Exception as exc:
+            if classify_read_failure(exc) is not ReadFailure.NOT_HTML:
+                raise
+            shown = None
+            break
+        if part and shown is not None:
             shown = shown.replace(part, " ", 1)
     visible = await element.filter(visible=True).count() == 1
     tried: set[str] = set()
@@ -4018,54 +4111,61 @@ class BrowserRun:
         and the shape of its first such dialog's close control (:func:`read_close_shape`)."""
         want = urlsplit(origin)
         path = f"{PROFILE_PATH_PREFIX}{profile_id}/"
-        pages = [page for page in self._attachment.context.pages if not page.is_closed()]
-        on_origin: list[_MessagingPage] = []
-        for page in pages:
-            try:
-                seen = urlsplit(page.url)
-                same = (seen.scheme, seen.hostname, seen.port) == (
-                    want.scheme,
-                    want.hostname,
-                    want.port,
-                )
-            except ValueError:
-                same = False
-            if same:
-                on_origin.append(cast(_MessagingPage, page))
+        with _bubble_step(BubbleCheckStep.TABS):
+            pages = [page for page in self._attachment.context.pages if not page.is_closed()]
+            on_origin: list[_MessagingPage] = []
+            for page in pages:
+                try:
+                    seen = urlsplit(page.url)
+                    same = (seen.scheme, seen.hostname, seen.port) == (
+                        want.scheme,
+                        want.hostname,
+                        want.port,
+                    )
+                except ValueError:
+                    same = False
+                if same:
+                    on_origin.append(cast(_MessagingPage, page))
         with_bubble = 0
         found: list[tuple[_MessagingPage, _MessagingLocator, int, int]] = []
-        for tab in on_origin:
-            dialogs = tab.get_by_role(
-                BUBBLE_ROLE, name=BUBBLE_NAME, exact=True, include_hidden=True
-            )
-            count = await dialogs.count()
-            if count:
-                with_bubble += 1
-            mine = []
-            for index in range(min(count, BUBBLE_CHECK_MAX_DIALOGS)):
-                dialog = dialogs.nth(index)
-                links = dialog.locator(BUBBLE_HEADER_LINK)
-                if await links.count() != 1:
-                    continue
-                href = await links.get_attribute("href", timeout=MESSAGING_READ_TIMEOUT_MS)
-                if _is_profile_link(href, path, fold_case=False):
-                    mine.append(dialog)
-            if mine:
-                found.append((tab, mine[0], count, len(mine)))
+        with _bubble_step(BubbleCheckStep.DIALOGS):
+            for tab in on_origin:
+                dialogs = tab.get_by_role(
+                    BUBBLE_ROLE, name=BUBBLE_NAME, exact=True, include_hidden=True
+                )
+                count = await dialogs.count()
+                if count:
+                    with_bubble += 1
+                mine = []
+                for index in range(min(count, BUBBLE_CHECK_MAX_DIALOGS)):
+                    dialog = dialogs.nth(index)
+                    links = dialog.locator(BUBBLE_HEADER_LINK)
+                    if await links.count() != 1:
+                        continue
+                    href = await links.get_attribute("href", timeout=MESSAGING_READ_TIMEOUT_MS)
+                    if _is_profile_link(href, path, fold_case=False):
+                        mine.append(dialog)
+                if mine:
+                    found.append((tab, mine[0], count, len(mine)))
         check = BubbleCheck(len(pages), len(on_origin), with_bubble, len(found))
         if not found:
             return check
         tab, dialog, count, for_contact = found[0]
-        composer = tab.get_by_role(
-            COMPOSER_ROLE, name=COMPOSER_NAME, exact=True, include_hidden=True
-        )
+        with _bubble_step(BubbleCheckStep.COMPOSER):
+            composer = tab.get_by_role(
+                COMPOSER_ROLE, name=COMPOSER_NAME, exact=True, include_hidden=True
+            )
+            composers = await composer.count()
+            composer_in_dialog = await dialog.filter(has=composer).count() == 1
+        with _bubble_step(BubbleCheckStep.CLOSE_CONTROL):
+            shape = await read_close_shape(tab, dialog)
         return replace(
             check,
             dialogs=count,
             dialogs_for_contact=for_contact,
-            composers=await composer.count(),
-            composer_in_dialog=await dialog.filter(has=composer).count() == 1,
-            shape=await read_close_shape(tab, dialog),
+            composers=composers,
+            composer_in_dialog=composer_in_dialog,
+            shape=shape,
         )
 
     async def close_sent_tab(self) -> None:

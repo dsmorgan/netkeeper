@@ -1818,7 +1818,7 @@ def _bubble_check_lines(run_id: int, result: BubbleCheckResult) -> list[str]:
         f"run {run_id}: nothing was opened, clicked, typed, or focused",
     ]
     if result.stopped is not None:
-        lines.append(f"stopped before its read: {result.stopped}")
+        lines.append(f"stopped: {result.stopped}")
     read = result.bubble
     if read is None:
         return lines
