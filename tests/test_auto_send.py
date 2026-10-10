@@ -25,7 +25,7 @@ import pytest
 from campaign_fakes import NOW
 from inbox_fakes import record_poll
 from messaging_dom import Bubble, MessagingSite, MessagingTab
-from messaging_pages import ZEPHYRINE, existing_bubble_html
+from messaging_pages import THADDEUS, ZEPHYRINE, existing_bubble_html, never_messaged_bubble_html
 from run_fakes import fake_provider
 from sqlalchemy.orm import Session, sessionmaker
 from test_linkedin_steps import LINKEDIN, Lane, make_lane
@@ -304,6 +304,44 @@ async def test_a_never_messaged_bubble_is_sent_once_send_enables() -> None:
     result, _, _ = await page_run(site, send=permit())
     assert result.outcome.kind is MessageOutcomeKind.SEND_CLICKED
     assert site.sent == [BODY]
+
+
+def _two_link_card() -> str:
+    """#481: the never-messaged card linking the contact twice, by member id and slug."""
+    cards = f'<a href="/in/{ZEPHYRINE.slug}/">{ZEPHYRINE.name}</a>'
+    return never_messaged_bubble_html([ZEPHYRINE]).replace(
+        cards,
+        f'<a href="/in/{ZEPHYRINE.profile_id}/"><img alt=""></a>{cards}',
+    )
+
+
+async def test_a_never_messaged_card_linking_the_contact_twice_is_sent_once() -> None:
+    bubble = Bubble(ZEPHYRINE, existing_conversation=None, html=_two_link_card())
+    site = MessagingSite(ZEPHYRINE, bubble=bubble)
+    result, _, _ = await page_run(site, send=permit())
+    assert result.outcome.kind is MessageOutcomeKind.SEND_CLICKED, result
+    assert site.sent == [BODY] and len(sends(site)) == 1
+
+
+async def test_a_never_messaged_card_that_links_someone_else_before_send_is_not_sent() -> None:
+    bubble = Bubble(ZEPHYRINE, existing_conversation=None, html=_two_link_card())
+    site = MessagingSite(ZEPHYRINE, bubble=bubble)
+
+    async def recheck() -> str | None:
+        photo = next(
+            e
+            for e in site.tab.document.elements()
+            if e.tag == "a" and e.attrs.get("href") == f"/in/{ZEPHYRINE.profile_id}/"
+        )
+        photo.attrs["href"] = f"/in/{THADDEUS.profile_id}/"
+        return None
+
+    result, _, _ = await page_run(site, send=permit(recheck))
+    assert result.outcome.kind is MessageOutcomeKind.PARTIALLY_TYPED, result
+    assert result.outcome.reason == (
+        "before Send: the new-message bubble links to more than one person"
+    )
+    assert sends(site) == [] and site.sent == []
 
 
 async def test_a_second_send_button_on_the_page_is_refused() -> None:

@@ -75,6 +75,8 @@
   "the new-message bubble does not name exactly one recipient",
   "the new-message bubble is for someone else",
   "the new-message bubble is not open, or more than one is",
+  "the new-message bubble links to more than one person",
+  "the new-message bubble links to no profile",
   "the new-message bubble's recipient field is missing",
   "the page answered {}",
   "the page does not show exactly one Send control",

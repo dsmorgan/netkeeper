@@ -100,6 +100,9 @@ class Scenario:
     #: over its whole box, click point included. ``pseudo_cover``: another element's
     #: ``::after`` lies over both of the contact's controls.
     layout: str = ""
+    #: #481, the never-messaged card: ``photo_and_name`` links the contact twice, the
+    #: photo by member id and the name by slug; ``plus_other`` adds a link to someone else.
+    card: str = ""
 
 
 def _member(n: int) -> Member:
@@ -132,6 +135,12 @@ SCENARIOS = {
     "auto_refused": Scenario(_member(322)),
     # A bubble left from earlier on the page: auto-send refuses, and sends nothing.
     "auto_leftover": Scenario(_member(323), second_composer=True),
+    # #481: the never-messaged card linking the contact twice, or the contact and another.
+    "card_two_links": Scenario(_member(324), existing=False, card="photo_and_name"),
+    "card_plus_other": Scenario(_member(325), existing=False, card="plus_other"),
+    "auto_card_two_links": Scenario(
+        _member(326), existing=False, enter_sends=False, card="photo_and_name"
+    ),
 }
 BY_SLUG = {s.member.slug: s for s in SCENARIOS.values()}
 
@@ -348,6 +357,13 @@ def _profile_html(scenario: Scenario) -> str:
         bubble = existing_bubble_html(scenario.header_for or member, draft=scenario.draft)
     else:
         bubble = never_messaged_bubble_html([member], draft=scenario.draft)
+        if scenario.card:
+            name_link = f'<a href="/in/{member.slug}/">{escape(member.name)}</a>'
+            photo = f'<a href="/in/{member.profile_id}/"><img alt="" width="48" height="48"></a>'
+            other = (
+                f'<a href="/in/{_member(396).slug}/">x</a>' if scenario.card == "plus_other" else ""
+            )
+            bubble = bubble.replace(name_link, photo + name_link + other)
     if scenario.second_composer:
         bubble = existing_bubble_html(_member(397)) + bubble
     origin_compose = f"{COMPOSE_OPTIONS_PATH}{quote(compose_option_urn(member), safe='')}"
@@ -521,6 +537,7 @@ def _no_send(state: dict[str, Any]) -> None:
         "covered",
         "sidebar",
         "pseudo_icon",
+        "card_two_links",
     ],
 )
 async def test_the_body_is_typed_into_a_real_composer_and_never_sent(
@@ -563,6 +580,8 @@ REFUSALS = {
     "leftover": "a message bubble is already open in Chrome, minimized ones included",
     # #475: another element's ::after over every control covers them; no click.
     "pseudo_cover": MESSAGE_NOT_ON_SCREEN,
+    # #481: a card linking the contact and someone else refuses before any key.
+    "card_plus_other": "the new-message bubble links to more than one person",
 }
 
 
@@ -576,6 +595,7 @@ REFUSALS = {
         "minimized",
         "leftover",
         "pseudo_cover",
+        "card_plus_other",
     ],
 )
 async def test_a_refused_prefill_types_nothing(origin: str, name: str) -> None:
@@ -716,6 +736,16 @@ async def test_auto_send_in_a_new_conversation_sends_once_and_leaves_the_tab(ori
     assert f"SENT:text:{BODY}" in events
     assert "SENT:key" not in events and "closed" not in events
     assert state["open"]
+
+
+async def test_auto_send_sends_once_to_a_card_linking_the_contact_twice(origin: str) -> None:
+    """#481: Send's own recheck reads the same card check, and passes the two links."""
+    scenario = SCENARIOS["auto_card_two_links"]
+    result, state = await _prefill(origin, scenario, permit=SendPermit(recheck=_holds))
+    assert result.outcome.kind is MessageOutcomeKind.SEND_CLICKED, (result, state.get("html"))
+    events = state["events"]
+    assert events.count("SENT:click") == 1, events
+    assert f"SENT:text:{BODY}" in events
 
 
 async def test_auto_send_refuses_a_page_with_a_leftover_bubble(origin: str) -> None:
