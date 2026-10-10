@@ -179,8 +179,8 @@ HEARTBEAT_EVERY: Final = timedelta(seconds=20)
 #: process can only set the flag, and a runner that never reaches its next check
 #: (stuck in the browser) keeps beating, so only its own process can stop it.
 ELSEWHERE_NOTE: Final = (
-    "the run is in another netkeeper data directory on this database; if it doesn't"
-    " stop, stop the netkeeper process that runs it"
+    "This run is in another netkeeper data directory on this database. If it doesn't"
+    " stop, stop the netkeeper process that runs it."
 )
 
 #: The length of :func:`runner_id`, and of ``sync_runs.heartbeat_by``.

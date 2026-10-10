@@ -537,8 +537,13 @@ async def test_a_cancel_of_a_run_another_data_directory_runs_carries_the_note(
             run_id = run.id
         async with client_for(app) as client:
             answer = await client.post(f"/api/v1/linkedin/runs/{run_id}/cancel", headers=HEADERS)
+            with session_scope(app.state.session_factory, write=True) as session:
+                ended = runs.get_run(session, _local(session), run_id)
+                ended.status = SyncRunStatus.ABORTED
+            got = await client.get(f"/api/v1/linkedin/runs/{run_id}")
     assert answer.status_code == 200, answer.text
     assert answer.json()["elsewhere_note"] == runs.ELSEWHERE_NOTE
+    assert got.json()["elsewhere_note"] is None  # a finished run needs no note
 
 
 def _many(count: int) -> list[Any]:
