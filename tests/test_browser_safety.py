@@ -2792,7 +2792,8 @@ def _close_rule_findings(rule: ast.AsyncFunctionDef) -> list[str]:
     when it holds: one ``get_by_role`` on ``dialog`` by ``CLOSE_CONTROL_ROLE`` and
     ``CLOSE_CONTROL_PATTERN`` with ``include_hidden=True``, counted ``!= 1``; that
     locator ``filter``-ed ``visible=True``, counted ``!= 1``; the name compared by
-    ``close_names_person``; and only that visible locator returned as a locator."""
+    ``close_names_person``; and only that visible locator, narrowed to its confirmed
+    exact name with hidden text counted (``visible.and_(same)``), returned as a locator."""
     findings: list[str] = []
     calls = [n for n in walk(rule) if isinstance(n, ast.Call)]
     on_dialog = [
@@ -2827,7 +2828,7 @@ def _close_rule_findings(rule: ast.AsyncFunctionDef) -> list[str]:
         for n in walk(rule)
         if isinstance(n, ast.Return) and n.value is not None
     ]
-    if [r for r in returned if not r.startswith("CloseMiss.")] != ["visible"]:
+    if [r for r in returned if not r.startswith("CloseMiss.")] != ["visible.and_(same)"]:
         findings.append(f"returns: {returned}")
     return findings
 
@@ -2846,7 +2847,9 @@ def test_the_close_click_target_is_built_by_the_rule() -> None:
         ("PATTERN, include_hidden=True)", "PATTERN, include_hidden=False)"),
         ("name=CLOSE_CONTROL_PATTERN, ", "name=CLOSE_CONTROL_PATTERN, exact=False, "),
         ("dialog.get_by_role(", "tab.get_by_role("),
-        ("    return visible\n", "    return closes\n"),
+        ("    return visible.and_(same)\n", "    return closes\n"),
+        ("    return visible.and_(same)\n", "    return visible\n"),
+        ("    return visible.and_(same)\n", "    return visible.and_(closes)\n"),
         ("    if not close_names_person(", "    if False and close_names_person("),
         ("if await visible.and_(same).count() != 1:", "if await visible.and_(same).count() < 1:"),
     ],

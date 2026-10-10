@@ -39,7 +39,8 @@ from netkeeper.db import database_url, make_engine, make_session_factory, sessio
 from netkeeper.linkedin import browser
 from netkeeper.linkedin.activity_lock import account_key
 from netkeeper.linkedin.browser import (
-    NAME_JOINERS,
+    NAME_APOSTROPHES,
+    NAME_JOINER_CATEGORIES,
     NO_ONE_CLOSE_CONTROL,
     BrowserRun,
     BubbleCheck,
@@ -223,6 +224,22 @@ def test_the_close_rule_holds_the_header_name_only_as_a_whole(suffix: str, holds
         ("Ann", "Annabel", False),
         ("Ann", "Joann", False),
         ("Ann", "Ann-Marie", False),
+        ("Ann", "Ann\u2013Marie", False),
+        ("Ann", "Ann\u2014Marie", False),
+        ("Ann", "Ann\u2012Marie", False),
+        ("Ann", "Ann\u05beMarie", False),
+        ("Ann", "Ann\u058aMarie", False),
+        ("Ann", "Ann\u30a0Marie", False),
+        ("Ann", "Ann\uff0dMarie", False),
+        ("Ann", "Ann\ufe63Marie", False),
+        ("Ann", "Ann\u2e3aMarie", False),
+        ("Ann", "Marie\u2e3bAnn", False),
+        ("Ann", "Ann\uff07s", False),
+        ("Ann", "Ann_Marie", False),
+        ("Ann", "Marie_Ann", False),
+        ("Ann", "Ann \u2013 Active now", True),
+        ("Ann", "Ann, Active now", True),
+        ("Ann", "Ann. Active now", True),
         ("Ann", "Annabel and Ann", True),
         ("Ann", "Annabel and Joann", False),
         (unicodedata.normalize("NFD", "Quorbéllé"), "Hi Quorbéllé", True),
@@ -292,7 +309,8 @@ async def test_the_shape_has_no_close_rule_without_a_header_name() -> None:
 
 
 def test_the_close_rule_s_words_are_fixed() -> None:
-    assert frozenset("-\u2010\u2011'\u2019\u02bc") == NAME_JOINERS
+    assert frozenset({"Pd", "Pc"}) == NAME_JOINER_CATEGORIES
+    assert frozenset("'\u2019\u02bc\uff07") == NAME_APOSTROPHES
     assert [m.value for m in CloseMiss] == [
         "not one button by prefix",
         "not visible",

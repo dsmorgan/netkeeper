@@ -1949,17 +1949,23 @@ def name_relation(header: str, suffix: str) -> tuple[NameRelation, int]:
     return NameRelation.UNRELATED, difference
 
 
-#: #499: punctuation that joins a name's parts, so it is never a name's edge: hyphens
-#: and apostrophes. With these as edges, ``Ann`` would be found in ``Ann-Marie``.
-NAME_JOINERS: Final = frozenset("-\u2010\u2011'\u2019\u02bc")
+#: #499: punctuation that joins a name's parts, so it is never a name's edge: every dash
+#: (Unicode category Pd: hyphens, en and em dashes, the maqaf, fullwidth and small
+#: hyphen-minus), every connector (Pc: ``_`` and its kin), and these apostrophes. With
+#: these as edges, ``Ann`` would be found in ``Ann-Marie``.
+NAME_JOINER_CATEGORIES: Final = frozenset({"Pd", "Pc"})
+NAME_APOSTROPHES: Final = frozenset("'\u2019\u02bc\uff07")
 
 
 def _name_edge(char: str) -> bool:
     """Whether ``char`` may stand beside a name: whitespace, or punctuation that doesn't
-    join a name's parts (:data:`NAME_JOINERS`)."""
+    join a name's parts (:data:`NAME_JOINER_CATEGORIES`, :data:`NAME_APOSTROPHES`)."""
     if char.isspace():
         return True
-    return unicodedata.category(char).startswith("P") and char not in NAME_JOINERS
+    category = unicodedata.category(char)
+    if category in NAME_JOINER_CATEGORIES or char in NAME_APOSTROPHES:
+        return False
+    return category.startswith("P")
 
 
 def close_names_person(header: str, suffix: str) -> bool:
@@ -2019,11 +2025,15 @@ async def _close_by_rule(
     same = tab.get_by_role(CLOSE_CONTROL_ROLE, name=read.candidate, exact=True, include_hidden=True)
     if await visible.and_(same).count() != 1:
         return CloseMiss.HIDDEN_TEXT
+    # Belt and braces: the prefix count already holds this, but the slice below must
+    # never cut a name that doesn't start with the prefix.
     if not read.name.startswith(CLOSE_CONTROL_PREFIX):
         return CloseMiss.NOT_THIS_PERSON
     if not close_names_person(header, read.name[len(CLOSE_CONTROL_PREFIX) :]):
         return CloseMiss.NOT_THIS_PERSON
-    return visible
+    # The target carries its confirmed full name, exact, hidden text counted: a button
+    # renamed between this read and the click no longer matches, as with the old lookup.
+    return visible.and_(same)
 
 
 def _longer(difference: int, longer: str, shorter: str) -> str:
