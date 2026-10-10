@@ -23,6 +23,10 @@ Columns beyond spec 8.4's list, each read by something:
   each harvest. It moved here from ``settings_kv`` (migration 0013).
 * ``cancel_requested_at`` -- spec 9.9's cooperative cancel flag, checked
   between units of work and inside sliced waits.
+* ``heartbeat_at`` -- when the process running the run last said it is still
+  running it (#467). A live runner refreshes it every
+  ``services.runs.HEARTBEAT_EVERY``, so another data directory that shares this
+  database can tell a live run from one whose process went away.
 * ``max_visits`` -- a manual enrichment's own cap. It only ever lowers the
   day's budget, never raises it.
 * ``error`` -- what went wrong, one line, for a ``failed`` run. Never a cookie,
@@ -104,6 +108,7 @@ class SyncRun(UserOwned, TimestampMixin, Base):
     notes: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
     cancel_requested_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     max_visits: Mapped[int | None] = mapped_column(Integer)
     resume_of_id: Mapped[int | None] = mapped_column(
         ForeignKey("sync_runs.id", ondelete="SET NULL"), index=True
