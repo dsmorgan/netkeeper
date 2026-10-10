@@ -159,6 +159,11 @@ function LiveRun({ runId }: { runId: number }) {
             : 'Stopping at the next check.'}
         </p>
       )}
+      {running && stopping && data.elsewhere_note !== null && (
+        <p role="status" className="text-muted-foreground">
+          {data.elsewhere_note}
+        </p>
+      )}
       {!running && data.stop_reason !== null && (
         <p className="text-muted-foreground">Stopped: {stopReasonLabel(data)}</p>
       )}

@@ -1883,6 +1883,10 @@ class RunOut(BaseModel):
     hours" for ``inactive``, #213), or null while the run is running.
     ``pause_requested`` is true while a running enrichment is stopping to pause
     (#324); it ends ``aborted`` with ``stop_reason`` ``paused``, and resumable.
+    ``elsewhere_note`` is set while the run is running in another data directory
+    on this database (#467): a cancel or pause here only sets a flag, so the note
+    says to stop that directory's netkeeper process if the run doesn't stop.
+    It is null otherwise.
     """
 
     id: int
@@ -1906,6 +1910,7 @@ class RunOut(BaseModel):
     aging_refused: str | None
     resumed_by: int | None
     pause_requested: bool
+    elsewhere_note: str | None
 
 
 class RunPage(BaseModel):

@@ -488,6 +488,7 @@ async def test_the_ui_can_start_a_run_watch_it_and_stop_it(
 
             cancelled = await client.post(f"/api/v1/linkedin/runs/{run_id}/cancel", headers=HEADERS)
             assert cancelled.status_code == 200 and cancelled.json()["cancel_requested_at"]
+            assert cancelled.json()["elsewhere_note"] is None  # this directory runs it
             gate.open()
             await app.state.tasks.join()
             async with asyncio.timeout(5):
@@ -510,6 +511,34 @@ async def test_the_ui_can_start_a_run_watch_it_and_stop_it(
     # One page load and no pagination: the run was cancelled in the wait between units.
     assert connector.attaches == 1 and context.fetches == []
     assert [method for method, _, _ in context.requests] == ["GET"]
+
+
+async def test_a_cancel_of_a_run_another_data_directory_runs_carries_the_note(
+    bare_engine: Engine, settings: Settings, no_frontend: None
+) -> None:
+    """The cancel answer tells the person to stop the other directory's process (#467)."""
+    provider, _ = fake_provider()
+    async with served(bare_engine, settings, provider, Clock(START)) as app:
+        now = datetime.now(UTC)
+        with session_scope(app.state.session_factory, write=True) as session:
+            user = _local(session)
+            run = SyncRun(
+                user_id=user.id,
+                linkedin_account_id=ensure_account(session, user).id,
+                kind=SyncRunKind.CONNECTIONS_FULL,
+                trigger=SyncRunTrigger.MANUAL,
+                status=SyncRunStatus.RUNNING,
+                started_at=now,
+                heartbeat_at=now,
+                heartbeat_by="b" * runs.RUNNER_ID_LENGTH,
+            )
+            session.add(run)
+            session.flush()
+            run_id = run.id
+        async with client_for(app) as client:
+            answer = await client.post(f"/api/v1/linkedin/runs/{run_id}/cancel", headers=HEADERS)
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["elsewhere_note"] == runs.ELSEWHERE_NOTE
 
 
 def _many(count: int) -> list[Any]:

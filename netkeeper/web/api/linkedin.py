@@ -155,6 +155,9 @@ def _run_out(session: SessionDep, user: User, run: SyncRun) -> RunOut:
         resumed_by=derived.resumed_by,
         pause_requested=run.status is SyncRunStatus.RUNNING
         and runs.pause_requested(session, user, run.id),
+        elsewhere_note=runs.ELSEWHERE_NOTE
+        if run.status is SyncRunStatus.RUNNING and runs.runs_elsewhere(run)
+        else None,
     )
 
 

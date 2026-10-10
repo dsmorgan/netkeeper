@@ -6976,6 +6976,10 @@ export interface components {
          *     hours" for ``inactive``, #213), or null while the run is running.
          *     ``pause_requested`` is true while a running enrichment is stopping to pause
          *     (#324); it ends ``aborted`` with ``stop_reason`` ``paused``, and resumable.
+         *     ``elsewhere_note`` is set while the run is running in another data directory
+         *     on this database (#467): a cancel or pause here only sets a flag, so the note
+         *     says to stop that directory's netkeeper process if the run doesn't stop.
+         *     It is null otherwise.
          */
         RunOut: {
             /** Aging Refused */
@@ -6992,6 +6996,8 @@ export interface components {
             counts: {
                 [key: string]: unknown;
             } | null;
+            /** Elsewhere Note */
+            elsewhere_note: string | null;
             /** Error */
             error: string | null;
             /** Id */

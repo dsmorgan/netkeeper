@@ -3381,11 +3381,12 @@ def test_0041_adds_heartbeat_at_and_leaves_every_run_without_one(
     migrations.upgrade(migration_engine, "0041")
     with migration_engine.begin() as connection:
         row = connection.execute(
-            text("SELECT status, heartbeat_at FROM sync_runs WHERE id = 1")
+            text("SELECT status, heartbeat_at, heartbeat_by FROM sync_runs WHERE id = 1")
         ).one()
-        assert tuple(row) == ("running", None)
+        assert tuple(row) == ("running", None, None)
         connection.execute(
-            text("UPDATE sync_runs SET heartbeat_at = :t WHERE id = 1"), {"t": STAMP}
+            text("UPDATE sync_runs SET heartbeat_at = :t, heartbeat_by = :b WHERE id = 1"),
+            {"t": STAMP, "b": "a" * 32},
         )
 
 
@@ -3394,11 +3395,13 @@ def test_0041_downgrades_to_runs_without_a_heartbeat(migration_engine: Engine) -
     with migration_engine.begin() as connection:
         _seed_a_running_run(connection)
         connection.execute(
-            text("UPDATE sync_runs SET heartbeat_at = :t WHERE id = 1"), {"t": STAMP}
+            text("UPDATE sync_runs SET heartbeat_at = :t, heartbeat_by = :b WHERE id = 1"),
+            {"t": STAMP, "b": "a" * 32},
         )
     migrations.downgrade(migration_engine, "0040")
     columns = {c["name"] for c in inspect(migration_engine).get_columns("sync_runs")}
     assert "heartbeat_at" not in columns
+    assert "heartbeat_by" not in columns
     with migration_engine.begin() as connection:
         assert _count(connection, "sync_runs") == 1
     migrations.upgrade(migration_engine, "0041")

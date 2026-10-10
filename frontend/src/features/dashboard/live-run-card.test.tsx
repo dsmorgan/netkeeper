@@ -161,6 +161,25 @@ describe('LiveRunCard', () => {
     expect(posted(calls, '/api/v1/linkedin/runs/7/cancel')).toBe(true)
   })
 
+  it('shows the note when another data directory runs the cancelled run', async () => {
+    const note = 'the run is in another netkeeper data directory on this database'
+    renderCard(
+      running({
+        'POST /api/v1/linkedin/runs/7/cancel': () =>
+          jsonResponse({
+            ...RUNNING,
+            cancel_requested_at: '2026-09-23T10:05:00Z',
+            elsewhere_note: note,
+          }),
+      }),
+    )
+    expect(screen.queryByText(note)).not.toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel run' }))
+    const dialog = await screen.findByRole('alertdialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel run' }))
+    expect(await screen.findByText(note)).toBeInTheDocument()
+  })
+
   it('pauses an enrichment and says it keeps its place', async () => {
     const calls: Call[] = []
     renderCard(

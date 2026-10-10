@@ -166,6 +166,7 @@ export function run(overrides: Partial<Run> = {}): Run {
     aging_refused: null,
     resumed_by: null,
     pause_requested: false,
+    elsewhere_note: null,
     ...overrides,
   }
 }
