@@ -582,6 +582,9 @@ def _photo_and_name(photo: str, name: str) -> str:
         # The contact's own id in a query, or on another person route, names no one else.
         f'<a href="/in/{Z_SLUG}/?u=urn%3Ali%3Afsd_profile%3A{Z_ID}">x</a>',
         f'<a href="/in/{Z_SLUG}/">x</a><a href="/sales/lead/{Z_ID},NAME_SEARCH">s</a>',
+        f'<a href="/in/{Z_SLUG}/?m=urn%253Ali%253Afs_miniProfile%253A{Z_ID}'
+        f'#urn:li:fsd_profile:{Z_ID}">x</a>',
+        f'<a href="/in/{Z_SLUG}/">x</a><a href="/mwlite/in/{Z_ID}/">m</a>',
     ],
     ids=[
         "two_by_slug",
@@ -596,6 +599,8 @@ def _photo_and_name(photo: str, name: str) -> str:
         "javascript_profile_path",
         "own_id_in_query",
         "own_id_on_sales_route",
+        "own_urns_everywhere",
+        "own_id_on_mwlite",
     ],
 )
 async def test_a_card_whose_every_profile_link_is_the_contact_is_typed(cards: str) -> None:
@@ -672,6 +677,25 @@ NO_PROFILE = "the new-message bubble links to no profile"
         (f'<a href="/in/{Z_SLUG}//x/">x</a>', SOMEONE_ELSE),
         (f'<a href="/in/{Z_SLUG}/overlay%2Fphoto/">x</a>', SOMEONE_ELSE),
         (f'<a href="https://evil.example/in/{Z_SLUG}/overlay/">x</a>', SOMEONE_ELSE),
+        # The re-review of #483: a scheme with a relative path is resolved against the page.
+        (_card(f'<a href="https:{T_SLUG}/">x</a>'), MORE_THAN_ONE),
+        (_card(f'<a href="http:{T_SLUG}">x</a>'), MORE_THAN_ONE),
+        (f'<a href="https:{Z_SLUG}/">x</a>', SOMEONE_ELSE),
+        # An empty segment before the last, and ;params on a person route's head.
+        (_card(f'<a href="https://www.linkedin.com//in/{T_SLUG}/">x</a>'), MORE_THAN_ONE),
+        (f'<a href="//www.linkedin.com//in/{Z_SLUG}/">x</a>', SOMEONE_ELSE),
+        (_card(f'<a href="/in;x/{T_SLUG}/">x</a>'), MORE_THAN_ONE),
+        (f'<a href="/in;x/{Z_SLUG}/">x</a>', SOMEONE_ELSE),
+        (_card(f'<a href="/pub;x/{T_SLUG}/">x</a>'), MORE_THAN_ONE),
+        (_card(f'<a href="/mwlite/in/{T_SLUG}/">x</a>'), MORE_THAN_ONE),
+        (_card(f'<a href="/mwlite/profile/{T_ID}">x</a>'), MORE_THAN_ONE),
+        # URNs: fs_miniProfile, in the fragment, and twice-encoded in the query.
+        (f'<a href="/in/{Z_SLUG}/?m=urn:li:fs_miniProfile:{T_ID}">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/{Z_SLUG}/#urn:li:fsd_profile:{T_ID}">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/{Z_SLUG}/?u=urn%253Ali%253Afsd_profile%253A{T_ID}">x</a>', SOMEONE_ELSE),
+        # A %25 in a longer path under the contact (%252e%252e decodes to %2e%2e).
+        (f'<a href="/in/{Z_SLUG}/%252e%252e/{T_SLUG}/">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/{Z_SLUG}/overlay%25/">x</a>', SOMEONE_ELSE),
         # Item 6: a relative and an absolute link to one other person are one person.
         (
             f'<a href="/in/{T_SLUG}/">x</a><a href="https://www.linkedin.com/in/{T_SLUG}/">y</a>',
@@ -726,6 +750,21 @@ NO_PROFILE = "the new-message bubble links to no profile"
         "empty_segment",
         "encoded_slash_later",
         "another_host_more_path",
+        "https_relative_other",
+        "http_relative_other",
+        "https_relative_contact",
+        "double_slash_other",
+        "double_slash_contact",
+        "param_in_other",
+        "param_in_contact",
+        "param_pub",
+        "mwlite_in",
+        "mwlite_profile",
+        "query_fs_mini_profile",
+        "fragment_urn",
+        "double_encoded_query_urn",
+        "encoded_percent_dot_dot",
+        "encoded_percent_later",
         "relative_and_absolute_other",
     ],
 )

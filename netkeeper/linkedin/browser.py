@@ -1457,16 +1457,21 @@ _MEMBER_ID_SHAPE: Final = re.compile(r"^ACoA[A-Za-z0-9_-]+$")
 #: ``mailto:``) names no profile, so the card check ignores it.
 _WEB_SCHEMES: Final = frozenset({"http", "https"})
 #: A member named in a link's query, by URN: the card check refuses any but the contact.
-_QUERY_MEMBER: Final = re.compile(r"urn:li:(?:fsd_profile|member):([^,&()\s/;:#?]+)", re.IGNORECASE)
+_QUERY_MEMBER: Final = re.compile(
+    r"urn:li:(?:fsd_profile|fs_miniProfile|member):([^,&()\s/;:#?]+)", re.IGNORECASE
+)
 #: LinkedIn routes other than ``/in/`` that name a person, case-folded: the path segment
 #: after the route holds that person's token (before any ``,``).
 _PERSON_ROUTES: Final = (
+    "/mwlite/",
     "/pub/",
     "/sales/lead/",
     "/sales/people/",
     "/talent/profile/",
     "/recruiter/",
 )
+#: The first path segments that, with ``;`` parameters, could still route to a person.
+_PARAM_HEADS: Final = frozenset({"in", "mwlite", "pub", "profile", "sales", "talent", "recruiter"})
 #: ``/profile/view?id=<token>``: the old profile route, its person in the query.
 _PROFILE_VIEW_PATH: Final = "/profile/view"
 
@@ -1510,20 +1515,23 @@ def read_card_link(href: str | None, public_id: str, profile_id: str) -> CardLin
     scheme isn't ``http`` or ``https``. Nothing is resolved against the page.
 
     Someone else, whatever the rest says: an ``href`` with a backslash (raw or
-    percent-encoded), a path-relative one (no scheme or host, a path not starting
-    ``/``), one with a ``.`` or ``..`` path segment once decoded (``%2e`` and ``%2F``
-    included), one whose query names a member by URN (``urn:li:fsd_profile:`` or
-    ``urn:li:member:``) other than the contact's id, and LinkedIn's other person routes
-    (``/pub/``, ``/profile/view?id=``, ``/sales/lead/``, ``/sales/people/``,
-    ``/talent/profile/``, ``/recruiter/``) unless their token is exactly the contact's
-    id, which is then ignored: only an ``/in/`` link can confirm the contact.
+    percent-encoded), a path-relative one (no host and a path not starting ``/``, with
+    a scheme or without: ``https:bob/`` resolves against the page), one with a ``.`` or
+    ``..`` path segment once decoded (``%2e`` and ``%2F`` included), an empty segment
+    before the last (``//in/…``), ``;`` parameters on a person route's first segment
+    (``/in;x/…``), one whose query or fragment, decoded twice, names a member by URN
+    (``urn:li:fsd_profile:``, ``urn:li:fs_miniProfile:``, ``urn:li:member:``) other
+    than the contact's id, and LinkedIn's other person routes (``/mwlite/``, ``/pub/``,
+    ``/profile/view?id=``, ``/sales/lead/``, ``/sales/people/``, ``/talent/profile/``,
+    ``/recruiter/``) unless their token is exactly the contact's id, which is then
+    ignored: only an ``/in/`` link can confirm the contact.
 
     The contact: on LinkedIn's own host over ``https``, or root-relative, a path whose
     raw ``/`` segments are ``in`` (decoded, case-folded), then the contact's slug
     (decoded, case-folded) or member id (decoded, exact), then any number of further
-    segments, each non-empty (one trailing empty one allowed) and, decoded, holding no
-    ``/`` or ``\\`` and not ``.`` or ``..``. The query and fragment are ignored. Any
-    other ``/in/`` link names someone else."""
+    segments, each non-empty (one trailing empty one allowed), holding no ``%25``, and,
+    decoded, holding no ``/`` or ``\\`` and not ``.`` or ``..``. The query and fragment
+    are ignored. Any other ``/in/`` link names someone else."""
     if href is None or not href.strip() or href.strip().startswith("#"):
         return None
     try:
@@ -1536,24 +1544,37 @@ def read_card_link(href: str | None, public_id: str, profile_id: str) -> CardLin
     decoded = unquote(raw)
     if "\\" in href or "\\" in unquote(href):
         return _someone_else("", "unsafe path")
-    if not (split.scheme or split.netloc) and not raw.startswith("/"):
+    # Path-relative, with a scheme or without: Chrome resolves ``https:bob/`` against
+    # the page as it does ``bob/``.
+    if not split.netloc and not raw.startswith("/"):
         return _someone_else("", "unsafe path")
     if any(part in (".", "..") for part in decoded.split("/")):
         return _someone_else("", "unsafe path")
-    for token in _QUERY_MEMBER.findall(unquote(split.query)):
+    segments = raw.split("/")[1:]
+    # An empty segment anywhere but last (``//in/bob/``) is a path no profile has.
+    if any(part == "" for part in segments[:-1]):
+        return _someone_else("", "unsafe path")
+    head = unquote(segments[0]) if segments else ""
+    if ";" in head and head.split(";")[0].casefold() in _PARAM_HEADS:
+        return _someone_else("", "unsafe path")
+    # The query and the fragment, decoded twice (``%253A``), may name a member by URN.
+    named = f"{unquote(unquote(split.query))} {unquote(unquote(split.fragment))}"
+    for token in _QUERY_MEMBER.findall(named):
         if token != profile_id:
             return _someone_else(token, "query member")
     folded = decoded.casefold()
     for route in _PERSON_ROUTES:
         if folded.startswith(route):
-            token = decoded[len(route) :].split("/")[0].split(",")[0]
+            parts = decoded[len(route) :].split("/")
+            # ``/mwlite/in/<token>/``: the token follows the route's own next segment.
+            index = 1 if route == "/mwlite/" and len(parts) > 1 else 0
+            token = parts[index].split(",")[0]
             return None if token == profile_id else _someone_else(token, "other route")
     if _trim_path(folded) == _PROFILE_VIEW_PATH:
         ids = [value for key, value in parse_qsl(split.query) if key.casefold() == "id"]
         if ids and all(value == profile_id for value in ids):
             return None
         return _someone_else(ids[0] if ids else "", "other route")
-    segments = raw.split("/")[1:]
     if not segments or unquote(segments[0]).casefold() != PROFILE_PATH_PREFIX.strip("/"):
         return None
     token = unquote(segments[1]) if len(segments) > 1 else ""
@@ -1567,7 +1588,10 @@ def read_card_link(href: str | None, public_id: str, profile_id: str) -> CardLin
         return _someone_else(token, "another host", *more)
     by_id = bool(profile_id) and token == profile_id
     by_slug = bool(public_id) and token.casefold() == public_id.casefold()
-    clean = all(part and "/" not in unquote(part) and "\\" not in unquote(part) for part in rest)
+    clean = all(
+        part and "%25" not in part and "/" not in unquote(part) and "\\" not in unquote(part)
+        for part in rest
+    )
     if (by_id or by_slug) and clean:
         return CardLink(True, "id" if by_id else "slug", None, more)
     return _someone_else(token, *more)
