@@ -84,7 +84,7 @@ about the page's shape, so it is a *soft* failure: the harvest carries the profi
 without contact info (:attr:`ProfileHarvest.contact_info_lost`), the core writes the
 profile and leaves the contact due so a later run reads Contact info again, and the
 visit is recorded (:attr:`UnreadableCause.CONTACT_INFO_DEFERRED`, a line in
-:attr:`EnrichResult.lost`) without counting toward the unreadable limits. It neither
+:attr:`EnrichResult.deferred`) without counting toward the unreadable limits. It neither
 adds to nor clears the unreadable streak. Nothing is clicked again on that visit.
 A systemic loss still stops the run, as ``answer_lost`` rather than ``route_changed``:
 :data:`MAX_CONTACT_INFO_LOST_IN_A_ROW` lost overlays in a row, or more than half of
