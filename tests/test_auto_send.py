@@ -1383,12 +1383,9 @@ async def test_two_close_controls_are_not_clicked() -> None:
 
     result, _ = await _close_after(twice)
     assert result.close_refusal == (
-        "the sent bubble does not have one close control for this person (2 close button(s)"
-        " by prefix; 2 visible; 2 by the exact name; button 1: visible, suffix vs header"
-        " name: same length, exact, its name from its text, no hidden text in its name;"
-        " button 2: visible, suffix vs header name: same length, exact, its name from its"
-        " text, no hidden text in its name; header name from its text, no aria-label,"
-        " 0 element(s) under the link, 0 aria-hidden, its text is its name)"
+        "the sent bubble does not have one close control for this person (header from text,"
+        " 0 elements; close buttons: 2 by prefix, 2 visible, 2 exact; #1 visible, same"
+        " length, exact; #2 visible, same length, exact)"
     )
 
 
@@ -1614,11 +1611,9 @@ async def test_a_close_control_with_more_to_its_name_is_not_clicked() -> None:
 
     result, _ = await _close_after(rename)
     assert result.close_refusal == (
-        "the sent bubble does not have one close control for this person (1 close button(s)"
-        " by prefix; 1 visible; 0 by the exact name; button 1: visible, suffix vs header"
-        " name: suffix longer by 11, suffix starts with header name, its name from its"
-        " text, no hidden text in its name; header name from its text, no aria-label,"
-        " 0 element(s) under the link, 0 aria-hidden, its text is its name)"
+        "the sent bubble does not have one close control for this person (header from text,"
+        " 0 elements; close buttons: 1 by prefix, 1 visible, 0 exact; #1 visible, suffix +11,"
+        " suffix starts with header name)"
     )
 
 
@@ -1635,10 +1630,8 @@ async def test_a_close_control_outside_the_dialog_is_not_clicked() -> None:
 
     result, _ = await _close_after(move)
     assert result.close_refusal == (
-        "the sent bubble does not have one close control for this person (0 close button(s)"
-        " by prefix; 0 visible; 0 by the exact name; 1 by prefix on the page; header name"
-        " from its text, no aria-label, 0 element(s) under the link, 0 aria-hidden, its"
-        " text is its name)"
+        "the sent bubble does not have one close control for this person (header from text,"
+        " 0 elements; close buttons: 0 by prefix, 0 visible, 0 exact, 1 on page)"
     )
 
 

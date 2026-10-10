@@ -851,7 +851,8 @@ async def run_bubble_check(
     Under the account's activity lock, never waiting for it, as :func:`run_message_check`:
     attach, re-check the session flag, heat, and a cancel (:func:`message_check.recheck`,
     no visit spent, since no profile opens), then
-    :class:`~netkeeper.linkedin.page_messaging.PageBubbleCheck`'s one read. A busy or
+    :class:`~netkeeper.linkedin.page_messaging.PageBubbleCheck`'s one read, then a cancel
+    once more. A cancel ends the run ``aborted``. A busy or
     missing browser, a refusal, or a failure ends the run ``failed`` with fixed words or
     an exception's type name. A cancel from outside records ``aborted`` and propagates."""
 
@@ -877,9 +878,14 @@ async def run_bubble_check(
                 message_check.recheck, factory, user_id, target, settings=settings, now=clock()
             )
             if refused is not None:
-                await end(SyncRunStatus.FAILED, *refused)
+                # A cancel ends the run aborted, as a cancelled Message check's does.
+                cancel = refused[0] == runs.CANCELLED
+                await end(SyncRunStatus.ABORTED if cancel else SyncRunStatus.FAILED, *refused)
                 return BubbleCheckResult(stopped=refused[1])
             check = await PageBubbleCheck(browser, origin=origin).run(target.profile_id)
+            if await off_loop(message_check.cancel_requested, factory, user_id, target.run_id):
+                await end(SyncRunStatus.ABORTED, runs.CANCELLED)
+                return BubbleCheckResult(check, stopped="cancelled")
     except (BrowserBusy, BrowserUnavailable) as exc:
         reason = "browser_busy" if isinstance(exc, BrowserBusy) else "browser_unavailable"
         log.warning("bubble check run %d could not use the browser: %s", target.run_id, exc)
