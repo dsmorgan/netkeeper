@@ -401,7 +401,8 @@ ALLOWED_INPUTS = frozenset(
         # ADR 0008 (#384): auto-send's one click on Send, behind every gate.
         (LINKEDIN / "browser.py", "BrowserRun.click_send", "click"),
         # ADR 0008, decision D1: after a landed Send, one click on the sent bubble's own
-        # close control ("Close your conversation with <name>"), in the verified dialog.
+        # close control, in the verified dialog: the one button whose name starts with
+        # "Close your conversation with " and holds the header link's name (#499).
         (LINKEDIN / "browser.py", "BrowserRun.close_sent_bubble", "click"),
     }
 )
@@ -2698,6 +2699,7 @@ def test_the_bubble_check_never_reaches_an_input_a_navigation_or_cdp() -> None:
         ("    closes = buttons(CLOSE_CONTROL_PATTERN)\n", "await tab.keyboard.press('Escape')"),
         ("    closes = buttons(CLOSE_CONTROL_PATTERN)\n", "await tab.evaluate('1')"),
         ("    read = await _read_accessible_name(tab, button,", "await button.focus()"),
+        ("    visible = closes.filter(visible=True)\n", "await closes.click()"),
         ("        want = urlsplit(origin)\n", "await self._ensure_page(restore=False)"),
     ],
 )
@@ -2723,7 +2725,7 @@ def test_the_bubble_check_pin_catches_each_mutation(anchor: str, line: str) -> N
 def test_the_close_shape_read_is_reached_from_the_close_refusal_and_the_bubble_check() -> None:
     """#495: the diagnostic is shared, and ``_close_control`` stays ``close_sent_bubble``'s
     alone: ``read_close_shape`` is reached only from the refusal helper and
-    ``BrowserRun.bubble_check``."""
+    ``BrowserRun.bubble_check``. The refusal helper is ``_close_control``'s alone (#499)."""
     reaches: list[tuple[Path, str]] = []
     for path in python_files(PACKAGE):
         source = read_source(path)
@@ -2739,5 +2741,125 @@ def test_the_close_shape_read_is_reached_from_the_close_refusal_and_the_bubble_c
                 reaches.append((path, scopes.get(id(node), "")))
     assert sorted(reaches) == [
         (LINKEDIN / "browser.py", "BrowserRun.bubble_check"),
-        (LINKEDIN / "browser.py", "_no_one_close_control"),
+        (LINKEDIN / "browser.py", "_close_refusal"),
     ], reaches
+    assert _bare_reaches("_close_refusal") == [
+        (LINKEDIN / "browser.py", "BrowserRun._close_control")
+    ]
+
+
+def _bare_reaches(name: str) -> list[tuple[Path, str]]:
+    """Every place in the package that names the module function ``name``, by scope,
+    sorted: a call, a held reference, or an import."""
+    reaches: list[tuple[Path, str]] = []
+    for path in python_files(PACKAGE):
+        source = read_source(path)
+        if name not in source:
+            continue
+        tree = parse(source)
+        scopes = _scoped(tree)
+        for node in walk(tree):
+            if (
+                (isinstance(node, ast.Name) and node.id == name)
+                or (isinstance(node, ast.Attribute) and node.attr == name)
+                or (isinstance(node, ast.alias) and name in (node.name, node.asname))
+                or (isinstance(node, ast.Constant) and node.value == name)
+            ):
+                reaches.append((path, scopes.get(id(node), "")))
+    return sorted(reaches)
+
+
+def test_the_close_rule_is_reached_only_from_the_close_lookup_and_the_diagnostic() -> None:
+    """#499: ``_close_by_rule`` builds the close click's target. It is reached only from
+    ``BrowserRun._close_control`` (itself reached only from ``close_sent_bubble``, pinned
+    above) and the read-only diagnostic, ``read_close_shape``."""
+    assert _bare_reaches("_close_by_rule") == [
+        (LINKEDIN / "browser.py", "BrowserRun._close_control"),
+        (LINKEDIN / "browser.py", "read_close_shape"),
+    ]
+
+
+def _close_rule_function(source: str | None = None) -> ast.AsyncFunctionDef:
+    tree = parse(source if source is not None else read_source(LINKEDIN / "browser.py"))
+    [rule] = [
+        n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_close_by_rule"
+    ]
+    return rule
+
+
+def _close_rule_findings(rule: ast.AsyncFunctionDef) -> list[str]:
+    """What is wrong with how ``_close_by_rule`` builds the click target, in words; empty
+    when it holds: one ``get_by_role`` on ``dialog`` by ``CLOSE_CONTROL_ROLE`` and
+    ``CLOSE_CONTROL_PATTERN`` with ``include_hidden=True``, counted ``!= 1``; that
+    locator ``filter``-ed ``visible=True``, counted ``!= 1``; the name compared by
+    ``close_names_person``; and only that visible locator, narrowed to its confirmed
+    exact name with hidden text counted (``visible.and_(same)``), returned as a locator."""
+    findings: list[str] = []
+    calls = [n for n in walk(rule) if isinstance(n, ast.Call)]
+    on_dialog = [
+        c
+        for c in calls
+        if isinstance(c.func, ast.Attribute)
+        and c.func.attr == "get_by_role"
+        and isinstance(c.func.value, ast.Name)
+        and c.func.value.id == "dialog"
+    ]
+    if len(on_dialog) != 1:
+        return [f"{len(on_dialog)} get_by_role calls on the dialog"]
+    [lookup] = on_dialog
+    keywords = {k.arg: ast.unparse(k.value) for k in lookup.keywords}
+    if [ast.unparse(a) for a in lookup.args] != ["CLOSE_CONTROL_ROLE"]:
+        findings.append("the lookup's role")
+    if keywords != {"name": "CLOSE_CONTROL_PATTERN", "include_hidden": "True"}:
+        findings.append(f"the lookup's keywords: {keywords}")
+    source = ast.unparse(rule)
+    for needed in (
+        "if await closes.count() != 1:",
+        "visible = closes.filter(visible=True)",
+        "if await visible.count() != 1:",
+        "if not close_names_person(header, read.name[len(CLOSE_CONTROL_PREFIX):]):",
+        "if await visible.and_(same).count() != 1:",
+        "_read_accessible_name(tab, visible, CLOSE_CONTROL_ROLE)",
+    ):
+        if needed not in source:
+            findings.append(f"missing: {needed}")
+    returned = [
+        ast.unparse(n.value)
+        for n in walk(rule)
+        if isinstance(n, ast.Return) and n.value is not None
+    ]
+    if [r for r in returned if not r.startswith("CloseMiss.")] != ["visible.and_(same)"]:
+        findings.append(f"returns: {returned}")
+    return findings
+
+
+def test_the_close_click_target_is_built_by_the_rule() -> None:
+    """#499: the close click's target is the one button in the verified dialog whose name
+    starts with the prefix, hidden ones counted, filtered to visible, and nothing else."""
+    assert _close_rule_findings(_close_rule_function()) == []
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("if await closes.count() != 1:", "if await closes.count() < 1:"),
+        ("if await visible.count() != 1:", "if await visible.count() < 1:"),
+        ("PATTERN, include_hidden=True)", "PATTERN, include_hidden=False)"),
+        ("name=CLOSE_CONTROL_PATTERN, ", "name=CLOSE_CONTROL_PATTERN, exact=False, "),
+        ("dialog.get_by_role(", "tab.get_by_role("),
+        ("    return visible.and_(same)\n", "    return closes\n"),
+        ("    return visible.and_(same)\n", "    return visible\n"),
+        ("    return visible.and_(same)\n", "    return visible.and_(closes)\n"),
+        ("    if not close_names_person(", "    if False and close_names_person("),
+        ("if await visible.and_(same).count() != 1:", "if await visible.and_(same).count() < 1:"),
+    ],
+)
+def test_the_close_rule_pin_catches_each_mutation(old: str, new: str) -> None:
+    """Each loosening of the close rule's target fails the pin above."""
+    source = read_source(LINKEDIN / "browser.py")
+    start = source.index("async def _close_by_rule(")
+    end = source.index("\ndef _longer(", start)
+    body = source[start:end]
+    assert body.count(old) == 1, old
+    mutated = source[:start] + body.replace(old, new, 1) + source[end:]
+    assert _close_rule_findings(_close_rule_function(mutated)), f"the pin missed {new!r}"

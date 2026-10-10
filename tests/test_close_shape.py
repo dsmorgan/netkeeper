@@ -39,13 +39,17 @@ from netkeeper.db import database_url, make_engine, make_session_factory, sessio
 from netkeeper.linkedin import browser
 from netkeeper.linkedin.activity_lock import account_key
 from netkeeper.linkedin.browser import (
+    NAME_APOSTROPHES,
+    NAME_JOINER_CATEGORIES,
     NO_ONE_CLOSE_CONTROL,
     BrowserRun,
     BubbleCheck,
     CloseButtonShape,
+    CloseMiss,
     CloseShape,
     NameRelation,
     NameSource,
+    close_names_person,
     name_relation,
     read_close_shape,
 )
@@ -178,12 +182,152 @@ def test_the_relation_words_are_fixed() -> None:
     }
 
 
+# --- #499: the close rule's name match -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("suffix", "holds"),
+    [
+        ("Quorbelle Fictionary", True),
+        ("Invented status line, Quorbelle Fictionary", True),
+        ("Quorbelle Fictionary and others", True),
+        ("Status: busy · Quorbelle Fictionary (Active now)", True),
+        ("(Quorbelle Fictionary)", True),
+        ("“Quorbelle Fictionary”", True),
+        ("Quorbelle  Fictionary", True),
+        ("Quorbelle\u00a0Fictionary", True),
+        ("Quor\u200bbelle Fictionary", True),
+        ("Annabel, Quorbelle Fictionary", True),
+        ("Quorbelle Fictionaryson", False),
+        ("XQuorbelle Fictionary", False),
+        ("Quorbelle Fictionary-Smith", False),
+        ("Quorbelle Fictionary\u2010Smith", False),
+        ("Smith-Quorbelle Fictionary", False),
+        ("Quorbelle Fictionary's", False),
+        ("Quorbelle Fictionary\u2019s", False),
+        ("Quorbelle Fictionary2", False),
+        ("quorbelle fictionary", False),
+        ("Quorbelle", False),
+        ("Wendolyn Madeupton", False),
+        ("", False),
+    ],
+)
+def test_the_close_rule_holds_the_header_name_only_as_a_whole(suffix: str, holds: bool) -> None:
+    assert close_names_person("Quorbelle Fictionary", suffix) is holds
+
+
+@pytest.mark.parametrize(
+    ("header", "suffix", "holds"),
+    [
+        ("Ann", "Ann", True),
+        ("Ann", "Chat with Ann, now", True),
+        ("Ann", "Annabel", False),
+        ("Ann", "Joann", False),
+        ("Ann", "Ann-Marie", False),
+        ("Ann", "Ann\u2013Marie", False),
+        ("Ann", "Ann\u2014Marie", False),
+        ("Ann", "Ann\u2012Marie", False),
+        ("Ann", "Ann\u05beMarie", False),
+        ("Ann", "Ann\u058aMarie", False),
+        ("Ann", "Ann\u30a0Marie", False),
+        ("Ann", "Ann\uff0dMarie", False),
+        ("Ann", "Ann\ufe63Marie", False),
+        ("Ann", "Ann\u2e3aMarie", False),
+        ("Ann", "Marie\u2e3bAnn", False),
+        ("Ann", "Ann\uff07s", False),
+        ("Ann", "Ann_Marie", False),
+        ("Ann", "Marie_Ann", False),
+        ("Ann", "Ann \u2013 Active now", True),
+        ("Ann", "Ann, Active now", True),
+        ("Ann", "Ann. Active now", True),
+        ("Ann", "Annabel and Ann", True),
+        ("Ann", "Annabel and Joann", False),
+        (unicodedata.normalize("NFD", "Quorbéllé"), "Hi Quorbéllé", True),
+        ("Quorbéllé", unicodedata.normalize("NFD", "Hi Quorbéllé"), True),
+        (" Ann  ", "Ann", True),
+        ("   ", "Ann", False),
+        ("", "Ann", False),
+        ("", "Hi, Ann", False),
+        ("\u200b", "Hi, Ann", False),
+        ("", "", False),
+    ],
+)
+def test_the_close_rule_s_edges_and_normalization(header: str, suffix: str, holds: bool) -> None:
+    assert close_names_person(header, suffix) is holds
+
+
+@pytest.mark.parametrize(
+    ("suffix", "rule", "miss"),
+    [
+        (f"Invented status line, {PERSON.name}", 1, None),
+        (f"{PERSON.name} (Active now)", 1, None),
+        (f"Invented status · {PERSON.name}, away", 1, None),
+        (f"{PERSON.name}son", 0, CloseMiss.NOT_THIS_PERSON),
+        (OTHER.name, 0, CloseMiss.NOT_THIS_PERSON),
+        (PERSON.name.lower(), 0, CloseMiss.NOT_THIS_PERSON),
+    ],
+)
+async def test_the_shape_reports_the_close_rule(
+    suffix: str, rule: int, miss: CloseMiss | None
+) -> None:
+    shape = await shape_of(_bubble(_rename_close(suffix)))
+    assert (shape.exact, shape.rule, shape.rule_miss) == (0, rule, miss)
+    want = f"close lookup by the rule: {rule}" + ("" if miss is None else f" ({miss.value})")
+    assert want in shape.lines()
+    assert f"0 exact, {rule} by rule" in shape.describe()
+
+
+async def test_the_shape_reports_each_close_rule_miss() -> None:
+    def two(html: str) -> str:
+        return html.replace("</header>", _close_button(PERSON.name) + "</header>", 1)
+
+    def hidden(html: str) -> str:
+        return html.replace("<button><span>Close", "<button hidden><span>Close", 1)
+
+    def hidden_text(html: str) -> str:
+        old = _close_button(PERSON.name)
+        return html.replace(
+            old, f'<button><span>{CLOSE}{PERSON.name}</span><span aria-hidden="true"> x</span>'
+        )
+
+    misses = {
+        CloseMiss.NOT_ONE: two,
+        CloseMiss.NOT_VISIBLE: hidden,
+        CloseMiss.HIDDEN_TEXT: hidden_text,
+    }
+    for miss, change in misses.items():
+        shape = await shape_of(_bubble(change))
+        assert (shape.rule, shape.rule_miss) == (0, miss), miss
+
+
+async def test_the_shape_has_no_close_rule_without_a_header_name() -> None:
+    html = _bubble(_relink(f"{PERSON.name}</a><a href='/in/{OTHER.profile_id}/'>{OTHER.name}"))
+    shape = await shape_of(html)
+    assert (shape.rule, shape.rule_miss) == (None, None)
+    assert "close lookup by the rule: -" in shape.lines()
+    assert "by rule" not in shape.describe()
+
+
+def test_the_close_rule_s_words_are_fixed() -> None:
+    assert frozenset({"Pd", "Pc"}) == NAME_JOINER_CATEGORIES
+    assert frozenset("'\u2019\u02bc\uff07") == NAME_APOSTROPHES
+    assert [m.value for m in CloseMiss] == [
+        "not one button by prefix",
+        "not visible",
+        "its name could not be read",
+        "hidden text changes its name",
+        "its name does not hold the header name",
+    ]
+
+
 # --- the shape, on invented bubbles ---------------------------------------------------------
 
 
 async def test_the_capture_s_bubble_has_one_exact_close_control() -> None:
     shape = await shape_of(_bubble())
     assert (shape.by_prefix, shape.by_prefix_visible, shape.exact) == (1, 1, 1)
+    assert (shape.rule, shape.rule_miss) == (1, None)
+    assert "close lookup by the rule: 1" in shape.lines()
     assert (shape.options_by_prefix, shape.minimize_by_prefix) == (1, 1)
     assert (shape.draft_close, shape.draft_minimize, shape.any_close) == (0, 0, 1)
     [button] = shape.buttons
@@ -206,8 +350,8 @@ async def test_a_badge_in_the_header_link_makes_the_header_name_longer() -> None
     assert (button.relation, button.difference) == (NameRelation.HEADER_STARTS, 8)
     assert shape.header_elements == 1 and shape.header_hidden_parts == 0
     assert shape.describe() == (
-        "header from text, 1 elements; close buttons: 1 by prefix, 1 visible, 0 exact;"
-        " #1 visible, header +8, header name starts with suffix"
+        "header from text, 1 elements; close buttons: 1 by prefix, 1 visible, 0 exact,"
+        " 0 by rule; #1 visible, header +8, header name starts with suffix"
     )
     assert "suffix vs header name: header name longer by 8" in "\n".join(shape.lines())
 
@@ -280,7 +424,8 @@ async def test_hidden_and_visible_close_controls_are_counted_apart() -> None:
     assert [b.visible for b in shape.buttons] == [True, False]
     assert [b.hidden_text for b in shape.buttons] == [False, None]
     assert shape.describe().endswith(
-        "close buttons: 2 by prefix, 1 visible, 2 exact; #1 visible, same length, exact;"
+        "close buttons: 2 by prefix, 1 visible, 2 exact, 0 by rule; #1 visible, same length,"
+        " exact;"
         " #2 hidden, same length, exact"
     )
     assert "close button 2: hidden" in "\n".join(shape.lines())
@@ -315,7 +460,7 @@ async def test_hidden_text_before_the_prefix_is_counted_without_it() -> None:
 
     shape = await shape_of(_bubble(icon))
     assert (shape.by_prefix, shape.by_prefix_shown_names, shape.exact) == (0, 1, 0)
-    assert "0 by prefix, 0 visible, 0 exact, 1 without hidden text" in shape.describe()
+    assert "0 by prefix, 0 visible, 0 exact, 0 by rule, 1 without hidden text" in shape.describe()
 
 
 async def test_the_never_messaged_header_controls_are_counted() -> None:
@@ -385,7 +530,9 @@ async def test_the_refusal_keeps_its_words_when_the_shape_cannot_be_read(
     tab = _tab(site, _bubble(_rename_close(OTHER.name)))
     dialog = tab.get_by_role("dialog", name="Messaging", exact=True, include_hidden=True)
     with caplog.at_level(logging.DEBUG):
-        refusal = await browser._no_one_close_control(cast(Any, tab), cast(Any, dialog))
+        refusal = await browser._close_refusal(
+            NO_ONE_CLOSE_CONTROL, cast(Any, tab), cast(Any, dialog)
+        )
     assert refusal == f"{NO_ONE_CLOSE_CONTROL} (its shape could not be read)"
     assert "the close control's shape could not be read (RuntimeError)" in caplog.text
     assert "timed out" not in caplog.text and "locator" not in caplog.text

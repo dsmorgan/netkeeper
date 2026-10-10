@@ -12,7 +12,8 @@ What this proves that the offline tests can't: that ``BrowserRun.bubble_check``,
 through real Playwright, on a close button that carries an ``aria-hidden`` icon as
 LinkedIn's do. Before #497 that icon stopped the check: Playwright's ``inner_text``
 raises on an ``svg``. It also pins how a real browser's role-and-name matcher answers
-the exact close lookup for a few button shapes, and the words
+the exact-name lookup used before #499 and the close rule that replaced it
+(``_close_by_rule``), for a few button shapes, and the words
 :func:`~netkeeper.linkedin.browser.classify_read_failure` gives Playwright's own errors.
 """
 
@@ -88,13 +89,23 @@ _CLOSE_INSIDES = {
         '<svg aria-hidden="true" width="16" height="16"><title>close-small</title></svg>'
         f"<span>{CLOSE}{name}</span>"
     ),
+    # #499: the live close label held more than the header name, with text before it.
+    "extra_before": lambda name: f"{ICON}<span>{CLOSE}Invented status line {name}</span>",
+    "extra_both_sides": lambda name: (
+        f"{ICON}<span>{CLOSE}Invented status, {name} (Active now)</span>"
+    ),
+    "extra_split_spans": lambda name: (
+        f"{ICON}<span>{CLOSE}Invented status </span><span>{name}</span><span>, away</span>"
+    ),
+    "longer_word": lambda name: f"{ICON}<span>{CLOSE}{name}son</span>",
 }
 
-#: Whether the exact lookup, ``get_by_role("button", name=..., exact=True,
-#: include_hidden=True)``, finds the close button in a real Chrome, today. Hidden text
+#: Whether the exact-name lookup used before #499, ``get_by_role("button",
+#: name="Close your conversation with <name>", exact=True, include_hidden=True)``, finds
+#: the close button in a real Chrome (the diagnostic's ``exact`` count). Hidden text
 #: counts in a name under ``include_hidden=True``, so an aria-hidden glyph or an svg's
-#: ``<title>`` breaks it; spans with no space between them run the words together. These
-#: are evidence for the close lookup's matching, not a decision about it.
+#: ``<title>`` breaks it; spans with no space between them run the words together; and
+#: any text beside the name misses. Evidence, not a decision.
 EXACT_LOOKUP_FINDS = {
     "icon": True,
     "icon_text_only_hidden": True,
@@ -103,6 +114,20 @@ EXACT_LOOKUP_FINDS = {
     "hidden_glyph_first": False,
     "hidden_glyph_after": False,
     "icon_with_title": False,
+    "extra_before": False,
+    "extra_both_sides": False,
+    "extra_split_spans": False,
+    "longer_word": False,
+}
+#: Whether the close lookup's rule since #499 (``_close_by_rule``: one button by prefix,
+#: visible, its confirmed name the same with hidden text counted, holding the header
+#: name as a whole) finds the close button in a real Chrome. It finds every shape the
+#: exact lookup did, and the ones with text beside the name; never a longer word.
+RULE_FINDS = {
+    **EXACT_LOOKUP_FINDS,
+    "extra_before": True,
+    "extra_both_sides": True,
+    "extra_split_spans": True,
 }
 MEMBERS = {variant: _member(500 + i) for i, variant in enumerate(_CLOSE_INSIDES)}
 
@@ -212,9 +237,10 @@ async def test_the_bubble_check_finds_no_bubble_for_someone_else(origin: str) ->
 async def test_the_close_shape_and_the_close_lookup_in_a_real_browser(
     origin: str, variant: str
 ) -> None:
-    """``read_close_shape`` reads each shape without raising, and ``close_sent_bubble``'s
-    lookup (``_close_control``, reads only) finds the button exactly when
-    :data:`EXACT_LOOKUP_FINDS` says a real Chrome does."""
+    """``read_close_shape`` reads each shape without raising; its exact count is what
+    :data:`EXACT_LOOKUP_FINDS` says; and ``close_sent_bubble``'s lookup (``_close_control``,
+    reads only) and the shape's rule count find the button exactly when
+    :data:`RULE_FINDS` says a real Chrome does."""
     member = MEMBERS[variant]
     async with _opened_by_hand(f"{origin}/{variant}/") as tab:
         async with AttachBrowserProvider(CDP_URL).run("smoke-bubble-check") as run:
@@ -226,8 +252,9 @@ async def test_the_close_shape_and_the_close_lookup_in_a_real_browser(
             recipient = BubbleRecipient(BubbleLayout.EXISTING, member.profile_id, member.slug)
             control = await run._close_control(tab, composer, recipient)
         events = await tab.evaluate("() => window.__events")
-    finds = EXACT_LOOKUP_FINDS[variant]
-    assert shape.exact == (1 if finds else 0), shape.describe()
+    assert shape.exact == (1 if EXACT_LOOKUP_FINDS[variant] else 0), shape.describe()
+    finds = RULE_FINDS[variant]
+    assert shape.rule == (1 if finds else 0), shape.lines()
     assert not isinstance(control, str) if finds else isinstance(control, str), control
     assert events == []
 
