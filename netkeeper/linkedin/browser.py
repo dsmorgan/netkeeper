@@ -1595,8 +1595,10 @@ class ContextLike(Protocol):
         without reaching the site, that LinkedIn never sets either cookie on
         a narrower host a ``www.linkedin.com`` url would not see -- and a
         false "no session" reading there is a worse failure than the small
-        amount of extra jar this one, already narrow, name+domain+expiry-only
-        read pulls in. Left alone rather than guessed at.
+        amount of extra jar this read pulls in. The CDP call itself loads
+        every cookie value into process memory; only what preflight copies
+        out (name, domain, expiry) is narrow. Left alone rather than guessed
+        at.
         """
         ...
 
