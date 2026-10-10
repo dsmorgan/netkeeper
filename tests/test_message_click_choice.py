@@ -68,6 +68,7 @@ def test_the_choice_constants_are_pinned() -> None:
     assert MESSAGE_MAX_CANDIDATES == 8
     assert MESSAGE_MAX_LINKS == 32
     assert GEOMETRY_TIMEOUT_S == 3.0
+    assert browser_module.PSEUDO_HOSTS_TIMEOUT_S == 2.0
     assert HIT_TOLERANCE_PX == 1.0
     assert MESSAGE_NOT_ON_SCREEN == (
         "no Message control is on screen with nothing over it; close or move what covers it"
@@ -595,6 +596,17 @@ async def test_no_snapshot_is_read_when_every_hit_is_the_links_own() -> None:
     site = _site(_top_card_icon(_profile()))
     ran = await prefill(site)
     assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert SNAPSHOT not in _sent(site)
+
+
+async def test_an_ordinary_cover_sends_no_snapshot() -> None:
+    """Review of #492: a covering element has a ``nodeId``; only a hit with none (a
+    ``::first-letter``) costs a snapshot. Here a sticky header covers the top card."""
+    header = '<header data-box="0,280,1280,80"><h2>Invented header</h2></header>'
+    site = _site(_profile(extra=header))
+    ran = await prefill(site)
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert _clicked_key(site) == "highlights"
     assert SNAPSHOT not in _sent(site)
 
 

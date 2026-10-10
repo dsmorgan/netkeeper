@@ -387,7 +387,16 @@ class GeometrySession:
                 ),
                 "main-frame",
             )
-            return {"backendNodeId": hit, "frameId": frame}
+            # As Chrome 154 (#490): a ::first-letter, or an element outside the tree,
+            # can't be pushed to a nodeId, so it answers 0; anything else has its own.
+            first_letter = (
+                hit >= _PSEUDO_ID_BASE
+                and _PSEUDO_KINDS[(hit - _PSEUDO_ID_BASE) % len(_LAYERS)] == FIRST_LETTER[0]
+            )
+            pushed = not first_letter and not any(
+                "data-untreed" in a.attrs for a in (owner, *owner.ancestors())
+            )
+            return {"backendNodeId": hit, "frameId": frame, "nodeId": hit if pushed else 0}
         if method == "DOMSnapshot.captureSnapshot":
             # #490: one document, every element, then every pseudo-element with its
             # element as parent, ::first-letter included, the way Chrome lays it out.

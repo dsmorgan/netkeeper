@@ -2795,7 +2795,8 @@ class BrowserRun:
           scroll offset), so the point is sent with the page's scroll added (#470).
           Without it, a scrolled page is hit-tested where the control isn't.
         - ``DOMSnapshot.captureSnapshot`` with no computed styles, at most once and only
-          when a hit isn't the link's by ``describeNode`` (:meth:`_pseudo_hosts`, #490):
+          when a hit isn't the link's by ``describeNode`` and has no ``nodeId`` (0)
+          (:meth:`_pseudo_hosts`, #490):
           each pseudo-element's host, ``::first-letter`` included, which
           ``describeNode`` doesn't list.
 
@@ -2877,7 +2878,11 @@ class BrowserRun:
                         hits.append(link.box)
                     else:
                         hits.append(None)
-                        foreign.append((len(hits) - 1, backend, link))
+                        # #490: only a hit Chrome couldn't push to a nodeId (0), as every
+                        # ::first-letter's is; an ordinary cover has one, and sends no
+                        # snapshot.
+                        if not hit.get("nodeId"):
+                            foreign.append((len(hits) - 1, backend, link))
             if foreign:
                 # #490: a pseudo-element describeNode doesn't list (::first-letter) is the
                 # link's when its host is the link or inside it. Outside the geometry
@@ -2908,7 +2913,9 @@ class BrowserRun:
 
         Sends ``DOMSnapshot.captureSnapshot`` with ``computedStyles: []`` and nothing
         else, through the caller's session: a read-only copy of the DOM and its layout
-        tree, with no computed styles, rectangles or paint order. On Chrome 154, a hit
+        tree. The answer holds the page's text and attribute values (input values
+        included) and layout bounds; only the node ids and parent links are kept, and
+        nothing of it is logged. On Chrome 154, a hit
         on a ``::first-letter`` answers with that pseudo-element's own id, with no
         ``nodeId``, and ``DOM.describeNode`` neither lists it under its host's
         ``pseudoElements`` nor gives its parent; the snapshot does. It raises when the
