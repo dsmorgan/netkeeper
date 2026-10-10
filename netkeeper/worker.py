@@ -15,7 +15,8 @@ owns only what needs the browser.
 the task runner and answers ``202``, never awaiting it inside the request,
 spec 9.9), and ``netkeeper linkedin sync``/``enrich`` on their own loops.
 ``netkeeper linkedin message-check`` calls :func:`run_message_check` (#473), a
-prefill's steps up to its click, on its own loop. The
+prefill's steps up to its click, on its own loop, and with ``--bubble``,
+:func:`run_bubble_check` (#495), a read of a bubble opened by hand. The
 app and the API reach it only as a :class:`~netkeeper.services.runs.RunExecutor`,
 so no request handler imports the browser (``tests/test_browser_safety.py``
 lists this module among the browser's few callers on purpose).
@@ -69,6 +70,7 @@ from netkeeper.linkedin.browser import (
     BrowserProvider,
     BrowserRun,
     BrowserUnavailable,
+    BubbleCheck,
 )
 from netkeeper.linkedin.connections import ConnectionsSource, SyncMode
 from netkeeper.linkedin.enrich import LINKEDIN_ORIGIN, ProfileSource
@@ -79,7 +81,7 @@ from netkeeper.linkedin.page_inbox import PageInbox
 
 # Re-exported for the CLI's report, so the CLI reaches the page source only through here.
 from netkeeper.linkedin.page_messaging import MessageCheckResult as MessageCheckResult
-from netkeeper.linkedin.page_messaging import PageMessageCheck, PagePrefill
+from netkeeper.linkedin.page_messaging import PageBubbleCheck, PageMessageCheck, PagePrefill
 from netkeeper.linkedin.page_profiles import PageProfiles
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
@@ -824,3 +826,73 @@ async def run_message_check(
         wall_url=result.wall_url,
     )
     return result
+
+
+@dataclass(frozen=True, slots=True)
+class BubbleCheckResult:
+    """What :func:`run_bubble_check` read (#495), or why it read nothing: fixed words."""
+
+    bubble: BubbleCheck | None = None
+    stopped: str | None = None
+
+
+async def run_bubble_check(
+    provider: BrowserProvider,
+    factory: sessionmaker[Session],
+    user_id: int,
+    target: message_check.CheckTarget,
+    *,
+    settings: Settings,
+    clock: Clock = _utcnow,
+    origin: str = LINKEDIN_ORIGIN,
+) -> BubbleCheckResult:
+    """Run a recorded bubble check (#495) and record how its run ended.
+
+    Under the account's activity lock, never waiting for it, as :func:`run_message_check`:
+    attach, re-check the session flag, heat, and a cancel (:func:`message_check.recheck`,
+    no visit spent, since no profile opens), then
+    :class:`~netkeeper.linkedin.page_messaging.PageBubbleCheck`'s one read. A busy or
+    missing browser, a refusal, or a failure ends the run ``failed`` with fixed words or
+    an exception's type name. A cancel from outside records ``aborted`` and propagates."""
+
+    async def end(status: SyncRunStatus, reason: str, error: str | None = None) -> None:
+        await off_loop(
+            message_check.finish_quietly,
+            factory,
+            user_id,
+            target,
+            status=status,
+            stop_reason=reason,
+            now=clock(),
+            settings=settings,
+            error=error,
+        )
+
+    try:
+        async with (
+            runs.heartbeat(factory, user_id, target.run_id, clock=clock),
+            provider.run(account_key(target.account_id)) as browser,
+        ):
+            refused = await off_loop(
+                message_check.recheck, factory, user_id, target, settings=settings, now=clock()
+            )
+            if refused is not None:
+                await end(SyncRunStatus.FAILED, *refused)
+                return BubbleCheckResult(stopped=refused[1])
+            check = await PageBubbleCheck(browser, origin=origin).run(target.profile_id)
+    except (BrowserBusy, BrowserUnavailable) as exc:
+        reason = "browser_busy" if isinstance(exc, BrowserBusy) else "browser_unavailable"
+        log.warning("bubble check run %d could not use the browser: %s", target.run_id, exc)
+        await end(SyncRunStatus.FAILED, reason, runs.describe_stop_reason(reason))
+        return BubbleCheckResult(stopped=runs.describe_stop_reason(reason))
+    except asyncio.CancelledError:
+        await end(SyncRunStatus.ABORTED, "interrupted", runs.INTERRUPTED)
+        raise
+    except Exception as exc:
+        # The type only: a Playwright error's text can quote a selector, and a selector
+        # here can hold the contact's name.
+        log.error("bubble check run %d failed (%s)", target.run_id, type(exc).__name__)
+        await end(SyncRunStatus.FAILED, "error", f"the check failed ({type(exc).__name__})")
+        return BubbleCheckResult(stopped=f"the check failed ({type(exc).__name__})")
+    await end(SyncRunStatus.COMPLETED, message_check.BUBBLE_CHECK_STOP)
+    return BubbleCheckResult(check)

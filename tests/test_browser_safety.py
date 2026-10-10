@@ -2641,3 +2641,103 @@ def test_the_message_check_pin_catches_each_mutation(where: str, line: str) -> N
     # Unmutated, the check reaches one name on the list: bring_tab_forward's own.
     reached = _check_reaches(messaging, browser)
     assert len(reached) > 1, f"the pin missed {line!r} in {where}"
+
+
+# --- #495: the bubble check reads a bubble opened by hand, and nothing more --------------
+
+#: What the bubble check may never reach: everything the Message check may not, and,
+#: since it opens no profile, any navigation, scroll, tab of its own, or bringing one
+#: forward. ``bring_to_front`` is in :data:`CHECK_BANNED` already.
+BUBBLE_CHECK_BANNED = CHECK_BANNED | {
+    "goto",
+    "scroll",
+    "ensure_page",
+    "_ensure_page",
+    "_open_tab",
+    "new_page",
+    "bring_tab_forward",
+    "message_check_snapshot",
+    "message_cover",
+    "_close_control",
+}
+
+
+def _bubble_check_reaches(
+    messaging: str, browser: str, banned: frozenset[str] = BUBBLE_CHECK_BANNED
+) -> list[str]:
+    """Every name in ``banned`` that ``PageBubbleCheck.run`` reaches, transitively."""
+    tree = ast.parse(messaging)
+    check = _methods(tree, "PageBubbleCheck")["run"]
+    run = _scope(ast.parse(browser), "BrowserRun")
+    return _reached_banned(tree, "PageBubbleCheck", [check], banned, run=run)
+
+
+def test_the_bubble_check_never_reaches_an_input_a_navigation_or_cdp() -> None:
+    """#495: ``PageBubbleCheck.run``, and everything it reaches, transitively, never
+    reaches a click, a key, typing, a focus, script, a navigation, a scroll, a tab of its
+    own, bringing a tab forward, the prefill's or auto-send's methods, or a CDP sender;
+    and it holds none of them under another name. It reaches ``bubble_check`` and the
+    name reads under the close-shape read, so the walk is not empty."""
+    messaging = read_source(LINKEDIN / "page_messaging.py")
+    browser = read_source(LINKEDIN / "browser.py")
+    assert _bubble_check_reaches(messaging, browser) == []
+    senders = frozenset(function.split(".")[-1] for _, function in CDP_SENDERS)
+    assert _bubble_check_reaches(messaging, browser, senders) == []
+    check = _methods(parse(messaging), "PageBubbleCheck")["run"]
+    assert not _held_not_called(check, BUBBLE_CHECK_BANNED)
+    reached = _bubble_check_reaches(messaging, browser, frozenset({"bubble_check", "inner_text"}))
+    assert {r.split(" ")[0] for r in reached} == {"bubble_check", "inner_text"}
+
+
+@pytest.mark.parametrize(
+    ("anchor", "line"),
+    [
+        ("        return await self._run.bubble_check(", "await self._run.goto('/')"),
+        ("        return await self._run.bubble_check(", "await self._run.bring_tab_forward()"),
+        ("    closes = buttons(CLOSE_CONTROL_PATTERN)\n", "await dialog.click()"),
+        ("    closes = buttons(CLOSE_CONTROL_PATTERN)\n", "await tab.keyboard.press('Escape')"),
+        ("    closes = buttons(CLOSE_CONTROL_PATTERN)\n", "await tab.evaluate('1')"),
+        ("    read = await _read_accessible_name(tab, button,", "await button.focus()"),
+        ("        want = urlsplit(origin)\n", "await self._ensure_page(restore=False)"),
+    ],
+)
+def test_the_bubble_check_pin_catches_each_mutation(anchor: str, line: str) -> None:
+    """Each input #495 rules out, added to the bubble check, its tab read, the shape read,
+    or the per-button read, fails the pin."""
+    messaging = read_source(LINKEDIN / "page_messaging.py")
+    browser = read_source(LINKEDIN / "browser.py")
+    for source in (messaging, browser):
+        if anchor in source:
+            indent = anchor[: len(anchor) - len(anchor.lstrip())]
+            mutated = source.replace(anchor, f"{indent}{line}\n{anchor}", 1)
+            if source is messaging:
+                messaging = mutated
+            else:
+                browser = mutated
+            break
+    else:
+        raise AssertionError(f"anchor not found: {anchor!r}")
+    assert _bubble_check_reaches(messaging, browser), f"the pin missed {line!r}"
+
+
+def test_the_close_shape_read_is_reached_from_the_close_refusal_and_the_bubble_check() -> None:
+    """#495: the diagnostic is shared, and ``_close_control`` stays ``close_sent_bubble``'s
+    alone: ``read_close_shape`` is reached only from the refusal helper and
+    ``BrowserRun.bubble_check``."""
+    reaches: list[tuple[Path, str]] = []
+    for path in python_files(PACKAGE):
+        source = read_source(path)
+        if "read_close_shape" not in source:
+            continue
+        tree = parse(source)
+        scopes = _scoped(tree)
+        for node in walk(tree):
+            if isinstance(node, ast.Name | ast.Attribute) and (
+                getattr(node, "id", None) == "read_close_shape"
+                or getattr(node, "attr", None) == "read_close_shape"
+            ):
+                reaches.append((path, scopes.get(id(node), "")))
+    assert sorted(reaches) == [
+        (LINKEDIN / "browser.py", "BrowserRun.bubble_check"),
+        (LINKEDIN / "browser.py", "_no_one_close_control"),
+    ], reaches
