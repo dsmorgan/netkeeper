@@ -497,9 +497,9 @@ async def test_a_contact_info_answer_that_breaks_off_is_not_clicked_for_again(
     assert result.reason is StopReason.END_OF_PLAN and result.clicks == 2
     assert (result.unreadable, result.contact_info_lost) == (0, 1)
     assert result.lost == ()  # #424: a saved profile is not an unreadable answer
-    (lost,) = result.deferred
-    assert lost.startswith("visit 1: the Contact info answer could not be read (")
-    assert lost.endswith("; the profile was saved without it")
+    (deferred,) = result.deferred
+    assert deferred.startswith("visit 1: the Contact info answer could not be read (")
+    assert deferred.endswith("; the profile was saved without it")
     navigations = [r for r in _Replica.received if r["path"] == NAVIGATION_PATH]
     slugs = [json.loads(r["body"])["clientArguments"]["payload"]["vanityName"] for r in navigations]
     assert slugs == [PRIYA.slug, MATEO.slug]  # one overlay request each: never asked again
