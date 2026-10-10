@@ -12,7 +12,7 @@ from __future__ import annotations
 import functools
 import random
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -495,6 +495,7 @@ def test_runs_run_and_cancel(cli_db: sessionmaker[Session]) -> None:
 
     cancelled = runner.invoke(cli, ["linkedin", "cancel", str(running)])
     assert cancelled.exit_code == 0, cancelled.output
+    assert runs.ELSEWHERE_NOTE not in cancelled.output
     with session_scope(cli_db) as session:
         assert runs.cancel_requested(session, _user(session), running)
     assert runner.invoke(cli, ["linkedin", "run", "999"]).exit_code == 1
@@ -527,6 +528,33 @@ def test_resuming_an_enrichment_shows_the_profile_view_notice_before_it_starts(
 def test_resuming_what_cannot_be_resumed_says_why(cli_db: sessionmaker[Session]) -> None:
     result = CliRunner().invoke(cli, ["linkedin", "enrich", "--resume", "42"])
     assert result.exit_code == 1 and "no enrichment run 42" in result.output
+
+
+@pytest.mark.parametrize("command", ["cancel", "pause"])
+def test_stopping_another_directory_s_live_run_says_who_can_stop_it(
+    cli_db: sessionmaker[Session], command: str
+) -> None:
+    """#467: a run another data directory runs, beating, is only flagged from here. If
+    its runner is stuck, only its own process can stop it, and the command says so."""
+    now = datetime.now(UTC)
+    with session_scope(cli_db, write=True) as session:
+        user = _user(session)
+        run_id = runs.create_run(
+            session,
+            user,
+            SyncRunKind.ENRICH,
+            trigger=SyncRunTrigger.MANUAL,
+            now=now - timedelta(hours=1),
+        ).id
+        assert runs.beat(session, user, run_id, now=now, by="b" * runs.RUNNER_ID_LENGTH)
+
+    result = CliRunner().invoke(cli, ["linkedin", command, str(run_id)])
+
+    assert result.exit_code == 0, result.output
+    assert runs.ELSEWHERE_NOTE in result.output
+    with session_scope(cli_db) as session:
+        run = runs.get_run(session, _user(session), run_id)
+        assert run.status is SyncRunStatus.RUNNING and run.cancel_requested_at is not None
 
 
 def test_cancelling_a_run_nobody_is_running_fails_it(cli_db: sessionmaker[Session]) -> None:

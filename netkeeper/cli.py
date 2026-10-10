@@ -2013,6 +2013,7 @@ def linkedin_cancel(run_id: Annotated[int, typer.Argument(help="The run to stop.
                 typer.echo(f"error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
             left_behind = run.status is SyncRunStatus.FAILED
+            elsewhere = runs.runs_elsewhere(run)
     finally:
         engine.dispose()
     if left_behind:
@@ -2022,6 +2023,8 @@ def linkedin_cancel(run_id: Annotated[int, typer.Argument(help="The run to stop.
         )
         return
     typer.echo(f"asked run {run_id} to stop; it stops at its next check")
+    if elsewhere:
+        typer.echo(runs.ELSEWHERE_NOTE)
 
 
 @linkedin_app.command("pause")
@@ -2046,6 +2049,7 @@ def linkedin_pause(
                 typer.echo(f"error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
             left_behind = run.status is SyncRunStatus.FAILED
+            elsewhere = runs.runs_elsewhere(run)
     finally:
         engine.dispose()
     if left_behind:
@@ -2059,6 +2063,8 @@ def linkedin_pause(
         f"asked run {run_id} to pause; it stops at its next check."
         f" `netkeeper linkedin enrich --resume {run_id}` continues it"
     )
+    if elsewhere:
+        typer.echo(runs.ELSEWHERE_NOTE)
 
 
 @schedule_app.command("status")

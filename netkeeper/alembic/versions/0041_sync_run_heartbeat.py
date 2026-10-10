@@ -1,12 +1,17 @@
-"""A run's heartbeat (#467).
+"""A run's heartbeat, and who wrote it (#467).
 
 Two ``NETKEEPER_DATA`` directories can share one database through
 ``NETKEEPER_DATABASE_URL``. Each keeps its browser locks in its own directory, so
 one could not tell whether the other's ``running`` run was still alive, and it
 could mark that run ``failed`` and start a second run on the same Chrome.
-``sync_runs`` gains ``heartbeat_at``: when the process running the run last said
-it is still running it. A live runner refreshes it, and a run counts as left
-behind only once its heartbeat is old.
+``sync_runs`` gains two columns:
+
+- ``heartbeat_at``: when the process running the run last said it is still
+  running it. A live runner refreshes it.
+- ``heartbeat_by``: which install wrote it, a 32-character hash of the host name
+  and the data directory. A run another install runs counts as left behind only
+  once its heartbeat is old; a run this install runs is judged by its own lock,
+  as before.
 
 No existing data changes. A run from before this migration has no heartbeat, so
 it is judged by its start time, as before.
@@ -30,13 +35,15 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 TABLE: Final = "sync_runs"
-COLUMN: Final = "heartbeat_at"
+COLUMNS: Final = ("heartbeat_at", "heartbeat_by")
 
 
 def upgrade() -> None:
-    op.add_column(TABLE, sa.Column(COLUMN, sa.DateTime(), nullable=True))
+    op.add_column(TABLE, sa.Column("heartbeat_at", sa.DateTime(), nullable=True))
+    op.add_column(TABLE, sa.Column("heartbeat_by", sa.String(length=32), nullable=True))
 
 
 def downgrade() -> None:
     with op.batch_alter_table(TABLE) as batch:
-        batch.drop_column(COLUMN)
+        for column in reversed(COLUMNS):
+            batch.drop_column(column)
