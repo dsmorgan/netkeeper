@@ -98,7 +98,11 @@ class Scenario:
     #: invented sticky header that appears once it has scrolled 200 pixels.
     #: ``pseudo_icon`` (#475): the top card's link draws its icon with a ``::before``
     #: over its whole box, click point included. ``pseudo_cover``: another element's
-    #: ``::after`` lies over both of the contact's controls.
+    #: ``::after`` lies over both of the contact's controls. ``first_letter_link`` and
+    #: ``first_letter_span`` (#490): the top card's ``::first-letter``, styled on the link
+    #: or on its label's span, is floated with padding over the click point; Chrome's hit
+    #: there is the ``::first-letter``. ``first_letter_cover``: another element's floated
+    #: ``::first-letter`` lies over both controls.
     layout: str = ""
     #: #481, the never-messaged card: ``photo_and_name`` links the contact twice, the
     #: photo by member id under a longer path, as a button, and the name by slug;
@@ -130,6 +134,9 @@ SCENARIOS = {
     "scroll_clear": Scenario(_member(317), layout="scroll_sticky"),
     "pseudo_icon": Scenario(_member(318), layout="pseudo_icon"),
     "pseudo_cover": Scenario(_member(319), layout="pseudo_cover"),
+    "first_letter_link": Scenario(_member(327), layout="first_letter_link"),
+    "first_letter_span": Scenario(_member(328), layout="first_letter_span"),
+    "first_letter_cover": Scenario(_member(329), layout="first_letter_cover"),
     # ADR 0008: auto-send, against this replica only.
     "auto_existing": Scenario(_member(320)),
     "auto_never_messaged": Scenario(_member(321), existing=False, enter_sends=False),
@@ -287,6 +294,25 @@ def _layout_html(scenario: Scenario) -> str:
         extra = (
             "<style>#veil::after{content:'';position:fixed;left:0;top:180px;width:600px;"
             "height:420px;background:#eee;z-index:20}</style><div id='veil'></div>"
+        )
+    elif scenario.layout in ("first_letter_link", "first_letter_span"):
+        # #490: the link's own ::first-letter at its click point. The icon is hidden, so
+        # the link's first quad is its label, and its middle lies in the floated letter.
+        # An inline-block label would hold its own first letter, so only the host is one.
+        host = "a" if scenario.layout == "first_letter_link" else "a span span"
+        blocks = "a" if host == "a" else "a,[componentkey=top-card] a span span"
+        extra = (
+            "<style>[componentkey=top-card] svg{display:none}"
+            f"[componentkey=top-card] {blocks}{{display:inline-block}}"
+            f"[componentkey=top-card] {host}::first-letter{{float:left;"
+            "padding:0 80px 20px 0;background:rgba(10,102,194,.3)}</style>"
+        )
+    elif scenario.layout == "first_letter_cover":
+        # An element with no height whose floated ::first-letter covers both controls.
+        extra = (
+            "<style>#veil{position:fixed;left:0;top:180px;width:600px;height:0;z-index:20;"
+            "font-size:10px}#veil::first-letter{float:left;padding:0 590px 420px 0;"
+            "background:#eee}</style><div id='veil'>M</div>"
         )
     elif scenario.layout == "minimized":
         extra = _minimized_bubbles()
@@ -542,6 +568,8 @@ def _no_send(state: dict[str, Any]) -> None:
         "sidebar",
         "pseudo_icon",
         "card_two_links",
+        "first_letter_link",
+        "first_letter_span",
     ],
 )
 async def test_the_body_is_typed_into_a_real_composer_and_never_sent(
@@ -567,6 +595,8 @@ async def test_the_body_is_typed_into_a_real_composer_and_never_sent(
         "covered": "highlights",
         "sidebar": "top-card",
         "pseudo_icon": "top-card",
+        "first_letter_link": "top-card",
+        "first_letter_span": "top-card",
     }
     if name in expected_card:
         cards = [e for e in state["events"] if e.startswith("card:")]
@@ -586,6 +616,8 @@ REFUSALS = {
     "pseudo_cover": MESSAGE_NOT_ON_SCREEN,
     # #481: a card linking the contact and someone else refuses before any key.
     "card_plus_other": "the new-message bubble links to more than one person",
+    # #490: another element's ::first-letter over every control covers them; no click.
+    "first_letter_cover": MESSAGE_NOT_ON_SCREEN,
 }
 
 
@@ -600,6 +632,7 @@ REFUSALS = {
         "leftover",
         "pseudo_cover",
         "card_plus_other",
+        "first_letter_cover",
     ],
 )
 async def test_a_refused_prefill_types_nothing(origin: str, name: str) -> None:
@@ -610,7 +643,7 @@ async def test_a_refused_prefill_types_nothing(origin: str, name: str) -> None:
     _no_send(state)
     if name == "decoy_link":
         assert not [e for e in state["events"] if e.startswith("click:")]
-    if name == "pseudo_cover":
+    if name in ("pseudo_cover", "first_letter_cover"):
         assert not state["attempted"], state["events"]
         assert not [e for e in state["events"] if e.startswith("click:")], state["events"]
     if name in ("minimized", "leftover"):

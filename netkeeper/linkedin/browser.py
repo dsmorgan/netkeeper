@@ -683,6 +683,10 @@ MESSAGE_MAX_LINKS: Final = 32
 #: How long the whole geometry read may take, in seconds. A renderer that hangs makes the
 #: read fail, and the click chooses without geometry.
 GEOMETRY_TIMEOUT_S: Final = 3.0
+#: How long the read of each pseudo-element's host may take, in seconds (#490). It runs
+#: only when a hit isn't the control's, after the geometry read; when it fails or is
+#: slow, the hit still counts as covering, never as unchecked.
+PSEUDO_HOSTS_TIMEOUT_S: Final = 2.0
 #: How far a hit element's box may stick out of the control's box and still count as
 #: the control's own (a rounding of sub-pixel layout), in CSS pixels.
 HIT_TOLERANCE_PX: Final = 1.0
@@ -913,6 +917,33 @@ def _backend_ids(node: Mapping[str, Any]) -> list[int]:
     for child in (*node.get("children", ()), *node.get("pseudoElements", ())):
         ids.extend(_backend_ids(child))
     return ids
+
+
+def _pseudo_hosts_of(snapshot: Mapping[str, Any]) -> dict[int, int]:
+    """Each pseudo-element's host, by ``backendNodeId``, from a
+    ``DOMSnapshot.captureSnapshot`` answer (#490).
+
+    The host is the nearest ancestor that isn't a pseudo-element, so a nested one
+    (``::before::marker``) maps to the element that draws its ``::before``. The snapshot
+    lists every pseudo-element Chrome lays out, ``::first-letter`` included, which
+    ``DOM.describeNode`` leaves out of ``pseudoElements``."""
+    hosts: dict[int, int] = {}
+    for document in snapshot.get("documents", ()):
+        nodes = document.get("nodes", {})
+        parents = list(nodes.get("parentIndex", ()))
+        backends = list(nodes.get("backendNodeId", ()))
+        pseudo = set(nodes.get("pseudoType", {}).get("index", ()))
+        for index in pseudo:
+            if not 0 <= index < len(backends):
+                continue
+            host = index
+            for _ in range(len(parents)):
+                if host not in pseudo or not 0 <= host < len(parents):
+                    break
+                host = parents[host]
+            if host not in pseudo and 0 <= host < len(backends):
+                hosts[int(backends[index])] = int(backends[host])
+    return hosts
 
 
 async def _box(locator: _MessagingLocator) -> Mapping[str, float] | None:
@@ -2763,13 +2794,19 @@ class BrowserRun:
           viewport coordinates and this method takes document ones (Chrome subtracts the
           scroll offset), so the point is sent with the page's scroll added (#470).
           Without it, a scrolled page is hit-tested where the control isn't.
+        - ``DOMSnapshot.captureSnapshot`` with no computed styles, at most once and only
+          when a hit isn't the link's by ``describeNode`` (:meth:`_pseudo_hosts`, #490):
+          each pseudo-element's host, ``::first-letter`` included, which
+          ``describeNode`` doesn't list.
 
         A hit counts for a control when it is the link or inside it, matched by node, not
         by size: an icon may overflow its link's box. The link's own pseudo-elements, and
-        its descendants', are inside it (#475); another element's are not. No script
-        runs in the page, nothing is input, and nothing the page can see changes.
-        ``None`` when the session can't start or a read fails: the click then chooses
-        without geometry (:class:`ClickTarget` ``UNCHECKED``).
+        its descendants', are inside it (#475), ``::first-letter`` too (#490); another
+        element's are not. No script runs in the page, nothing is input, and nothing
+        the page can see changes. ``None`` when the session can't start or a read before
+        the hit test fails: the click then chooses without geometry (:class:`ClickTarget`
+        ``UNCHECKED``). When the hosts can't be read, a hit that isn't the link's by
+        ``describeNode`` still counts as covering.
         """
         context = cast(_TapContext, self._attachment.context)
         try:
@@ -2813,6 +2850,8 @@ class BrowserRun:
                         )
                 hits: list[Mapping[str, float] | None] = []
                 points: list[tuple[float, float] | None] = []
+                # Hits that aren't the link's own by describeNode: (index, id, link).
+                foreign: list[tuple[int, int, _Link]] = []
                 for box in boxes:
                     link = next((k for k in links if box is not None and _clear(box, k.box)), None)
                     if box is None or link is None or link.point is None:
@@ -2833,8 +2872,27 @@ class BrowserRun:
                             "ignorePointerEventsNone": True,
                         },
                     )
-                    hits.append(link.box if hit["backendNodeId"] in link.owned else None)
-                return ClickGeometry(viewport, tuple(hits), tuple(points))
+                    backend = int(hit["backendNodeId"])
+                    if backend in link.owned:
+                        hits.append(link.box)
+                    else:
+                        hits.append(None)
+                        foreign.append((len(hits) - 1, backend, link))
+            if foreign:
+                # #490: a pseudo-element describeNode doesn't list (::first-letter) is the
+                # link's when its host is the link or inside it. Outside the geometry
+                # read's timeout, so a slow read leaves the hit covering, never unchecked.
+                try:
+                    hosts = await self._pseudo_hosts(session)
+                except Exception as exc:
+                    log.info(
+                        "prefill: pseudo-element hosts could not be read (%s)", type(exc).__name__
+                    )
+                    hosts = {}
+                for index, backend, link in foreign:
+                    if hosts.get(backend) in link.owned:
+                        hits[index] = link.box
+            return ClickGeometry(viewport, tuple(hits), tuple(points))
         except Exception as exc:
             log.info("prefill: the page's geometry could not be read (%s)", type(exc).__name__)
             return None
@@ -2843,6 +2901,21 @@ class BrowserRun:
                 await session.detach()
             except Exception as exc:
                 log.info("prefill: the geometry session could not detach (%s)", type(exc).__name__)
+
+    @staticmethod
+    async def _pseudo_hosts(session: _CdpSessionLike) -> dict[int, int]:
+        """Each pseudo-element's host on the page, by ``backendNodeId`` (#490).
+
+        Sends ``DOMSnapshot.captureSnapshot`` with ``computedStyles: []`` and nothing
+        else, through the caller's session: a read-only copy of the DOM and its layout
+        tree, with no computed styles, rectangles or paint order. On Chrome 154, a hit
+        on a ``::first-letter`` answers with that pseudo-element's own id, with no
+        ``nodeId``, and ``DOM.describeNode`` neither lists it under its host's
+        ``pseudoElements`` nor gives its parent; the snapshot does. It raises when the
+        read fails or takes over :data:`PSEUDO_HOSTS_TIMEOUT_S`."""
+        async with asyncio.timeout(PSEUDO_HOSTS_TIMEOUT_S):
+            snapshot = await session.send("DOMSnapshot.captureSnapshot", {"computedStyles": []})
+        return _pseudo_hosts_of(snapshot)
 
     async def message_check_snapshot(
         self, profile_path: str, profile_id: str, phase: str
@@ -3028,6 +3101,9 @@ class BrowserRun:
           document point, as :meth:`_read_click_geometry` sends it.
         - ``DOM.getBoxModel``: the box of each ancestor of a hit element whose tag is
           the control's, to tell the control itself from something over it.
+        - ``DOMSnapshot.captureSnapshot`` (:meth:`_pseudo_hosts`, #490), at most once and
+          only for a hit the tree doesn't hold outside a frame: a ``::first-letter``'s
+          host, which the tree leaves out.
 
         Each probe is ``(box, point, tag)``: the control's box, the point to test
         (``None`` for the box's center, when the box is wholly on screen), and the
@@ -3052,6 +3128,19 @@ class BrowserRun:
                 ratio = _ratio(device.get("clientWidth"), layout["clientWidth"])
                 document = await session.send("DOM.getDocument", {"depth": -1})
                 tree = _CheckTree.of(document["root"])
+                hosts: dict[int, int] | None = None
+
+                async def pseudo_hosts() -> Mapping[int, int]:
+                    # #490: read once, and only for a hit the tree doesn't hold.
+                    nonlocal hosts
+                    if hosts is None:
+                        try:
+                            hosts = await self._pseudo_hosts(session)
+                        except Exception as exc:
+                            errors.append(f"pseudo-element hosts: {type(exc).__name__}")
+                            hosts = {}
+                    return hosts
+
                 hits: list[CheckHit | None] = []
                 for box, given, tag in probes:
                     point = given
@@ -3061,7 +3150,9 @@ class BrowserRun:
                         hits.append(CheckHit(point, HitRelation.NOT_READ))
                         continue
                     hits.append(
-                        await self._check_hit(session, tree, box, point, tag, viewport, scroll)
+                        await self._check_hit(
+                            session, tree, pseudo_hosts, box, point, tag, viewport, scroll
+                        )
                     )
                 return _CheckDetail(viewport, scroll, zoom, ratio, tuple(hits))
         except Exception as exc:
@@ -3074,6 +3165,7 @@ class BrowserRun:
     async def _check_hit(
         session: _CdpSessionLike,
         tree: _CheckTree,
+        pseudo_hosts: Callable[[], Awaitable[Mapping[int, int]]],
         box: Mapping[str, float],
         point: tuple[float, float],
         tag: str,
@@ -3082,7 +3174,10 @@ class BrowserRun:
     ) -> CheckHit:
         """What :meth:`_read_check_detail`'s hit test found at ``point``, for a control
         with ``box`` and ``tag``. Sends ``DOM.getNodeForLocation`` and ``DOM.getBoxModel``
-        only, through the caller's session."""
+        only, through the caller's session. A hit the tree doesn't hold, outside a frame,
+        is looked up in ``pseudo_hosts`` (:meth:`_pseudo_hosts`, #490): a
+        ``::first-letter`` the tree leaves out is described by its host, as a
+        ``::before`` is."""
         x, y = point
         try:
             found = await session.send(
@@ -3104,16 +3199,25 @@ class BrowserRun:
                 or (tree.root_frame is not None and frame != tree.root_frame)
             ):
                 return CheckHit(point, HitRelation.IN_FRAME)
-            return CheckHit(point, HitRelation.IN_SHADOW_ROOT)
-        scope = tree.scopes.get(backend)
-        pseudo = scope == PSEUDO_SCOPE
-        if pseudo:
-            # A ::before or ::after: described by its host, and the walk starts there.
-            host = tree.parents.get(backend)
-            if host is None:
+            # #490: a ::first-letter, which the tree doesn't list: by its host, as a
+            # ::before is.
+            host_id = (await pseudo_hosts()).get(backend)
+            host = None if host_id is None else tree.nodes.get(host_id)
+            if host is None or host_id is None:
                 return CheckHit(point, HitRelation.IN_SHADOW_ROOT)
             hit = host
-            scope = tree.scopes.get(int(host.get("backendNodeId", -1)))
+            scope = tree.scopes.get(host_id)
+            pseudo = True
+        else:
+            scope = tree.scopes.get(backend)
+            pseudo = scope == PSEUDO_SCOPE
+            if pseudo:
+                # A ::before or ::after: described by its host, and the walk starts there.
+                parent = tree.parents.get(backend)
+                if parent is None:
+                    return CheckHit(point, HitRelation.IN_SHADOW_ROOT)
+                hit = parent
+                scope = tree.scopes.get(int(parent.get("backendNodeId", -1)))
         hit_tag = _check_tag(hit.get("nodeName", ""))
         hit_role = _check_role(hit_tag, _attributes(hit))
         landmark: str | None = None

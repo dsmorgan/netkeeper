@@ -148,6 +148,10 @@ ALLOWED_CONTEXT_MUTATIONS = frozenset(
 #:   own click reads to find where it presses. Reads.
 #: - ``DOM.getNodeForLocation``: which element the page would hit at a point, as
 #:   ``elementFromPoint`` answers it. It runs no script and dispatches no event.
+#: - ``DOMSnapshot.captureSnapshot`` with ``computedStyles`` (always ``[]``) and nothing
+#:   else (#490), sent only by ``BrowserRun._pseudo_hosts``: each pseudo-element's host,
+#:   ``::first-letter`` included, which ``DOM.describeNode`` doesn't list. A read-only
+#:   copy of the DOM and layout tree. It runs no script and dispatches no event.
 READ_ONLY_CDP_METHODS: dict[str, frozenset[str]] = {
     "Network.enable": frozenset({"maxTotalBufferSize", "maxResourceBufferSize"}),
     "Network.streamResourceContent": frozenset({"requestId"}),
@@ -158,6 +162,7 @@ READ_ONLY_CDP_METHODS: dict[str, frozenset[str]] = {
     "DOM.getBoxModel": frozenset({"nodeId"}),
     "DOM.getContentQuads": frozenset({"nodeId"}),
     "DOM.getNodeForLocation": frozenset({"x", "y", "ignorePointerEventsNone"}),
+    "DOMSnapshot.captureSnapshot": frozenset({"computedStyles"}),
 }
 #: #195, the background tab. These aren't reads of the page, so they're kept apart from
 #: the ones above; none of them reaches a tab netkeeper doesn't own:
@@ -184,6 +189,8 @@ CDP_SENDERS = {
     # #473: the Message check's detail read, and the hit test it makes on that session.
     (LINKEDIN / "browser.py", "BrowserRun._read_check_detail"): 2,
     (LINKEDIN / "browser.py", "BrowserRun._check_hit"): 2,
+    # #490: each pseudo-element's host, on the caller's session (the click's or the check's).
+    (LINKEDIN / "browser.py", "BrowserRun._pseudo_hosts"): 1,
     (LINKEDIN / "browser.py", "BrowserRun._open_tab"): 1,
     (LINKEDIN / "browser.py", "BrowserRun._close_unclaimed_tab"): 1,
     (LINKEDIN / "browser.py", "BrowserRun._target_id"): 1,
@@ -209,6 +216,9 @@ CDP_SENDER_METHODS = {
     ),
     (LINKEDIN / "browser.py", "BrowserRun._check_hit"): frozenset(
         {"DOM.getNodeForLocation", "DOM.getBoxModel"}
+    ),
+    (LINKEDIN / "browser.py", "BrowserRun._pseudo_hosts"): frozenset(
+        {"DOMSnapshot.captureSnapshot"}
     ),
     (LINKEDIN / "browser.py", "BrowserRun._open_tab"): frozenset({"Target.createTarget"}),
     (LINKEDIN / "browser.py", "BrowserRun._close_unclaimed_tab"): frozenset({"Target.closeTarget"}),
@@ -2493,12 +2503,14 @@ CHECK_BANNED = frozenset(
     }
 )
 #: The CDP sites the check may reach: the click's geometry read, its own detail read
-#: and hit test, and the background tab's three (#195).
+#: and hit test, the pseudo-element hosts both read (#490), and the background tab's
+#: three (#195).
 CHECK_CDP_SITES = frozenset(
     {
         "_read_click_geometry",
         "_read_check_detail",
         "_check_hit",
+        "_pseudo_hosts",
         "_open_tab",
         "_close_unclaimed_tab",
         "_target_id",
@@ -2550,7 +2562,7 @@ def test_the_message_check_sends_only_from_the_allowed_cdp_sites() -> None:
     names = {r.split(" ")[0] for r in reached}
     assert names <= CHECK_CDP_SITES, names
     assert {"_read_click_geometry", "_read_check_detail", "_check_hit"} <= names
-    for site in ("_read_check_detail", "_check_hit"):
+    for site in ("_read_check_detail", "_check_hit", "_pseudo_hosts"):
         methods = CDP_SENDER_METHODS[(LINKEDIN / "browser.py", f"BrowserRun.{site}")]
         assert methods <= frozenset(READ_ONLY_CDP_METHODS)
 

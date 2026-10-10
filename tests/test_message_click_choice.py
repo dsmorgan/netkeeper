@@ -41,7 +41,9 @@ from netkeeper.linkedin.browser import (
     ClickGeometry,
     ClickTarget,
     NotClear,
+    _backend_ids,
     _click_point,
+    _pseudo_hosts_of,
     choose_message_target,
     classify_click_failure,
 )
@@ -552,3 +554,151 @@ async def test_the_scroll_back_probe_counts_the_links_own_pseudo_elements_too() 
             await run.goto(f"https://www.linkedin.com{path}")
             assert await run.message_cover(path, ZEPHYRINE.profile_id) is expected
             assert site.tab.clicks == [] and not run.message_click_attempted
+
+
+# --- #490: a ::first-letter at the click point ----------------------------------------------
+
+SNAPSHOT = "DOMSnapshot.captureSnapshot"
+
+
+def _first_letter(profile: str, *, on: str, where: str = ICON_AT_CLICK_POINT) -> str:
+    """``profile`` with the top card's ``::first-letter`` at its click point, styled on the
+    ``<a>`` itself (``on="link"``) or on its label's ``<span>`` (``on="span"``)."""
+    attr = f'data-first-letter-box="{where}"'
+    link = profile.index('<a data-box="40,300,110,32"')
+    if on == "link":
+        at = link + len("<a ")
+        return f"{profile[:at]}{attr} {profile[at:]}"
+    span = profile.index("<span>Message", link)
+    return f"{profile[:span]}<span {attr}>{profile[span + len('<span>') :]}"
+
+
+def _sent(site: MessagingSite) -> list[str]:
+    return [method for session in site.geometry_sessions for method, _ in session.sent]
+
+
+@pytest.mark.parametrize("on", ["link", "span"])
+async def test_a_hit_on_the_links_own_first_letter_counts(on: str) -> None:
+    """#490: on Chrome 154 the hit over a link's first letter is its ``::first-letter``,
+    which ``DOM.describeNode`` doesn't list. Its host, from the snapshot, is the link or
+    inside it, so it is the link's own, styled on the link or on a span inside it."""
+    site = _site(_first_letter(_profile(), on=on))
+    ran = await prefill(site)
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert _clicked_key(site) == "top-card"
+    assert ran.run.message_click_diagnostics["message_click_target"] == "top_card"
+    # Once per geometry read: the scroll-back probe's and the click's.
+    assert [[m for m, _ in s.sent].count(SNAPSHOT) for s in site.geometry_sessions] == [1, 1]
+
+
+async def test_no_snapshot_is_read_when_every_hit_is_the_links_own() -> None:
+    site = _site(_top_card_icon(_profile()))
+    ran = await prefill(site)
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert SNAPSHOT not in _sent(site)
+
+
+async def test_another_elements_first_letter_over_the_top_card_still_covers_it() -> None:
+    """#490: a ``::first-letter`` whose host is outside the link covers it."""
+    bar = f'<aside data-first-letter-box="{ICON_AT_CLICK_POINT}"><h2>Messaging</h2></aside>'
+    site = _site(_profile(extra=bar))
+    ran = await prefill(site)
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert _clicked_key(site) == "highlights"
+    assert ran.run.message_click_diagnostics["message_click_target"] == "on_screen"
+
+
+async def test_another_elements_first_letter_over_every_control_refuses() -> None:
+    cover = '<aside data-first-letter-box="0,0,1280,800"><h2>Messaging</h2></aside>'
+    site = _site(_first_letter(_profile(extra=cover), on="link"))
+    ran = await prefill(site)
+    assert_no_keys(ran)
+    assert ran.result.outcome.reason == MESSAGE_NOT_ON_SCREEN
+    assert site.tab.clicks == [] and not ran.run.message_click_attempted
+
+
+@pytest.mark.parametrize("failure", ["error", "hang"])
+async def test_a_failed_snapshot_leaves_the_hit_covering_never_unchecked(
+    failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#490: when the hosts can't be read, the link's own ``::first-letter`` reads as
+    covering, as before the fix: the Highlights copy is clicked, by the geometry. Not
+    the top card unchecked, which a failed geometry read would give."""
+    monkeypatch.setattr(browser_module, "PSEUDO_HOSTS_TIMEOUT_S", 0.05)
+    site = _site(_first_letter(_profile(), on="link"))
+    if failure == "error":
+        site.snapshot_error = RuntimeError("invented")
+    else:
+        site.snapshot_hangs = True
+    ran = await prefill(site)
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert _clicked_key(site) == "highlights"
+    assert ran.run.message_click_diagnostics["message_click_target"] == "on_screen"
+
+
+async def test_the_scroll_back_probe_counts_the_links_own_first_letter_too() -> None:
+    path = f"/in/{ZEPHYRINE.slug}/"
+    cover = f'<aside data-first-letter-box="{ICON_AT_CLICK_POINT}"></aside>'
+    for extra, on, expected in [
+        ("", "link", None),
+        ("", "span", None),
+        (cover, "span", NotClear.COVERED_BY_OTHER),
+    ]:
+        profile = _profile(extra=extra).replace('"40,620,110,32"', '"40,1620,110,32"')
+        site = _site(_first_letter(profile, on=on) if not extra else profile)
+        provider, _ = fake_provider(site)
+        async with provider.run() as run:
+            await run.goto(f"https://www.linkedin.com{path}")
+            assert await run.message_cover(path, ZEPHYRINE.profile_id) is expected
+            assert site.tab.clicks == [] and not run.message_click_attempted
+
+
+#: ``DOM.describeNode`` with ``depth: -1`` for ``<a>`` whose ``::before`` is a list item,
+#: as Chrome 154 answers it: the ``::marker`` nests in the ``::before``'s
+#: ``pseudoElements``.
+NESTED_PSEUDO = {
+    "nodeId": 5,
+    "backendNodeId": 26,
+    "nodeName": "A",
+    "children": [{"nodeId": 8, "backendNodeId": 29, "nodeName": "#text"}],
+    "pseudoElements": [
+        {
+            "nodeId": 6,
+            "backendNodeId": 27,
+            "nodeName": "::before",
+            "pseudoType": "before",
+            "pseudoElements": [
+                {"nodeId": 7, "backendNodeId": 28, "nodeName": "::marker", "pseudoType": "marker"}
+            ],
+        }
+    ],
+}
+
+
+def test_a_nested_pseudo_element_is_the_links_own() -> None:
+    """Review of #476: ``::before::marker`` sits in the ``::before``'s own
+    ``pseudoElements``, so the walk recurses into pseudo-elements as into children."""
+    assert sorted(_backend_ids(NESTED_PSEUDO)) == [26, 27, 28, 29]
+
+
+def test_each_pseudo_elements_host_is_its_nearest_element() -> None:
+    """#490: ``DOMSnapshot.captureSnapshot``'s nodes, as Chrome 154 answers for
+    ``<a>`` with a ``::first-letter`` and a ``::before::marker``, beside a ``<div>``
+    with its own ``::first-letter``: each maps to its own host, the marker past its
+    ``::before``. Elements and text map to nothing."""
+    snapshot = {
+        "strings": ["first-letter", "before", "marker"],
+        "documents": [
+            {
+                "nodes": {
+                    # #document, html, body, a, ::first-letter, #text, ::before, ::marker,
+                    # div, ::first-letter
+                    "parentIndex": [-1, 0, 1, 2, 3, 3, 3, 6, 2, 8],
+                    "backendNodeId": [1, 3, 5, 6, 2, 7, 27, 28, 16, 11],
+                    "pseudoType": {"index": [4, 6, 7, 9], "value": [0, 1, 2, 0]},
+                }
+            }
+        ],
+    }
+    assert _pseudo_hosts_of(snapshot) == {2: 6, 27: 6, 28: 6, 11: 16}
+    assert _pseudo_hosts_of({}) == {}
