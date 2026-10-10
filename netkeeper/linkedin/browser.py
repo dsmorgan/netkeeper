@@ -530,8 +530,9 @@ SEND_CLICK_TIMEOUT_MS: Final = 1_000.0
 #: Time between the press and the release of the Send click, in milliseconds.
 SEND_PRESS_MS: Final = 90.0
 #: ADR 0008 (decision D1): after a landed Send, the existing-conversation bubble's own
-#: close control, ``Close your conversation with <the header link's name>`` (the
-#: 2026-10-05 capture, ``docs/linkedin-messaging-shapes.md``), by role and exact name.
+#: close control: the one button whose name starts with this prefix and holds the header
+#: link's name (#499, :func:`close_names_person`; the 2026-10-05 capture showed it as
+#: ``Close your conversation with <name>``, ``docs/linkedin-messaging-shapes.md``).
 CLOSE_CONTROL_ROLE: Final = "button"
 CLOSE_CONTROL_PREFIX: Final = "Close your conversation with "
 #: How long the run waits, reading only, for the composer to empty after Send, and then
@@ -1948,6 +1949,83 @@ def name_relation(header: str, suffix: str) -> tuple[NameRelation, int]:
     return NameRelation.UNRELATED, difference
 
 
+#: #499: punctuation that joins a name's parts, so it is never a name's edge: hyphens
+#: and apostrophes. With these as edges, ``Ann`` would be found in ``Ann-Marie``.
+NAME_JOINERS: Final = frozenset("-\u2010\u2011'\u2019\u02bc")
+
+
+def _name_edge(char: str) -> bool:
+    """Whether ``char`` may stand beside a name: whitespace, or punctuation that doesn't
+    join a name's parts (:data:`NAME_JOINERS`)."""
+    if char.isspace():
+        return True
+    return unicodedata.category(char).startswith("P") and char not in NAME_JOINERS
+
+
+def close_names_person(header: str, suffix: str) -> bool:
+    """#499, ADR 0008 (D1): whether ``suffix``, a close button's name past
+    :data:`CLOSE_CONTROL_PREFIX`, holds ``header``, the header link's name, as a whole.
+
+    Both sides are compared as :func:`name_relation` compares them: whitespace as
+    Playwright normalizes it, then NFC. Case counts. The header name must sit in the
+    suffix with an edge on each side: the start or end of the suffix, whitespace, or
+    punctuation other than a hyphen or an apostrophe. So ``Ann`` is in ``Ann``,
+    ``Ann (Active)``, and ``Chat with Ann, now``, and never in ``Annabel``, ``Joann``,
+    ``Ann-Marie``, or ``Ann2``. An exact match is the case with both edges at the ends."""
+    h, s = (unicodedata.normalize("NFC", _playwright_space(part)) for part in (header, suffix))
+    if not h:
+        return False
+    start = s.find(h)
+    while start != -1:
+        end = start + len(h)
+        if (start == 0 or _name_edge(s[start - 1])) and (end == len(s) or _name_edge(s[end])):
+            return True
+        start = s.find(h, start + 1)
+    return False
+
+
+class CloseMiss(enum.StrEnum):
+    """Why the close rule (:func:`_close_by_rule`, #499) found no button to click."""
+
+    NOT_ONE = "not one button by prefix"
+    NOT_VISIBLE = "not visible"
+    UNREAD = "its name could not be read"
+    HIDDEN_TEXT = "hidden text changes its name"
+    NOT_THIS_PERSON = "its name does not hold the header name"
+
+
+async def _close_by_rule(
+    tab: _MessagingPage, dialog: _MessagingLocator, header: str
+) -> _MessagingLocator | CloseMiss:
+    """#499, ADR 0008 (D1): the sent bubble's close control in ``dialog``, by the rule, or
+    why there is none. ``header`` is the header link's confirmed name. Reads only.
+
+    Exactly one button in the dialog, hidden ones counted, has a name that starts with
+    :data:`CLOSE_CONTROL_PREFIX`, and it is visible. Its name is read as the header
+    link's is (:func:`_read_accessible_name`, confirmed by Playwright's exact role
+    match on that button), and must be the same with hidden text counted, so the name
+    compared is the one the prefix count saw. Past the prefix, it must hold the header
+    name (:func:`close_names_person`). Shared by ``close_sent_bubble`` and the
+    diagnostic (:func:`read_close_shape`), so the diagnostic reports this very rule."""
+    closes = dialog.get_by_role(CLOSE_CONTROL_ROLE, name=CLOSE_CONTROL_PATTERN, include_hidden=True)
+    if await closes.count() != 1:
+        return CloseMiss.NOT_ONE
+    visible = closes.filter(visible=True)
+    if await visible.count() != 1:
+        return CloseMiss.NOT_VISIBLE
+    read = await _read_accessible_name(tab, visible, CLOSE_CONTROL_ROLE)
+    if read is None:
+        return CloseMiss.UNREAD
+    same = tab.get_by_role(CLOSE_CONTROL_ROLE, name=read.candidate, exact=True, include_hidden=True)
+    if await visible.and_(same).count() != 1:
+        return CloseMiss.HIDDEN_TEXT
+    if not read.name.startswith(CLOSE_CONTROL_PREFIX):
+        return CloseMiss.NOT_THIS_PERSON
+    if not close_names_person(header, read.name[len(CLOSE_CONTROL_PREFIX) :]):
+        return CloseMiss.NOT_THIS_PERSON
+    return visible
+
+
 def _longer(difference: int, longer: str, shorter: str) -> str:
     if difference > 0:
         return f"{longer} longer by {difference}"
@@ -2028,8 +2106,11 @@ class CloseShape:
     only (#495): never a name, a URL, an href, or the page's text.
 
     Counts are of buttons in the dialog, hidden ones included, unless they say otherwise.
-    ``exact`` is the close lookup's own count, by the exact name it asks for, when there
-    is a header name to ask with. The ``header_*`` fields describe the header link:
+    ``exact`` is the count by the exact name ``Close your conversation with <header
+    name>``, the close lookup before #499, when there is a header name to ask with.
+    ``rule`` is how many buttons the close lookup's own rule (:func:`_close_by_rule`,
+    #499) finds, 1 or 0, and ``rule_miss`` why it found none; both ``None`` without a
+    header name. The ``header_*`` fields describe the header link:
     where its name came from, whether it has an ``aria-label``, how many elements and
     ``aria-hidden`` elements are under it, its text's length minus its name's, and
     whether NFC normalization changes the name the lookup asks with."""
@@ -2052,6 +2133,8 @@ class CloseShape:
     header_text_extra: int | None = None
     header_nfc_changes: bool | None = None
     buttons: tuple[CloseButtonShape, ...] = ()
+    rule: int | None = None
+    rule_miss: CloseMiss | None = None
 
     def header_words(self) -> str:
         """The header link's name, described: never the name."""
@@ -2111,6 +2194,8 @@ class CloseShape:
         counts = [f"{self.by_prefix} by prefix", f"{self.by_prefix_visible} visible"]
         if self.exact is not None:
             counts.append(f"{self.exact} exact")
+        if self.rule is not None:
+            counts.append(f"{self.rule} by rule")
         if self.by_prefix_shown_names != self.by_prefix_visible:
             counts.append(f"{self.by_prefix_shown_names} without hidden text")
         if self.on_page_by_prefix != self.by_prefix:
@@ -2136,6 +2221,9 @@ class CloseShape:
     def lines(self) -> list[str]:
         """The CLI's report lines (``netkeeper linkedin message-check --bubble``)."""
         exact = "-" if self.exact is None else str(self.exact)
+        rule = "-" if self.rule is None else str(self.rule)
+        if self.rule_miss is not None:
+            rule += f" ({self.rule_miss.value})"
         lines = [
             f"header links in the dialog: {self.header_links}; {self.header_words()}",
             f"close buttons by prefix (hidden ones counted): {self.by_prefix};"
@@ -2143,6 +2231,7 @@ class CloseShape:
             f" by prefix without hidden text: {self.by_prefix_shown_names};"
             f" on the whole page: {self.on_page_by_prefix}",
             f"close lookup by the exact name: {exact}",
+            f"close lookup by the rule: {rule}",
             f"buttons named Close-anything (any case): {self.any_close};"
             f" named {DRAFT_CLOSE_NAME!r}: {self.draft_close}",
             f"options buttons by prefix: {self.options_by_prefix};"
@@ -2198,9 +2287,12 @@ async def read_close_shape(tab: _MessagingPage, dialog: _MessagingLocator) -> Cl
     )
     if header is None:
         return shape
+    found_by_rule = await _close_by_rule(tab, dialog, header.name)
     return replace(
         shape,
         exact=await buttons(f"{CLOSE_CONTROL_PREFIX}{header.name}").count(),
+        rule=0 if isinstance(found_by_rule, CloseMiss) else 1,
+        rule_miss=found_by_rule if isinstance(found_by_rule, CloseMiss) else None,
         header_source=header.source,
         header_labelled=header.labelled,
         header_elements=await links.locator(ANY_ELEMENT).count(),
@@ -2210,20 +2302,29 @@ async def read_close_shape(tab: _MessagingPage, dialog: _MessagingLocator) -> Cl
     )
 
 
-#: ``close_sent_bubble``'s refusal when the lookup doesn't find exactly one close
-#: control. A run's note may add the shape after it, in parentheses (#495).
+#: ``close_sent_bubble``'s refusal when the dialog doesn't hold exactly one button whose
+#: name starts with :data:`CLOSE_CONTROL_PREFIX`. A run's note adds the shape after it,
+#: in parentheses (#495).
 NO_ONE_CLOSE_CONTROL: Final = "the sent bubble does not have one close control for this person"
+#: #499: the refusals when there is one such button, visible, but the rule can't use it:
+#: its name can't be read, hidden text changes it, or it doesn't hold the header link's
+#: name. Each also carries the shape, as :data:`NO_ONE_CLOSE_CONTROL` does.
+CLOSE_NAME_UNREAD: Final = "the sent bubble's close control's name could not be read"
+CLOSE_HIDDEN_TEXT: Final = "hidden text changes the sent bubble's close control's name"
+CLOSE_NOT_FOR_PERSON: Final = "the sent bubble's close control does not name this person"
+#: The plain refusal for a close button that is there but hidden, as before #499.
+CLOSE_NOT_VISIBLE: Final = "the sent bubble's close control is not visible"
 
 
-async def _no_one_close_control(tab: _MessagingPage, dialog: _MessagingLocator) -> str:
-    """:data:`NO_ONE_CLOSE_CONTROL`, and why, from :func:`read_close_shape` (#495). A shape
+async def _close_refusal(words: str, tab: _MessagingPage, dialog: _MessagingLocator) -> str:
+    """``words``, a close refusal, and why, from :func:`read_close_shape` (#495). A shape
     that can't be read changes only the words after the refusal, never the refusal."""
     try:
         shape = await read_close_shape(tab, dialog)
     except Exception as exc:
         log.info("the close control's shape could not be read (%s)", type(exc).__name__)
-        return f"{NO_ONE_CLOSE_CONTROL} (its shape could not be read)"
-    return f"{NO_ONE_CLOSE_CONTROL} ({shape.describe()})"
+        return f"{words} (its shape could not be read)"
+    return f"{words} ({shape.describe()})"
 
 
 async def _close_button_shape(
@@ -4014,8 +4115,10 @@ class BrowserRun:
         - exactly one ``Messaging`` dialog is on the page, hidden ones counted, holding
           the composer, whose header ``h2`` holds exactly one link, to
           ``/in/<the contact's profile id>/``;
-        - exactly one button in that dialog is named exactly
-          ``Close your conversation with <that link's name>``, and it is visible.
+        - exactly one button in that dialog, hidden ones counted, has a name starting
+          with ``Close your conversation with ``, and it is visible; its name, confirmed
+          by Playwright, is the same with hidden text counted, and past the prefix it
+          holds that link's name as a whole (#499, :func:`_close_by_rule`).
 
         Then one click, never retried; closed only when the composer then leaves the
         page."""
@@ -4086,18 +4189,18 @@ class BrowserRun:
         name = await _accessible_name(tab, links, "link")
         if name is None:
             return "the sent bubble's name could not be read"
-        closes = dialogs.get_by_role(
-            CLOSE_CONTROL_ROLE,
-            name=f"{CLOSE_CONTROL_PREFIX}{name}",
-            exact=True,
-            include_hidden=True,
-        )
-        if await closes.count() != 1:
-            return await _no_one_close_control(tab, dialogs)
-        visible = closes.filter(visible=True)
-        if await visible.count() != 1:
-            return "the sent bubble's close control is not visible"
-        return visible
+        found = await _close_by_rule(tab, dialogs, name)
+        if not isinstance(found, CloseMiss):
+            return found
+        if found is CloseMiss.NOT_VISIBLE:
+            return CLOSE_NOT_VISIBLE
+        words = {
+            CloseMiss.NOT_ONE: NO_ONE_CLOSE_CONTROL,
+            CloseMiss.UNREAD: CLOSE_NAME_UNREAD,
+            CloseMiss.HIDDEN_TEXT: CLOSE_HIDDEN_TEXT,
+            CloseMiss.NOT_THIS_PERSON: CLOSE_NOT_FOR_PERSON,
+        }[found]
+        return await _close_refusal(words, tab, dialogs)
 
     async def bubble_check(self, profile_id: str, origin: str) -> BubbleCheck:
         """#495, ``netkeeper linkedin message-check --bubble``: the close control's shape in

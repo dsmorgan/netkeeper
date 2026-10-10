@@ -32,6 +32,11 @@ from test_linkedin_steps import LINKEDIN, Lane, make_lane
 
 from netkeeper.config import BudgetSettings, LinkedInSettings, Settings
 from netkeeper.linkedin.browser import (
+    CLOSE_HIDDEN_TEXT,
+    CLOSE_NAME_UNREAD,
+    CLOSE_NOT_FOR_PERSON,
+    CLOSE_NOT_VISIBLE,
+    NO_ONE_CLOSE_CONTROL,
     BrowserRun,
     BrowserUnavailable,
     BubbleLayout,
@@ -1384,8 +1389,8 @@ async def test_two_close_controls_are_not_clicked() -> None:
     result, _ = await _close_after(twice)
     assert result.close_refusal == (
         "the sent bubble does not have one close control for this person (header from text,"
-        " 0 elements; close buttons: 2 by prefix, 2 visible, 2 exact; #1 visible, same"
-        " length, exact; #2 visible, same length, exact)"
+        " 0 elements; close buttons: 2 by prefix, 2 visible, 2 exact, 0 by rule; #1 visible,"
+        " same length, exact; #2 visible, same length, exact)"
     )
 
 
@@ -1603,18 +1608,141 @@ async def test_a_never_messaged_bubble_that_became_a_conversation_is_closed() ->
 # --- #458 re-review: every close check, killed one by one ---------------------------------
 
 
-async def test_a_close_control_with_more_to_its_name_is_not_clicked() -> None:
-    def rename(tab: MessagingTab) -> None:
-        for element in _dialog(tab).elements():
-            if element.tag == "span" and element.text().startswith("Close your conversation"):
-                element.children = [element.text() + " and others"]
+# --- #499: the close button by prefix, holding the header link's name -----------------------
 
-    result, _ = await _close_after(rename)
-    assert result.close_refusal == (
-        "the sent bubble does not have one close control for this person (header from text,"
-        " 0 elements; close buttons: 1 by prefix, 1 visible, 0 exact; #1 visible, suffix +11,"
-        " suffix starts with header name)"
+#: An invented name that is not the contact's.
+SOMEONE_ELSE = "Wendolyn Madeupton"
+
+
+def _close_inside(inner: str) -> Callable[[MessagingTab], None]:
+    """After Send, the bubble's close button holds ``inner`` (HTML) instead of its span."""
+
+    def change(tab: MessagingTab) -> None:
+        from messaging_dom import parse_into
+
+        [button] = [
+            e
+            for e in _dialog(tab).elements()
+            if e.tag == "button" and e.text().startswith("Close your conversation")
+        ]
+        button.children = []
+        parse_into(button, inner)
+
+    return change
+
+
+def _close_named(suffix: str) -> Callable[[MessagingTab], None]:
+    return _close_inside(f"<span>Close your conversation with {suffix}</span>")
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        pytest.param(ZEPHYRINE.name, id="exact"),
+        pytest.param(f"Invented status line, {ZEPHYRINE.name}", id="extra-before"),
+        pytest.param(f"{ZEPHYRINE.name} and others", id="extra-after"),
+        pytest.param(f"Status: busy · {ZEPHYRINE.name} (Active now)", id="extra-both-sides"),
+        pytest.param(f"({ZEPHYRINE.name})", id="in-parentheses"),
+        pytest.param(f"{ZEPHYRINE.first}  {ZEPHYRINE.last}", id="whitespace"),
+    ],
+)
+async def test_a_close_control_that_holds_the_name_is_clicked_once(suffix: str) -> None:
+    site = MessagingSite(ZEPHYRINE)
+    site.after_send = _close_named(suffix)
+    result, run, _ = await page_run(site, send=permit())
+    assert result.outcome.kind is MessageOutcomeKind.SEND_CLICKED
+    assert result.bubble_closed is True and result.close_refusal is None, result
+    assert len(closes(site)) == 1 and site.closed_bubbles == 1
+    assert run.tab_closed
+
+
+@pytest.mark.parametrize(
+    ("suffix", "words"),
+    [
+        pytest.param(f"{ZEPHYRINE.name}son", CLOSE_NOT_FOR_PERSON, id="longer-word-after"),
+        pytest.param(f"X{ZEPHYRINE.name}", CLOSE_NOT_FOR_PERSON, id="longer-word-before"),
+        pytest.param(f"{ZEPHYRINE.name}-Smith", CLOSE_NOT_FOR_PERSON, id="hyphenated"),
+        pytest.param(f"{ZEPHYRINE.name}'s", CLOSE_NOT_FOR_PERSON, id="apostrophe"),
+        pytest.param(f"{ZEPHYRINE.name}2", CLOSE_NOT_FOR_PERSON, id="digit-after"),
+        pytest.param(ZEPHYRINE.name.lower(), CLOSE_NOT_FOR_PERSON, id="case"),
+        pytest.param(ZEPHYRINE.first, CLOSE_NOT_FOR_PERSON, id="first-name-only"),
+        pytest.param(SOMEONE_ELSE, CLOSE_NOT_FOR_PERSON, id="someone-else"),
+        pytest.param(f"{SOMEONE_ELSE} and others", CLOSE_NOT_FOR_PERSON, id="someone-else-more"),
+        pytest.param("", NO_ONE_CLOSE_CONTROL, id="prefix-only"),
+    ],
+)
+async def test_a_close_control_that_does_not_hold_the_name_is_not_clicked(
+    suffix: str, words: str
+) -> None:
+    result, _ = await _close_after(_close_named(suffix))
+    assert result.close_refusal is not None
+    assert result.close_refusal.startswith(f"{words} (header from text"), result.close_refusal
+    assert "0 by rule" in result.close_refusal
+
+
+async def test_two_close_controls_by_prefix_are_not_clicked_whatever_their_names() -> None:
+    def two(tab: MessagingTab) -> None:
+        from messaging_dom import parse_into
+
+        _close_named(f"Invented status, {ZEPHYRINE.name}")(tab)
+        [header] = [e for e in _dialog(tab).elements() if e.tag == "header"]
+        parse_into(
+            header, f"<button><span>Close your conversation with {SOMEONE_ELSE}</span></button>"
+        )
+
+    result, _ = await _close_after(two)
+    assert result.close_refusal is not None
+    assert result.close_refusal.startswith(f"{NO_ONE_CLOSE_CONTROL} (")
+    assert "2 by prefix" in result.close_refusal
+
+
+async def test_a_hidden_close_control_with_extra_text_is_not_clicked() -> None:
+    def hide(tab: MessagingTab) -> None:
+        _close_named(f"Invented status, {ZEPHYRINE.name}")(tab)
+        for element in _dialog(tab).elements():
+            if element.tag == "button" and "Close your conversation" in element.text():
+                element.attrs["style"] = "display: none"
+
+    result, _ = await _close_after(hide)
+    assert result.close_refusal == CLOSE_NOT_VISIBLE
+
+
+async def test_hidden_text_in_the_close_control_s_name_is_not_clicked() -> None:
+    """The prefix count reads hidden text into a name; the name compared must be that one."""
+    result, _ = await _close_after(
+        _close_inside(
+            f"<span>Close your conversation with {ZEPHYRINE.name}</span>"
+            f'<span aria-hidden="true"> {SOMEONE_ELSE}</span>'
+        )
     )
+    assert result.close_refusal is not None
+    assert result.close_refusal.startswith(f"{CLOSE_HIDDEN_TEXT} ("), result.close_refusal
+
+
+async def test_a_close_control_whose_name_cannot_be_read_is_not_clicked() -> None:
+    def labelled(tab: MessagingTab) -> None:
+        from messaging_dom import parse_into
+
+        _close_inside("<span>x</span>")(tab)
+        [button] = [e for e in _dialog(tab).elements() if e.tag == "button" and e.text() == "x"]
+        button.attrs["aria-labelledby"] = "nk-499-close"
+        [header] = [e for e in _dialog(tab).elements() if e.tag == "header"]
+        parse_into(
+            header,
+            f'<span id="nk-499-close" hidden>Close your conversation with {ZEPHYRINE.name}</span>',
+        )
+
+    result, _ = await _close_after(labelled)
+    assert result.close_refusal is not None
+    assert result.close_refusal.startswith(f"{CLOSE_NAME_UNREAD} ("), result.close_refusal
+
+
+def test_the_close_refusals_are_pinned() -> None:
+    assert NO_ONE_CLOSE_CONTROL == "the sent bubble does not have one close control for this person"
+    assert CLOSE_NOT_FOR_PERSON == "the sent bubble's close control does not name this person"
+    assert CLOSE_NAME_UNREAD == "the sent bubble's close control's name could not be read"
+    assert CLOSE_HIDDEN_TEXT == "hidden text changes the sent bubble's close control's name"
+    assert CLOSE_NOT_VISIBLE == "the sent bubble's close control is not visible"
 
 
 async def test_a_close_control_outside_the_dialog_is_not_clicked() -> None:
@@ -1631,7 +1759,7 @@ async def test_a_close_control_outside_the_dialog_is_not_clicked() -> None:
     result, _ = await _close_after(move)
     assert result.close_refusal == (
         "the sent bubble does not have one close control for this person (header from text,"
-        " 0 elements; close buttons: 0 by prefix, 0 visible, 0 exact, 1 on page)"
+        " 0 elements; close buttons: 0 by prefix, 0 visible, 0 exact, 0 by rule, 1 on page)"
     )
 
 
