@@ -37,6 +37,7 @@ from typing import Any, ClassVar
 from urllib.parse import quote, unquote, urlsplit
 
 import pytest
+from browser_guard import isolated_cdp
 from messaging_pages import (
     Member,
     compose_href,
@@ -522,8 +523,10 @@ async def _inspect(origin: str, scenario: Scenario) -> dict[str, Any]:
     """Read the handed-over tab back through a separate test-only connection, then close it."""
     from playwright.async_api import async_playwright
 
+    # A raw connect skips the guarded connector: refuse a personal Chrome first.
+    cdp_url = isolated_cdp(CDP_URL)
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.connect_over_cdp(CDP_URL)
+        browser = await playwright.chromium.connect_over_cdp(cdp_url)
         try:
             pages = [
                 page
@@ -683,8 +686,10 @@ async def test_playwrights_own_click_errors_classify_to_their_category(
     and :func:`classify_click_failure` reads each one's category from the real error."""
     from playwright.async_api import async_playwright
 
+    # A raw connect skips the guarded connector: refuse a personal Chrome first.
+    cdp_url = isolated_cdp(CDP_URL)
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.connect_over_cdp(CDP_URL)
+        browser = await playwright.chromium.connect_over_cdp(cdp_url)
         page = await browser.contexts[0].new_page()
         try:
             await page.set_content(f"<body style='margin:0'>{_ERROR_PAGES[category]}</body>")
@@ -707,8 +712,10 @@ async def test_the_old_first_visible_choice_fails_on_the_sticky_page(origin: str
     from playwright.async_api import async_playwright
 
     member = SCENARIOS["sticky"].member
+    # A raw connect skips the guarded connector: refuse a personal Chrome first.
+    cdp_url = isolated_cdp(CDP_URL)
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.connect_over_cdp(CDP_URL)
+        browser = await playwright.chromium.connect_over_cdp(cdp_url)
         page = await browser.contexts[0].new_page()
         try:
             await page.goto(f"{origin}/in/{member.slug}/")

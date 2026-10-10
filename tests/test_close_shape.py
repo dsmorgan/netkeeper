@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import traceback
 import unicodedata
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
@@ -845,7 +846,52 @@ async def test_an_icon_in_the_close_button_does_not_stop_the_bubble_check() -> N
     [button] = found.shape.buttons
     assert (button.relation, button.source) == (NameRelation.EXACT, NameSource.TEXT)
     assert_untouched(site, [tab])
-    assert not any(read.startswith("inner_text") and "svg" in read for read in tab.read_log)
+    # The icon has no text, so no aria-hidden part's inner_text is ever asked for.
+    hidden_reads = f".locator({browser.ARIA_HIDDEN})"
+    assert not [r for r in tab.read_log if r.startswith("inner_text") and hidden_reads in r]
+    assert any(r.startswith("text_content") and hidden_reads in r for r in tab.read_log)
+
+
+async def _read_button_name(html: str) -> Any:
+    site = MessagingSite(PERSON)
+    tab = _tab(site, f"<main>{html}</main>")
+    button = tab.locator("button")
+    return await browser._read_accessible_name(cast(Any, tab), cast(Any, button), "button")
+
+
+async def test_hidden_html_text_comes_out_of_the_name_beside_an_icon() -> None:
+    """An aria-hidden HTML part with text still comes out of the shown name when an
+    aria-hidden icon without text sits beside it."""
+    read = await _read_button_name(
+        f'<button>{PERSON.name}<span aria-hidden="true"> x</span>{ICON}</button>'
+    )
+    assert read is not None and read.source is NameSource.SHOWN and read.name == PERSON.name
+
+
+async def test_an_svg_with_text_means_the_shown_name_is_never_tried() -> None:
+    """#497: an aria-hidden svg holding text (a ``<title>``) can't be taken out of the text
+    as it renders, so the name without hidden parts isn't tried, and with no other
+    candidate the name is unreadable: fail closed."""
+    svg = '<svg aria-hidden="true"><title>close-small</title></svg>'
+    read = await _read_button_name(
+        f'<button>{PERSON.name}<span aria-hidden="true"> x</span>{svg}</button>'
+    )
+    assert read is None
+
+
+async def test_a_timeout_reading_a_hidden_part_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only "not an HTML element" is answered; any other failure of a hidden part's read
+    stops the read."""
+    real = messaging_dom.FakeLocator.inner_text
+
+    async def slow(self: messaging_dom.FakeLocator, *, timeout: float | None = None) -> str:  # noqa: ASYNC109
+        if f".locator({browser.ARIA_HIDDEN})" in self.desc:
+            raise TimeoutError("Locator.inner_text: Timeout 1000ms exceeded.")
+        return await real(self, timeout=timeout)
+
+    monkeypatch.setattr(messaging_dom.FakeLocator, "inner_text", slow)
+    with pytest.raises(TimeoutError):
+        await _read_button_name(f'<button>{PERSON.name}<span aria-hidden="true"> x</span></button>')
 
 
 @pytest.mark.parametrize(
@@ -925,6 +971,8 @@ async def test_a_bubble_check_failure_names_its_step_and_kind_without_its_text(
         await bubble_check(site)
     assert str(raised.value) == words
     assert raised.value.__cause__ is None and raised.value.__suppress_context__
+    trace = "".join(traceback.format_exception(raised.value))
+    assert PERSON.first not in trace and PERSON.last not in trace and "name=" not in trace
     assert_no_pii(str(raised.value))
     assert_untouched(site, [tab])
 

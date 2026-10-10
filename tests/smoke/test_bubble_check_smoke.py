@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, ClassVar
 
 import pytest
+from browser_guard import isolated_cdp
 from messaging_pages import Member, existing_bubble_html
 
 from netkeeper.linkedin.browser import (
@@ -161,8 +162,10 @@ async def _opened_by_hand(url: str) -> AsyncIterator[Any]:
     in the context's tabs and never opens one of its own. Closed afterwards."""
     from playwright.async_api import async_playwright
 
+    # A raw connect skips the guarded connector: refuse a personal Chrome first.
+    cdp_url = isolated_cdp(CDP_URL)
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.connect_over_cdp(CDP_URL)
+        browser = await playwright.chromium.connect_over_cdp(cdp_url)
         try:
             page = await browser.contexts[0].new_page()
             try:

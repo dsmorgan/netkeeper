@@ -1513,6 +1513,8 @@ def _bubble_step(step: BubbleCheckStep) -> Iterator[None]:
         raise
     except Exception as exc:
         # The cause is dropped: its text can quote a selector with a name in it.
+        # ``from None`` suppresses the context, but the with statement still sets it:
+        # never log this failure with log.exception or exc_info all the same.
         raise BubbleCheckFailed(step, type(exc).__name__, classify_read_failure(exc)) from None
 
 
@@ -4108,7 +4110,9 @@ class BrowserRun:
         :data:`BUBBLE_CHECK_MAX_DIALOGS`) has exactly one header link, to
         ``/in/<profile id>/``, as :meth:`close_sent_bubble` checks it. It reports how many
         tabs are the contact's and, for the first, that tab's dialog and composer counts
-        and the shape of its first such dialog's close control (:func:`read_close_shape`)."""
+        and the shape of its first such dialog's close control (:func:`read_close_shape`).
+
+        A failure raises :class:`BubbleCheckFailed`, fixed words only (#497)."""
         want = urlsplit(origin)
         path = f"{PROFILE_PATH_PREFIX}{profile_id}/"
         with _bubble_step(BubbleCheckStep.TABS):
