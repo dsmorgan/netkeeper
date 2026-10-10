@@ -827,6 +827,19 @@ def test_the_stop_reason_has_plain_words() -> None:
             "covered by a pseudo-element of div (none), middle",
         ),
         (
+            # #490: the link's ::first-letter, which the tree doesn't list, by its host.
+            "",
+            ' data-first-letter-box="40,400,110,32"',
+            HitRelation.PSEUDO_INSIDE,
+            "a pseudo-element inside the control (its host: a, link)",
+        ),
+        (
+            '<div data-box="0,300,1280,300" data-first-letter-box="40,400,110,32"></div>',
+            "",
+            HitRelation.PSEUDO_COVERED,
+            "covered by a pseudo-element of div (none), middle",
+        ),
+        (
             '<my-overlay data-box="0,300,1280,300"><shadow-root>'
             '<span data-box="40,400,110,32"></span></shadow-root></my-overlay>',
             "",
@@ -1031,3 +1044,41 @@ def test_the_check_records_its_run_through_its_own_gate(
     _start(cli_db)
     assert gates == [runs.MESSAGE_CHECK_GATE]
     assert runs.MESSAGE_CHECK_GATE is not runs.MESSAGE_SEND_GATE
+
+
+@pytest.mark.usefixtures("no_scroll")
+async def test_a_first_letter_on_a_span_inside_the_link_is_inside_it() -> None:
+    """#490: a ``::first-letter`` styled on the label's ``<span>`` is described by the
+    span, and the walk finds the link around it."""
+    html = (
+        f"<main><h1>{ZEPHYRINE.name}</h1>"
+        f'<a data-box="40,400,110,32" href="{escape(HREF)}">'
+        '<span data-first-letter-box="40,400,110,32">Message</span></a></main>'
+    )
+    site = static_site(html)
+    result, run = await check(site)
+    assert_untouched(site, run)
+    [candidate] = last(result).candidates
+    hit = candidate.hit
+    assert hit is not None and hit.relation is HitRelation.PSEUDO_INSIDE
+    assert (hit.tag, hit.role) == ("span", "none")
+    assert "a pseudo-element inside the control (its host: span, none)" in report(result)
+
+
+@pytest.mark.usefixtures("no_scroll")
+async def test_a_first_letter_whose_host_cant_be_read_says_so() -> None:
+    """#490: when the snapshot fails, the hit reads as before the fix, and the error
+    is named."""
+    html = (
+        f"<main><h1>{ZEPHYRINE.name}</h1>"
+        f'<a data-box="40,400,110,32" href="{escape(HREF)}"'
+        ' data-first-letter-box="40,400,110,32"><span>Message</span></a></main>'
+    )
+    site = static_site(html)
+    site.snapshot_error = RuntimeError("invented")
+    result, run = await check(site)
+    assert_untouched(site, run)
+    snap = last(result)
+    [candidate] = snap.candidates
+    assert candidate.hit is not None and candidate.hit.relation is HitRelation.IN_SHADOW_ROOT
+    assert "pseudo-element hosts: RuntimeError" in snap.errors

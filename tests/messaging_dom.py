@@ -188,12 +188,19 @@ def box_of(element: Element) -> dict[str, float] | None:
 #: The fake DOM's pseudo-elements (#475): an element's ``data-before-box`` or
 #: ``data-after-box`` draws a ``::before`` or ``::after`` there, as CSS ``content`` does.
 PSEUDO_BOXES = (("before", "data-before-box"), ("after", "data-after-box"))
+#: An element's ``data-first-letter-box`` draws its ``::first-letter`` there (#490). As on
+#: Chrome 154, ``DOM.describeNode`` and ``DOM.getDocument`` leave it out of
+#: ``pseudoElements``; only ``DOMSnapshot.captureSnapshot`` lists it, with its host.
+FIRST_LETTER = ("first-letter", "data-first-letter-box")
+#: Every pseudo-element the fake draws, bottom to top over its element.
+_LAYERS = (FIRST_LETTER, *PSEUDO_BOXES)
+_PSEUDO_KINDS = tuple(kind for kind, _ in _LAYERS)
 #: A pseudo-element's ``backendNodeId``: past every element's, as Chrome gives it its own.
 _PSEUDO_ID_BASE = 100_000
 
 
 def _pseudo_id(index: int, kind: str) -> int:
-    return _PSEUDO_ID_BASE + 2 * index + (1 if kind == "after" else 0)
+    return _PSEUDO_ID_BASE + len(_LAYERS) * index + _PSEUDO_KINDS.index(kind)
 
 
 def _box_attr(element: Element, attr: str) -> dict[str, float] | None:
@@ -212,6 +219,8 @@ class GeometrySession:
     fixed overlay comes after what it covers), as ``elementFromPoint`` answers; an
     element's ``data-before-box``/``data-after-box`` pseudo-elements (#475) are hit on
     top of it, with their own ``backendNodeId``, and listed in its ``pseudoElements``;
+    its ``data-first-letter-box`` (#490) is hit the same way but listed only in
+    ``DOMSnapshot.captureSnapshot``'s answer;
     ``data-pointer-events="none"`` is skipped. A point outside the viewport, or one over
     no box, raises, as Chrome does. Boxes and quads are viewport coordinates, as Chrome's
     are; ``DOM.getNodeForLocation`` takes a document point and subtracts the site's
@@ -351,10 +360,10 @@ class GeometrySession:
             for index, element in enumerate(order):
                 if element.attrs.get("data-pointer-events") == "none":
                     continue
-                # The element, then its ::before, then its ::after: the later one on top.
+                # The element, then its ::first-letter, ::before and ::after: the later
+                # one on top.
                 layers = [(index + 1, box_of(element))] + [
-                    (_pseudo_id(index, kind), _box_attr(element, attr))
-                    for kind, attr in PSEUDO_BOXES
+                    (_pseudo_id(index, kind), _box_attr(element, attr)) for kind, attr in _LAYERS
                 ]
                 for node_id, box in layers:
                     if box is None:
@@ -366,7 +375,9 @@ class GeometrySession:
                 raise RuntimeError("No node found at given location")
             # #473: the frame a hit belongs to, from an invented data-frame on it or above.
             owner = (
-                order[(hit - _PSEUDO_ID_BASE) // 2] if hit >= _PSEUDO_ID_BASE else order[hit - 1]
+                order[(hit - _PSEUDO_ID_BASE) // len(_LAYERS)]
+                if hit >= _PSEUDO_ID_BASE
+                else order[hit - 1]
             )
             frame = next(
                 (
@@ -377,6 +388,41 @@ class GeometrySession:
                 "main-frame",
             )
             return {"backendNodeId": hit, "frameId": frame}
+        if method == "DOMSnapshot.captureSnapshot":
+            # #490: one document, every element, then every pseudo-element with its
+            # element as parent, ::first-letter included, the way Chrome lays it out.
+            assert params == {"computedStyles": []}
+            if self.tab.site.snapshot_error is not None:
+                raise self.tab.site.snapshot_error
+            if self.tab.site.snapshot_hangs:
+                await asyncio.sleep(3600)
+            position = {id(e): i for i, e in enumerate(order)}
+            parents = [
+                -1 if e.parent is None or id(e.parent) not in position else position[id(e.parent)]
+                for e in order
+            ]
+            backends = [i + 1 for i in range(len(order))]
+            pseudo_index: list[int] = []
+            pseudo_value: list[int] = []
+            for index, element in enumerate(order):
+                for kind, attr in _LAYERS:
+                    if attr in element.attrs:
+                        pseudo_index.append(len(backends))
+                        pseudo_value.append(_PSEUDO_KINDS.index(kind))
+                        parents.append(index)
+                        backends.append(_pseudo_id(index, kind))
+            return {
+                "strings": list(_PSEUDO_KINDS),
+                "documents": [
+                    {
+                        "nodes": {
+                            "parentIndex": parents,
+                            "backendNodeId": backends,
+                            "pseudoType": {"index": pseudo_index, "value": pseudo_value},
+                        }
+                    }
+                ],
+            }
         raise AssertionError(f"the geometry session never sends {method}")
 
     def on(self, event: str, handler: Callable[[Any], None]) -> None:
@@ -992,6 +1038,9 @@ class MessagingSite(FakeContext):
         self.device_pixel_ratio = 2.0
         self.geometry_error: BaseException | None = None
         self.geometry_hangs = False
+        # #490: only DOMSnapshot.captureSnapshot fails, or never answers.
+        self.snapshot_error: BaseException | None = None
+        self.snapshot_hangs = False
         self.geometry_sessions: list[GeometrySession] = []
 
     async def new_cdp_session(self, page: Any) -> GeometrySession:
