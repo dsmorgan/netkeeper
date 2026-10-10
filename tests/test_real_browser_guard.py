@@ -11,13 +11,14 @@ socket is opened.
 
 from __future__ import annotations
 
+import importlib
 import socket
 from typing import Any
 
 import factories
 import playwright.async_api
 import pytest
-from browser_guard import UNREACHABLE_CDP_URL, RealBrowserBlocked, is_personal_cdp
+from browser_guard import UNREACHABLE_CDP_URL, RealBrowserBlocked, is_personal_cdp, isolated_cdp
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import Settings
@@ -148,3 +149,37 @@ def test_only_other_ports_count_as_isolated() -> None:
 def test_a_test_that_did_not_opt_out_cannot_start_playwright() -> None:
     with pytest.raises(RealBrowserBlocked):
         playwright.async_api.async_playwright()
+
+
+# --- #497 review: the smoke tests' own raw connects ---------------------------------------
+
+#: The smoke tests' fallback, and an address with no port: both are refused.
+PERSONAL_URLS = (DEFAULT_CDP_URL, "http://localhost")
+
+
+@pytest.mark.parametrize("url", PERSONAL_URLS)
+def test_a_raw_smoke_connect_refuses_a_personal_chrome(url: str) -> None:
+    with pytest.raises(RealBrowserBlocked, match="isolated Chrome"):
+        isolated_cdp(url)
+    assert isolated_cdp("http://127.0.0.1:9497") == "http://127.0.0.1:9497"
+
+
+@pytest.mark.real_cdp
+@pytest.mark.parametrize("url", PERSONAL_URLS)
+async def test_the_smoke_tests_raw_connects_are_refused_before_any_socket(
+    spies: dict[str, list[Any]], monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    """``_opened_by_hand`` (the bubble check's smoke tests, the read-failure one
+    included) and the prefill smoke's ``_inspect`` connect over CDP themselves, past
+    the guarded connector. Opted out of the guard, as the smoke suite is, each still
+    refuses the default URL and a URL with no port before Playwright starts."""
+    bubble = importlib.import_module("smoke.test_bubble_check_smoke")
+    prefill = importlib.import_module("smoke.test_prefill_smoke")
+    for module in (bubble, prefill):
+        monkeypatch.setattr(module, "CDP_URL", url)
+    with pytest.raises(RealBrowserBlocked, match="isolated Chrome"):
+        async with bubble._opened_by_hand("http://127.0.0.1:1/icon/"):
+            pytest.fail("connected")
+    with pytest.raises(RealBrowserBlocked, match="isolated Chrome"):
+        await prefill._inspect("http://127.0.0.1:1", prefill.SCENARIOS["existing"])
+    assert spies == {"playwright": [], "socket": []}

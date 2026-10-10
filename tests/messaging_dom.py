@@ -46,7 +46,7 @@ from messaging_pages import (
 
 from netkeeper.linkedin.browser import PageLike
 
-VOID = frozenset({"br", "input", "img", "meta", "link", "hr", "svg"})
+VOID = frozenset({"br", "input", "img", "meta", "link", "hr"})
 #: Elements that aren't HTML, which Playwright's ``inner_text`` refuses (#497).
 FOREIGN = frozenset({"svg", "math"})
 
@@ -95,7 +95,8 @@ class Element:
                 out.append(child)
             elif child.tag == "br":
                 out.append("\n")
-            else:
+            elif child.tag != "title":
+                # As innerText reads it: an svg's <title> is never drawn (#497).
                 out.append(child.text())
         return "".join(out)
 

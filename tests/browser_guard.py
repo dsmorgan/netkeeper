@@ -36,3 +36,17 @@ def is_personal_cdp(url: str) -> bool:
 #: (``activity_lock_proc.py``) run without ``conftest.py``'s guard, so this is all that
 #: stands between them and port 9222 (#294).
 UNREACHABLE_CDP_URL = "http://127.0.0.1:1"
+
+
+def isolated_cdp(url: str) -> str:
+    """``url``, for a smoke test's own raw ``connect_over_cdp``, or
+    :class:`RealBrowserBlocked` when it is a personal Chrome's address (#497 review).
+
+    A raw connect skips ``PlaywrightCdpConnector`` and so ``conftest.py``'s guard: each
+    one calls this first, before Playwright starts."""
+    if is_personal_cdp(url):
+        raise RealBrowserBlocked(
+            f"a smoke test tried a raw CDP connect to {url}, a personal Chrome's debug"
+            " port or no port. Set NETKEEPER_CDP_URL to an isolated Chrome on another port"
+        )
+    return url
