@@ -71,6 +71,9 @@ from netkeeper.linkedin.browser import (
     BrowserRun,
     BrowserUnavailable,
     BubbleCheck,
+    BubbleCheckFailed,
+    ReadFailure,
+    classify_read_failure,
 )
 from netkeeper.linkedin.connections import ConnectionsSource, SyncMode
 from netkeeper.linkedin.enrich import LINKEDIN_ORIGIN, ProfileSource
@@ -836,6 +839,17 @@ class BubbleCheckResult:
     stopped: str | None = None
 
 
+def _bubble_check_failure(exc: Exception) -> str:
+    """How a bubble check failed (#497), in fixed words: the step, when the read itself
+    failed, then the exception's class and its kind. Never the exception's text."""
+    if isinstance(exc, BubbleCheckFailed):
+        return f"{exc.step.value} ({exc.error}: {exc.kind.value})"
+    kind = classify_read_failure(exc)
+    if kind is ReadFailure.OTHER:
+        return f"({type(exc).__name__})"
+    return f"({type(exc).__name__}: {kind.value})"
+
+
 async def run_bubble_check(
     provider: BrowserProvider,
     factory: sessionmaker[Session],
@@ -895,10 +909,11 @@ async def run_bubble_check(
         await end(SyncRunStatus.ABORTED, "interrupted", runs.INTERRUPTED)
         raise
     except Exception as exc:
-        # The type only: a Playwright error's text can quote a selector, and a selector
+        # Fixed words only: a Playwright error's text can quote a selector, and a selector
         # here can hold the contact's name.
-        log.error("bubble check run %d failed (%s)", target.run_id, type(exc).__name__)
-        await end(SyncRunStatus.FAILED, "error", f"the check failed ({type(exc).__name__})")
-        return BubbleCheckResult(stopped=f"the check failed ({type(exc).__name__})")
+        failed = _bubble_check_failure(exc)
+        log.error("bubble check run %d failed %s", target.run_id, failed)
+        await end(SyncRunStatus.FAILED, "error", f"the check failed {failed}")
+        return BubbleCheckResult(stopped=f"the check failed {failed}")
     await end(SyncRunStatus.COMPLETED, message_check.BUBBLE_CHECK_STOP)
     return BubbleCheckResult(check)

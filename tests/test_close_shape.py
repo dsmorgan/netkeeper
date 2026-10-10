@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+import messaging_dom
 import pytest
 from factories import make_contact
 from messaging_dom import MessagingSite, MessagingTab
@@ -819,3 +820,169 @@ async def test_a_cancel_during_the_read_ends_the_run_aborted(
     with session_scope(cli_db) as session:
         run = runs.get_run(session, _user(session), target.run_id)
         assert (run.status, run.stop_reason) == (SyncRunStatus.ABORTED, runs.CANCELLED)
+
+
+# --- #497: an icon in the close button, and failures named by kind and step -----------------
+
+#: The close button as LinkedIn draws its header buttons: an ``aria-hidden`` icon first.
+ICON = '<svg aria-hidden="true"></svg>'
+
+
+def _icon_close(html: str) -> str:
+    old = _close_button(PERSON.name)
+    assert old in html
+    return html.replace(old, f"<button>{ICON}<span>{CLOSE}{PERSON.name}</span></button>")
+
+
+async def test_an_icon_in_the_close_button_does_not_stop_the_bubble_check() -> None:
+    """#497: Playwright's ``inner_text`` raises on an ``svg``, and the fake's does too. An
+    icon has no text to take out of the name, so the read never asks for it."""
+    site = MessagingSite(PERSON)
+    tab = _tab(site, _bubble(_icon_close))
+    found, _ = await bubble_check(site)
+    assert found.for_contact == 1 and found.shape is not None
+    assert (found.shape.by_prefix, found.shape.exact) == (1, 1)
+    [button] = found.shape.buttons
+    assert (button.relation, button.source) == (NameRelation.EXACT, NameSource.TEXT)
+    assert_untouched(site, [tab])
+    assert not any(read.startswith("inner_text") and "svg" in read for read in tab.read_log)
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("Locator.inner_text: Error: Node is not an HTMLElement", "not an HTML element"),
+        ("Locator.count: Error: strict mode violation: resolved to 2 elements:", "strict mode"),
+        ('Locator.count: Unexpected token "" while parsing css selector "x[".', "invalid selector"),
+        (
+            "Locator.count: InvalidSelectorError: Error while parsing selector `x`",
+            "invalid selector",
+        ),
+        ('Locator.count: Unknown engine "nope" while parsing selector nope=x', "invalid selector"),
+        ("Locator.count: Target page, context or browser has been closed", "target or tab closed"),
+        ("Page.evaluate: Target crashed", "target or tab closed"),
+        ("Locator.count: something else\nstrict mode violation", "other"),
+    ],
+)
+def test_a_read_failure_is_named_by_its_kind(text: str, kind: str) -> None:
+    """The first line decides; a marker further down the call log doesn't count."""
+    found = browser.classify_read_failure(messaging_dom.Error(text))
+    assert found.value.startswith(kind)
+
+
+def test_a_read_failure_s_class_names_a_timeout_and_a_closed_target() -> None:
+    class TargetClosedError(Exception):
+        pass
+
+    assert browser.classify_read_failure(TimeoutError("name=x")) is browser.ReadFailure.TIMEOUT
+    closed = browser.classify_read_failure(TargetClosedError("x"))
+    assert closed is browser.ReadFailure.TARGET_CLOSED
+    assert [kind.value for kind in browser.ReadFailure] == [
+        "timeout",
+        "target or tab closed",
+        "invalid selector",
+        "strict mode violation",
+        "not an HTML element",
+        "other",
+    ]
+    assert [step.value for step in browser.BubbleCheckStep] == [
+        "finding tabs",
+        "reading dialogs",
+        "reading the composer",
+        "reading the close control",
+    ]
+
+
+def _raise(exc: Exception) -> Callable[..., Any]:
+    def boom(*args: object, **kwargs: object) -> Any:
+        raise exc
+
+    return boom
+
+
+@pytest.mark.parametrize(
+    ("patch", "exc", "words"),
+    [
+        (
+            "_is_profile_link",
+            TimeoutError(f"name={PERSON.name}"),
+            "reading dialogs failed (TimeoutError: timeout)",
+        ),
+        (
+            "read_close_shape",
+            messaging_dom.Error(f"Locator.count: Error: strict mode violation: {PERSON.name}"),
+            "reading the close control failed (Error: strict mode violation)",
+        ),
+    ],
+)
+async def test_a_bubble_check_failure_names_its_step_and_kind_without_its_text(
+    monkeypatch: pytest.MonkeyPatch, patch: str, exc: Exception, words: str
+) -> None:
+    monkeypatch.setattr(browser, patch, _raise(exc))
+    site = MessagingSite(PERSON)
+    tab = _tab(site, _bubble())
+    with pytest.raises(browser.BubbleCheckFailed) as raised:
+        await bubble_check(site)
+    assert str(raised.value) == words
+    assert raised.value.__cause__ is None and raised.value.__suppress_context__
+    assert_no_pii(str(raised.value))
+    assert_untouched(site, [tab])
+
+
+@pytest.mark.usefixtures("inside_active_hours")
+async def test_a_failed_read_records_its_step_and_kind(
+    cli_db: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#497: the run's error and the log say which step failed and how, in fixed words."""
+    contact_id = _contact(cli_db)
+    with session_scope(cli_db, write=True) as session:
+        target = message_check.start(
+            session,
+            _user(session),
+            contact_id,
+            now=datetime.now(UTC),
+            settings=Settings(),
+            bubble=True,
+        )
+    error = messaging_dom.Error(f"Locator.inner_text: Error: Node is not an HTMLElement {PERSON}")
+    monkeypatch.setattr(browser, "read_close_shape", _raise(error))
+    site = MessagingSite(PERSON)
+    _tab(site, _bubble())
+    provider, _ = fake_provider(site)
+    with caplog.at_level(logging.DEBUG):
+        result = await run_bubble_check(provider, cli_db, 1, target, settings=Settings())
+    words = "the check failed reading the close control (Error: not an HTML element)"
+    assert result.stopped == words
+    assert f"bubble check run {target.run_id} failed reading the close control" in caplog.text
+    for secret in (PERSON.first, PERSON.last, PERSON.slug, PERSON.profile_id, "HTMLElement"):
+        assert secret not in caplog.text
+    report = "\n".join(_bubble_check_lines(target.run_id, result))
+    assert f"stopped: {words}" in report
+    with session_scope(cli_db) as session:
+        run = runs.get_run(session, _user(session), target.run_id)
+        assert run.status is SyncRunStatus.FAILED and run.error == words
+
+
+@pytest.mark.usefixtures("inside_active_hours")
+async def test_a_failure_outside_the_read_records_its_kind(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class TargetClosedError(Exception):
+        pass
+
+    contact_id = _contact(cli_db)
+    with session_scope(cli_db, write=True) as session:
+        target = message_check.start(
+            session,
+            _user(session),
+            contact_id,
+            now=datetime.now(UTC),
+            settings=Settings(),
+            bubble=True,
+        )
+    monkeypatch.setattr(BrowserRun, "bubble_check", _raise(TargetClosedError(PERSON.name)))
+    provider, _ = fake_provider(MessagingSite(PERSON))
+    result = await run_bubble_check(provider, cli_db, 1, target, settings=Settings())
+    assert result.stopped == "the check failed (TargetClosedError: target or tab closed)"

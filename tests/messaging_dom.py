@@ -47,6 +47,13 @@ from messaging_pages import (
 from netkeeper.linkedin.browser import PageLike
 
 VOID = frozenset({"br", "input", "img", "meta", "link", "hr", "svg"})
+#: Elements that aren't HTML, which Playwright's ``inner_text`` refuses (#497).
+FOREIGN = frozenset({"svg", "math"})
+
+
+class Error(Exception):
+    """Stands in for Playwright's base ``Error``: the same class name, for the checks
+    that read only an exception's type."""
 
 
 # --- the DOM ---------------------------------------------------------------------------
@@ -670,7 +677,11 @@ class FakeLocator:
         self._page.read_log.append(f"inner_text{self.desc}")
         self._page.reads += 1
         self._page.before_read()
-        return self._one().text()
+        element = self._one()
+        if element.tag in FOREIGN:
+            # As Playwright's does (#497): inner_text reads only an HTML element.
+            raise Error("Locator.inner_text: Error: Node is not an HTMLElement")
+        return element.text()
 
     async def text_content(self, *, timeout: float | None = None) -> str | None:  # noqa: ASYNC109
         self._page.read_log.append(f"text_content{self.desc}")
