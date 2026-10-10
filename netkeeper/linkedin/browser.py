@@ -28,7 +28,7 @@ import re
 import unicodedata
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Final, Protocol, cast, runtime_checkable
@@ -540,6 +540,23 @@ CLOSE_WAIT_S: Final = 5.0
 CLOSE_WAIT_POLLS: Final = 25
 #: How long Playwright may wait for the close control to be clickable, in milliseconds.
 CLOSE_CLICK_TIMEOUT_MS: Final = 1_000.0
+#: #495: what the close-control diagnostic (:func:`read_close_shape`) counts in the
+#: bubble, hidden ones included: buttons whose name starts with each header control's
+#: prefix (the capture's three, ``docs/linkedin-messaging-shapes.md``), the
+#: never-messaged bubble's two header controls by exact name, and any button whose name
+#: starts with "close", in any case.
+#: Written out, not ``re.escape``-d: Python escapes spaces, and the pattern goes to the
+#: page's JavaScript as it is.
+CLOSE_CONTROL_PATTERN: Final = re.compile("^Close your conversation with ")
+OPTIONS_CONTROL_PATTERN: Final = re.compile("^Open the options list in your conversation with ")
+MINIMIZE_CONTROL_PATTERN: Final = re.compile("^Minimize your conversation with ")
+ANY_CLOSE_PATTERN: Final = re.compile(r"^close\b", re.IGNORECASE)
+DRAFT_CLOSE_NAME: Final = "Close your draft conversation"
+DRAFT_MINIMIZE_NAME: Final = "Minimize your conversation"
+#: How many of the close buttons the diagnostic describes one by one.
+CLOSE_SHAPE_MAX: Final = 4
+#: Every element under the header link, for the diagnostic's count of them.
+ANY_ELEMENT: Final = "*"
 
 
 class BubbleLayout(enum.StrEnum):
@@ -1394,6 +1411,32 @@ class SendClick:
     clicked_at: datetime | None = None
 
 
+#: How many ``Messaging`` dialogs per tab :meth:`BrowserRun.bubble_check` reads (#495).
+BUBBLE_CHECK_MAX_DIALOGS: Final = 8
+
+
+@dataclass(frozen=True, slots=True)
+class BubbleCheck:
+    """What :meth:`BrowserRun.bubble_check` read (#495). Counts and fixed words only.
+
+    ``tabs`` is the context's open tabs; ``on_origin`` those on LinkedIn's origin;
+    ``with_bubble`` those with any ``Messaging`` dialog; ``for_contact`` those with one
+    whose header links only this contact. The rest is read only when exactly one tab is
+    the contact's: its ``Messaging`` dialogs and composers (hidden ones counted), how
+    many of its dialogs are the contact's, whether the first of those holds a composer,
+    and that dialog's close-control shape."""
+
+    tabs: int
+    on_origin: int
+    with_bubble: int
+    for_contact: int
+    dialogs: int | None = None
+    dialogs_for_contact: int | None = None
+    composers: int | None = None
+    composer_in_dialog: bool | None = None
+    shape: CloseShape | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class BubbleClose:
     """What :meth:`BrowserRun.close_sent_bubble` did (ADR 0008, D1). ``closed`` is true
@@ -1690,6 +1733,42 @@ async def _accessible_name(
     is confirmed (an ``aria-labelledby``, for one), the name is unreadable. A visible
     element is matched with ``include_hidden=False``, so ``aria-hidden`` text is never
     part of its name. Reads only."""
+    read = await _read_accessible_name(page, element, role, level=level)
+    return None if read is None else read.name
+
+
+class NameSource(enum.StrEnum):
+    """Which read :func:`_accessible_name` confirmed as an element's name (#495)."""
+
+    LABEL = "its aria-label"
+    TEXT = "its text"
+    SHOWN = "its text without its aria-hidden parts"
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadName:
+    """An accessible name as :func:`_accessible_name` read it: ``name`` as it answers,
+    ``candidate`` as Playwright confirmed it (whitespace collapsed, before NFC), ``raw``
+    as read (the candidate, for text without its aria-hidden parts), where it came
+    from, whether there is an ``aria-label``, and the element's whole text. Never
+    logged, stored, or printed."""
+
+    name: str
+    candidate: str
+    raw: str
+    source: NameSource
+    labelled: bool
+    text: str
+
+
+async def _read_accessible_name(
+    page: _MessagingPage,
+    element: _MessagingLocator,
+    role: str,
+    *,
+    level: int | None = None,
+) -> _ReadName | None:
+    """:func:`_accessible_name`'s reads and its answer, with where the name came from."""
     label = await element.get_attribute("aria-label", timeout=MESSAGING_READ_TIMEOUT_MS)
     text = await element.inner_text(timeout=MESSAGING_READ_TIMEOUT_MS)
     hidden_parts = element.locator(ARIA_HIDDEN)
@@ -1699,7 +1778,15 @@ async def _accessible_name(
         if part:
             shown = shown.replace(part, " ", 1)
     visible = await element.filter(visible=True).count() == 1
-    for raw in dict.fromkeys(c for c in (label, text, shown) if c is not None):
+    tried: set[str] = set()
+    for source, raw in (
+        (NameSource.LABEL, label),
+        (NameSource.TEXT, text),
+        (NameSource.SHOWN, shown),
+    ):
+        if raw is None or raw in tried:
+            continue
+        tried.add(raw)
         candidate = " ".join(raw.split())
         if not candidate:
             continue
@@ -1707,8 +1794,302 @@ async def _accessible_name(
             role, name=candidate, exact=True, include_hidden=not visible, level=level
         )
         if await element.and_(matcher).count() == 1:
-            return _name(candidate)
+            name = _name(candidate)
+            assert name is not None  # a non-empty candidate always has a name
+            # Text without its aria-hidden parts has a space where each part was: only
+            # an aria-label or the text is "as read".
+            read = candidate if source is NameSource.SHOWN else raw
+            return _ReadName(name, candidate, read, source, label is not None, text)
     return None
+
+
+# --- #495: the close control's shape, in counts and fixed words ----------------------------
+
+
+class NameRelation(enum.StrEnum):
+    """How a close button's name, past :data:`CLOSE_CONTROL_PREFIX`, relates to the header
+    link's name (#495). The first that holds, in this order."""
+
+    EXACT = "exact"
+    WHITESPACE = "equal after whitespace normalization"
+    UNICODE = "equal after whitespace and NFC normalization"
+    CASE = "differ only in case"
+    HEADER_STARTS = "header name starts with suffix"
+    SUFFIX_STARTS = "suffix starts with header name"
+    HEADER_CONTAINS = "header name contains suffix"
+    SUFFIX_CONTAINS = "suffix contains header name"
+    UNRELATED = "unrelated"
+
+
+def _playwright_space(text: str) -> str:
+    """Whitespace as Playwright's role matcher normalizes it on both sides: zero-width
+    spaces and soft hyphens dropped, trimmed, and runs collapsed to one space."""
+    return " ".join(text.replace("\u200b", "").replace("\u00ad", "").split())
+
+
+def name_relation(header: str, suffix: str) -> tuple[NameRelation, int]:
+    """How ``suffix`` (a close button's name past its prefix) relates to ``header`` (the
+    header link's name), and the header's length minus the suffix's, in characters, after
+    whitespace and NFC normalization. Neither string leaves this function."""
+    spaced = _playwright_space(header), _playwright_space(suffix)
+    h, s = (unicodedata.normalize("NFC", part) for part in spaced)
+    difference = len(h) - len(s)
+    if header == suffix:
+        return NameRelation.EXACT, difference
+    if spaced[0] == spaced[1]:
+        return NameRelation.WHITESPACE, difference
+    if h == s:
+        return NameRelation.UNICODE, difference
+    if h.casefold() == s.casefold():
+        return NameRelation.CASE, difference
+    for relation, holds in (
+        (NameRelation.HEADER_STARTS, h.startswith(s)),
+        (NameRelation.SUFFIX_STARTS, s.startswith(h)),
+        (NameRelation.HEADER_CONTAINS, s in h),
+        (NameRelation.SUFFIX_CONTAINS, h in s),
+    ):
+        if holds:
+            return relation, difference
+    return NameRelation.UNRELATED, difference
+
+
+def _longer(difference: int, longer: str, shorter: str) -> str:
+    if difference > 0:
+        return f"{longer} longer by {difference}"
+    if difference < 0:
+        return f"{shorter} longer by {-difference}"
+    return "same length"
+
+
+@dataclass(frozen=True, slots=True)
+class CloseButtonShape:
+    """One button whose name starts with :data:`CLOSE_CONTROL_PREFIX` (#495).
+
+    ``relation`` and ``difference`` (header minus suffix, in characters) are ``None``
+    when its name, or the header's, could not be read; ``why`` then says which, in fixed
+    words. ``hidden_text`` is whether its name changes when hidden text is counted, as
+    the close lookup counts it (``include_hidden=True``)."""
+
+    visible: bool
+    relation: NameRelation | None = None
+    difference: int | None = None
+    source: NameSource | None = None
+    hidden_text: bool | None = None
+    why: str | None = None
+
+    def describe(self) -> str:
+        where = "visible" if self.visible else "hidden"
+        if self.relation is None or self.difference is None:
+            return f"{where}, {self.why or 'not compared'}"
+        parts = [
+            where,
+            f"suffix vs header name: {_longer(self.difference, 'header name', 'suffix')}",
+            self.relation.value,
+        ]
+        if self.source is not None:
+            parts.append(f"its name from {self.source.value}")
+        if self.hidden_text is not None:
+            parts.append(
+                "hidden text changes its name" if self.hidden_text else "no hidden text in its name"
+            )
+        return ", ".join(parts)
+
+
+@dataclass(frozen=True, slots=True)
+class CloseShape:
+    """The close control's shape in one ``Messaging`` dialog, in counts and fixed words
+    only (#495): never a name, a URL, an href, or the page's text.
+
+    Counts are of buttons in the dialog, hidden ones included, unless they say otherwise.
+    ``exact`` is the close lookup's own count, by the exact name it asks for, when there
+    is a header name to ask with. The ``header_*`` fields describe the header link:
+    where its name came from, whether it has an ``aria-label``, how many elements and
+    ``aria-hidden`` elements are under it, its text's length minus its name's, and
+    whether NFC normalization changes the name the lookup asks with."""
+
+    by_prefix: int
+    by_prefix_visible: int
+    by_prefix_shown_names: int
+    on_page_by_prefix: int
+    any_close: int
+    draft_close: int
+    options_by_prefix: int
+    minimize_by_prefix: int
+    draft_minimize: int
+    exact: int | None
+    header_links: int
+    header_source: NameSource | None = None
+    header_labelled: bool | None = None
+    header_elements: int | None = None
+    header_hidden_parts: int | None = None
+    header_text_extra: int | None = None
+    header_nfc_changes: bool | None = None
+    buttons: tuple[CloseButtonShape, ...] = ()
+
+    def header_words(self) -> str:
+        """The header link's name, described: never the name."""
+        if self.header_links != 1:
+            return f"{self.header_links} header links"
+        if self.header_source is None:
+            return "header name unreadable"
+        parts = [f"header name from {self.header_source.value}"]
+        if self.header_labelled is not None:
+            parts.append("aria-label present" if self.header_labelled else "no aria-label")
+        if self.header_elements is not None:
+            parts.append(f"{self.header_elements} element(s) under the link")
+        if self.header_hidden_parts is not None:
+            parts.append(f"{self.header_hidden_parts} aria-hidden")
+        extra = self.header_text_extra
+        if extra is not None:
+            parts.append(
+                "its text is its name"
+                if extra == 0
+                else f"its text longer than its name by {extra}"
+                if extra > 0
+                else f"its text shorter than its name by {-extra}"
+            )
+        if self.header_nfc_changes:
+            parts.append("NFC changes it")
+        return ", ".join(parts)
+
+    def describe(self) -> str:
+        """One line for a run's note: why the close lookup missed, in fixed words."""
+        parts = [
+            f"{self.by_prefix} close button(s) by prefix",
+            f"{self.by_prefix_visible} visible",
+        ]
+        if self.exact is not None:
+            parts.append(f"{self.exact} by the exact name")
+        if self.by_prefix_shown_names != self.by_prefix_visible:
+            parts.append(f"{self.by_prefix_shown_names} by prefix without hidden text")
+        if self.on_page_by_prefix != self.by_prefix:
+            parts.append(f"{self.on_page_by_prefix} by prefix on the page")
+        if self.any_close != self.by_prefix:
+            parts.append(f"{self.any_close} named Close-anything")
+        if self.draft_close:
+            parts.append(f"{self.draft_close} named {DRAFT_CLOSE_NAME!r}")
+        parts += [f"button {n}: {b.describe()}" for n, b in enumerate(self.buttons, start=1)]
+        parts.append(self.header_words())
+        return "; ".join(parts)
+
+    def lines(self) -> list[str]:
+        """The CLI's report lines (``netkeeper linkedin message-check --bubble``)."""
+        exact = "-" if self.exact is None else str(self.exact)
+        lines = [
+            f"header links in the dialog: {self.header_links}; {self.header_words()}",
+            f"close buttons by prefix (hidden ones counted): {self.by_prefix};"
+            f" visible: {self.by_prefix_visible};"
+            f" by prefix without hidden text: {self.by_prefix_shown_names};"
+            f" on the whole page: {self.on_page_by_prefix}",
+            f"close lookup by the exact name: {exact}",
+            f"buttons named Close-anything (any case): {self.any_close};"
+            f" named {DRAFT_CLOSE_NAME!r}: {self.draft_close}",
+            f"options buttons by prefix: {self.options_by_prefix};"
+            f" minimize buttons by prefix: {self.minimize_by_prefix};"
+            f" named {DRAFT_MINIMIZE_NAME!r}: {self.draft_minimize}",
+        ]
+        lines += [f"close button {n}: {b.describe()}" for n, b in enumerate(self.buttons, start=1)]
+        if self.by_prefix > len(self.buttons):
+            lines.append(f"(only the first {len(self.buttons)} close buttons are described)")
+        return lines
+
+
+async def read_close_shape(tab: _MessagingPage, dialog: _MessagingLocator) -> CloseShape:
+    """The close control's shape in ``dialog``, one ``Messaging`` dialog (#495). Reads only:
+    counts by role and name, and the reads :func:`_accessible_name` makes. No click, key,
+    focus, or script. What it reads never leaves it but as counts and fixed words."""
+
+    def buttons(
+        name: str | re.Pattern[str],
+        *,
+        scope: _MessagingLocator | _MessagingPage = dialog,
+        hidden: bool = True,
+    ) -> _MessagingLocator:
+        return scope.get_by_role(
+            CLOSE_CONTROL_ROLE,
+            name=name,
+            exact=True if isinstance(name, str) else None,
+            include_hidden=hidden,
+        )
+
+    closes = buttons(CLOSE_CONTROL_PATTERN)
+    links = dialog.locator(BUBBLE_HEADER_LINK)
+    header_links = await links.count()
+    header = await _read_accessible_name(tab, links, "link") if header_links == 1 else None
+    found = await closes.count()
+    described = [
+        await _close_button_shape(tab, closes.nth(index), header)
+        for index in range(min(found, CLOSE_SHAPE_MAX))
+    ]
+    shape = CloseShape(
+        by_prefix=found,
+        by_prefix_visible=await closes.filter(visible=True).count(),
+        by_prefix_shown_names=await buttons(CLOSE_CONTROL_PATTERN, hidden=False).count(),
+        on_page_by_prefix=await buttons(CLOSE_CONTROL_PATTERN, scope=tab).count(),
+        any_close=await buttons(ANY_CLOSE_PATTERN).count(),
+        draft_close=await buttons(DRAFT_CLOSE_NAME).count(),
+        options_by_prefix=await buttons(OPTIONS_CONTROL_PATTERN).count(),
+        minimize_by_prefix=await buttons(MINIMIZE_CONTROL_PATTERN).count(),
+        draft_minimize=await buttons(DRAFT_MINIMIZE_NAME).count(),
+        exact=None,
+        header_links=header_links,
+        buttons=tuple(described),
+    )
+    if header is None:
+        return shape
+    return replace(
+        shape,
+        exact=await buttons(f"{CLOSE_CONTROL_PREFIX}{header.name}").count(),
+        header_source=header.source,
+        header_labelled=header.labelled,
+        header_elements=await links.locator(ANY_ELEMENT).count(),
+        header_hidden_parts=await links.locator(ARIA_HIDDEN).count(),
+        header_text_extra=len(_playwright_space(header.text)) - len(header.candidate),
+        header_nfc_changes=header.name != header.candidate,
+    )
+
+
+#: ``close_sent_bubble``'s refusal when the lookup doesn't find exactly one close
+#: control. A run's note may add the shape after it, in parentheses (#495).
+NO_ONE_CLOSE_CONTROL: Final = "the sent bubble does not have one close control for this person"
+
+
+async def _no_one_close_control(tab: _MessagingPage, dialog: _MessagingLocator) -> str:
+    """:data:`NO_ONE_CLOSE_CONTROL`, and why, from :func:`read_close_shape` (#495). A shape
+    that can't be read changes only the words after the refusal, never the refusal."""
+    try:
+        shape = await read_close_shape(tab, dialog)
+    except Exception as exc:
+        log.info("the close control's shape could not be read (%s)", type(exc).__name__)
+        return f"{NO_ONE_CLOSE_CONTROL} (its shape could not be read)"
+    return f"{NO_ONE_CLOSE_CONTROL} ({shape.describe()})"
+
+
+async def _close_button_shape(
+    tab: _MessagingPage, button: _MessagingLocator, header: _ReadName | None
+) -> CloseButtonShape:
+    """One close button, against the header link's name (#495). Reads only."""
+    visible = await button.filter(visible=True).count() == 1
+    read = await _read_accessible_name(tab, button, CLOSE_CONTROL_ROLE)
+    if read is None:
+        return CloseButtonShape(visible, why="its name could not be read")
+    if not read.candidate.startswith(CLOSE_CONTROL_PREFIX):
+        return CloseButtonShape(visible, source=read.source, why="no prefix without hidden text")
+    # The close lookup counts hidden text in a button's name (include_hidden=True).
+    same = tab.get_by_role(CLOSE_CONTROL_ROLE, name=read.candidate, exact=True, include_hidden=True)
+    hidden_text = await button.and_(same).count() != 1
+    if header is None:
+        return CloseButtonShape(
+            visible, source=read.source, hidden_text=hidden_text, why="no header name to compare"
+        )
+    raw = read.raw.lstrip()
+    suffix = (
+        raw[len(CLOSE_CONTROL_PREFIX) :]
+        if raw.startswith(CLOSE_CONTROL_PREFIX)
+        else read.candidate[len(CLOSE_CONTROL_PREFIX) :]
+    )
+    relation, difference = name_relation(header.raw, suffix)
+    return CloseButtonShape(visible, relation, difference, read.source, hidden_text)
 
 
 def _keyed(chunk: str) -> bool:
@@ -3549,11 +3930,75 @@ class BrowserRun:
             include_hidden=True,
         )
         if await closes.count() != 1:
-            return "the sent bubble does not have one close control for this person"
+            return await _no_one_close_control(tab, dialogs)
         visible = closes.filter(visible=True)
         if await visible.count() != 1:
             return "the sent bubble's close control is not visible"
         return visible
+
+    async def bubble_check(self, profile_id: str, origin: str) -> BubbleCheck:
+        """#495, ``netkeeper linkedin message-check --bubble``: the close control's shape in
+        the message bubble a person opened by hand for this contact, read in the tab it
+        is in. Reads only, and never this run's own tab: it opens, navigates, brings
+        forward, clicks, types, and focuses nothing.
+
+        Of the context's open tabs, it reads only those on ``origin``. A tab is the
+        contact's when one of its ``Messaging`` dialogs (hidden ones counted, the first
+        :data:`BUBBLE_CHECK_MAX_DIALOGS`) has exactly one header link, to
+        ``/in/<profile id>/``, as :meth:`close_sent_bubble` checks it. With exactly one
+        such tab, it reports that tab's dialog and composer counts and the shape of that
+        dialog's close control (:func:`read_close_shape`)."""
+        want = urlsplit(origin)
+        path = f"{PROFILE_PATH_PREFIX}{profile_id}/"
+        pages = [page for page in self._attachment.context.pages if not page.is_closed()]
+        on_origin: list[_MessagingPage] = []
+        for page in pages:
+            try:
+                seen = urlsplit(page.url)
+                same = (seen.scheme, seen.hostname, seen.port) == (
+                    want.scheme,
+                    want.hostname,
+                    want.port,
+                )
+            except ValueError:
+                same = False
+            if same:
+                on_origin.append(cast(_MessagingPage, page))
+        with_bubble = 0
+        found: list[tuple[_MessagingPage, _MessagingLocator, int, int]] = []
+        for tab in on_origin:
+            dialogs = tab.get_by_role(
+                BUBBLE_ROLE, name=BUBBLE_NAME, exact=True, include_hidden=True
+            )
+            count = await dialogs.count()
+            if count:
+                with_bubble += 1
+            mine = []
+            for index in range(min(count, BUBBLE_CHECK_MAX_DIALOGS)):
+                dialog = dialogs.nth(index)
+                links = dialog.locator(BUBBLE_HEADER_LINK)
+                if await links.count() != 1:
+                    continue
+                href = await links.get_attribute("href", timeout=MESSAGING_READ_TIMEOUT_MS)
+                if _is_profile_link(href, path, fold_case=False):
+                    mine.append(dialog)
+            if mine:
+                found.append((tab, mine[0], count, len(mine)))
+        check = BubbleCheck(len(pages), len(on_origin), with_bubble, len(found))
+        if len(found) != 1:
+            return check
+        tab, dialog, count, for_contact = found[0]
+        composer = tab.get_by_role(
+            COMPOSER_ROLE, name=COMPOSER_NAME, exact=True, include_hidden=True
+        )
+        return replace(
+            check,
+            dialogs=count,
+            dialogs_for_contact=for_contact,
+            composers=await composer.count(),
+            composer_in_dialog=await dialog.filter(has=composer).count() == 1,
+            shape=await read_close_shape(tab, dialog),
+        )
 
     async def close_sent_tab(self) -> None:
         """ADR 0008, decision D3: close this run's tab once its sent message's bubble

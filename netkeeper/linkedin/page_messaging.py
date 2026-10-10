@@ -45,6 +45,10 @@ No body, name, slug, or url reaches a log line or a reason from here.
 :class:`PageMessageCheck` (#473) runs steps 1 to 3 and stops before step 4: no
 observation, no click, no key. It reads the page instead, and its report says what the
 click would have decided (``netkeeper linkedin message-check``).
+
+:class:`PageBubbleCheck` (#495) takes none of these steps. It reads the message bubble a
+person opened by hand, in the tab it is in, and reports the shape of its close control
+(``netkeeper linkedin message-check --bubble``).
 """
 
 from __future__ import annotations
@@ -65,6 +69,7 @@ from netkeeper.linkedin.browser import (
     MESSAGE_NOT_ON_SCREEN,
     TOP_CARD_COVERED,
     BrowserRun,
+    BubbleCheck,
     BubbleLayout,
     BubbleRecipient,
     MessageCheckSnapshot,
@@ -639,3 +644,25 @@ class PageMessageCheck:
         snapshots.append(await self._run.message_check_snapshot(path, profile_id, click))
         since.append(round(loop.time() - loaded, 1))
         return MessageCheckResult(tuple(snapshots), tuple(since), cover, scrolled_back, depth)
+
+
+class PageBubbleCheck:
+    """The close control's shape in a bubble a person opened by hand (#495).
+
+    :meth:`run` makes one read,
+    :meth:`~netkeeper.linkedin.browser.BrowserRun.bubble_check`, in the tab that holds
+    the contact's bubble. It never opens, navigates, or brings a tab forward, and never
+    clicks, types, focuses, or observes: ``tests/test_browser_safety.py`` pins that.
+    One instance per check."""
+
+    def __init__(self, run: BrowserRun, *, origin: str = LINKEDIN_ORIGIN) -> None:
+        self._run = run
+        self._origin = _require_origin(origin)
+        self._used = False
+
+    async def run(self, profile_id: str) -> BubbleCheck:
+        """Read the bubble's shape once. See the class docstring."""
+        if self._used:
+            raise RuntimeError("a PageBubbleCheck runs once")
+        self._used = True
+        return await self._run.bubble_check(profile_id, self._origin)

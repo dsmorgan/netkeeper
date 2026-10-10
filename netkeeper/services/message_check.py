@@ -14,7 +14,9 @@ writes, and nothing touches a browser here:
    is claimed, so no message or step changes.
 2. **Under the lock** (:func:`spend`): the session flag, heat, and a cancel again, then
    one ``profile_visits`` unit, before the navigation, as a prefill spends one. No
-   ``li_prefills`` or ``li_messages_auto`` unit is spent.
+   ``li_prefills`` or ``li_messages_auto`` unit is spent. The bubble check (#495,
+   ``message-check --bubble``) opens no profile: it rechecks the same (:func:`recheck`)
+   and spends nothing.
 3. **After** (:func:`finish`): a wall at the profile sets the session flag or raises
    heat, as a prefill's does; the run ends ``completed`` with stop reason
    :data:`MESSAGE_CHECK_STOP`, or ``failed`` with why. What the check read is printed by
@@ -51,6 +53,13 @@ MESSAGE_CHECK_NOTE: Final = (
     "message check (#473): a dry run of a prefill up to the Message click;"
     " nothing was clicked, typed, or focused"
 )
+#: #495: the stop reason and note of a bubble check (``message-check --bubble``), a read
+#: of a message bubble a person opened by hand: no profile opened, nothing clicked.
+BUBBLE_CHECK_STOP: Final = "bubble_check"
+BUBBLE_CHECK_NOTE: Final = (
+    "bubble check (#495): a read of an open message bubble's close control;"
+    " no profile was opened, and nothing was clicked, typed, or focused"
+)
 _HEAT_WALLS: Final = frozenset({Outcome.THROTTLED, Outcome.CHECKPOINT})
 _FLAG_WALLS: Final = frozenset({Outcome.CHECKPOINT, Outcome.LOGGED_OUT})
 _BAD_ID_CHARACTERS: Final = frozenset("/?#&=,()% ")
@@ -71,12 +80,19 @@ class CheckTarget:
 
 
 def start(
-    session: Session, user: User, contact_id: int, *, now: datetime, settings: Settings
+    session: Session,
+    user: User,
+    contact_id: int,
+    *,
+    now: datetime,
+    settings: Settings,
+    bubble: bool = False,
 ) -> CheckTarget:
     """Step 1 of the module docstring. Raises ``LookupError`` for no such contact,
     :class:`CheckRefused` for a contact the check can't open, and what
     :func:`runs.refuse_if_outside_active_hours`, :func:`runs.refuse_if_flagged_or_hot`
-    and :func:`runs.create_run` raise. Needs a writer session."""
+    and :func:`runs.create_run` raise. Needs a writer session. ``bubble`` records a bubble
+    check (#495) instead: the same gates and run, its own note."""
     contact = get_scoped(session, user, Contact, contact_id)
     if contact is None:
         raise LookupError(f"no contact {contact_id}")
@@ -102,7 +118,7 @@ def start(
         now=now,
         gate=runs.MESSAGE_CHECK_GATE,
     )
-    run.notes = MESSAGE_CHECK_NOTE
+    run.notes = BUBBLE_CHECK_NOTE if bubble else MESSAGE_CHECK_NOTE
     return CheckTarget(run.id, account_id, public_id, profile_id)
 
 
@@ -118,16 +134,11 @@ def spend(
     and nothing is spent. Under the browser lock, before the navigation."""
     with session_scope(factory, write=True) as session:
         user = _user(session, user_id)
-        try:
-            runs.refuse_if_flagged_or_hot(
-                session, user, target.account_id, now=now, settings=settings.linkedin
-            )
-        except runs.SessionFlagged as exc:
-            return "session_flagged", str(exc)
-        except runs.HeatSkipped as exc:
-            return "heat_skip", str(exc)
-        if runs.cancel_requested(session, user, target.run_id):
-            return runs.CANCELLED, "cancelled before the profile opened"
+        refused = _recheck(
+            session, user, target, settings=settings, now=now, when="before the profile opened"
+        )
+        if refused is not None:
+            return refused
         try:
             budgets.consume(
                 session,
@@ -139,6 +150,45 @@ def spend(
             )
         except BudgetExceeded:
             return "budget", "today's or this week's profile-visit budget is spent"
+    return None
+
+
+def recheck(
+    factory: sessionmaker[Session],
+    user_id: int,
+    target: CheckTarget,
+    *,
+    settings: Settings,
+    now: datetime,
+) -> tuple[str, str] | None:
+    """Step 2 for the bubble check (#495), which opens no profile: the session flag, heat,
+    and a cancel again, under the browser lock, and nothing spent."""
+    with session_scope(factory) as session:
+        user = _user(session, user_id)
+        return _recheck(
+            session, user, target, settings=settings, now=now, when="before the page was read"
+        )
+
+
+def _recheck(
+    session: Session,
+    user: User,
+    target: CheckTarget,
+    *,
+    settings: Settings,
+    now: datetime,
+    when: str,
+) -> tuple[str, str] | None:
+    try:
+        runs.refuse_if_flagged_or_hot(
+            session, user, target.account_id, now=now, settings=settings.linkedin
+        )
+    except runs.SessionFlagged as exc:
+        return "session_flagged", str(exc)
+    except runs.HeatSkipped as exc:
+        return "heat_skip", str(exc)
+    if runs.cancel_requested(session, user, target.run_id):
+        return runs.CANCELLED, f"cancelled {when}"
     return None
 
 

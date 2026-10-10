@@ -151,7 +151,14 @@ from netkeeper.services.simulate_run import render as render_simulation
 from netkeeper.services.users import ensure_local_user
 from netkeeper.web.api.campaigns import results_out
 from netkeeper.web.app import create_app, openapi_json
-from netkeeper.worker import BrowserWorker, MessageCheckResult, run_message_check, serve_app
+from netkeeper.worker import (
+    BrowserWorker,
+    BubbleCheckResult,
+    MessageCheckResult,
+    run_bubble_check,
+    run_message_check,
+    serve_app,
+)
 
 log = logging.getLogger(__name__)
 
@@ -1679,6 +1686,17 @@ def _since(text: str) -> timedelta:
 def linkedin_message_check(
     ctx: typer.Context,
     contact_id: Annotated[int, typer.Argument(help="The contact whose profile to check.")],
+    bubble: Annotated[
+        bool,
+        typer.Option(
+            "--bubble",
+            help=(
+                "Read the message bubble you opened by hand for this contact, in the tab"
+                " it is in, and report its close control's shape (#495). Opens no"
+                " profile and spends no profile visit."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Check why a prefill would refuse its Message click, without clicking (#473).
 
@@ -1693,8 +1711,17 @@ def linkedin_message_check(
     It prints a report to this terminal only: sizes, positions, tag and role names,
     and fixed words, never a name, a URL, an href, or the page's text. Nothing it reads
     is stored; the database gets only the run's own row and the visit.
+
+    With --bubble (#495), it opens nothing. Open the contact's message bubble by hand
+    in the netkeeper Chrome window first; it finds the tab that holds that bubble and
+    reports, in counts and fixed words, how the bubble's close control matches the name
+    in its header, which is what auto-send's close click looks for. Same lock, gates,
+    and run row; no profile visit.
     """
     settings = _load_settings_or_exit(ctx.ensure_object(CliState))
+    if bubble:
+        _bubble_check(settings, contact_id)
+        return
     with _campaign_db() as factory:
         with session_scope(factory, write=True) as session:
             user = _local_user_or_exit(session)
@@ -1733,6 +1760,86 @@ def linkedin_message_check(
     typer.echo(f"run {target.run_id}: {status.value} ({reason})")
     if status is not SyncRunStatus.COMPLETED:
         raise typer.Exit(code=1)
+
+
+def _bubble_check(settings: Settings, contact_id: int) -> None:
+    """``message-check --bubble`` (#495): the close control's shape, read only."""
+    with _campaign_db() as factory:
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            user_id = user.id
+            try:
+                target = message_check.start(
+                    session,
+                    user,
+                    contact_id,
+                    now=datetime.now(UTC),
+                    settings=settings,
+                    bubble=True,
+                )
+            except (
+                LookupError,
+                message_check.CheckRefused,
+                runs.RunError,
+                runs.HeatSkipped,
+                runs.SessionFlagged,
+                runs.OutsideActiveHours,
+            ) as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+        typer.echo(
+            f"run {target.run_id} (bubble check) started; it reads the open bubble and opens,"
+            f" clicks, types, and focuses nothing. `netkeeper linkedin cancel {target.run_id}`"
+            " stops it"
+        )
+        result = asyncio.run(
+            run_bubble_check(_provider(settings), factory, user_id, target, settings=settings)
+        )
+        with session_scope(factory) as session:
+            finished = runs.get_run(session, _local_user_or_exit(session), target.run_id)
+            status = finished.status
+            reason = runs.describe_stop_reason(finished.stop_reason) or "-"
+    for line in _bubble_check_lines(target.run_id, result):
+        typer.echo(line)
+    typer.echo(f"run {target.run_id}: {status.value} ({reason})")
+    if status is not SyncRunStatus.COMPLETED:
+        raise typer.Exit(code=1)
+
+
+def _bubble_check_lines(run_id: int, result: BubbleCheckResult) -> list[str]:
+    """The bubble check's report (#495): counts and fixed words only."""
+    lines = [
+        "--- bubble check report (no names, URLs, hrefs, or page text) ---",
+        f"run {run_id}: nothing was opened, clicked, typed, or focused",
+    ]
+    if result.stopped is not None:
+        lines.append(f"stopped before its read: {result.stopped}")
+    read = result.bubble
+    if read is None:
+        return lines
+    lines.append(
+        f"open tabs: {read.tabs}; on LinkedIn: {read.on_origin};"
+        f" with a Messaging dialog: {read.with_bubble};"
+        f" with this contact's bubble: {read.for_contact}"
+    )
+    if read.for_contact != 1:
+        lines.append(
+            "no tab holds this contact's bubble: open it by hand in the netkeeper Chrome"
+            " window, then run this again"
+            if read.for_contact == 0
+            else "more than one tab holds this contact's bubble: close all but one, then"
+            " run this again"
+        )
+        return lines
+    lines.append(
+        f"in that tab: Messaging dialogs (hidden ones counted): {_check_count(read.dialogs)};"
+        f" this contact's: {_check_count(read.dialogs_for_contact)};"
+        f" composers: {_check_count(read.composers)};"
+        f" composer in the contact's dialog: {_yes(read.composer_in_dialog)}"
+    )
+    if read.shape is not None:
+        lines += read.shape.lines()
+    return lines
 
 
 def _check_box(box: Mapping[str, float] | None) -> str:

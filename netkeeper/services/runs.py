@@ -900,6 +900,8 @@ STOP_REASON_TEXT: Final[Mapping[str, str]] = {
     "error": "an error stopped it",
     # #473: a Message check, a dry run of a prefill up to the click
     "message_check": "checked the Message control up to the click; nothing was clicked",
+    # #495: a bubble check, a read of a message bubble opened by hand
+    "bubble_check": "read the open message bubble's close control; nothing was clicked",
 }
 
 
