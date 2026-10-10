@@ -24,6 +24,7 @@ from messaging_dom import (
     parse_into,
 )
 from messaging_pages import (
+    MARISOL,
     OWNER,
     THADDEUS,
     ZEPHYRINE,
@@ -470,7 +471,7 @@ def _new(chips: list[Member], *, cards: str | None = None, heading: str = "") ->
         _new([ZEPHYRINE], heading="<h2>New message</h2>"),
         _new(
             [ZEPHYRINE],
-            cards=f'<a href="/in/{ZEPHYRINE.slug}/">a</a><a href="/in/{ZEPHYRINE.slug}/">b</a>',
+            cards=f'<a href="/in/{ZEPHYRINE.slug}/">a</a><a href="/in/{THADDEUS.slug}/">b</a>',
         ),
         _new([ZEPHYRINE], cards=f'<a href="/in/{THADDEUS.slug}/">x</a>'),
         _new([ZEPHYRINE], cards=""),
@@ -505,9 +506,9 @@ NEW_REASONS = {
     "no_chip": "exactly one recipient",
     "two_chips": "exactly one recipient",
     "two_headings": "or more than one is",
-    "two_cards": "for someone else",
+    "two_cards": "links to more than one person",
     "card_for_another": "for someone else",
-    "no_card": "for someone else",
+    "no_card": "links to no profile",
     "no_field": "recipient field is missing",
     "a_dialog_without_the_heading": "shows the conversation's bubble",
     "other_layout": "or more than one is",
@@ -525,7 +526,7 @@ async def test_the_innermost_scope_is_read_not_a_wrapper_around_the_page() -> No
     site = MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, None, html=html))
     ran = await prefill(site)
     assert_no_keys(ran)
-    assert "for someone else" in ran.result.outcome.reason
+    assert ran.result.outcome.reason == "the new-message bubble links to no profile"
 
 
 async def test_a_reply_composer_outside_its_dialog_refuses() -> None:
@@ -544,6 +545,137 @@ async def test_the_profiles_own_slug_never_stands_in_for_the_bubbles_card() -> N
     site = MessagingSite(ZEPHYRINE, profile_html=profile, bubble=Bubble(ZEPHYRINE, None, html=html))
     ran = await prefill(site)
     assert_no_keys(ran)
+
+
+# --- #481: the never-messaged card links the contact more than once, by slug or id ----
+
+Z_SLUG, Z_ID = ZEPHYRINE.slug, ZEPHYRINE.profile_id
+T_SLUG, T_ID = THADDEUS.slug, THADDEUS.profile_id
+
+
+def _photo_and_name(photo: str, name: str) -> str:
+    """The card as #481 suspects LinkedIn draws it: the photo and the name, each a link."""
+    return (
+        f'<a href="{photo}"><img alt="" src="/invented.png"></a>'
+        f'<a href="{name}"><span>{ZEPHYRINE.name}</span></a>'
+    )
+
+
+@pytest.mark.parametrize(
+    "cards",
+    [
+        _photo_and_name(f"/in/{Z_SLUG}/", f"/in/{Z_SLUG}/"),
+        _photo_and_name(f"/in/{Z_ID}/", f"/in/{Z_ID}/"),
+        _photo_and_name(f"/in/{Z_ID}/", f"https://www.linkedin.com/in/{Z_SLUG}/"),
+        f'<a href="/in/{Z_ID}">x</a>',
+        f'<a href="/in/{Z_SLUG.upper()}/?miniProfileUrn=x">x</a>',
+        # A link that isn't a profile is no part of the card's check.
+        _photo_and_name(f"/in/{Z_SLUG}/", f"/in/{Z_SLUG}/") + '<a href="/company/x/">co</a>',
+    ],
+    ids=["two_by_slug", "two_by_id", "id_and_slug", "one_by_id", "slug_case", "other_link"],
+)
+async def test_a_card_whose_every_profile_link_is_the_contact_is_typed(cards: str) -> None:
+    html = _new([ZEPHYRINE], cards=cards)
+    ran = await prefill(MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, None, html=html)))
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    assert composer_text(ran.tab) == BODY
+
+
+MORE_THAN_ONE = "the new-message bubble links to more than one person"
+SOMEONE_ELSE = "the new-message bubble is for someone else"
+NO_PROFILE = "the new-message bubble links to no profile"
+
+
+@pytest.mark.parametrize(
+    ("cards", "reason"),
+    [
+        (_photo_and_name(f"/in/{Z_SLUG}/", f"/in/{T_SLUG}/"), MORE_THAN_ONE),
+        (_photo_and_name(f"/in/{T_ID}/", f"/in/{Z_ID}/"), MORE_THAN_ONE),
+        (_photo_and_name(f"/in/{T_SLUG}/", f"/in/{T_SLUG}/"), SOMEONE_ELSE),
+        (_photo_and_name(f"/in/{T_ID}/", f"/in/{T_ID}/"), SOMEONE_ELSE),
+        (_photo_and_name(f"/in/{T_SLUG}/", f"/in/{MARISOL.slug}/"), MORE_THAN_ONE),
+        # The member id is compared exactly, as the existing conversation's header is.
+        (f'<a href="/in/{Z_ID.lower()}/">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/{Z_ID.upper()}/">x</a>', SOMEONE_ELSE),
+        # The contact's slug, but not exactly the profile's own path, or not on LinkedIn.
+        (f'<a href="/in/{Z_SLUG}/overlay/photo/">x</a>', SOMEONE_ELSE),
+        (f'<a href="https://evil.example/in/{Z_SLUG}/">x</a>', SOMEONE_ELSE),
+        (f'<a href="http://www.linkedin.com/in/{Z_SLUG}/">x</a>', SOMEONE_ELSE),
+        (_photo_and_name(f"/in/{Z_SLUG}/", f"https://evil.example/in/{Z_SLUG}/"), MORE_THAN_ONE),
+        # A percent-encoded or upper-case /in/ still names someone.
+        (_photo_and_name(f"/in/{Z_SLUG}/", f"/%69n/{T_SLUG}/"), MORE_THAN_ONE),
+        (_photo_and_name(f"/in/{Z_SLUG}/", f"/IN/{T_SLUG}/"), MORE_THAN_ONE),
+        ("", NO_PROFILE),
+        ('<a href="/company/x/">co</a><a>no href</a>', NO_PROFILE),
+        (f'<a href="/in/{Z_SLUG}x/">x</a>', SOMEONE_ELSE),
+        ('<a href="/in/">x</a>', SOMEONE_ELSE),
+    ],
+    ids=[
+        "contact_and_another_slug",
+        "another_id_and_contact",
+        "another_by_slug_twice",
+        "another_by_id_twice",
+        "two_others",
+        "id_lower_case",
+        "id_upper_case",
+        "more_path",
+        "another_host",
+        "http",
+        "contact_and_another_host",
+        "encoded_in",
+        "upper_case_in",
+        "no_link",
+        "no_profile_link",
+        "slug_prefix",
+        "empty_slug",
+    ],
+)
+async def test_a_card_with_any_link_to_someone_else_or_none_refuses(
+    cards: str, reason: str
+) -> None:
+    html = _new([ZEPHYRINE], cards=cards)
+    ran = await prefill(MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, None, html=html)))
+    assert_no_keys(ran)
+    assert ran.result.outcome.reason == reason
+
+
+async def test_a_card_refusal_logs_its_links_forms_and_never_their_hrefs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cards = _photo_and_name(f"/in/{Z_ID}/", f"https://www.linkedin.com/in/{T_SLUG}/x/")
+    html = _new([ZEPHYRINE], cards=cards)
+    with caplog.at_level("INFO", logger="netkeeper.linkedin.browser"):
+        ran = await prefill(MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, None, html=html)))
+    assert_no_keys(ran)
+    lines = [r.getMessage() for r in caplog.records if "card check refused" in r.getMessage()]
+    # Written once, though the check refused on every poll of the composer wait.
+    assert lines == [
+        "the new-message bubble's card check refused (more than one person: 2 profile"
+        " link(s): link 1 id, matches; link 2 slug, more path, no match)"
+    ]
+    for value in (Z_SLUG, Z_ID, T_SLUG, T_ID, ZEPHYRINE.name, THADDEUS.name, "/in/"):
+        assert value.casefold() not in caplog.text.casefold()
+
+
+async def test_a_card_that_changes_to_add_someone_else_mid_type_stops() -> None:
+    cards = _photo_and_name(f"/in/{Z_SLUG}/", f"/in/{Z_ID}/")
+    site = MessagingSite(
+        ZEPHYRINE, bubble=Bubble(ZEPHYRINE, None, html=_new([ZEPHYRINE], cards=cards))
+    )
+
+    def another(tab: MessagingTab) -> None:
+        photo = next(
+            e
+            for e in tab.document.elements()
+            if e.tag == "a" and any(getattr(c, "tag", None) == "img" for c in e.children)
+        )
+        photo.attrs["href"] = f"/in/{T_SLUG}/"
+
+    site.after_key[2] = another
+    ran = await prefill(site)
+    assert ran.kind is MessageOutcomeKind.PARTIALLY_TYPED, ran.result
+    assert len(ran.tab.attempts) == 2
+    assert ran.result.outcome.reason == MORE_THAN_ONE
 
 
 async def test_a_chip_that_does_not_read_the_profiles_name_refuses() -> None:

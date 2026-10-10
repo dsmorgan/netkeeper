@@ -1448,14 +1448,68 @@ def _is_profile_link(href: str | None, path: str, *, fold_case: bool) -> bool:
     return seen.casefold() == want.casefold() if fold_case else seen == want
 
 
-def _profile_path(href: str | None) -> bool:
-    """Whether ``href`` points at a profile (``/in/...``), on any host or none."""
+#: A LinkedIn member id's shape (``ACoAA…``), used only to name a link's form in the
+#: never-messaged card's diagnostic log (#481), never to match anyone.
+_MEMBER_ID_SHAPE: Final = re.compile(r"^ACoA[A-Za-z0-9_-]+$")
+
+
+@dataclass(frozen=True, slots=True)
+class CardLink:
+    """One profile link in the never-messaged bubble's scope, read against the contact
+    (#481). Nothing here holds the link's ``href``, slug, or id."""
+
+    #: Exactly ``/in/<the contact's slug>/`` (case-folded) or ``/in/<their member id>/``
+    #: (exact), on LinkedIn's own host or relative (:func:`_is_profile_link`).
+    matches: bool
+    #: ``slug`` or ``id``: which form the link's first path segment has.
+    form: str
+    #: For a link that doesn't match: which person it names, as a key that only tells
+    #: two such links apart. ``None`` for a link to the contact.
+    other: str | None
+    #: Fixed words on why a link doesn't match: ``another host``, ``more path``.
+    notes: tuple[str, ...] = ()
+
+    def describe(self) -> str:
+        """The link's diagnostic in fixed words: its form, any notes, and whether it matches."""
+        return ", ".join((self.form, *self.notes, "matches" if self.matches else "no match"))
+
+
+def read_card_link(href: str | None, public_id: str, profile_id: str) -> CardLink | None:
+    """``href`` read as a profile link against the contact, or ``None`` when it isn't one.
+
+    A profile link is any whose percent-decoded path starts ``/in/``, case-folded, on any
+    host: a link elsewhere still names someone, so it counts. It matches only when it is
+    exactly the contact's vanity slug, case-folded, or exactly their member id, as
+    LinkedIn's routing reads each. Anything else (another slug or id, another host, a
+    longer path) names someone else."""
     if href is None:
-        return False
+        return None
     try:
-        return urlsplit(href).path.startswith(PROFILE_PATH_PREFIX)
+        split = urlsplit(href)
     except ValueError:
-        return False
+        return None
+    path = unquote(split.path)
+    if not path.casefold().startswith(PROFILE_PATH_PREFIX):
+        return None
+    by_slug = bool(public_id) and _is_profile_link(
+        href, f"{PROFILE_PATH_PREFIX}{public_id}/", fold_case=True
+    )
+    by_id = bool(profile_id) and _is_profile_link(
+        href, f"{PROFILE_PATH_PREFIX}{profile_id}/", fold_case=False
+    )
+    segments = _trim_path(path)[len(PROFILE_PATH_PREFIX) :].split("/")
+    first = segments[0]
+    if by_id or by_slug:
+        return CardLink(True, "id" if by_id else "slug", None)
+    notes: list[str] = []
+    if (split.scheme or split.netloc) and (
+        split.scheme != "https" or split.netloc != MESSAGE_COMPOSE_HOST
+    ):
+        notes.append("another host")
+    if len(segments) > 1:
+        notes.append("more path")
+    form = "id" if _MEMBER_ID_SHAPE.match(first) else "slug"
+    return CardLink(False, form, f"{split.netloc.casefold()}/{first.casefold()}", tuple(notes))
 
 
 def _one_composer(count: int) -> bool:
@@ -1865,6 +1919,8 @@ class BrowserRun:
         self._handed_over = False
         #: Whether :meth:`_focus_seam` ran (ADR 0007, option B): at most once per run.
         self._focus_used = False
+        #: #481: the never-messaged card check's last diagnostic line, written once each.
+        self._card_refusal_logged: str | None = None
         #: ADR 0008: set once the Send click is sent. Nothing clicks Send twice.
         self._send_attempted = False
         #: Whether :meth:`type_into_composer` ended with the whole body in the composer.
@@ -3467,8 +3523,11 @@ class BrowserRun:
           header ``h2`` holds exactly one link, to ``/in/<profile id>/``.
         - Never messaged: exactly one ``New message`` heading; in the innermost element
           holding both it and the composer, exactly one chip (a button named
-          ``Remove …``), one recipient field, and one ``/in/`` link, to the contact's
-          slug. A dialog, if there is one, holds that heading. Without a slug, refused.
+          ``Remove …``), one recipient field, and at least one ``/in/`` link, every one
+          of them to the contact: their slug, case-folded, or their member id, exact
+          (:func:`read_card_link`, #481). No profile link, a link to anyone else, or
+          links to two people each refuse with their own reason. A dialog, if there is
+          one, holds that heading. Without a slug, refused.
         """
         composers = await composer.count()
         if not _one_composer(composers):
@@ -3541,12 +3600,36 @@ class BrowserRun:
             await links.nth(index).get_attribute("href", timeout=MESSAGING_READ_TIMEOUT_MS)
             for index in range(await links.count())
         ]
-        cards = [href for href in hrefs if _profile_path(href)]
-        if len(cards) != 1 or not _is_profile_link(
-            cards[0], f"{PROFILE_PATH_PREFIX}{recipient.public_id}/", fold_case=True
-        ):
-            return "the new-message bubble is for someone else"
-        return None
+        # #481: the card may link the contact more than once (its photo and its name),
+        # by slug or by member id. Every profile link must be the contact's.
+        cards = [
+            card
+            for href in hrefs
+            if (card := read_card_link(href, recipient.public_id, recipient.profile_id)) is not None
+        ]
+        others = {card.other for card in cards if not card.matches}
+        if not cards:
+            self._log_card_refusal("no profile link", cards)
+            return "the new-message bubble links to no profile"
+        if not others:
+            return None
+        if len(others) > 1 or any(card.matches for card in cards):
+            self._log_card_refusal("more than one person", cards)
+            return "the new-message bubble links to more than one person"
+        self._log_card_refusal("someone else", cards)
+        return "the new-message bubble is for someone else"
+
+    def _log_card_refusal(self, why: str, cards: Sequence[CardLink]) -> None:
+        """One INFO line on why the never-messaged card refused, in fixed words (#481):
+        how many profile links, each one's form, and whether it matches. No ``href``,
+        slug, id, or name. The check runs on every poll and before every key, so a line
+        is written only when it differs from the run's last one."""
+        links = "; ".join(f"link {n} {card.describe()}" for n, card in enumerate(cards, 1))
+        line = f"{why}: {len(cards)} profile link(s)" + (f": {links}" if links else "")
+        if line == self._card_refusal_logged:
+            return
+        self._card_refusal_logged = line
+        log.info("the new-message bubble's card check refused (%s)", line)
 
     async def hand_over(self) -> None:
         """End the run by giving the tab to the person (ADR 0007, "Handing the tab over").

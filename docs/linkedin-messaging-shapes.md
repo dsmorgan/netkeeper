@@ -181,7 +181,7 @@ From `message-never-contacted.html` (the bubble's inside; whether its outer elem
 
 - The header's `h2` reads `New message`, with buttons `Minimize your conversation` and `Close your draft conversation`.
 - A `label` `Enter message recipients` names the recipient field. The recipient is a chip: a `button[type="button"]` with `aria-label="Remove <name>"` and the name as its text, beside an `input[role="combobox"][type="text"]` with `aria-autocomplete="list"`.
-- Below it, a card links to the recipient by **vanity slug**, `/in/<slug>/`, with the name and `1st degree connection`.
+- Below it, a card links to the recipient by **vanity slug**, `/in/<slug>/`, with the name and `1st degree connection`. The copied card showed one link. CP8b (#479) suggests the live card links the photo and the name, and maybe by member id; since #481 the check accepts any number of profile links in the scope, by slug or id, as long as every one is the contact's (ADR 0007).
 - The composer is the same `form#msg-form-…` with the same `role="textbox"` and `aria-label="Write a message…"`, empty (`<p><br></p>`).
 - **Send** is `button[type="submit"]` with `disabled`, until there is text.
 
@@ -291,7 +291,7 @@ The inbox page opens `GET /realtime/connect` (`text/event-stream`), subscribes w
 | The bubble opened | The compose option answer's `composeNavigationContext.recipientUrns` is `[contact's urn]` | Captured | Another recipient, or none: no key |
 | Existing or new | `existingConversationUrn` present (`REPLY`) or absent (`CONNECTION_MESSAGE`) | Captured | |
 | The existing bubble | One `role="dialog"` named `Messaging`, whose header `h2` link is `/in/<contact's profile id>/` | Captured | Another id, or two dialogs: no key |
-| The new bubble | `New message`; exactly one chip, `Remove <name>`; the card's `/in/<slug>/` is the contact's slug | Captured (root role unknown) | Zero or two chips: no key |
+| The new bubble | `New message`; exactly one chip, `Remove <name>`; every `/in/` link in the scope is the contact's, by slug or member id, and at least one is there (#481) | Captured (root role unknown) | Zero or two chips: no key |
 | The composer | Exactly one `role="textbox"` named `Write a message…` in that bubble, empty | Captured | None, two, or not empty: no key |
 | Focus | Focus the composer by role and name before typing | **Assumed**: where focus lands is unknown | |
 | Newlines | Shift+Enter | Captured: never sends | |

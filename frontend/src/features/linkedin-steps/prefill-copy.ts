@@ -380,6 +380,16 @@ const AFTER_CLICK: readonly Rule[] = [
     bubble: 'open',
   },
   {
+    match: 'the new-message bubble links to more than one person',
+    text: "The message bubble links to more than one person, so netkeeper couldn't confirm it's for this contact.",
+    bubble: 'open',
+  },
+  {
+    match: 'the new-message bubble links to no profile',
+    text: "The message bubble doesn't link to a profile, so netkeeper couldn't confirm it's for this contact.",
+    bubble: 'open',
+  },
+  {
     match: /bubble|composer is not in|recipient/,
     text: "The message bubble didn't look the way netkeeper expects for this contact, so it didn't type.",
     bubble: 'open',

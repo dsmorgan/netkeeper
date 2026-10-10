@@ -1136,6 +1136,8 @@ describe('prefill refusal reasons in plain words', () => {
     'the new-message bubble does not name exactly one recipient',
     "the new-message bubble's recipient field is missing",
     'the new-message bubble is for someone else',
+    'the new-message bubble links to more than one person',
+    'the new-message bubble links to no profile',
     "the tab's url changed",
     'the tab or the browser went away',
     'the composer is not empty',
@@ -1167,6 +1169,25 @@ describe('prefill refusal reasons in plain words', () => {
       "netkeeper couldn't read the recipient's name in the message bubble, so it couldn't check it against the profile.",
     )
     expect(prefillReason('another_compose').text).toMatch(/second message composer/)
+  })
+
+  it("tells the new-message card's three refusals apart (#481)", () => {
+    const words = [
+      'the new-message bubble is for someone else',
+      'the new-message bubble links to more than one person',
+      'the new-message bubble links to no profile',
+    ].map((phrase) => prefillReason(phrase))
+    expect(words.map((w) => w.text)).toEqual([
+      'The message bubble is for someone else.',
+      "The message bubble links to more than one person, so netkeeper couldn't confirm it's for this contact.",
+      "The message bubble doesn't link to a profile, so netkeeper couldn't confirm it's for this contact.",
+    ])
+    expect(words.every((w) => w.bubble === 'open')).toBe(true)
+    expect(
+      prefillReason('before Send: the new-message bubble links to more than one person').text,
+    ).toBe(
+      "Before Send, the message bubble links to more than one person, so netkeeper couldn't confirm it's for this contact.",
+    )
   })
 
   it('says only the refusals after the click leave a bubble open', () => {
