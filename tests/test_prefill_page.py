@@ -571,14 +571,43 @@ def _photo_and_name(photo: str, name: str) -> str:
         f'<a href="/in/{Z_SLUG.upper()}/?miniProfileUrn=x">x</a>',
         # A link that isn't a profile is no part of the card's check.
         _photo_and_name(f"/in/{Z_SLUG}/", f"/in/{Z_SLUG}/") + '<a href="/company/x/">co</a>',
+        # A longer path under the contact's own profile (the review of #483).
+        _photo_and_name(f"/in/{Z_SLUG}/overlay/photo/", f"/in/{Z_SLUG}/"),
+        f'<a href="/in/{Z_ID}/overlay/photo">x</a>',
+        # Hrefs that name no page: empty, fragment-only, and other schemes.
+        f'<a href="/in/{Z_SLUG}/">x</a><a href="">e</a><a href="#top">f</a>'
+        '<a href="javascript:void(0)">j</a><a href="mailto:x@example.invalid">m</a>',
+        # A scheme other than http(s) is ignored, whatever its path looks like.
+        f'<a href="/in/{Z_SLUG}/">x</a><a href="javascript:/in/{T_SLUG}/">j</a>',
+        # The contact's own id in a query, or on another person route, names no one else.
+        f'<a href="/in/{Z_SLUG}/?u=urn%3Ali%3Afsd_profile%3A{Z_ID}">x</a>',
+        f'<a href="/in/{Z_SLUG}/">x</a><a href="/sales/lead/{Z_ID},NAME_SEARCH">s</a>',
     ],
-    ids=["two_by_slug", "two_by_id", "id_and_slug", "one_by_id", "slug_case", "other_link"],
+    ids=[
+        "two_by_slug",
+        "two_by_id",
+        "id_and_slug",
+        "one_by_id",
+        "slug_case",
+        "other_link",
+        "more_path",
+        "id_more_path",
+        "no_page_hrefs",
+        "javascript_profile_path",
+        "own_id_in_query",
+        "own_id_on_sales_route",
+    ],
 )
 async def test_a_card_whose_every_profile_link_is_the_contact_is_typed(cards: str) -> None:
     html = _new([ZEPHYRINE], cards=cards)
     ran = await prefill(MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, None, html=html)))
     assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
     assert composer_text(ran.tab) == BODY
+
+
+def _card(extra: str) -> str:
+    """The contact's own card link, then ``extra``."""
+    return f'<a href="/in/{Z_SLUG}/">{ZEPHYRINE.name}</a>{extra}'
 
 
 MORE_THAN_ONE = "the new-message bubble links to more than one person"
@@ -597,8 +626,7 @@ NO_PROFILE = "the new-message bubble links to no profile"
         # The member id is compared exactly, as the existing conversation's header is.
         (f'<a href="/in/{Z_ID.lower()}/">x</a>', SOMEONE_ELSE),
         (f'<a href="/in/{Z_ID.upper()}/">x</a>', SOMEONE_ELSE),
-        # The contact's slug, but not exactly the profile's own path, or not on LinkedIn.
-        (f'<a href="/in/{Z_SLUG}/overlay/photo/">x</a>', SOMEONE_ELSE),
+        # The contact's slug, but not on LinkedIn, or under it a path that leaves it.
         (f'<a href="https://evil.example/in/{Z_SLUG}/">x</a>', SOMEONE_ELSE),
         (f'<a href="http://www.linkedin.com/in/{Z_SLUG}/">x</a>', SOMEONE_ELSE),
         (_photo_and_name(f"/in/{Z_SLUG}/", f"https://evil.example/in/{Z_SLUG}/"), MORE_THAN_ONE),
@@ -609,6 +637,46 @@ NO_PROFILE = "the new-message bubble links to no profile"
         ('<a href="/company/x/">co</a><a>no href</a>', NO_PROFILE),
         (f'<a href="/in/{Z_SLUG}x/">x</a>', SOMEONE_ELSE),
         ('<a href="/in/">x</a>', SOMEONE_ELSE),
+        # Item 1 of the review: an href on any element counts, whatever its role.
+        (_card(f'<a role="button" href="/in/{T_SLUG}/">x</a>'), MORE_THAN_ONE),
+        (_card(f'<a role="img" href="/in/{T_SLUG}/"></a>'), MORE_THAN_ONE),
+        (_card(f'<a role="menuitem" href="/in/{T_SLUG}/">x</a>'), MORE_THAN_ONE),
+        (_card(f'<a hidden href="/in/{T_SLUG}/">x</a>'), MORE_THAN_ONE),
+        (_card(f'<div href="/in/{T_SLUG}/">x</div>'), MORE_THAN_ONE),
+        # Item 2: never resolved; unsafe shapes name someone else.
+        (f'<a href="in/{Z_SLUG}/">x</a>', SOMEONE_ELSE),
+        (_card(f'<a href="{T_SLUG}/">x</a>'), MORE_THAN_ONE),
+        (f'<a href="/in/{Z_SLUG}\\x/">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/{Z_SLUG}%5Cx/">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/{Z_SLUG}/?next=a\\b">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/{Z_SLUG}/#a%5Cb">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/./{Z_SLUG}/">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/{Z_SLUG}/./">x</a>', SOMEONE_ELSE),
+        # Item 3: LinkedIn's other person routes, and a member named in a query.
+        (_card(f'<a href="/pub/{T_SLUG}/1/2/3">x</a>'), MORE_THAN_ONE),
+        (_card(f'<a href="/profile/view?id={T_ID}">x</a>'), MORE_THAN_ONE),
+        (_card('<a href="/profile/view">x</a>'), MORE_THAN_ONE),
+        (_card(f'<a href="/sales/lead/{T_ID},NAME_SEARCH">x</a>'), MORE_THAN_ONE),
+        (_card(f'<a href="/sales/people/{T_ID},x">x</a>'), MORE_THAN_ONE),
+        (_card(f'<a href="/talent/profile/{T_ID}">x</a>'), MORE_THAN_ONE),
+        (_card(f'<a href="/recruiter/profile/{T_ID}">x</a>'), MORE_THAN_ONE),
+        (f'<a href="/in/{Z_SLUG}/?u=urn:li:fsd_profile:{T_ID}">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/{Z_SLUG}/?u=urn%3Ali%3Amember%3A900000101">x</a>', SOMEONE_ELSE),
+        (f'<a href="/sales/lead/{T_ID},x">x</a>', SOMEONE_ELSE),
+        (f'<a href="/sales/lead/{Z_ID},x">x</a>', NO_PROFILE),
+        # Item 4: a longer path is bounded to the contact's own profile.
+        (f'<a href="/in/{Z_SLUG}/../{T_SLUG}/">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/{Z_SLUG}/%2e%2e/{T_SLUG}/">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/{Z_SLUG}%2F..%2F{T_SLUG}">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/{Z_SLUG}%2F{T_SLUG}/">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/{Z_SLUG}//x/">x</a>', SOMEONE_ELSE),
+        (f'<a href="/in/{Z_SLUG}/overlay%2Fphoto/">x</a>', SOMEONE_ELSE),
+        (f'<a href="https://evil.example/in/{Z_SLUG}/overlay/">x</a>', SOMEONE_ELSE),
+        # Item 6: a relative and an absolute link to one other person are one person.
+        (
+            f'<a href="/in/{T_SLUG}/">x</a><a href="https://www.linkedin.com/in/{T_SLUG}/">y</a>',
+            SOMEONE_ELSE,
+        ),
     ],
     ids=[
         "contact_and_another_slug",
@@ -618,7 +686,6 @@ NO_PROFILE = "the new-message bubble links to no profile"
         "two_others",
         "id_lower_case",
         "id_upper_case",
-        "more_path",
         "another_host",
         "http",
         "contact_and_another_host",
@@ -628,6 +695,38 @@ NO_PROFILE = "the new-message bubble links to no profile"
         "no_profile_link",
         "slug_prefix",
         "empty_slug",
+        "role_button",
+        "role_img",
+        "role_menuitem",
+        "hidden_link",
+        "href_on_div",
+        "path_relative_contact",
+        "path_relative_other",
+        "backslash",
+        "encoded_backslash",
+        "backslash_in_query",
+        "encoded_backslash_in_fragment",
+        "dot_before_slug",
+        "dot_after_slug",
+        "pub",
+        "profile_view",
+        "profile_view_no_id",
+        "sales_lead",
+        "sales_people",
+        "talent",
+        "recruiter",
+        "query_fsd_profile",
+        "query_member",
+        "sales_lead_alone",
+        "own_sales_lead_alone",
+        "dot_dot_under_contact",
+        "encoded_dot_dot",
+        "encoded_slashes",
+        "encoded_slash_in_slug",
+        "empty_segment",
+        "encoded_slash_later",
+        "another_host_more_path",
+        "relative_and_absolute_other",
     ],
 )
 async def test_a_card_with_any_link_to_someone_else_or_none_refuses(
@@ -654,6 +753,24 @@ async def test_a_card_refusal_logs_its_links_forms_and_never_their_hrefs(
         " link(s): link 1 id, matches; link 2 slug, more path, no match)"
     ]
     for value in (Z_SLUG, Z_ID, T_SLUG, T_ID, ZEPHYRINE.name, THADDEUS.name, "/in/"):
+        assert value.casefold() not in caplog.text.casefold()
+
+
+async def test_a_card_that_passes_logs_its_shape_once_per_run(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cards = _photo_and_name(f"/in/{Z_ID}/overlay/photo/", f"/in/{Z_SLUG}/")
+    html = _new([ZEPHYRINE], cards=cards)
+    with caplog.at_level("INFO", logger="netkeeper.linkedin.browser"):
+        ran = await prefill(MessagingSite(ZEPHYRINE, bubble=Bubble(ZEPHYRINE, None, html=html)))
+    assert ran.kind is MessageOutcomeKind.PREFILLED, ran.result
+    lines = [r.getMessage() for r in caplog.records if "card check" in r.getMessage()]
+    # Once, though the check passed on the wait and before every key.
+    assert lines == [
+        "the new-message bubble's card check passed (2 profile link(s):"
+        " link 1 id, more path, matches; link 2 slug, matches)"
+    ]
+    for value in (Z_SLUG, Z_ID, ZEPHYRINE.name, "/in/"):
         assert value.casefold() not in caplog.text.casefold()
 
 

@@ -101,7 +101,8 @@ class Scenario:
     #: ``::after`` lies over both of the contact's controls.
     layout: str = ""
     #: #481, the never-messaged card: ``photo_and_name`` links the contact twice, the
-    #: photo by member id and the name by slug; ``plus_other`` adds a link to someone else.
+    #: photo by member id under a longer path, as a button, and the name by slug;
+    #: ``plus_other`` adds a link to someone else.
     card: str = ""
 
 
@@ -359,7 +360,10 @@ def _profile_html(scenario: Scenario) -> str:
         bubble = never_messaged_bubble_html([member], draft=scenario.draft)
         if scenario.card:
             name_link = f'<a href="/in/{member.slug}/">{escape(member.name)}</a>'
-            photo = f'<a href="/in/{member.profile_id}/"><img alt="" width="48" height="48"></a>'
+            photo = (
+                f'<a href="/in/{member.profile_id}/overlay/photo/" role="button">'
+                '<img alt="" width="48" height="48"></a>'
+            )
             other = (
                 f'<a href="/in/{_member(396).slug}/">x</a>' if scenario.card == "plus_other" else ""
             )

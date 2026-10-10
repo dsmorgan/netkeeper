@@ -491,6 +491,8 @@ COMPOSER_UNREADABLE: Final = ":scope > :not(p), p :not(br)"
 PROFILE_HEADING: Final = "h1"
 #: The never-messaged bubble's scope: the composer's nearest ancestor that holds the
 #: ``New message`` heading (ADR 0007), found upward from the verified composer.
+#: What the never-messaged card check reads in its scope: every element with an href (#481).
+CARD_HREFS: Final = "[href]"
 NEW_MESSAGE_SCOPE: Final = "xpath=ancestor::*[.//h2[normalize-space()='New message']][1]"
 #: The refusal a chip whose name isn't ``Remove <the profile's h1>`` gives (ADR 0007).
 RECIPIENT_NAME_MISMATCH: Final = "recipient_name_mismatch"
@@ -1451,6 +1453,22 @@ def _is_profile_link(href: str | None, path: str, *, fold_case: bool) -> bool:
 #: A LinkedIn member id's shape (``ACoAA…``), used only to name a link's form in the
 #: never-messaged card's diagnostic log (#481), never to match anyone.
 _MEMBER_ID_SHAPE: Final = re.compile(r"^ACoA[A-Za-z0-9_-]+$")
+#: Schemes a card link can have and still name a page: any other (``javascript:``,
+#: ``mailto:``) names no profile, so the card check ignores it.
+_WEB_SCHEMES: Final = frozenset({"http", "https"})
+#: A member named in a link's query, by URN: the card check refuses any but the contact.
+_QUERY_MEMBER: Final = re.compile(r"urn:li:(?:fsd_profile|member):([^,&()\s/;:#?]+)", re.IGNORECASE)
+#: LinkedIn routes other than ``/in/`` that name a person, case-folded: the path segment
+#: after the route holds that person's token (before any ``,``).
+_PERSON_ROUTES: Final = (
+    "/pub/",
+    "/sales/lead/",
+    "/sales/people/",
+    "/talent/profile/",
+    "/recruiter/",
+)
+#: ``/profile/view?id=<token>``: the old profile route, its person in the query.
+_PROFILE_VIEW_PATH: Final = "/profile/view"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1458,15 +1476,16 @@ class CardLink:
     """One profile link in the never-messaged bubble's scope, read against the contact
     (#481). Nothing here holds the link's ``href``, slug, or id."""
 
-    #: Exactly ``/in/<the contact's slug>/`` (case-folded) or ``/in/<their member id>/``
-    #: (exact), on LinkedIn's own host or relative (:func:`_is_profile_link`).
+    #: Under ``/in/<the contact's slug>`` (case-folded) or ``/in/<their member id>``
+    #: (exact), on LinkedIn's own host or root-relative (:func:`read_card_link`).
     matches: bool
-    #: ``slug`` or ``id``: which form the link's first path segment has.
+    #: ``slug`` or ``id``: which form the link's person token has.
     form: str
     #: For a link that doesn't match: which person it names, as a key that only tells
     #: two such links apart. ``None`` for a link to the contact.
     other: str | None
-    #: Fixed words on why a link doesn't match: ``another host``, ``more path``.
+    #: Fixed words on the link's shape: ``more path``, ``another host``, ``query member``,
+    #: ``other route``, ``unsafe path``.
     notes: tuple[str, ...] = ()
 
     def describe(self) -> str:
@@ -1474,42 +1493,90 @@ class CardLink:
         return ", ".join((self.form, *self.notes, "matches" if self.matches else "no match"))
 
 
-def read_card_link(href: str | None, public_id: str, profile_id: str) -> CardLink | None:
-    """``href`` read as a profile link against the contact, or ``None`` when it isn't one.
+def _form(token: str) -> str:
+    return "id" if _MEMBER_ID_SHAPE.match(token) else "slug"
 
-    A profile link is any whose percent-decoded path starts ``/in/``, case-folded, on any
-    host: a link elsewhere still names someone, so it counts. It matches only when it is
-    exactly the contact's vanity slug, case-folded, or exactly their member id, as
-    LinkedIn's routing reads each. Anything else (another slug or id, another host, a
-    longer path) names someone else."""
-    if href is None:
+
+def _someone_else(token: str, *notes: str) -> CardLink:
+    """A link that names someone other than the contact, keyed by its person token only,
+    so a relative and an absolute link to the same other person read as one."""
+    return CardLink(False, _form(token), token.casefold(), notes)
+
+
+def read_card_link(href: str | None, public_id: str, profile_id: str) -> CardLink | None:
+    """``href`` read against the contact, or ``None`` when it names no person (#481).
+
+    Ignored: no ``href``, an empty one, a fragment-only one (``#…``), and one whose
+    scheme isn't ``http`` or ``https``. Nothing is resolved against the page.
+
+    Someone else, whatever the rest says: an ``href`` with a backslash (raw or
+    percent-encoded), a path-relative one (no scheme or host, a path not starting
+    ``/``), one with a ``.`` or ``..`` path segment once decoded (``%2e`` and ``%2F``
+    included), one whose query names a member by URN (``urn:li:fsd_profile:`` or
+    ``urn:li:member:``) other than the contact's id, and LinkedIn's other person routes
+    (``/pub/``, ``/profile/view?id=``, ``/sales/lead/``, ``/sales/people/``,
+    ``/talent/profile/``, ``/recruiter/``) unless their token is exactly the contact's
+    id, which is then ignored: only an ``/in/`` link can confirm the contact.
+
+    The contact: on LinkedIn's own host over ``https``, or root-relative, a path whose
+    raw ``/`` segments are ``in`` (decoded, case-folded), then the contact's slug
+    (decoded, case-folded) or member id (decoded, exact), then any number of further
+    segments, each non-empty (one trailing empty one allowed) and, decoded, holding no
+    ``/`` or ``\\`` and not ``.`` or ``..``. The query and fragment are ignored. Any
+    other ``/in/`` link names someone else."""
+    if href is None or not href.strip() or href.strip().startswith("#"):
         return None
     try:
         split = urlsplit(href)
     except ValueError:
+        return _someone_else("", "unsafe path")
+    if split.scheme and split.scheme.casefold() not in _WEB_SCHEMES:
         return None
-    path = unquote(split.path)
-    if not path.casefold().startswith(PROFILE_PATH_PREFIX):
+    raw = split.path
+    decoded = unquote(raw)
+    if "\\" in href or "\\" in unquote(href):
+        return _someone_else("", "unsafe path")
+    if not (split.scheme or split.netloc) and not raw.startswith("/"):
+        return _someone_else("", "unsafe path")
+    if any(part in (".", "..") for part in decoded.split("/")):
+        return _someone_else("", "unsafe path")
+    for token in _QUERY_MEMBER.findall(unquote(split.query)):
+        if token != profile_id:
+            return _someone_else(token, "query member")
+    folded = decoded.casefold()
+    for route in _PERSON_ROUTES:
+        if folded.startswith(route):
+            token = decoded[len(route) :].split("/")[0].split(",")[0]
+            return None if token == profile_id else _someone_else(token, "other route")
+    if _trim_path(folded) == _PROFILE_VIEW_PATH:
+        ids = [value for key, value in parse_qsl(split.query) if key.casefold() == "id"]
+        if ids and all(value == profile_id for value in ids):
+            return None
+        return _someone_else(ids[0] if ids else "", "other route")
+    segments = raw.split("/")[1:]
+    if not segments or unquote(segments[0]).casefold() != PROFILE_PATH_PREFIX.strip("/"):
         return None
-    by_slug = bool(public_id) and _is_profile_link(
-        href, f"{PROFILE_PATH_PREFIX}{public_id}/", fold_case=True
-    )
-    by_id = bool(profile_id) and _is_profile_link(
-        href, f"{PROFILE_PATH_PREFIX}{profile_id}/", fold_case=False
-    )
-    segments = _trim_path(path)[len(PROFILE_PATH_PREFIX) :].split("/")
-    first = segments[0]
-    if by_id or by_slug:
-        return CardLink(True, "id" if by_id else "slug", None)
-    notes: list[str] = []
+    token = unquote(segments[1]) if len(segments) > 1 else ""
+    rest = segments[2:]
+    if rest and rest[-1] == "":
+        rest = rest[:-1]
+    more = ("more path",) if rest else ()
     if (split.scheme or split.netloc) and (
         split.scheme != "https" or split.netloc != MESSAGE_COMPOSE_HOST
     ):
-        notes.append("another host")
-    if len(segments) > 1:
-        notes.append("more path")
-    form = "id" if _MEMBER_ID_SHAPE.match(first) else "slug"
-    return CardLink(False, form, f"{split.netloc.casefold()}/{first.casefold()}", tuple(notes))
+        return _someone_else(token, "another host", *more)
+    by_id = bool(profile_id) and token == profile_id
+    by_slug = bool(public_id) and token.casefold() == public_id.casefold()
+    clean = all(part and "/" not in unquote(part) and "\\" not in unquote(part) for part in rest)
+    if (by_id or by_slug) and clean:
+        return CardLink(True, "id" if by_id else "slug", None, more)
+    return _someone_else(token, *more)
+
+
+def _card_line(cards: Sequence[CardLink]) -> str:
+    """The never-messaged card's links in fixed words: their count, then each one's."""
+    links = "; ".join(f"link {n} {card.describe()}" for n, card in enumerate(cards, 1))
+    return f"{len(cards)} profile link(s)" + (f": {links}" if links else "")
 
 
 def _one_composer(count: int) -> bool:
@@ -1921,6 +1988,8 @@ class BrowserRun:
         self._focus_used = False
         #: #481: the never-messaged card check's last diagnostic line, written once each.
         self._card_refusal_logged: str | None = None
+        #: #481: whether a passing card's shape was logged (once per run).
+        self._card_pass_logged = False
         #: ADR 0008: set once the Send click is sent. Nothing clicks Send twice.
         self._send_attempted = False
         #: Whether :meth:`type_into_composer` ended with the whole body in the composer.
@@ -3523,11 +3592,11 @@ class BrowserRun:
           header ``h2`` holds exactly one link, to ``/in/<profile id>/``.
         - Never messaged: exactly one ``New message`` heading; in the innermost element
           holding both it and the composer, exactly one chip (a button named
-          ``Remove …``), one recipient field, and at least one ``/in/`` link, every one
-          of them to the contact: their slug, case-folded, or their member id, exact
-          (:func:`read_card_link`, #481). No profile link, a link to anyone else, or
-          links to two people each refuse with their own reason. A dialog, if there is
-          one, holds that heading. Without a slug, refused.
+          ``Remove …``), one recipient field, and among every ``href`` in it at least
+          one link to the contact (their slug, case-folded, or member id, exact) and
+          none to anyone else (:func:`read_card_link`, #481). No profile link, a link
+          to anyone else, or links to two people each refuse with their own reason. A
+          dialog, if there is one, holds that heading. Without a slug, refused.
         """
         composers = await composer.count()
         if not _one_composer(composers):
@@ -3595,7 +3664,9 @@ class BrowserRun:
             != 1
         ):
             return "the new-message bubble's recipient field is missing"
-        links = scope.get_by_role("link", include_hidden=True)
+        # Every element with an href, hidden ones included, whatever its role (#481): an
+        # <a href> with role="button" or "img" still takes the person somewhere.
+        links = scope.locator(CARD_HREFS)
         hrefs = [
             await links.nth(index).get_attribute("href", timeout=MESSAGING_READ_TIMEOUT_MS)
             for index in range(await links.count())
@@ -3612,6 +3683,7 @@ class BrowserRun:
             self._log_card_refusal("no profile link", cards)
             return "the new-message bubble links to no profile"
         if not others:
+            self._log_card_pass(cards)
             return None
         if len(others) > 1 or any(card.matches for card in cards):
             self._log_card_refusal("more than one person", cards)
@@ -3619,13 +3691,20 @@ class BrowserRun:
         self._log_card_refusal("someone else", cards)
         return "the new-message bubble is for someone else"
 
+    def _log_card_pass(self, cards: Sequence[CardLink]) -> None:
+        """Once per run, the card that passed, in the same fixed words as a refusal: so a
+        checkpoint shows the live card's shape (#481). No ``href``, slug, id, or name."""
+        if self._card_pass_logged:
+            return
+        self._card_pass_logged = True
+        log.info("the new-message bubble's card check passed (%s)", _card_line(cards))
+
     def _log_card_refusal(self, why: str, cards: Sequence[CardLink]) -> None:
         """One INFO line on why the never-messaged card refused, in fixed words (#481):
         how many profile links, each one's form, and whether it matches. No ``href``,
         slug, id, or name. The check runs on every poll and before every key, so a line
         is written only when it differs from the run's last one."""
-        links = "; ".join(f"link {n} {card.describe()}" for n, card in enumerate(cards, 1))
-        line = f"{why}: {len(cards)} profile link(s)" + (f": {links}" if links else "")
+        line = f"{why}: {_card_line(cards)}"
         if line == self._card_refusal_logged:
             return
         self._card_refusal_logged = line
