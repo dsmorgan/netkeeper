@@ -389,7 +389,9 @@ class GeometrySession:
 # --- a tiny selector engine --------------------------------------------------------------
 
 
-_SIMPLE = re.compile(r'\*|[a-z][a-z0-9]*|\[[a-z-]+="(?:[^"\\]|\\.)*"\]|:focus|:scope|:not\([^)]*\)')
+_SIMPLE = re.compile(
+    r'\*|[a-z][a-z0-9]*|\[[a-z-]+="(?:[^"\\]|\\.)*"\]|\[[a-z-]+\]|:focus|:scope|:not\([^)]*\)'
+)
 
 
 def _matches_simple(part: str, element: Element, page: MessagingTab, scope: Element) -> bool:
@@ -401,6 +403,8 @@ def _matches_simple(part: str, element: Element, page: MessagingTab, scope: Elem
         return element is scope
     if part.startswith(":not("):
         return not _matches_compound(part[5:-1], element, page, scope)
+    if part.startswith("[") and "=" not in part:
+        return part[1:-1] in element.attrs
     if part.startswith("["):
         name, _, value = part[1:-1].partition("=")
         wanted = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
