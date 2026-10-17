@@ -227,12 +227,16 @@ async def _busy(app: FastAPI) -> list[str]:
 
 
 async def _quiesce(app: FastAPI) -> None:
-    """No new scheduled work: the scheduler pauses, and the campaign engine stops after
-    the tick in flight, its send included. The lifespan's teardown stops them for good."""
+    """No new scheduled work: the scheduler and the nightly backup pause, and the campaign
+    engine stops after the tick in flight, its send included. The lifespan's teardown
+    stops them for good."""
     state = app.state
     scheduler = getattr(state, "scheduler", None)
     if scheduler is not None and scheduler.running:
         scheduler.pause()
+    backups = getattr(state, "nightly_backups", None)
+    if backups is not None:
+        backups.pause()
     engine = getattr(state, "campaign_engine", None)
     if engine is not None:
         await engine.stop()
@@ -244,6 +248,9 @@ def _resume(app: FastAPI) -> None:
     scheduler = getattr(state, "scheduler", None)
     if scheduler is not None and scheduler.running:
         scheduler.resume()
+    backups = getattr(state, "nightly_backups", None)
+    if backups is not None:
+        backups.resume()
     engine = getattr(state, "campaign_engine", None)
     if engine is not None:
         engine.start()

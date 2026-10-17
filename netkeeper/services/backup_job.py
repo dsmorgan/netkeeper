@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -71,11 +72,23 @@ class NightlyBackups:
         self._first_check_s = first_check_s
         self._task: asyncio.Task[None] | None = None
         self._backing_up = False
+        self._paused = False
+        self._guard = threading.Lock()  # pause and the start of a write never interleave
 
     @property
     def busy(self) -> bool:
         """A nightly backup is being written (#597: a restart waits for it)."""
         return self._backing_up
+
+    def pause(self) -> None:
+        """No new backup starts until :meth:`resume`; one being written finishes, and
+        :attr:`busy` says so (#597: a restart waiting for idle pauses it)."""
+        with self._guard:
+            self._paused = True
+
+    def resume(self) -> None:
+        with self._guard:
+            self._paused = False
 
     def start(self) -> None:
         if self._task is None:
@@ -105,7 +118,11 @@ class NightlyBackups:
         newest = found[0].created_at if found else None
         if not nightly_due(newest, now, settings.linkedin.timezone):
             return None
-        self._backing_up = True
+        with self._guard:
+            if self._paused:
+                log.info("nightly backup paused while netkeeper waits to restart")
+                return None
+            self._backing_up = True
         try:
             written = create_backup(self._engine, self.backups_dir, now=now)
             removed = prune_backups(self.backups_dir, keep, now=now)

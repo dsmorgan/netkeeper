@@ -526,3 +526,98 @@ def test_serve_attaches_at_the_chrome_address_the_settings_page_set(
         rebuilt.provider, AttachBrowserProvider
     )
     assert rebuilt.provider.cdp_url == "http://127.0.0.1:9333"
+
+
+class _SlowEngine:
+    """A campaign engine whose stop waits out a send in flight until ``sent`` is set."""
+
+    def __init__(self) -> None:
+        self.busy = False
+        self.stopping = False
+        self.started = 0
+        self.sent = asyncio.Event()
+
+    async def stop(self) -> bool:
+        self.stopping = True
+        await self.sent.wait()
+        return True
+
+    def start(self) -> None:
+        self.started += 1
+
+
+class _Backups:
+    def __init__(self) -> None:
+        self.busy = False
+        self.calls: list[str] = []
+
+    def pause(self) -> None:
+        self.calls.append("pause")
+
+    def resume(self) -> None:
+        self.calls.append("resume")
+
+
+async def test_cancel_during_the_quiesce_resumes_the_real_scheduler_the_engine_and_backups(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """#597 final review: a Cancel that lands while the engine waits out a send must
+    still undo the whole quiesce. The real APScheduler pins pause over shutdown: a
+    shut-down scheduler cannot resume, so scheduled runs would never come back."""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.schedulers.base import STATE_PAUSED, STATE_RUNNING
+
+    stops: list[None] = []
+    running_app.state.restarter = restart.Restarter(stop=lambda: stops.append(None), mode="exec")
+    running_app.state.restart_gate = None
+    scheduler = AsyncIOScheduler()
+    scheduler.start()
+    engine, backups = _SlowEngine(), _Backups()
+    running_app.state.scheduler = scheduler
+    running_app.state.campaign_engine = engine
+    running_app.state.nightly_backups = backups
+    try:
+        response = await client.post(URL, headers=CSRF)
+        assert response.status_code == 202, response.text
+        await _until(lambda: engine.stopping)  # mid-quiesce: the engine waits out a send
+        assert scheduler.state == STATE_PAUSED and backups.calls == ["pause"]
+        cancelling = asyncio.create_task(client.delete(URL, headers=CSRF))
+        await asyncio.sleep(0.05)
+        assert not cancelling.done()  # the quiesce is never cut off part way
+        engine.sent.set()
+        cancelled = await cancelling
+        assert cancelled.json() == {"cancelled": True}
+        assert scheduler.state == STATE_RUNNING
+        assert engine.started == 1
+        assert backups.calls == ["pause", "resume"]
+        await asyncio.sleep(0.05)
+        assert stops == []
+    finally:
+        running_app.state.scheduler = None
+        running_app.state.campaign_engine = None
+        running_app.state.nightly_backups = None
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+
+
+def test_a_paused_nightly_backup_starts_no_new_write(
+    session_factory: sessionmaker[Session], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from netkeeper.services import backup_job
+
+    job = backup_job.NightlyBackups(
+        session_factory.kw["bind"], session_factory, Settings(), tmp_path / "backups"
+    )
+    written: list[Path] = []
+
+    def create(*_: object, **__: object) -> Path:
+        written.append(tmp_path / "b")
+        return tmp_path / "b"
+
+    monkeypatch.setattr(backup_job, "nightly_due", lambda *_: True)
+    monkeypatch.setattr(backup_job, "create_backup", create)
+    monkeypatch.setattr(backup_job, "prune_backups", lambda *_, **__: [])
+    job.pause()
+    assert job.back_up_if_due() is None and written == []
+    job.resume()
+    assert job.back_up_if_due() == tmp_path / "b" and len(written) == 1
