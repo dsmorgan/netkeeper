@@ -45,13 +45,13 @@ from pathlib import Path
 from typing import IO, Final
 
 from netkeeper.linkedin.archive import (
-    MAX_MEMBERS,
     Archive,
     ArchiveFormatError,
     ArchiveRefusalCode,
     open_archive,
 )
 from netkeeper.logging_setup import personal
+from netkeeper.zipguard import MAX_MEMBERS
 
 log = logging.getLogger(__name__)
 

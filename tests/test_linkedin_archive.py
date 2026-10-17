@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from netkeeper import zipguard
 from netkeeper.linkedin import archive as linkedin_archive
 from netkeeper.linkedin.archive import (
     Archive,
@@ -280,6 +281,7 @@ def test_a_zip_with_several_members_and_no_table_gets_the_plain_message(
 
 def test_too_many_members_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(linkedin_archive, "MAX_MEMBERS", 2)
+    monkeypatch.setattr(zipguard, "MAX_MEMBERS", 2)
     path = tmp_path / "export.zip"
     with zipfile.ZipFile(path, "w") as zf:
         for index in range(3):
@@ -292,6 +294,7 @@ def test_too_many_files_in_a_directory_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(linkedin_archive, "MAX_MEMBERS", 2)
+    monkeypatch.setattr(zipguard, "MAX_MEMBERS", 2)
     for index in range(3):
         (tmp_path / f"Skills{index}.csv").write_text("Name\nMade up\n", encoding="utf-8")
     with pytest.raises(ArchiveFormatError, match="file limit"), open_archive(tmp_path):
@@ -302,6 +305,7 @@ def test_the_uncompressed_total_over_the_cap_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(linkedin_archive, "MAX_TOTAL_UNCOMPRESSED_BYTES", 100)
+    monkeypatch.setattr(zipguard, "MAX_TOTAL_UNCOMPRESSED_BYTES", 100)
     path = tmp_path / "export.zip"
     with zipfile.ZipFile(path, "w") as zf:
         zf.writestr("Connections.csv", "First Name\n" + "a" * 60 + "\n")
@@ -314,6 +318,7 @@ def test_the_directory_total_over_the_cap_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(linkedin_archive, "MAX_TOTAL_UNCOMPRESSED_BYTES", 100)
+    monkeypatch.setattr(zipguard, "MAX_TOTAL_UNCOMPRESSED_BYTES", 100)
     (tmp_path / "Connections.csv").write_text("First Name\n" + "a" * 60 + "\n", encoding="utf-8")
     (tmp_path / "Skills.csv").write_text("Name\n" + "b" * 60 + "\n", encoding="utf-8")
     with pytest.raises(ArchiveFormatError, match="across its files"), open_archive(tmp_path):
@@ -323,8 +328,8 @@ def test_the_directory_total_over_the_cap_is_refused(
 def test_a_high_compression_ratio_is_refused_as_a_bomb(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(linkedin_archive, "MAX_COMPRESSION_RATIO", 10)
-    monkeypatch.setattr(linkedin_archive, "COMPRESSION_RATIO_FLOOR_BYTES", 100)
+    monkeypatch.setattr(zipguard, "MAX_COMPRESSION_RATIO", 10)
+    monkeypatch.setattr(zipguard, "COMPRESSION_RATIO_FLOOR_BYTES", 100)
     path = tmp_path / "export.zip"
     with zipfile.ZipFile(path, "w") as zf:
         zf.writestr("Skills.csv", "0" * 100_000, compress_type=zipfile.ZIP_DEFLATED)
@@ -362,6 +367,7 @@ def test_a_directory_bounds_a_huge_non_csv_file_too(
     ``.csv``-looking ones, matching the zip path (issue #124 review finding 7).
     """
     monkeypatch.setattr(linkedin_archive, "MAX_TOTAL_UNCOMPRESSED_BYTES", 100)
+    monkeypatch.setattr(zipguard, "MAX_TOTAL_UNCOMPRESSED_BYTES", 100)
     (tmp_path / "Connections.csv").write_text("First Name\na\n", encoding="utf-8")
     (tmp_path / "attachment.bin").write_bytes(b"x" * 200)
     with pytest.raises(ArchiveFormatError, match="across its files"), open_archive(tmp_path):
@@ -507,16 +513,16 @@ def test_the_guard_values_themselves_are_the_ones_that_were_reasoned_about() -> 
     about 1.4 MB across thirty-odd members. Changing one is a decision, so it
     changes this line too, and the comment beside the constant with it.
     """
-    assert linkedin_archive.MAX_MEMBER_BYTES == 512 * 1024 * 1024
-    assert linkedin_archive.MAX_TOTAL_UNCOMPRESSED_BYTES == 64 * 1024 * 1024
-    assert linkedin_archive.MAX_MEMBERS == 5000
-    assert linkedin_archive.MAX_COMPRESSION_RATIO == 100
-    assert linkedin_archive.COMPRESSION_RATIO_FLOOR_BYTES == 8 * 1024 * 1024
+    assert zipguard.MAX_MEMBER_BYTES == 512 * 1024 * 1024
+    assert zipguard.MAX_TOTAL_UNCOMPRESSED_BYTES == 64 * 1024 * 1024
+    assert zipguard.MAX_MEMBERS == 5000
+    assert zipguard.MAX_COMPRESSION_RATIO == 100
+    assert zipguard.COMPRESSION_RATIO_FLOOR_BYTES == 8 * 1024 * 1024
 
 
 def test_the_member_size_cap_is_enforced_at_its_shipped_value() -> None:
     info = zipfile.ZipInfo(filename="messages.csv")
-    info.file_size = linkedin_archive.MAX_MEMBER_BYTES + 1
+    info.file_size = zipguard.MAX_MEMBER_BYTES + 1
     info.compress_size = 1000
     with pytest.raises(ArchiveFormatError, match="byte limit"):
         linkedin_archive._guard_zip_members([info], "test.zip")
@@ -524,7 +530,7 @@ def test_the_member_size_cap_is_enforced_at_its_shipped_value() -> None:
 
 def test_the_total_uncompressed_cap_is_enforced_at_its_shipped_value() -> None:
     info = zipfile.ZipInfo(filename="Skills.csv")
-    info.file_size = linkedin_archive.MAX_TOTAL_UNCOMPRESSED_BYTES + 1
+    info.file_size = zipguard.MAX_TOTAL_UNCOMPRESSED_BYTES + 1
     # Comfortably under the ratio cap, so it is the total-size guard being
     # tested here, not the ratio guard tripping first on the same member.
     info.compress_size = info.file_size // 2
@@ -534,7 +540,7 @@ def test_the_total_uncompressed_cap_is_enforced_at_its_shipped_value() -> None:
 
 def test_the_member_count_cap_is_enforced_at_its_shipped_value() -> None:
     infos = []
-    for index in range(linkedin_archive.MAX_MEMBERS + 1):
+    for index in range(zipguard.MAX_MEMBERS + 1):
         info = zipfile.ZipInfo(filename=f"f{index}.csv")
         info.file_size = 0
         info.compress_size = 0
@@ -545,8 +551,8 @@ def test_the_member_count_cap_is_enforced_at_its_shipped_value() -> None:
 
 def test_the_compression_ratio_cap_is_enforced_at_its_shipped_value() -> None:
     info = zipfile.ZipInfo(filename="Skills.csv")
-    info.file_size = linkedin_archive.COMPRESSION_RATIO_FLOOR_BYTES + 1
-    info.compress_size = info.file_size // (linkedin_archive.MAX_COMPRESSION_RATIO + 1)
+    info.file_size = zipguard.COMPRESSION_RATIO_FLOOR_BYTES + 1
+    info.compress_size = info.file_size // (zipguard.MAX_COMPRESSION_RATIO + 1)
     with pytest.raises(ArchiveFormatError, match="compresses"):
         linkedin_archive._guard_zip_members([info], "test.zip")
 
@@ -554,7 +560,7 @@ def test_the_compression_ratio_cap_is_enforced_at_its_shipped_value() -> None:
 def test_a_member_at_the_compression_ratio_floor_is_not_judged_by_ratio() -> None:
     """At or below the floor, no ratio — however extreme — trips the guard."""
     info = zipfile.ZipInfo(filename="Skills.csv")
-    info.file_size = linkedin_archive.COMPRESSION_RATIO_FLOOR_BYTES
+    info.file_size = zipguard.COMPRESSION_RATIO_FLOOR_BYTES
     info.compress_size = 1
     linkedin_archive._guard_zip_members([info], "test.zip")  # does not raise
 
@@ -564,7 +570,7 @@ def test_a_real_deflated_member_over_the_shipped_ratio_and_floor_is_refused(
 ) -> None:
     """No monkeypatch: an actual zip, actually deflated, past the shipped values."""
     path = tmp_path / "bomb.zip"
-    payload = b"0" * (linkedin_archive.COMPRESSION_RATIO_FLOOR_BYTES + 1)
+    payload = b"0" * (zipguard.COMPRESSION_RATIO_FLOOR_BYTES + 1)
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("Skills.csv", payload)
     with pytest.raises(ArchiveFormatError, match="compresses"), open_archive(path):
@@ -585,7 +591,7 @@ def test_a_zip_declaring_more_members_than_the_shipped_cap_is_refused_cheaply() 
     """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
-        for index in range(linkedin_archive.MAX_MEMBERS + 1):
+        for index in range(zipguard.MAX_MEMBERS + 1):
             zf.writestr(str(index), b"")
     with pytest.raises(ArchiveFormatError, match="member limit"), open_archive(buf):
         pass

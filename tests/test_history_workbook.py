@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import re
+import time
+import zipfile
+from collections.abc import Sequence
 from datetime import date, datetime
 from io import BytesIO
 
 import pytest
 from history_fixtures import Tab, grid, workbook_bytes
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from netkeeper.crm.history_workbook import (
     BLANK_ROWS_END_A_LIST,
+    MAX_SHEET_COLUMNS,
     Person,
     WorkbookError,
     read_tab,
@@ -219,3 +224,72 @@ def test_a_personalized_subject_is_warned_about() -> None:
         "the subject is personalized ({{...}}), so the Gmail scan's exact subject"
         " match cannot find replies to it",
     )
+
+
+# --- guards (#619) -----------------------------------------------------------------
+
+_TIME_BOUND_SECONDS = 10.0
+
+
+def _cells_workbook(cells: Sequence[tuple[int, int]], *, dimension: bool = True) -> bytes:
+    """A workbook with a ``"x"`` in each (row, column); optionally without its
+    ``<dimension>`` element, the way some writers leave it out."""
+    book = Workbook()
+    sheet = book.active
+    assert sheet is not None
+    for row, col in cells:
+        sheet.cell(row=row, column=col, value="x")
+    buffer = BytesIO()
+    book.save(buffer)
+    if dimension:
+        return buffer.getvalue()
+    out = BytesIO()
+    with zipfile.ZipFile(BytesIO(buffer.getvalue())) as src, zipfile.ZipFile(out, "w") as dst:
+        for info in src.infolist():
+            payload = src.read(info.filename)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                payload = re.sub(rb"<dimension[^>]*/>", b"", payload)
+            dst.writestr(info, payload, zipfile.ZIP_DEFLATED)
+    return out.getvalue()
+
+
+def _refused(data: bytes, match: str) -> None:
+    started = time.monotonic()
+    with pytest.raises(WorkbookError, match=match):
+        read_workbook(data)
+    assert time.monotonic() - started < _TIME_BOUND_SECONDS
+
+
+def test_a_far_away_cell_is_refused_on_its_declared_dimension() -> None:
+    _refused(_cells_workbook([(1_048_576, 1)]), "row limit")
+    _refused(_cells_workbook([(1, 16_384)]), "column limit")
+
+
+def test_a_far_away_cell_is_refused_while_reading_when_there_is_no_dimension() -> None:
+    data = _cells_workbook([(1_048_576, 1)], dimension=False)
+    assert b"<dimension" not in zipfile.ZipFile(BytesIO(data)).read("xl/worksheets/sheet1.xml")
+    _refused(data, "more than 50000 rows")
+    _refused(_cells_workbook([(1, 16_384)], dimension=False), "64 limit")
+
+
+def test_a_dense_padded_sheet_is_refused_on_its_cell_count() -> None:
+    # One cell per row in the last allowed column: small on disk, but every row is padded
+    # to 64 cells when read. 20,000 rows x 64 = 1.28M cells, over the 1M cap, though each
+    # axis is inside its own limit.
+    cells = [(row, MAX_SHEET_COLUMNS) for row in range(1, 20_001)]
+    _refused(_cells_workbook(cells, dimension=False), "more than 1000000 cells")
+    _refused(_cells_workbook(cells), "cells declared")
+
+
+def test_a_zip_bomb_workbook_is_refused() -> None:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("xl/worksheets/sheet1.xml", b"\0" * (80 * 1024 * 1024))
+    _refused(buffer.getvalue(), "100x ratio")
+
+
+def test_a_normal_export_still_reads() -> None:
+    book = read_workbook(workbook_bytes(Tab()))
+    assert len(book.campaigns) == 1
+    assert book.campaigns[0].name == "Spring check-in"

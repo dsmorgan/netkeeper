@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from email.message import EmailMessage
+from io import BytesIO
 from typing import Any
 
 import factories
@@ -14,6 +15,7 @@ import pytest
 from campaign_fakes import make_mailbox
 from fastapi import FastAPI
 from history_fixtures import Tab, workbook_bytes
+from openpyxl import Workbook
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -226,3 +228,17 @@ async def test_a_second_scan_while_one_runs_is_refused(
         history_api._scanning.release()
     assert response.status_code == 409
     assert "already running" in response.json()["detail"]
+
+
+async def test_import_refuses_an_oversized_sheet_with_a_422(client: httpx.AsyncClient) -> None:
+    book = Workbook()
+    sheet = book.active
+    assert sheet is not None
+    sheet.cell(row=1_048_576, column=1, value="x")
+    buffer = BytesIO()
+    book.save(buffer)
+
+    response = await _import(client, buffer.getvalue())
+
+    assert response.status_code == 422
+    assert "row limit" in response.json()["detail"]

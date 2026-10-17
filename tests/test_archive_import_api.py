@@ -25,6 +25,7 @@ from fastapi import FastAPI, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper import zipguard
 from netkeeper.crm.archive_check import check_zip_directory
 from netkeeper.db import session_scope
 from netkeeper.linkedin import archive as linkedin_archive
@@ -258,8 +259,8 @@ async def test_the_upload_size_guard_answers_422_before_opening_anything(
 async def test_a_zip_bomb_is_refused_with_a_422_not_a_500(
     client: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(linkedin_archive, "MAX_COMPRESSION_RATIO", 10)
-    monkeypatch.setattr(linkedin_archive, "COMPRESSION_RATIO_FLOOR_BYTES", 100)
+    monkeypatch.setattr(zipguard, "MAX_COMPRESSION_RATIO", 10)
+    monkeypatch.setattr(zipguard, "COMPRESSION_RATIO_FLOOR_BYTES", 100)
     path = tmp_path / "bomb.zip"
     with zipfile.ZipFile(path, "w") as zf:
         zf.writestr("Skills.csv", "0" * 100_000, compress_type=zipfile.ZIP_DEFLATED)
@@ -464,11 +465,12 @@ async def test_every_refusal_code_is_reachable_and_present_on_the_response(
     # catch another scenario's zip before it reaches the code being tested.
     with pytest.MonkeyPatch.context() as m:
         m.setattr(linkedin_archive, "MAX_MEMBERS", 2)
+        m.setattr(zipguard, "MAX_MEMBERS", 2)
         await check(_too_many_members_zip_bytes(tmp_path), ArchiveRefusalCode.TOO_MANY_MEMBERS)
 
     with pytest.MonkeyPatch.context() as m:
-        m.setattr(linkedin_archive, "MAX_COMPRESSION_RATIO", 10)
-        m.setattr(linkedin_archive, "COMPRESSION_RATIO_FLOOR_BYTES", 100)
+        m.setattr(zipguard, "MAX_COMPRESSION_RATIO", 10)
+        m.setattr(zipguard, "COMPRESSION_RATIO_FLOOR_BYTES", 100)
         await check(_compression_ratio_zip_bytes(), ArchiveRefusalCode.COMPRESSION_RATIO_TOO_HIGH)
 
     with pytest.MonkeyPatch.context() as m:
