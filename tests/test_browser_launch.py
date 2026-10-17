@@ -125,3 +125,34 @@ def test_cli_browser_launch_json_names_a_remote_cdp_url(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     remote = json.loads(result.output)["remote"]
     assert isinstance(remote, str) and "10.0.0.5" in remote
+
+
+def test_cli_browser_launch_uses_the_chrome_address_the_settings_page_set() -> None:
+    """#597 review: `browser launch` (and so `make chrome`) uses the address in force,
+    the file's, then the Settings page's, as serve and preflight do."""
+    from sqlalchemy import select
+
+    from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
+    from netkeeper.models import User
+    from netkeeper.scoping import install_scope_guard
+    from netkeeper.services import ui_settings
+
+    assert CliRunner().invoke(cli, ["db", "upgrade"]).exit_code == 0
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = session.scalars(select(User)).one()
+            ui_settings.write(
+                session, user, Settings(), {"linkedin.cdp_url": "http://127.0.0.1:9444"}
+            )
+    finally:
+        engine.dispose()
+
+    result = CliRunner().invoke(cli, ["browser", "launch", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["port"] == 9444
+    plain = CliRunner().invoke(cli, ["browser", "launch"])
+    assert "--remote-debugging-port=9444" in plain.output

@@ -145,3 +145,19 @@ def test_db_current_before_and_after_upgrade(cli_data_dir: Path) -> None:
     assert runner.invoke(app, ["db", "upgrade"]).exit_code == 0
     after = runner.invoke(app, ["db", "current"])
     assert f"current: {migrations.head_revision()}" in after.stdout
+
+
+def test_ensure_local_user_keeps_the_zone_the_settings_page_set(session: Session) -> None:
+    """#597: a start (serve, or db upgrade) syncs the row to the zone in force, the
+    Settings page's when the file does not set one, never back to the file's default."""
+    from netkeeper.services import ui_settings
+
+    user = ensure_local_user(session, settings=Settings())
+    ui_settings.write(session, user, Settings(), {"linkedin.timezone": "Europe/Berlin"})
+    assert ensure_local_user(session, settings=Settings()).timezone == "Europe/Berlin"
+    pinned = replace(
+        Settings(),
+        linkedin=LinkedInSettings(timezone="Asia/Tokyo"),
+        file_keys=frozenset({"linkedin.timezone"}),
+    )
+    assert ensure_local_user(session, settings=pinned).timezone == "Asia/Tokyo"

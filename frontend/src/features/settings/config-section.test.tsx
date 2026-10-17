@@ -75,16 +75,56 @@ const POLL = field({
   restart_pending: true,
 })
 
-function renderSections(fields: ConfigField[] = [PREFILLS, VISITS, AUTO_SEND, POLL]) {
-  const puts: Record<string, unknown>[] = []
-  let current: ConfigSettings = {
+function settings(fields: ConfigField[], overrides: Partial<ConfigSettings> = {}): ConfigSettings {
+  return {
     config_path: '/etc/nk.toml',
     log_file: '/data/nk/logs/netkeeper.log',
+    config_changed: false,
+    config_error: null,
+    restart_pending: fields.some((f) => f.restart_pending),
+    can_restart: true,
+    busy: [],
+    restart_waiting: false,
     fields,
+    ...overrides,
   }
+}
+
+function renderSections(
+  fields: ConfigField[] = [PREFILLS, VISITS, AUTO_SEND, POLL],
+  overrides: Partial<ConfigSettings> = {},
+) {
+  const puts: Record<string, unknown>[] = []
+  const restarts: string[] = []
+  const restartBodies: unknown[] = []
+  const cancels: string[] = []
+  let boot = 'boot-1'
+  let current: ConfigSettings = settings(fields, overrides)
   mockFetch(async (request) => {
     const { pathname } = new URL(request.url)
     if (pathname === '/api/v1/posture') return jsonResponse({}, 500)
+    if (pathname === '/api/v1/settings/restart' && request.method === 'DELETE') {
+      cancels.push('DELETE')
+      current = { ...current, restart_waiting: false }
+      return jsonResponse({ cancelled: true })
+    }
+    if (pathname === '/api/v1/settings/restart') {
+      expect(request.method).toBe('POST')
+      expect(request.headers.get('X-Netkeeper-Client')).not.toBeNull()
+      restarts.push(boot)
+      const stopping = boot
+      boot = 'boot-2'
+      // The restarted server applies the pending value: nothing is pending after.
+      current = settings(
+        current.fields.map((f) => ({ ...f, restart_pending: false })),
+        { ...overrides, config_changed: false },
+      )
+      restartBodies.push(await request.json())
+      return jsonResponse({ mode: 'exec', boot_id: stopping, waiting_on: [] }, 202)
+    }
+    if (pathname === '/api/v1/health') {
+      return jsonResponse({ status: 'ok', version: 'test', boot_id: boot })
+    }
     if (pathname !== '/api/v1/settings/config') return jsonResponse({}, 500)
     if (request.method === 'GET') return jsonResponse(current)
     expect(request.headers.get('X-Netkeeper-Client')).not.toBeNull()
@@ -114,7 +154,7 @@ function renderSections(fields: ConfigField[] = [PREFILLS, VISITS, AUTO_SEND, PO
       <ConfigSections />
     </QueryClientProvider>,
   )
-  return { puts }
+  return { puts, restarts, restartBodies, cancels }
 }
 
 describe('ConfigSections', () => {
@@ -186,9 +226,107 @@ describe('ConfigSections', () => {
     const poll = within(
       campaigns.getByRole('group', { name: 'Check Gmail for replies every (minutes)' }),
     )
-    expect(poll.getByText(/Restart netkeeper serve to apply this value/)).toBeVisible()
+    expect(poll.getByText(/Restart netkeeper to apply this value/)).toBeVisible()
     fireEvent.click(poll.getByRole('button', { name: 'Use the default (10)' }))
     await waitFor(() => expect(puts).toEqual([{ [POLL.key]: null }]))
+  })
+
+  it('marks a restart-only field, and offers Restart netkeeper until serve is back', async () => {
+    const { restarts, restartBodies } = renderSections()
+    const campaigns = within(await screen.findByRole('form', { name: 'Campaign defaults' }))
+    const poll = within(
+      campaigns.getByRole('group', { name: 'Check Gmail for replies every (minutes)' }),
+    )
+    expect(poll.getByText('Needs a restart')).toBeVisible()
+    const banner = within(screen.getByRole('region', { name: 'Restart netkeeper' }))
+    expect(banner.getByText(/A setting you changed takes effect when netkeeper restarts/))
+    fireEvent.click(banner.getByRole('button', { name: 'Restart netkeeper' }))
+    expect(await screen.findByText(/Restarting… this page reconnects/)).toBeVisible()
+    expect(
+      await screen.findByText(
+        'netkeeper restarted, and the settings above are in force.',
+        {},
+        { timeout: 3_000 },
+      ),
+    ).toBeVisible()
+    expect(restarts).toEqual(['boot-1'])
+    expect(restartBodies).toEqual([{ when_idle: false }])
+    expect(screen.queryByRole('region', { name: 'Restart netkeeper' })).toBeNull()
+  })
+
+  it('names what is running, and offers Restart when idle instead', async () => {
+    const { restartBodies } = renderSections([PREFILLS], {
+      restart_pending: true,
+      busy: ['a LinkedIn enrich run (#7) is going; cancel it or wait for it to finish'],
+    })
+    const banner = within(await screen.findByRole('region', { name: 'Restart netkeeper' }))
+    expect(banner.getByText('netkeeper is busy:')).toBeVisible()
+    expect(banner.getByText(/a LinkedIn enrich run \(#7\) is going/)).toBeVisible()
+    expect(banner.queryByRole('button', { name: 'Restart netkeeper' })).toBeNull()
+    fireEvent.click(banner.getByRole('button', { name: 'Restart when idle' }))
+    await waitFor(() => expect(restartBodies).toEqual([{ when_idle: true }]))
+  })
+
+  it('shows a restart that waits for idle, and cancels it', async () => {
+    const { cancels } = renderSections([PREFILLS], {
+      restart_pending: true,
+      restart_waiting: true,
+      busy: ['a campaign send is in progress'],
+    })
+    const banner = within(await screen.findByRole('region', { name: 'Restart netkeeper' }))
+    expect(banner.getByText('netkeeper restarts once this is done:')).toBeVisible()
+    expect(banner.getByText(/nothing running is cut off/)).toBeVisible()
+    expect(banner.getByText(/A run you start by hand after that keeps them paused/)).toBeVisible()
+    expect(banner.queryByRole('button', { name: /Restart/ })).toBeNull()
+    fireEvent.click(banner.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(cancels).toEqual(['DELETE']))
+  })
+
+  it('shows no restart banner when nothing waits for one', async () => {
+    renderSections([PREFILLS])
+    await screen.findByRole('form', { name: 'LinkedIn budgets' })
+    expect(screen.queryByRole('region', { name: 'Restart netkeeper' })).toBeNull()
+  })
+
+  it('says config.toml changed, and will not restart onto a file that does not load', async () => {
+    renderSections([PREFILLS], {
+      config_changed: true,
+      restart_pending: true,
+      config_error: '/etc/nk.toml: invalid TOML',
+    })
+    const banner = within(await screen.findByRole('region', { name: 'Restart netkeeper' }))
+    expect(banner.getByText(/config.toml changed since netkeeper started/)).toBeVisible()
+    expect(banner.getByRole('alert')).toHaveTextContent('/etc/nk.toml: invalid TOML')
+    expect(banner.getByRole('button', { name: 'Restart netkeeper' })).toBeDisabled()
+  })
+
+  it('says how to restart when serve cannot restart itself', async () => {
+    renderSections([PREFILLS], { restart_pending: true, can_restart: false })
+    const banner = within(await screen.findByRole('region', { name: 'Restart netkeeper' }))
+    expect(banner.queryByRole('button')).toBeNull()
+    expect(banner.getByText(/Stop it and start it again/)).toBeVisible()
+  })
+
+  it('edits a text field and saves it trimmed', async () => {
+    const zone = field({
+      key: 'linkedin.timezone',
+      group: 'linkedin_hours',
+      label: 'Time zone',
+      kind: 'text',
+      minimum: null,
+      maximum: null,
+      warn_above: null,
+      value: 'America/New_York',
+      default: 'America/New_York',
+    })
+    const { puts } = renderSections([zone])
+    const hours = within(await screen.findByRole('form', { name: 'LinkedIn active hours' }))
+    const input = hours.getByRole('textbox', { name: 'Time zone' })
+    fireEvent.change(input, { target: { value: '' } })
+    expect(hours.getByRole('alert')).toHaveTextContent('Enter a value.')
+    fireEvent.change(input, { target: { value: ' Europe/Berlin ' } })
+    fireEvent.click(hours.getByRole('button', { name: 'Save linkedin active hours' }))
+    await waitFor(() => expect(puts).toEqual([{ 'linkedin.timezone': 'Europe/Berlin' }]))
   })
 
   it('shows the warnings the value in force earns', async () => {

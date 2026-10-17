@@ -92,6 +92,10 @@ class TaskRunner:
         log.info("task %s (%s) submitted for user %d", info.id, name, user_id)
         return info
 
+    def active(self) -> list[TaskInfo]:
+        """Every task still pending or running, oldest first (#597: restart waits for them)."""
+        return [self._tasks[task_id] for task_id in list(self._running) if task_id in self._tasks]
+
     def get(self, task_id: str) -> TaskInfo | None:
         """The current snapshot of a task, or None if unknown or pruned."""
         return self._tasks.get(task_id)

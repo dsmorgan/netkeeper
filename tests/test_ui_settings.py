@@ -273,14 +273,29 @@ def test_a_file_value_above_the_hard_max_is_warned_about() -> None:
     assert "asks for 80 a day, above the hard max of 50" in warning
 
 
-def test_no_editable_value_needs_a_restart() -> None:
-    """#464: serve reads each user's values as it runs, so none waits for a restart."""
+def test_only_the_chrome_address_needs_a_restart() -> None:
+    """#464: serve reads each user's values as it runs, so none waits for a restart but
+    ``linkedin.cdp_url`` (#597), whose attach provider serve builds once."""
     started = ui_settings.apply(Settings(), {})
     views = ui_settings.describe(
         Settings(), {"campaigns.reply_poll_minutes": 5, PREFILLS: 30}, started=started
     )
     assert not any(view.restart_pending for view in views)
-    assert not any(view.spec.applies == "restart" and view.spec.editable for view in views)
+    assert [v.spec.key for v in views if v.spec.applies == "restart" and v.spec.editable] == [
+        "linkedin.cdp_url"
+    ]
+
+
+def test_a_changed_chrome_address_is_restart_pending_until_serve_restarts() -> None:
+    started = ui_settings.apply(Settings(), {})
+    moved = {"linkedin.cdp_url": "http://127.0.0.1:9333"}
+    views = {v.spec.key: v for v in ui_settings.describe(Settings(), moved, started=started)}
+    assert views["linkedin.cdp_url"].restart_pending
+    assert [k for k, v in views.items() if v.restart_pending] == ["linkedin.cdp_url"]
+    # After the restart, serve started with the new address: nothing is pending.
+    restarted = ui_settings.apply(Settings(), moved)
+    after = ui_settings.describe(Settings(), moved, started=restarted)
+    assert not any(v.restart_pending for v in after)
 
 
 # --- review follow-ups ------------------------------------------------------------
@@ -346,3 +361,121 @@ def test_a_file_spacing_below_the_page_minimum_never_blocks_another_write(
     base = _pinned(campaigns__send_spacing_median_s=30, campaigns__send_spacing_floor_s=20)
     ui_settings.write(session, user, base, {"campaigns.mailbox_daily_cap": 10})
     assert ui_settings.stored(session, user) == {"campaigns.mailbox_daily_cap": 10}
+
+
+# --- #597: the settings that moved onto the page ------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("key", "minimum", "maximum"),
+    [
+        ("linkedin.budget.warmup_start", 1, 100),
+        ("linkedin.budget.warmup_step", 1, 30),
+        ("linkedin.enrich_stale_days", 30, 3650),
+        ("linkedin.disconnect_after_misses", 1, 10),
+    ],
+)
+def test_the_new_number_fields_have_their_floor_and_ceiling(
+    key: str, minimum: int, maximum: int
+) -> None:
+    spec = ui_settings.BY_KEY[key]
+    assert (spec.minimum, spec.maximum, spec.applies) == (minimum, maximum, "now")
+    with pytest.raises(ValueError, match="at least"):
+        ui_settings.parse(spec, minimum - 1)
+    with pytest.raises(ValueError, match="at most"):
+        ui_settings.parse(spec, maximum + 1)
+
+
+@pytest.mark.parametrize("zone", ["Europe/Berlin", "UTC", " Asia/Tokyo "])
+def test_a_known_time_zone_is_taken(zone: str) -> None:
+    spec = ui_settings.BY_KEY["linkedin.timezone"]
+    assert ui_settings.parse(spec, zone) == zone.strip()
+
+
+@pytest.mark.parametrize("zone", ["Mars/Olympus", "", "../../etc/passwd", 5])
+def test_an_unknown_time_zone_is_refused(zone: object) -> None:
+    with pytest.raises(ValueError):
+        ui_settings.parse(ui_settings.BY_KEY["linkedin.timezone"], zone)
+
+
+@pytest.mark.parametrize(
+    ("url", "stored"),
+    [
+        ("http://127.0.0.1:9333", "http://127.0.0.1:9333"),
+        ("http://localhost:9223/", "http://localhost:9223"),
+        ("HTTP://LOCALHOST:9223", "http://localhost:9223"),
+        ("http://[::1]:9224", "http://[::1]:9224"),
+    ],
+)
+def test_a_loopback_chrome_address_is_taken(url: str, stored: str) -> None:
+    assert ui_settings.parse(ui_settings.BY_KEY["linkedin.cdp_url"], url) == stored
+
+
+@pytest.mark.parametrize(
+    ("url", "why"),
+    [
+        ("http://192.0.2.10:9222", "not this machine's loopback"),
+        ("http://example.test:9222", "not this machine's loopback"),
+        ("http://127.0.0.1", "with its port"),
+        ("ws://127.0.0.1:9222", "with its port"),
+        ("http://127.0.0.1:9222/json", "just a scheme, host and port"),
+        ("http://127.0.0.1:99999", "such as"),
+        ("http://127.0.0.1:0", "1 to 65535"),
+        ("http://127.0.0.1:92\n22", "no spaces or line breaks"),
+        ("http://127.0.0.1:\t9222", "no spaces or line breaks"),
+    ],
+)
+def test_a_remote_or_odd_chrome_address_is_refused(url: str, why: str) -> None:
+    with pytest.raises(ValueError, match=why):
+        ui_settings.parse(ui_settings.BY_KEY["linkedin.cdp_url"], url)
+
+
+def test_a_remote_chrome_address_from_the_file_is_warned_about() -> None:
+    settings = _pinned(linkedin__cdp_url="http://192.0.2.10:9222")
+    view = _view(ui_settings.describe(settings, {}), "linkedin.cdp_url")
+    assert (view.source, view.editable) == ("file", False)
+    assert view.warnings and "not this machine's loopback" in view.warnings[0]
+
+
+def test_a_warm_up_at_or_above_the_daily_limit_is_refused(session: Session, user: User) -> None:
+    with pytest.raises(ui_settings.SettingsRefused) as refused:
+        ui_settings.write(session, user, Settings(), {"linkedin.budget.warmup_start": 60})
+    assert (
+        "below the daily profile-visit limit (60)"
+        in refused.value.problems["linkedin.budget.warmup_start"]
+    )
+    # Raising the daily limit in the same write makes room for it.
+    ui_settings.write(session, user, Settings(), {"linkedin.budget.warmup_start": 60, VISITS: 80})
+    resolved = ui_settings.resolve(session, user, Settings())
+    assert resolved.linkedin.budget.warmup_start == 60
+
+
+def test_a_file_warm_up_at_the_daily_limit_is_warned_about() -> None:
+    settings = _pinned(linkedin__budget__warmup_start=70)
+    view = _view(ui_settings.describe(settings, {}), "linkedin.budget.warmup_start")
+    assert view.warnings and "full budget on day one" in view.warnings[0]
+
+
+def test_saving_the_time_zone_moves_the_user_row_with_it(
+    session: Session, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Budgets count days in the row's zone; the active window reads the setting. A
+    save changes both at once, and going back to the default does too (an hour later:
+    the page changes the zone at most once an hour, tests/test_zone_change.py)."""
+    from datetime import UTC, datetime, timedelta
+
+    clock = [datetime(2026, 10, 14, 11, 0, tzinfo=UTC)]
+    monkeypatch.setattr(ui_settings, "utcnow", lambda: clock[0])
+    user.timezone = "America/New_York"
+    ui_settings.write(session, user, Settings(), {"linkedin.timezone": "Europe/Berlin"})
+    assert user.timezone == "Europe/Berlin"
+    assert ui_settings.resolve(session, user, Settings()).linkedin.timezone == "Europe/Berlin"
+    clock[0] += timedelta(hours=1)
+    ui_settings.write(session, user, Settings(), {"linkedin.timezone": None})
+    assert user.timezone == "America/New_York"
+
+
+def test_a_time_zone_the_file_sets_is_locked(session: Session, user: User) -> None:
+    pinned = _pinned(linkedin__timezone="Asia/Tokyo")
+    with pytest.raises(ui_settings.SettingsRefused):
+        ui_settings.write(session, user, pinned, {"linkedin.timezone": "Europe/Berlin"})

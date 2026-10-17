@@ -2542,6 +2542,7 @@
             "enum": [
               "linkedin_budgets",
               "linkedin_hours",
+              "linkedin_runs",
               "campaigns",
               "backup",
               "logs"
@@ -2564,7 +2565,8 @@
               "float",
               "bool",
               "window",
-              "dates"
+              "dates",
+              "text"
             ],
             "title": "Kind",
             "type": "string"
@@ -2698,6 +2700,32 @@
       },
       "ConfigOut": {
         "properties": {
+          "busy": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Busy",
+            "type": "array"
+          },
+          "can_restart": {
+            "title": "Can Restart",
+            "type": "boolean"
+          },
+          "config_changed": {
+            "title": "Config Changed",
+            "type": "boolean"
+          },
+          "config_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config Error"
+          },
           "config_path": {
             "anyOf": [
               {
@@ -2719,11 +2747,25 @@
           "log_file": {
             "title": "Log File",
             "type": "string"
+          },
+          "restart_pending": {
+            "title": "Restart Pending",
+            "type": "boolean"
+          },
+          "restart_waiting": {
+            "title": "Restart Waiting",
+            "type": "boolean"
           }
         },
         "required": [
           "config_path",
           "log_file",
+          "config_changed",
+          "config_error",
+          "restart_pending",
+          "can_restart",
+          "busy",
+          "restart_waiting",
           "fields"
         ],
         "title": "ConfigOut",
@@ -6912,6 +6954,10 @@
       },
       "HealthOut": {
         "properties": {
+          "boot_id": {
+            "title": "Boot Id",
+            "type": "string"
+          },
           "status": {
             "const": "ok",
             "title": "Status",
@@ -6924,7 +6970,8 @@
         },
         "required": [
           "status",
-          "version"
+          "version",
+          "boot_id"
         ],
         "title": "HealthOut",
         "type": "object"
@@ -12185,6 +12232,60 @@
         ],
         "title": "ResponseVia",
         "type": "string"
+      },
+      "RestartCancelOut": {
+        "properties": {
+          "cancelled": {
+            "title": "Cancelled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cancelled"
+        ],
+        "title": "RestartCancelOut",
+        "type": "object"
+      },
+      "RestartIn": {
+        "properties": {
+          "when_idle": {
+            "default": false,
+            "title": "When Idle",
+            "type": "boolean"
+          }
+        },
+        "title": "RestartIn",
+        "type": "object"
+      },
+      "RestartOut": {
+        "properties": {
+          "boot_id": {
+            "title": "Boot Id",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "launchd",
+              "exec"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "waiting_on": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Waiting On",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mode",
+          "boot_id",
+          "waiting_on"
+        ],
+        "title": "RestartOut",
+        "type": "object"
       },
       "ResultTotalsOut": {
         "properties": {
@@ -22267,7 +22368,7 @@
     },
     "/api/v1/linkedin/browser": {
       "get": {
-        "description": "``netkeeper browser launch``'s instructions, as data (spec 9.1, ADR 0002).\n\nnetkeeper never starts Chrome; it only ever prints (here, shows) the command\nfor a person to run themselves. Everything below comes from config -- no\nattach, so this never awaits browser work (CLAUDE.md). ``user`` is unused --\nthe instructions are the same for everyone -- but every route here resolves\nthe current user (spec 14.1), local mode's single user included.",
+        "description": "``netkeeper browser launch``'s instructions, as data (spec 9.1, ADR 0002).\n\nnetkeeper never starts Chrome; it only ever prints (here, shows) the command\nfor a person to run themselves. Everything below comes from config -- no\nattach, so this never awaits browser work (CLAUDE.md). The address is the one in\nforce (the file, then the Settings page, #597): after a change Chrome is started\non the new port, then serve restarted to attach there.",
         "operationId": "get_linkedin_browser",
         "responses": {
           "200": {
@@ -24216,6 +24317,81 @@
           }
         },
         "summary": "Set Config Settings",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/v1/settings/restart": {
+      "delete": {
+        "description": "Cancel a restart that waits for idle (**Cancel** on the banner). ``user`` is\nunused; every route resolves the current user.",
+        "operationId": "cancel_restart",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestartCancelOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "The restart has already begun"
+          }
+        },
+        "summary": "Cancel Restart",
+        "tags": [
+          "settings"
+        ]
+      },
+      "post": {
+        "description": "Restart ``netkeeper serve`` so settings it reads at startup apply, never in the\nmiddle of work: ``409`` names what is running, unless ``when_idle`` asks to wait for\nit. ``user`` is unused; every route resolves the current user.",
+        "operationId": "restart_serve",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RestartIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestartOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "This process cannot restart, config.toml does not load, or something is running (a LinkedIn run, the browser, a task, a campaign send)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restart Serve",
         "tags": [
           "settings"
         ]

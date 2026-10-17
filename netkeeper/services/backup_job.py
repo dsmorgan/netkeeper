@@ -70,6 +70,12 @@ class NightlyBackups:
         self._tick_s = tick_s
         self._first_check_s = first_check_s
         self._task: asyncio.Task[None] | None = None
+        self._backing_up = False
+
+    @property
+    def busy(self) -> bool:
+        """A nightly backup is being written (#597: a restart waits for it)."""
+        return self._backing_up
 
     def start(self) -> None:
         if self._task is None:
@@ -99,8 +105,12 @@ class NightlyBackups:
         newest = found[0].created_at if found else None
         if not nightly_due(newest, now, settings.linkedin.timezone):
             return None
-        written = create_backup(self._engine, self.backups_dir, now=now)
-        removed = prune_backups(self.backups_dir, keep, now=now)
+        self._backing_up = True
+        try:
+            written = create_backup(self._engine, self.backups_dir, now=now)
+            removed = prune_backups(self.backups_dir, keep, now=now)
+        finally:
+            self._backing_up = False
         log.info(
             "nightly backup wrote %s; pruned %d (keeping %d)", personal(written), len(removed), keep
         )

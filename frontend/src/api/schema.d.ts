@@ -2197,9 +2197,9 @@ export interface paths {
          *
          *     netkeeper never starts Chrome; it only ever prints (here, shows) the command
          *     for a person to run themselves. Everything below comes from config -- no
-         *     attach, so this never awaits browser work (CLAUDE.md). ``user`` is unused --
-         *     the instructions are the same for everyone -- but every route here resolves
-         *     the current user (spec 14.1), local mode's single user included.
+         *     attach, so this never awaits browser work (CLAUDE.md). The address is the one in
+         *     force (the file, then the Settings page, #597): after a change Chrome is started
+         *     on the new port, then serve restarted to attach there.
          */
         get: operations["get_linkedin_browser"];
         put?: never;
@@ -3126,6 +3126,33 @@ export interface paths {
         put: operations["set_config_settings"];
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/settings/restart": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restart Serve
+         * @description Restart ``netkeeper serve`` so settings it reads at startup apply, never in the
+         *     middle of work: ``409`` names what is running, unless ``when_idle`` asks to wait for
+         *     it. ``user`` is unused; every route resolves the current user.
+         */
+        post: operations["restart_serve"];
+        /**
+         * Cancel Restart
+         * @description Cancel a restart that waits for idle (**Cancel** on the banner). ``user`` is
+         *     unused; every route resolves the current user.
+         */
+        delete: operations["cancel_restart"];
         options?: never;
         head?: never;
         patch?: never;
@@ -4722,7 +4749,7 @@ export interface components {
              * Group
              * @enum {string}
              */
-            group: "linkedin_budgets" | "linkedin_hours" | "campaigns" | "backup" | "logs";
+            group: "linkedin_budgets" | "linkedin_hours" | "linkedin_runs" | "campaigns" | "backup" | "logs";
             /** Help */
             help: string;
             /** Key */
@@ -4731,7 +4758,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "int" | "optional_int" | "float" | "bool" | "window" | "dates";
+            kind: "int" | "optional_int" | "float" | "bool" | "window" | "dates" | "text";
             /** Label */
             label: string;
             /** Locked Reason */
@@ -4769,12 +4796,24 @@ export interface components {
         };
         /** ConfigOut */
         ConfigOut: {
+            /** Busy */
+            busy: string[];
+            /** Can Restart */
+            can_restart: boolean;
+            /** Config Changed */
+            config_changed: boolean;
+            /** Config Error */
+            config_error: string | null;
             /** Config Path */
             config_path: string | null;
             /** Fields */
             fields: components["schemas"]["ConfigFieldOut"][];
             /** Log File */
             log_file: string;
+            /** Restart Pending */
+            restart_pending: boolean;
+            /** Restart Waiting */
+            restart_waiting: boolean;
         };
         /**
          * ConfirmationRejected
@@ -5945,6 +5984,8 @@ export interface components {
         };
         /** HealthOut */
         HealthOut: {
+            /** Boot Id */
+            boot_id: string;
             /**
              * Status
              * @constant
@@ -8021,6 +8062,31 @@ export interface components {
          * @enum {string}
          */
         ResponseVia: "call" | "text" | "other_email" | "other_app" | "in_person" | "other";
+        /** RestartCancelOut */
+        RestartCancelOut: {
+            /** Cancelled */
+            cancelled: boolean;
+        };
+        /** RestartIn */
+        RestartIn: {
+            /**
+             * When Idle
+             * @default false
+             */
+            when_idle: boolean;
+        };
+        /** RestartOut */
+        RestartOut: {
+            /** Boot Id */
+            boot_id: string;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "launchd" | "exec";
+            /** Waiting On */
+            waiting_on: string[];
+        };
         /** ResultTotalsOut */
         ResultTotalsOut: {
             /** Bounced */
@@ -15895,6 +15961,73 @@ export interface operations {
             };
             /** @description A value refused: nothing was stored */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    restart_serve: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RestartIn"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RestartOut"];
+                };
+            };
+            /** @description This process cannot restart, config.toml does not load, or something is running (a LinkedIn run, the browser, a task, a campaign send) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_restart: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RestartCancelOut"];
+                };
+            };
+            /** @description The restart has already begun */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

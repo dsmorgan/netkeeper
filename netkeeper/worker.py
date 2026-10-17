@@ -57,6 +57,7 @@ from datetime import UTC, datetime
 from typing import Any, Final, Protocol
 
 from fastapi import FastAPI
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import LinkedInSettings, Settings, load_settings
@@ -88,7 +89,7 @@ from netkeeper.linkedin.page_messaging import MessageCheckResult as MessageCheck
 from netkeeper.linkedin.page_messaging import PageBubbleCheck, PageMessageCheck, PagePrefill
 from netkeeper.linkedin.page_profiles import PageProfiles
 from netkeeper.logging_setup import setup_logging
-from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
+from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User, UserKind
 from netkeeper.services import message_check, message_send, route_breaker, runs, ui_settings
 from netkeeper.services.budgets import (
     ActionClass,
@@ -702,7 +703,9 @@ def serve_extractor(
     ``provider`` defaults to :class:`~netkeeper.linkedin.browser.AttachBrowserProvider`
     on ``linkedin.cdp_url``, built once the app has its database, so the
     legacy-lock co-claim (#169 F) goes with the local user's account whatever its
-    id (#175 review, F10). Building it attaches to nothing; the provider only
+    id (#175 review, F10), and the address is the one in force for the local user:
+    the file's, else the Settings page's (#597). It is read here only, so a change
+    applies at serve's next start. Building it attaches to nothing; the provider only
     connects inside a run, and a run on a disarmed account is never scheduled.
     """
 
@@ -711,15 +714,24 @@ def serve_extractor(
         if chosen is None:
             with session_scope(factory) as session:
                 local = local_account_id(session)
+                cdp_url = _local_cdp_url(session, settings)
             partner = activity_lock.SINGLE_ACCOUNT_KEY if local is None else account_key(local)
-            chosen = AttachBrowserProvider(
-                settings.linkedin.cdp_url, locks=ActivityLocks(legacy_partner=partner)
-            )
+            chosen = AttachBrowserProvider(cdp_url, locks=ActivityLocks(legacy_partner=partner))
         return BrowserWorker(
             chosen, factory, settings.linkedin, bus=bus, campaign_settings=settings
         )
 
     return ServeExtractor(executor=executor)
+
+
+def _local_cdp_url(session: Session, settings: Settings) -> str:
+    """``linkedin.cdp_url`` in force for the first local user, or the file's without one."""
+    user = session.scalars(
+        select(User).where(User.kind == UserKind.LOCAL).order_by(User.id)
+    ).first()
+    if user is None:
+        return settings.linkedin.cdp_url
+    return ui_settings.resolve(session, user, settings).linkedin.cdp_url
 
 
 def serve_app(settings: Settings) -> FastAPI:

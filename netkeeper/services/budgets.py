@@ -465,6 +465,48 @@ def _week_budget(
     return PeriodBudget(count=count, limit=limits.week)
 
 
+def carry_counters(
+    session: Session,
+    user: User,
+    account_id: int,
+    *,
+    old_zone: tzinfo,
+    new_zone: tzinfo,
+    now: datetime,
+) -> None:
+    """Carry today's and this week's counters across a time-zone change (#597).
+
+    Counter keys are local dates, and at one instant two or three local dates exist
+    somewhere, so moving ``user.timezone`` would otherwise open a fresh day (and week)
+    for every zone it visits. Each action's counter for the old zone's current day and
+    week becomes the new zone's too, keeping the larger count: a merge only ever grows a
+    count, so moving back and forth gains nothing, and a move onto a zone already on
+    tomorrow spends part of tomorrow, the safe direction. Needs a writer session.
+    """
+    _require_writer(session, "carry_counters")
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    old, new = _period_in(now, old_zone), _period_in(now, new_zone)
+    for action in ActionClass:
+        pairs = [
+            (_day_key(account_id, action, old.day), _day_key(account_id, action, new.day)),
+            (_week_key(account_id, action, old), _week_key(account_id, action, new)),
+        ]
+        for old_key, new_key in pairs:
+            if old_key == new_key:
+                continue
+            carried = _read_count(session, user, old_key)
+            if carried > _read_count(session, user, new_key):
+                set_setting(session, user, new_key, carried)
+                log.info("budget counter %s carried to %s: %d", old_key, new_key, carried)
+
+
+def _period_in(now: datetime, zone: tzinfo) -> LocalPeriod:
+    local = now.astimezone(zone)
+    iso_year, iso_week, _ = local.isocalendar()
+    return LocalPeriod(day=local.date(), iso_year=iso_year, iso_week=iso_week)
+
+
 def _day_key(account_id: int, action: ActionClass, day: date) -> str:
     return f"linkedin.budget.{account_id}.{action.value}.day.{day.isoformat()}"
 
