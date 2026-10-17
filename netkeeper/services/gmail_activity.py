@@ -42,6 +42,7 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.scoping import scoped
+from netkeeper.services import zone_change
 from netkeeper.services.campaign_engine import (
     campaign_cap,
     campaign_count,
@@ -152,6 +153,7 @@ def gmail_activity(
     session: Session, user: User, *, now: datetime, settings: Settings, limit: int = RECENT_LIMIT
 ) -> GmailActivity:
     day_start, day_end, zone = _day(settings, user, now)
+    day_start = zone_change.count_start(session, user, day_start, now)  # as the tick counts
     live = session.scalars(
         scoped(user, Mailbox).where(Mailbox.status != MailboxStatus.DISABLED).order_by(Mailbox.id)
     ).all()

@@ -5,7 +5,10 @@
  */
 import type { ConfigField } from './api'
 
-/** A field's draft: text for numbers and dates, a pair for a window, a flag for a switch. */
+/**
+ * A field's draft: text for numbers, dates and text fields, a pair for a window, a flag
+ * for a switch.
+ */
 export type Draft = string | boolean | [string, string]
 
 const CLOCK = /^([01][0-9]|2[0-3]):[0-5][0-9]$/
@@ -22,6 +25,11 @@ export const GROUPS: { id: ConfigField['group']; title: string; description: str
     id: 'linkedin_hours',
     title: 'LinkedIn active hours',
     description: 'When netkeeper may use LinkedIn, and how much less it does on weekends.',
+  },
+  {
+    id: 'linkedin_runs',
+    title: 'LinkedIn runs',
+    description: 'How syncs and enrichment treat your contacts, and where netkeeper finds Chrome.',
   },
   {
     id: 'campaigns',
@@ -67,6 +75,8 @@ export function valueOf(field: ConfigField, draft: Draft): unknown {
       return draft
     case 'dates':
       return datesOf(draft as string)
+    case 'text':
+      return (draft as string).trim()
     case 'optional_int':
       return (draft as string).trim() === '' ? null : Number(draft)
     default:
@@ -94,6 +104,7 @@ export function draftProblem(field: ConfigField, draft: Draft): string | null {
     const bad = datesOf(draft as string).find((d) => !ISO_DATE.test(d))
     return bad === undefined ? null : `${bad} is not a date as YYYY-MM-DD.`
   }
+  if (field.kind === 'text') return (draft as string).trim() === '' ? 'Enter a value.' : null
   const text = (draft as string).trim()
   if (text === '' && field.kind === 'optional_int') return null
   const number = Number(text)

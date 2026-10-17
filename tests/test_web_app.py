@@ -19,6 +19,7 @@ from netkeeper.cli import app as cli
 from netkeeper.config import LinkedInSettings, Settings
 from netkeeper.db import make_session_factory
 from netkeeper.models import User, UserKind
+from netkeeper.web.api import health
 from netkeeper.web.app import API_PREFIX, create_app, discover_routers, openapi_json
 from netkeeper.worker import dev_app, serve_app
 
@@ -134,6 +135,7 @@ API_PATHS = {
     "/api/v1/settings/self-contact",
     "/api/v1/settings/sending-hours",
     "/api/v1/settings/config",
+    "/api/v1/settings/restart",
     "/api/v1/campaigns",
     "/api/v1/campaigns/{campaign_id}",
     "/api/v1/campaigns/{campaign_id}/activate",
@@ -198,7 +200,9 @@ API_PATHS = {
 async def test_health(client: httpx.AsyncClient) -> None:
     response = await client.get("/api/v1/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "version": __version__}
+    body = response.json()
+    assert {k: body[k] for k in ("status", "version")} == {"status": "ok", "version": __version__}
+    assert body["boot_id"] == health.BOOT_ID and len(body["boot_id"]) == 32
 
 
 async def test_me_returns_the_local_user(client: httpx.AsyncClient) -> None:

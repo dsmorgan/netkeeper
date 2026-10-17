@@ -195,6 +195,7 @@ def create_app(
                     )
                     teardown.push_async_callback(nightly.stop)
                     nightly.start()
+                    app.state.nightly_backups = nightly
             yield
 
     app = FastAPI(
@@ -261,6 +262,7 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     app.state.pending_oauth = PendingAuthorizations()
     app.state.mailbox_monitor = None
     app.state.campaign_engine = None
+    app.state.nightly_backups = None
     return tasks
 
 

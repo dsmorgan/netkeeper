@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from netkeeper.config import Settings
 from netkeeper.models import User, UserKind
+from netkeeper.services import ui_settings
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +45,10 @@ def ensure_local_user(session: Session, *, settings: Settings | None = None) -> 
     and ``netkeeper.services.posture`` keeps its own check of the two as a
     regression detector rather than as the fix.
 
+    The zone in force is the file's, else the Settings page's (#597), else the
+    default: the page's value is laid over ``settings`` here, so a start never puts
+    the row back to the file's zone after the page changed it.
+
     The user row stays the thing budgets read, rather than budgets learning to
     read the config, because in a hosted deployment the zone belongs to the
     user and not to one machine's config file (ADR 0005). This writes, so it
@@ -51,15 +56,10 @@ def ensure_local_user(session: Session, *, settings: Settings | None = None) -> 
     """
     existing = local_owner(session)
     if existing is not None:
-        if settings is not None and existing.timezone != settings.linkedin.timezone:
-            log.info(
-                "local user %d: timezone %s -> %s, following linkedin.timezone",
-                existing.id,
-                existing.timezone,
-                settings.linkedin.timezone,
+        if settings is not None:
+            ui_settings.sync_timezone(
+                session, existing, ui_settings.resolve(session, existing, settings)
             )
-            existing.timezone = settings.linkedin.timezone
-            session.flush()
         return existing
     timezone = settings.linkedin.timezone if settings is not None else "UTC"
     user = User(kind=UserKind.LOCAL, timezone=timezone)

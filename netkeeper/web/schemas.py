@@ -69,6 +69,8 @@ from netkeeper.services.tasks import TaskStatus
 class HealthOut(BaseModel):
     status: Literal["ok"]
     version: str
+    boot_id: str
+    """New for each process: it changes when netkeeper serve restarts (#597)."""
 
 
 class UserOut(BaseModel):

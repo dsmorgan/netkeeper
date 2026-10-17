@@ -24,32 +24,42 @@ calls it where it uses the value: each request, each campaign tick for each user
 and each LinkedIn run as it starts. A change therefore applies from the next
 request, tick or run. ``serve``'s scheduler, mailbox poll and reply poll read each
 user's own values at each heartbeat or tick (#464), so those apply without a restart
-too. A value a running ``serve`` reads once at startup would say so
-(:attr:`FieldSpec.applies` ``"restart"``), and :func:`describe` reports when the
-running process still has the old one; none is left but file-only ``linkedin_auto_send``.
+too. ``linkedin.timezone`` is also the user row's zone, which budgets count days in:
+:func:`write` updates the row in the same transaction (#597). A value a running
+``serve`` reads once at startup says so (:attr:`FieldSpec.applies` ``"restart"``):
+``linkedin.cdp_url``, because the attach provider and its in-process activity lock
+are built once. :func:`describe` reports when the running process still has the old
+one, and the Settings page then offers **Restart netkeeper** (``POST
+/settings/restart``, :mod:`netkeeper.services.restart`).
 
 **What is not here.** ``linkedin_auto_send`` is shown, never written: turning it on
 from a web page would need a confirm step as deliberate as ``schedule arm``. Secrets
-never are settings; they stay in the Keychain. ``web.*``, ``linkedin.cdp_url``,
-pacing, heat and the LLM model names stay file-only.
+never are settings; they stay in the Keychain. ``web.*`` stays file-only: it is the
+address the page itself is served from, so a wrong value would leave no page to fix
+it with. Pacing and heat stay file-only as safety tuning, and nothing reads the LLM
+keys yet. The inventory is on #597.
 """
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import re
-from collections.abc import Mapping
+import zoneinfo
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
-from datetime import date, time
+from datetime import UTC, date, time
 from typing import Any, Final, Literal
+from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
 
 from netkeeper.config import Settings
 from netkeeper.models import JsonValue, SettingKV, User
+from netkeeper.models.base import utcnow
 from netkeeper.scoping import scoped
-from netkeeper.services import budgets
+from netkeeper.services import budgets, zone_change
 from netkeeper.services.budgets import (
     HARD_MAX_PER_DAY,
     HARD_MAX_PER_WEEK,
@@ -71,9 +81,11 @@ log = logging.getLogger(__name__)
 KEY_PREFIX: Final = "config."
 """``settings_kv`` key prefix: ``config.linkedin.budget.li_prefills_per_day``."""
 
-Kind = Literal["int", "optional_int", "float", "bool", "window", "dates"]
+Kind = Literal["int", "optional_int", "float", "bool", "window", "dates", "text"]
 Applies = Literal["now", "restart"]
-Group = Literal["linkedin_budgets", "linkedin_hours", "campaigns", "backup", "logs"]
+Group = Literal[
+    "linkedin_budgets", "linkedin_hours", "linkedin_runs", "campaigns", "backup", "logs"
+]
 Source = Literal["default", "ui", "file"]
 
 SPACING_FLOOR_MIN_S: Final = 90
@@ -86,6 +98,14 @@ warning: Appendix B's default is 30. The page refuses 0, which turns the guard o
 
 MAX_HOLIDAYS: Final = 366
 """The most holidays the page stores: a year of them, every day."""
+
+WARMUP_STEP_MAX: Final = 30
+"""The fastest warm-up the page accepts: 30 more profile visits each day, three times
+spec 9.5's 10. A file value may be faster; the posture report still judges it."""
+
+LOOPBACK_CDP_HOSTS: Final = frozenset({"127.0.0.1", "localhost", "::1"})
+"""The hosts ``linkedin.cdp_url`` may name when the page sets it. Chrome's debug port
+answers on its own loopback only; a remote one stays a deliberate config.toml edit."""
 
 _CLOCK = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -204,6 +224,31 @@ FIELDS: Final[tuple[FieldSpec, ...]] = (
         warn_above=LI_MESSAGE_WARN_ABOVE,
     ),
     FieldSpec(
+        key="linkedin.budget.warmup_start",
+        group="linkedin_budgets",
+        label="Warm-up: profile visits on day one",
+        help=(
+            "A fresh install starts at this many profile visits a day and grows toward the"
+            " daily limit. It must be below the daily limit."
+        ),
+        kind="int",
+        applies="now",
+        applies_note=_BUDGET_NOTE,
+        minimum=1,
+        maximum=PROFILE_VISITS_DESIGN_LEVEL,
+    ),
+    FieldSpec(
+        key="linkedin.budget.warmup_step",
+        group="linkedin_budgets",
+        label="Warm-up: more visits each day",
+        help="How many more profile visits each day of warm-up allows, until the daily limit.",
+        kind="int",
+        applies="now",
+        applies_note=_BUDGET_NOTE,
+        minimum=1,
+        maximum=WARMUP_STEP_MAX,
+    ),
+    FieldSpec(
         key="linkedin.active_hours",
         group="linkedin_hours",
         label="Active hours",
@@ -222,6 +267,23 @@ FIELDS: Final[tuple[FieldSpec, ...]] = (
         ),
     ),
     FieldSpec(
+        key="linkedin.timezone",
+        group="linkedin_hours",
+        label="Time zone",
+        help=(
+            "The zone your active hours, budget days, sending hours and nightly backup are"
+            " read in, as an IANA name such as America/New_York."
+        ),
+        kind="text",
+        applies="now",
+        applies_note=(
+            "Applies at once: budgets count the day in the new zone, carrying over what"
+            " today already spent, and the next run checks your hours in it. A scheduled"
+            " run netkeeper already planned keeps its due time until it fires. It can"
+            " change once an hour."
+        ),
+    ),
+    FieldSpec(
         key="linkedin.weekend_multiplier",
         group="linkedin_hours",
         label="Weekend multiplier",
@@ -231,6 +293,46 @@ FIELDS: Final[tuple[FieldSpec, ...]] = (
         applies_note=_BUDGET_NOTE,
         minimum=0,
         maximum=WEEKEND_DAMPING_CEILING,
+    ),
+    FieldSpec(
+        key="linkedin.enrich_stale_days",
+        group="linkedin_runs",
+        label="Enrich again after (days)",
+        help="Enrichment visits a profile again once its details are this many days old.",
+        kind="int",
+        applies="now",
+        applies_note="Applies from the next enrichment run.",
+        minimum=30,
+        maximum=3650,
+    ),
+    FieldSpec(
+        key="linkedin.disconnect_after_misses",
+        group="linkedin_runs",
+        label="Mark disconnected after (missed syncs)",
+        help=(
+            "A contact missing from this many full connection syncs in a row is marked no"
+            " longer connected."
+        ),
+        kind="int",
+        applies="now",
+        applies_note="Applies from the next connections sync.",
+        minimum=1,
+        maximum=10,
+    ),
+    FieldSpec(
+        key="linkedin.cdp_url",
+        group="linkedin_runs",
+        label="Chrome debug address",
+        help=(
+            "Where netkeeper attaches to the Chrome you started, such as"
+            " http://127.0.0.1:9222. This page accepts this machine's loopback only."
+        ),
+        kind="text",
+        applies="restart",
+        applies_note=(
+            "Needs a restart: netkeeper serve connects its browser runs to the address it"
+            " started with. Commands you run in a terminal use the new one at once."
+        ),
     ),
     FieldSpec(
         key="campaigns.mailbox_daily_cap",
@@ -518,6 +620,10 @@ def parse(spec: FieldSpec, raw: object) -> object:
         return raw
     if spec.kind == "window":
         return _parse_window(raw)
+    if spec.kind == "text":
+        if not isinstance(raw, str):
+            raise ValueError("must be text")
+        return _TEXT_PARSERS[spec.key](raw.strip())
     return _parse_dates(raw)
 
 
@@ -560,6 +666,51 @@ def _parse_dates(raw: object) -> tuple[str, ...]:
         except ValueError as exc:
             raise ValueError(f"{item!r} is not a date as YYYY-MM-DD") from exc
     return tuple(sorted(days))
+
+
+def _parse_timezone(name: str) -> str:
+    if name not in _zone_names():
+        raise ValueError(
+            f"{name!r} is not a time zone this machine knows, such as America/New_York"
+        )
+    return name
+
+
+@functools.cache
+def _zone_names() -> frozenset[str]:
+    return frozenset(zoneinfo.available_timezones())
+
+
+def _parse_cdp_url(url: str) -> str:
+    """``url`` rebuilt as ``scheme://host:port``. Rebuilt, not passed through: ``urlsplit``
+    drops a tab or newline inside the text, so the input itself is never what is stored."""
+    example = "must be an address such as http://127.0.0.1:9222"
+    if any(char.isspace() or not char.isprintable() for char in url):
+        raise ValueError(f"{example}, with no spaces or line breaks")
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError(example) from exc
+    if parts.scheme not in ("http", "https") or not parts.hostname or port is None:
+        raise ValueError(f"{example}, with its port")
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{example}: the port must be 1 to 65535")
+    if parts.hostname not in LOOPBACK_CDP_HOSTS:
+        raise ValueError(
+            f"names {parts.hostname}, not this machine's loopback; a remote debug address"
+            " can only be set in config.toml"
+        )
+    if parts.path not in ("", "/") or parts.query or parts.fragment or parts.username:
+        raise ValueError("must be just a scheme, host and port, such as http://127.0.0.1:9222")
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    return f"{parts.scheme}://{host}:{port}"
+
+
+_TEXT_PARSERS: Final[dict[str, Callable[[str], str]]] = {
+    "linkedin.timezone": _parse_timezone,
+    "linkedin.cdp_url": _parse_cdp_url,
+}
 
 
 def to_json(value: object) -> JsonValue:
@@ -607,6 +758,8 @@ def write(session: Session, user: User, base: Settings, changes: Mapping[str, Js
             problems[key] = str(exc)
     if not problems:
         problems.update(_cross_field(base, {**stored(session, user), **parsed}, parsed))
+    if not problems and "linkedin.timezone" in parsed:
+        problems.update(_zone_too_soon(session, user, base, parsed))
     if problems:
         raise SettingsRefused(problems)
     for key, value in parsed.items():
@@ -615,6 +768,37 @@ def write(session: Session, user: User, base: Settings, changes: Mapping[str, Js
         else:
             set_setting(session, user, KEY_PREFIX + key, value)
         log.info("setting %s changed on the Settings page for user %d", key, user.id)
+    if "linkedin.timezone" in parsed:
+        sync_timezone(session, user, resolve(session, user, base))
+
+
+def _zone_too_soon(
+    session: Session, user: User, base: Settings, parsed: Mapping[str, JsonValue]
+) -> dict[str, str]:
+    """The page changes the zone at most once an hour (#597): each change carries the
+    budget counts across (:mod:`netkeeper.services.zone_change`), and the limit keeps
+    the change itself a deliberate act."""
+    after = apply(base, {**stored(session, user), **parsed})
+    if after.linkedin.timezone == user.timezone:
+        return {}
+    last = zone_change.last_changed(session, user)
+    now = utcnow()
+    if last is None or now - last >= zone_change.MIN_INTERVAL:
+        return {}
+    again = (last + zone_change.MIN_INTERVAL).astimezone(UTC)
+    return {
+        "linkedin.timezone": (
+            f"the time zone changed at {last.astimezone(UTC):%H:%M} UTC; it can change again"
+            f" from {again:%H:%M} UTC, once an hour at most"
+        )
+    }
+
+
+def sync_timezone(session: Session, user: User, settings: Settings) -> None:
+    """Make ``user``'s row zone ``settings.linkedin.timezone`` (#597). Budgets count
+    days in the row's zone and the active window reads the setting, so the two must
+    never disagree (``netkeeper.services.users.ensure_local_user``). Needs a writer."""
+    zone_change.change_zone(session, user, settings.linkedin.timezone, now=utcnow())
 
 
 def _cross_field(
@@ -622,20 +806,33 @@ def _cross_field(
 ) -> dict[str, str]:
     """Rules between fields, judged on the values that would be in force after a write,
     and only when the write touches one of them: a file value never blocks another key."""
-    spacing = {"campaigns.send_spacing_median_s", "campaigns.send_spacing_floor_s"}
-    if not spacing & set(changed):
-        return {}
     after = apply(base, {k: v for k, v in values.items() if v is not None})
-    median = after.campaigns.send_spacing_median_s
-    floor = after.campaigns.send_spacing_floor_s
-    if median < floor:
-        key = (
-            "campaigns.send_spacing_median_s"
-            if "campaigns.send_spacing_median_s" in changed
-            else "campaigns.send_spacing_floor_s"
+    problems: dict[str, str] = {}
+    spacing = {"campaigns.send_spacing_median_s", "campaigns.send_spacing_floor_s"}
+    if spacing & set(changed):
+        median = after.campaigns.send_spacing_median_s
+        floor = after.campaigns.send_spacing_floor_s
+        if median < floor:
+            key = (
+                "campaigns.send_spacing_median_s"
+                if "campaigns.send_spacing_median_s" in changed
+                else "campaigns.send_spacing_floor_s"
+            )
+            problems[key] = (
+                f"the typical gap ({median} s) must be at least the shortest ({floor} s)"
+            )
+    if "linkedin.budget.warmup_start" in changed:
+        start = after.linkedin.budget.warmup_start
+        cap = min(
+            after.linkedin.budget.profile_visits_per_day,
+            HARD_MAX_PER_DAY[ActionClass.PROFILE_VISITS],
         )
-        return {key: f"the typical gap ({median} s) must be at least the shortest ({floor} s)"}
-    return {}
+        if start >= cap:
+            problems["linkedin.budget.warmup_start"] = (
+                f"the warm-up must start below the daily profile-visit limit ({cap}), or a"
+                " fresh install gets its full budget on day one"
+            )
+    return problems
 
 
 # --- describing -------------------------------------------------------------------
@@ -728,6 +925,20 @@ def checks(key: str, settings: Settings) -> tuple[tuple[str, ...], tuple[str, ..
                 f" {hard_week}. The clamp holds and {hard_week} is what is enforced."
             )
         notes.extend(_some(budgets.profile_visit_week_note(budget)))
+    elif key == "linkedin.budget.warmup_start":
+        cap = min(budget.profile_visits_per_day, HARD_MAX_PER_DAY[ActionClass.PROFILE_VISITS])
+        if budget.warmup_start >= cap:
+            warnings.append(
+                f"The warm-up starts at {budget.warmup_start}, at or above the {cap}-visit"
+                " daily limit, so a fresh install gets its full budget on day one."
+            )
+    elif key == "linkedin.cdp_url":
+        host = _host_of(settings.linkedin.cdp_url)
+        if host not in LOOPBACK_CDP_HOSTS:
+            warnings.append(
+                f"linkedin.cdp_url points at {host or 'no host'}, not this machine's loopback."
+                " Chrome's debug port is only ever reachable on its own loopback address."
+            )
     elif key == "linkedin.active_hours":
         warnings.extend(_window_warnings(settings.linkedin.active_hours))
     elif key == "linkedin.weekend_multiplier":
@@ -779,6 +990,13 @@ def _window_warnings(active_hours: tuple[str, str]) -> tuple[str, ...]:
             "linkedin.active_hours is not two HH:MM times, so no run can start until it is fixed",
         )
     return active_window_check(start, end)[1]
+
+
+def _host_of(url: str) -> str | None:
+    try:
+        return urlsplit(url).hostname
+    except ValueError:
+        return None
 
 
 def _some(text: str | None) -> tuple[str, ...]:

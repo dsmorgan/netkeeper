@@ -873,10 +873,26 @@ def test_no_code_path_launches_a_browser() -> None:
     assert not findings, complain(findings, "netkeeper may only attach to a browser:")
 
 
+# The one exception (#597): **Restart netkeeper** re-execs serve in place, the same
+# interpreter and arguments, replacing this process rather than starting another.
+ALLOWED_PROCESS_STARTS = {PACKAGE / "services" / "restart.py": 1}
+
+
 def test_no_code_path_starts_a_process() -> None:
     """`netkeeper browser launch` prints a command. Nothing runs one."""
     findings = scan([PACKAGE], process_starts)
-    assert not findings, complain(findings, "netkeeper starts no processes:")
+    for path, count in ALLOWED_PROCESS_STARTS.items():
+        hits = [f for f in findings if f.path == path and f.detail == "execv() starts a process"]
+        assert len(hits) == count, (
+            f"{path.name} no longer reaches execv exactly {count} time(s) ({len(hits)} found);"
+            " if it moved, update ALLOWED_PROCESS_STARTS"
+        )
+    others = [
+        f
+        for f in findings
+        if not (f.path in ALLOWED_PROCESS_STARTS and f.detail == "execv() starts a process")
+    ]
+    assert not others, complain(others, "netkeeper starts no processes:")
 
 
 def test_the_users_browser_context_is_never_mutated() -> None:

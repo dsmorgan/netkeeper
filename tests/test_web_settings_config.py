@@ -302,3 +302,87 @@ async def test_the_posture_report_shows_a_setting_serve_cannot_read_on_its_row(
     again = (await client.get("/api/v1/posture")).json()
     assert again["protections"] == before["protections"]
     assert again["verdict"] == before["verdict"]
+
+
+# --- #597: the settings that moved onto the page ------------------------------------
+
+
+async def test_a_saved_time_zone_is_in_force_at_once(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """Budgets read the user row's zone and the sending hours show it: both move on save."""
+    saved = await _put(client, {"linkedin.timezone": "Europe/Berlin"})
+    assert saved.status_code == 200, saved.text
+    field = _field(saved.json(), "linkedin.timezone")
+    assert (field["value"], field["source"], field["restart_pending"]) == (
+        "Europe/Berlin",
+        "ui",
+        False,
+    )
+    hours = (await client.get("/api/v1/settings/sending-hours")).json()
+    assert hours["timezone"] == "Europe/Berlin"
+    with session_scope(running_app.state.session_factory) as session:
+        users = session.scalars(select(User)).all()
+        assert [u.timezone for u in users] == ["Europe/Berlin"]
+    posture = (await client.get("/api/v1/posture")).json()
+    assert posture["timezone"] == "Europe/Berlin"
+    refused = await _put(client, {"linkedin.timezone": "Mars/Olympus"})
+    assert refused.status_code == 422
+
+
+async def test_a_saved_warm_up_is_in_force_at_once(client: httpx.AsyncClient) -> None:
+    saved = await _put(
+        client, {"linkedin.budget.warmup_start": 12, "linkedin.budget.warmup_step": 4}
+    )
+    assert saved.status_code == 200, saved.text
+    posture = (await client.get("/api/v1/posture")).json()
+    ramp = next(p for p in posture["protections"] if p["name"] == "warm-up ramp")
+    assert ramp["value"].startswith("start 12, +4/day")
+    assert (await _put(client, {"linkedin.budget.warmup_start": 60})).status_code == 422
+
+
+async def test_runs_read_the_saved_sync_and_enrichment_settings(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """The worker resolves each run's settings as it starts, so a run started after the
+    save uses the new values."""
+    from netkeeper.worker import BrowserWorker
+
+    factory = running_app.state.session_factory
+    worker = BrowserWorker(
+        object(),  # type: ignore[arg-type]  # never entered: only the settings are read
+        factory,
+        Settings().linkedin,
+        bus=running_app.state.bus,
+    )
+    with session_scope(factory) as session:
+        user_id = session.scalars(select(User.id)).one()
+    before = worker._resolved(user_id).linkedin
+    assert (before.enrich_stale_days, before.disconnect_after_misses) == (180, 2)
+    saved = await _put(
+        client, {"linkedin.enrich_stale_days": 90, "linkedin.disconnect_after_misses": 3}
+    )
+    assert saved.status_code == 200, saved.text
+    after = worker._resolved(user_id).linkedin
+    assert (after.enrich_stale_days, after.disconnect_after_misses) == (90, 3)
+
+
+async def test_a_saved_chrome_address_waits_for_a_restart(client: httpx.AsyncClient) -> None:
+    """serve's attach provider keeps the address it started with, so the field says a
+    restart is pending, and the page offers one. The launch instructions use the new
+    address at once: Chrome is started on it before serve restarts."""
+    body = (await client.get(URL)).json()
+    assert body["restart_pending"] is False
+    saved = await _put(client, {"linkedin.cdp_url": "http://127.0.0.1:9333"})
+    assert saved.status_code == 200, saved.text
+    body = saved.json()
+    field = _field(body, "linkedin.cdp_url")
+    assert (field["applies"], field["restart_pending"]) == ("restart", True)
+    assert body["restart_pending"] is True and body["config_changed"] is False
+    browser = (await client.get("/api/v1/linkedin/browser")).json()
+    assert browser["cdp_url"] == "http://127.0.0.1:9333"
+    assert "9333" in " ".join(browser["launch_command"])
+    remote = await _put(client, {"linkedin.cdp_url": "http://192.0.2.10:9222"})
+    assert remote.status_code == 422
+    reset = await _put(client, {"linkedin.cdp_url": None})
+    assert reset.json()["restart_pending"] is False

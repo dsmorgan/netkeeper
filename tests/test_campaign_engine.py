@@ -2799,3 +2799,33 @@ def test_an_unknown_send_that_took_time_spaces_from_its_record_not_its_claim(
     world.tick(allowed, settings=tight)
     [claimed] = world.messages(second)
     assert claimed.scheduled_at == allowed
+
+
+def test_after_a_zone_change_the_tick_still_counts_this_mornings_sends(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#597 re-review: the chooser enforces the email caps from ``count_start``. Two
+    sends under UTC at 08:00 and 08:30 fill a cap of 2; at 11:00 the user moves to
+    Pacific/Kiritimati, whose day began at 10:00 UTC. Those sends still count."""
+    from netkeeper.services import zone_change
+
+    world = make_world(session_factory, daily_cap=2)
+    world.hours(any_time=True)
+    morning = datetime(2026, 9, 29, 8, 0, tzinfo=UTC)
+    world.write(lambda s: setattr(s.get(User, world.user.id), "timezone", "UTC"))
+    for _ in range(2):
+        world.enroll_new(next_action_at=morning)
+    assert world.tick(morning).fired != []
+    assert world.tick(morning + timedelta(minutes=30)).fired != []
+    later = datetime(2026, 9, 29, 11, 0, tzinfo=UTC)
+
+    def move(session: Session) -> None:
+        user = session.get(User, world.user.id)
+        assert user is not None
+        zone_change.change_zone(session, user, "Pacific/Kiritimati", now=later)
+
+    world.write(move)
+    third = world.enroll_new(next_action_at=later)
+    capped = world.tick(later)
+    assert capped.fired == []
+    assert reasons_of(capped, third) == (Skip.CAMPAIGN_AT_CAP,)

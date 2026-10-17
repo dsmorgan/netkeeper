@@ -251,6 +251,12 @@ def _stale(run: SyncRun, *, now: datetime, held: BrowserHeld) -> bool:
     return now - since >= STALE_AFTER
 
 
+def is_stale(session: Session, run: SyncRun, *, now: datetime) -> bool:
+    """:func:`_stale` with this database's lock view: whether a ``running`` row was left
+    behind by a process that went away. Read-only (#597: a restart does not wait on it)."""
+    return _stale(run, now=now, held=browser_held_for(session))
+
+
 def _fail_stale(session: Session, user: User, run: SyncRun, *, now: datetime) -> None:
     _clear_pause(session, user, run.id)
     run.status = SyncRunStatus.FAILED

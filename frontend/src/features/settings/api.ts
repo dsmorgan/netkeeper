@@ -177,6 +177,39 @@ export async function saveConfigSettings(values: Record<string, unknown>): Promi
   return data
 }
 
+export type Restart = components['schemas']['RestartOut']
+
+/**
+ * Restart netkeeper serve (#597) so the settings it reads at startup apply. 409 when it
+ * cannot restart itself, config.toml no longer loads, or something is running (a
+ * LinkedIn run, the browser, a task, a campaign send) and `whenIdle` is not set; with
+ * it, serve restarts once that work is done.
+ */
+export async function restartServe(whenIdle = false): Promise<Restart> {
+  const { data, error, response } = await api.POST('/api/v1/settings/restart', {
+    body: { when_idle: whenIdle },
+  })
+  if (data === undefined) throw failure(error, response, 'POST /settings/restart')
+  return data
+}
+
+/** Cancel a restart that waits for idle; false when nothing waited. */
+export async function cancelRestart(): Promise<boolean> {
+  const { data, error, response } = await api.DELETE('/api/v1/settings/restart')
+  if (data === undefined) throw failure(error, response, 'DELETE /settings/restart')
+  return data.cancelled
+}
+
+/** The running server's boot id, or null while nothing answers (it is restarting). */
+export async function currentBootId(): Promise<string | null> {
+  try {
+    const { data } = await api.GET('/api/v1/health')
+    return data?.boot_id ?? null
+  } catch {
+    return null
+  }
+}
+
 export type Backups = components['schemas']['BackupsOut']
 export type Backup = components['schemas']['BackupOut']
 

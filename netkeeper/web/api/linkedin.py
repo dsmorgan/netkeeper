@@ -902,16 +902,16 @@ def get_browser_health(
 
 
 @router.get("/browser", operation_id="get_linkedin_browser")
-def get_browser(request: Request, user: CurrentUser) -> BrowserLaunchOut:
+def get_browser(request: Request, session: SessionDep, user: CurrentUser) -> BrowserLaunchOut:
     """``netkeeper browser launch``'s instructions, as data (spec 9.1, ADR 0002).
 
     netkeeper never starts Chrome; it only ever prints (here, shows) the command
     for a person to run themselves. Everything below comes from config -- no
-    attach, so this never awaits browser work (CLAUDE.md). ``user`` is unused --
-    the instructions are the same for everyone -- but every route here resolves
-    the current user (spec 14.1), local mode's single user included.
+    attach, so this never awaits browser work (CLAUDE.md). The address is the one in
+    force (the file, then the Settings page, #597): after a change Chrome is started
+    on the new port, then serve restarted to attach there.
     """
-    cdp_url = file_settings(request).linkedin.cdp_url  # file-only, never on the Settings page
+    cdp_url = effective_settings(request, session, user).linkedin.cdp_url
     profile = data_dir() / CHROME_PROFILE_DIRNAME
     return BrowserLaunchOut(
         cdp_url=cdp_url,

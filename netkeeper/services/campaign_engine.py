@@ -176,7 +176,7 @@ from netkeeper.models import (
 )
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped, scoped, scoped_contacts
-from netkeeper.services import inbox_hold, sending_hours, ui_settings
+from netkeeper.services import inbox_hold, sending_hours, ui_settings, zone_change
 from netkeeper.services.campaign_guards import (
     UNSENDABLE_EMAIL_STATUSES,
     ChannelReason,
@@ -1641,6 +1641,8 @@ class _Chooser:
         # A cap reached today lifts at the local midnight; what is left of the batch
         # then spills to its own time of day (above).
         day_start, day_end = slots.day_bounds(now)
+        # On a day the time zone changed, sends from the old zone's day still count (#597).
+        day_start = zone_change.count_start(session, user, day_start, now)
         tomorrow = day_end
         mailbox_reasons = self._mailbox(campaign, day_start, day_end)
         if mailbox_reasons:
@@ -2884,6 +2886,11 @@ class CampaignEngine:
     @property
     def sender(self) -> Sender | None:
         return self._sender
+
+    @property
+    def busy(self) -> bool:
+        """A tick is in flight, which may be sending (#597: restart waits for it)."""
+        return self._inflight is not None and not self._inflight.done()
 
     def start(self) -> None:
         if self._sender is None:

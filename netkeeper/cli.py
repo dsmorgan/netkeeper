@@ -102,6 +102,7 @@ from netkeeper.services import (
     message_check,
     message_id_check,
     outside_responses,
+    restart,
     route_breaker,
     run_diagnostics,
     runs,
@@ -390,7 +391,27 @@ def serve(
             APP_FACTORY, factory=True, reload=True, host=bind_host, port=bind_port, log_config=None
         )
         return
-    uvicorn.run(serve_app(settings), host=bind_host, port=bind_port, log_config=None)
+    application = serve_app(settings)
+    server = uvicorn.Server(
+        uvicorn.Config(application, host=bind_host, port=bind_port, log_config=None)
+    )
+    restarter = _restart_hook(server)
+    application.state.restarter = restarter
+    server.run()
+    if restarter.requested:
+        # The lifespan's teardown has released the serve lock; the next serve claims it.
+        restart.relaunch(restarter.mode)
+
+
+def _restart_hook(server: uvicorn.Server) -> restart.Restarter:
+    """**Restart netkeeper** (#597): stop ``server`` as Ctrl-C would. Setting
+    ``should_exit`` rather than calling ``handle_exit`` keeps uvicorn from raising a
+    signal at the process once it has stopped; the event streams see it either way."""
+
+    def stop() -> None:
+        server.should_exit = True
+
+    return restart.Restarter(stop=stop, mode=restart.mode())
 
 
 @config_app.command("show")
@@ -620,7 +641,9 @@ def browser_launch(
     # The command comes from netkeeper.services.browser_launch, the same module
     # GET /api/v1/linkedin/browser uses (P2-12), so one place knows how to build it.
     state = ctx.ensure_object(CliState)
-    settings = _file_settings_or_exit(state)
+    # The address in force (#597): config.toml, then the Settings page. scripts/chrome.sh
+    # (`make chrome`) asks this command for its port, so it follows the page too.
+    settings = _load_settings_or_exit(state)
     cdp_url = settings.linkedin.cdp_url
     profile = data_dir() / CHROME_PROFILE_DIRNAME
     if as_json:

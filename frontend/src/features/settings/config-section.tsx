@@ -24,6 +24,7 @@ import {
   valueOf,
   warnAboveHint,
 } from './config-fields'
+import { RestartBanner } from './restart-banner'
 
 /**
  * Settings you change here instead of in config.toml (#343): LinkedIn budgets, active
@@ -46,6 +47,7 @@ export function ConfigSections() {
   if (current.isError) return <p role="alert">{message(current.error)}</p>
   return (
     <>
+      <RestartBanner settings={current.data} />
       {GROUPS.map((group) => {
         const fields = current.data.fields.filter((f) => f.group === group.id)
         if (fields.length === 0) return null
@@ -182,6 +184,9 @@ function FieldRow({
         <Badge variant={field.source === 'file' ? 'secondary' : 'outline'}>
           {SOURCE_LABEL[field.source]}
         </Badge>
+        {field.applies === 'restart' && field.editable && (
+          <Badge variant="outline">Needs a restart</Badge>
+        )}
         {field.source === 'ui' && field.editable && (
           <Button type="button" variant="link" size="sm" disabled={resetting} onClick={onReset}>
             Use the default ({describe(field, field.default)})
@@ -201,8 +206,8 @@ function FieldRow({
       )}
       {field.restart_pending && (
         <p role="status" className="text-amber-800 dark:text-amber-300">
-          Restart netkeeper serve to apply this value: the running server still uses the one it
-          started with.
+          Restart netkeeper to apply this value: the running server still uses the one it started
+          with.
         </p>
       )}
       {field.stored_unreadable && (
@@ -275,6 +280,20 @@ function FieldInput({
           className="w-fit"
         />
       </div>
+    )
+  }
+  if (field.kind === 'text') {
+    return (
+      <Input
+        id={id}
+        type="text"
+        value={draft as string}
+        disabled={disabled}
+        spellCheck={false}
+        autoComplete="off"
+        onChange={(event) => onChange(event.target.value)}
+        className="w-full max-w-xs font-mono"
+      />
     )
   }
   if (field.kind === 'dates') {
